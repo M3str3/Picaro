@@ -31,7 +31,7 @@ impl Params {
     /// Renders this technique's stub fragment for these parameters.
     pub fn render_fragment(&self) -> String {
         // TODO: substitute this technique's placeholders, e.g.
-        // DEF.stub_fragment.replace("{{PLACEHOLDER}}", &value)
+        // DEF.stub_fragment.replace("$PLACEHOLDER$", &value)
         DEF.stub_fragment.to_string()
     }
 }

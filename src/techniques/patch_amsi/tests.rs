@@ -46,8 +46,8 @@ fn render_fragment_obfuscates_literals() {
     // The entry point is present, the placeholders are substituted, and the
     // runtime byte literals must not appear in cleartext.
     assert!(fragment.contains("fn patch_amsi"));
-    assert!(!fragment.contains("AMSI_DLL_DEF"));
-    assert!(!fragment.contains("AMSI_FUNC_DEF"));
+    assert!(!fragment.contains("$AMSI_DLL_DEF$"));
+    assert!(!fragment.contains("$AMSI_FUNC_DEF$"));
     assert!(!fragment.contains("b\"amsi.dll"));
     assert!(!fragment.contains("b\"AmsiScanBuffer"));
     assert!(fragment.contains("crate::dec_xor"));

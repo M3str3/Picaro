@@ -16,8 +16,8 @@ fn main() {
         std::process::exit(1);
     }
 
-    let ciphertext: Vec<u8> = {{PAYLOAD_BYTES}}.to_vec();
-    let nonce = {{PAYLOAD_NONCE_DEF}};
+    let ciphertext: Vec<u8> = $PAYLOAD_BYTES$.to_vec();
+    let nonce = $PAYLOAD_NONCE_DEF$;
 
     // decrypt with chacha20poly1305::XChaCha20Poly1305
     // ... el usuario escribe esta parte ...

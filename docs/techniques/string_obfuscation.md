@@ -13,7 +13,7 @@ The stub contains a handful of sensitive literals: the per-build marker
 cleartext in `.rdata` and show up in `strings <binary>`.
 
 The packer intercepts each literal, obfuscates it according to the configured
-strategy, and substitutes the result into a placeholder (`{{STUB_MARKER_DEF}}`,
+strategy, and substitutes the result into a placeholder (`$STUB_MARKER_DEF$`,
 `HOLLOW_TARGET_DEF`) as a Rust expression. The stub binds that expression at
 runtime (`let stub_marker = ...;`, `let hollow_target = ...;`) and uses the
 reconstructed `String` normally. The old hardcoded XOR with `0x5A` is gone; all

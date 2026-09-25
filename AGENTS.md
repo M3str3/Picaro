@@ -99,16 +99,23 @@ source (comments stripped) — a binary hit alone can come from the toolchain
 
 **Custom loader stubs (done).** A YAML `loader:` block (`loader.path`) replaces
 the builtin stub with a user `.rs` template rendered through the same
-substitution engine (see `docs/custom-stubs.md`). Placeholders:
-`{{PAYLOAD_BYTES}}`, `{{PAYLOAD_LEN}}`, `{{PAYLOAD_NONCE_DEF}}`,
-`{{PAYLOAD_KEY_DEF}}` (embedded only when referenced), `{{PREPARATION_BLOCKS}}`,
-`{{EXECUTION_BLOCK}}`, and `{{ARG_<n>}}` (positional build args). The stub must
+substitution engine (see `docs/custom-stubs.md`). Placeholders use the `$X$`
+delimiter (`$PAYLOAD_BYTES$`, `$PAYLOAD_LEN$`, `$PAYLOAD_NONCE_DEF$`,
+`$PAYLOAD_KEY_DEF$` (embedded only when referenced), `$PREPARATION_BLOCKS$`,
+`$EXECUTION_BLOCK$`, `$ARG_<n>$`; YAML build args are `$build.N$`). The stub must
 define `fn main()`; ignoring the technique blocks is a warning, not an error.
-Build args reuse the existing `{{build.N}}` positional mechanism (no separate
-`--arg` flag). **Gotcha:** `write_file`/rustfmt mangles bare `{{...}}`
-placeholders in `.rs` files (parses them as nested blocks) — write custom-stub
-examples with `cat >`/terminal, not the file writer.
+Build args reuse the existing `$build.N$` positional mechanism (no separate
+`--arg` flag). `$X$` is invalid Rust, so `rustfmt` cannot rewrite it; never go
+back to `{{X}}` (valid Rust — `rustfmt` reformats it into nested blocks and
+silently breaks substitution).
 See `.memory.md` for the rolling state.
+
+## Known limitations
+
+- Custom stubs do not obfuscate the key/nonce by default. If the custom stub
+  uses `$PAYLOAD_KEY_DEF$` / `$PAYLOAD_NONCE_DEF$`, the values land in `.rdata`.
+  Use `$PAYLOAD_KEY_DEF_OBFUSCATED$` when available, or read the key at runtime
+  (see `examples/stubs/runtime-key.rs`).
 
 ## code_examples/ — how to use it
 

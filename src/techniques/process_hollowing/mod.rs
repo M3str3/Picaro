@@ -56,9 +56,9 @@ impl Params {
             .obfuscate("NtUnmapViewOfSection")
             .render_stub_expr("unmap_func");
         DEF.stub_fragment
-            .replace("HOLLOW_TARGET_DEF", &target_def)
-            .replace("NTDLL_DEF", &ntdll_def)
-            .replace("UNMAP_FUNC_DEF", &unmap_def)
+            .replace("$HOLLOW_TARGET_DEF$", &target_def)
+            .replace("$NTDLL_DEF$", &ntdll_def)
+            .replace("$UNMAP_FUNC_DEF$", &unmap_def)
     }
 }
 

@@ -10,7 +10,7 @@
 //!   preparation/execution blocks; the packer only requires it to define a
 //!   `fn main()`.
 //!
-//! Both are rendered by the same substitution engine: every `{{PLACEHOLDER}}`
+//! Both are rendered by the same substitution engine: every `$PLACEHOLDER$`
 //! token in the template is replaced with a value built from [`StubParams`],
 //! the technique [`PipelineStep`]s and the [`StringsConfig`]. A token that is
 //! not a known placeholder (or a provided build arg) is an error, to catch
@@ -28,19 +28,19 @@ use crate::techniques::{Category, PipelineStep};
 
 /// Values used to fill the template placeholders.
 pub struct StubParams {
-    /// XChaCha20 nonce (24 bytes), for `{{NONCE_HEX}}` / `{{PAYLOAD_NONCE_DEF}}`.
+    /// XChaCha20 nonce (24 bytes), for `$NONCE_HEX$` / `$PAYLOAD_NONCE_DEF$`.
     pub nonce: [u8; 24],
-    /// Symmetric key (32 bytes), for `{{KEY_HEX}}` / `{{PAYLOAD_KEY_DEF}}`.
+    /// Symmetric key (32 bytes), for `$KEY_HEX$` / `$PAYLOAD_KEY_DEF$`.
     pub key: [u8; 32],
-    /// Encrypted payload (ciphertext + tag), for `{{PAYLOAD_BYTES}}`.
+    /// Encrypted payload (ciphertext + tag), for `$PAYLOAD_BYTES$`.
     pub ciphertext: Vec<u8>,
-    /// Original payload size, for `{{PLAINTEXT_LEN}}` / `{{PAYLOAD_LEN}}`.
+    /// Original payload size, for `$PLAINTEXT_LEN$` / `$PAYLOAD_LEN$`.
     pub plaintext_len: usize,
     /// Per-build unique marker (e.g. `STUB_MARKER_<hex>`).
     pub stub_marker: String,
     /// Path to `payload.bin` for `include_bytes!` (relative to the stub).
     pub payload_path: String,
-    /// Positional build args, exposed to the template as `{{ARG_<index>}}`.
+    /// Positional build args, exposed to the template as `$ARG_<index>$`.
     pub build_args: BTreeMap<String, String>,
 }
 
@@ -58,13 +58,13 @@ pub struct RenderedStub {
 /// A missing one means the builtin template is stale, so we fail loudly rather
 /// than emit a stub that will not compile or that silently does nothing.
 const BUILTIN_REQUIRED: &[&str] = &[
-    "{{NONCE_HEX}}",
-    "{{KEY_HEX}}",
-    "{{PLAINTEXT_LEN}}",
-    "{{STUB_MARKER_DEF}}",
-    "{{PAYLOAD_PATH}}",
-    "{{PREPARATION_BLOCKS}}",
-    "{{EXECUTION_BLOCK}}",
+    "$NONCE_HEX$",
+    "$KEY_HEX$",
+    "$PLAINTEXT_LEN$",
+    "$STUB_MARKER_DEF$",
+    "$PAYLOAD_PATH$",
+    "$PREPARATION_BLOCKS$",
+    "$EXECUTION_BLOCK$",
 ];
 
 /// Generates a per-build unique marker: `STUB_MARKER_<16 hex>`.
@@ -76,11 +76,11 @@ pub fn generate_stub_marker() -> String {
 
 /// Renders the builtin stub template, substituting every placeholder with
 /// `params` and injecting the active techniques' fragments (`pipeline`) into
-/// `{{PREPARATION_BLOCKS}}` (Preparation techniques, in order) and
-/// `{{EXECUTION_BLOCK}}` (the single Execution technique).
+/// `$PREPARATION_BLOCKS$` (Preparation techniques, in order) and
+/// `$EXECUTION_BLOCK$` (the single Execution technique).
 ///
 /// Returns an error if a required placeholder is missing from the template or
-/// if any `{{...}}` is left unsubstituted.
+/// if any `$...$` is left unsubstituted.
 pub fn render_main_rs(
     template: &str,
     params: &StubParams,
@@ -110,16 +110,16 @@ pub fn render_custom_stub(
     strings: &StringsConfig,
 ) -> Result<RenderedStub> {
     let mut warnings = Vec::new();
-    if has_preparation(pipeline) && !template.contains("{{PREPARATION_BLOCKS}}") {
+    if has_preparation(pipeline) && !template.contains("$PREPARATION_BLOCKS$") {
         warnings.push(
-            "loader stub does not reference {{PREPARATION_BLOCKS}}; declared \
+            "loader stub does not reference $PREPARATION_BLOCKS$; declared \
              preparation techniques will have no effect"
                 .to_string(),
         );
     }
-    if has_execution(pipeline) && !template.contains("{{EXECUTION_BLOCK}}") {
+    if has_execution(pipeline) && !template.contains("$EXECUTION_BLOCK$") {
         warnings.push(
-            "loader stub does not reference {{EXECUTION_BLOCK}}; the payload \
+            "loader stub does not reference $EXECUTION_BLOCK$; the payload \
              will not be executed"
                 .to_string(),
         );
@@ -154,9 +154,9 @@ fn render_common(
     substitute_template(template, &values)
 }
 
-/// Builds the `{{PLACEHOLDER}} → value` map for a template.
+/// Builds the `$PLACEHOLDER$ → value` map for a template.
 ///
-/// The expensive `{{PAYLOAD_BYTES}}` array literal is only built when the
+/// The expensive `$PAYLOAD_BYTES$` array literal is only built when the
 /// template actually references it (the builtin uses `include_bytes!` instead).
 fn placeholder_values(
     template: &str,
@@ -170,36 +170,36 @@ fn placeholder_values(
         .render_stub_expr("stub_marker");
 
     let mut values = BTreeMap::new();
-    values.insert("{{NONCE_HEX}}".to_string(), hex::encode(params.nonce));
-    values.insert("{{KEY_HEX}}".to_string(), hex::encode(params.key));
+    values.insert("$NONCE_HEX$".to_string(), hex::encode(params.nonce));
+    values.insert("$KEY_HEX$".to_string(), hex::encode(params.key));
     values.insert(
-        "{{PLAINTEXT_LEN}}".to_string(),
+        "$PLAINTEXT_LEN$".to_string(),
         params.plaintext_len.to_string(),
     );
     values.insert(
-        "{{PAYLOAD_LEN}}".to_string(),
+        "$PAYLOAD_LEN$".to_string(),
         params.plaintext_len.to_string(),
     );
-    values.insert("{{STUB_MARKER_DEF}}".to_string(), stub_marker_def);
-    values.insert("{{PAYLOAD_PATH}}".to_string(), params.payload_path.clone());
+    values.insert("$STUB_MARKER_DEF$".to_string(), stub_marker_def);
+    values.insert("$PAYLOAD_PATH$".to_string(), params.payload_path.clone());
     values.insert(
-        "{{PAYLOAD_NONCE_DEF}}".to_string(),
+        "$PAYLOAD_NONCE_DEF$".to_string(),
         byte_array_literal(&params.nonce),
     );
     values.insert(
-        "{{PAYLOAD_KEY_DEF}}".to_string(),
+        "$PAYLOAD_KEY_DEF$".to_string(),
         byte_array_literal(&params.key),
     );
-    values.insert("{{PREPARATION_BLOCKS}}".to_string(), preparation_blocks);
-    values.insert("{{EXECUTION_BLOCK}}".to_string(), execution_block);
-    if template.contains("{{PAYLOAD_BYTES}}") {
+    values.insert("$PREPARATION_BLOCKS$".to_string(), preparation_blocks);
+    values.insert("$EXECUTION_BLOCK$".to_string(), execution_block);
+    if template.contains("$PAYLOAD_BYTES$") {
         values.insert(
-            "{{PAYLOAD_BYTES}}".to_string(),
+            "$PAYLOAD_BYTES$".to_string(),
             byte_array_literal(&params.ciphertext),
         );
     }
     for (name, value) in &params.build_args {
-        values.insert(format!("{{{{ARG_{name}}}}}"), value.clone());
+        values.insert(format!("$ARG_{name}$"), value.clone());
     }
     values
 }
@@ -243,35 +243,62 @@ fn render_blocks(pipeline: &[PipelineStep], strings: &StringsConfig) -> (String,
     (preparation_blocks, execution_block)
 }
 
-/// Substitutes every `{{...}}` token in `template`, looking each one up in
-/// `values`. An unknown token (or an unterminated one) is an error.
+/// Substitutes every `$NAME$` token in `template`, looking each one up in
+/// `values`. An unknown token is an error, and the legacy `{{NAME}}` delimiters
+/// are rejected with a migration hint.
+///
+/// A `$` that is not part of a `$NAME$` token (e.g. inside a string literal or a
+/// macro body) is kept literally.
 fn substitute_template(template: &str, values: &BTreeMap<String, String>) -> Result<String> {
+    if let Some(legacy) = find_legacy_placeholder(template) {
+        return Err(BuildError::InvalidTemplate(format!(
+            "placeholder '{legacy}' uses the old `{{{{...}}}}` syntax; use `$...$` instead (e.g. `$PAYLOAD_BYTES$`)"
+        )));
+    }
+
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
 
-    while let Some(start) = rest.find("{{") {
-        out.push_str(&rest[..start]);
-
-        let after = &rest[start + 2..];
-        let end = after.find("}}").ok_or_else(|| {
-            BuildError::InvalidTemplate("the template contains an unterminated placeholder".into())
-        })?;
-
-        // Reconstruct the full `{{token}}` for the map lookup.
-        let full = &rest[start..start + 2 + end + 2];
-        match values.get(full) {
-            Some(value) => out.push_str(value),
-            None => {
-                return Err(BuildError::InvalidTemplate(format!(
-                    "the template contains an unsubstituted placeholder: '{full}'"
-                )));
+    while let Some(start) = rest.find('$') {
+        // A placeholder is `$NAME$`; any other `$` is kept literally.
+        let after_open = &rest[start + 1..];
+        if let Some(end) = after_open.find('$') {
+            if is_placeholder_name(&after_open[..end]) {
+                let full = &rest[start..start + 1 + end + 1];
+                let value = values.get(full).ok_or_else(|| {
+                    BuildError::InvalidTemplate(format!(
+                        "the template contains an unsubstituted placeholder: '{full}'"
+                    ))
+                })?;
+                out.push_str(&rest[..start]);
+                out.push_str(value);
+                rest = &after_open[end + 1..];
+                continue;
             }
         }
-        rest = &after[end + 2..];
+        out.push_str(&rest[..start + 1]);
+        rest = &rest[start + 1..];
     }
 
     out.push_str(rest);
     Ok(out)
+}
+
+/// Whether `name` may sit between the `$...$` delimiters. Dots are allowed for
+/// the YAML `$build.N$` tokens.
+fn is_placeholder_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')
+}
+
+/// Returns the first legacy `{{NAME}}` token in `s`, if any, for the migration
+/// error message.
+fn find_legacy_placeholder(s: &str) -> Option<&str> {
+    let start = s.find("{{")?;
+    let end = s[start + 2..].find("}}")?;
+    Some(&s[start..start + 2 + end + 2])
 }
 
 /// Whether the pipeline declares at least one Preparation technique.
@@ -300,15 +327,15 @@ mod tests {
     /// that the strategy tests below can assert on the substituted fragment
     /// alone: xor emits a `dec_xor` call, stack emits none.
     const TEMPLATE: &str = r#"
-const NONCE_HEX: &str = "{{NONCE_HEX}}";
-const KEY_HEX: &str = "{{KEY_HEX}}";
-const PLAINTEXT_LEN: usize = {{PLAINTEXT_LEN}};
-static PAYLOAD_ENC: &[u8] = include_bytes!("{{PAYLOAD_PATH}}");
+const NONCE_HEX: &str = "$NONCE_HEX$";
+const KEY_HEX: &str = "$KEY_HEX$";
+const PLAINTEXT_LEN: usize = $PLAINTEXT_LEN$;
+static PAYLOAD_ENC: &[u8] = include_bytes!("$PAYLOAD_PATH$");
 fn run() {
-    let stub_marker = {{STUB_MARKER_DEF}};
+    let stub_marker = $STUB_MARKER_DEF$;
 }
-{{PREPARATION_BLOCKS}}
-{{EXECUTION_BLOCK}}
+$PREPARATION_BLOCKS$
+$EXECUTION_BLOCK$
 "#;
 
     fn params() -> StubParams {
@@ -348,7 +375,7 @@ fn run() {
         let out = render_main_rs(TEMPLATE, &params(), &[], &xor_config())
             .expect("should render without error");
 
-        assert!(!out.contains("{{"), "no placeholders should remain: {out}");
+        assert!(!out.contains('$'), "no placeholders should remain: {out}");
         assert!(out.contains(&"00".repeat(24)), "nonce not substituted");
         assert!(out.contains(&"11".repeat(32)), "key not substituted");
         assert!(out.contains("1234"), "plaintext_len not substituted");
@@ -372,7 +399,7 @@ fn run() {
             "target def not emitted: {out}"
         );
         assert!(
-            !out.contains("HOLLOW_TARGET_DEF"),
+            !out.contains("$HOLLOW_TARGET_DEF$"),
             "target placeholder not substituted"
         );
         assert!(out.contains("fn run_stage_two"), "fragment not injected");
@@ -442,7 +469,7 @@ fn run() {
 
     #[test]
     fn missing_placeholder_is_an_error() {
-        let tpl = TEMPLATE.replace("{{KEY_HEX}}", "already-substituted");
+        let tpl = TEMPLATE.replace("$KEY_HEX$", "already-substituted");
         let err = render_main_rs(&tpl, &params(), &[], &xor_config()).expect_err("should fail");
         let msg = err.to_string();
         assert!(msg.contains("KEY_HEX"), "unclear error message: {msg}");
@@ -450,11 +477,23 @@ fn run() {
 
     #[test]
     fn unknown_placeholder_is_an_error() {
-        // Use concatenation (not `format!`) so that `{{` stays literal.
-        let tpl = TEMPLATE.to_string() + "\nconst EXTRA: &str = \"{{UNKNOWN}}\";\n";
+        let tpl = TEMPLATE.to_string() + "\nconst EXTRA: &str = \"$UNKNOWN$\";\n";
         let err = render_main_rs(&tpl, &params(), &[], &xor_config()).expect_err("should fail");
         let msg = err.to_string();
         assert!(msg.contains("UNKNOWN"), "unclear error message: {msg}");
+    }
+
+    #[test]
+    fn legacy_brace_placeholder_is_rejected_with_a_hint() {
+        // Concatenate (do not `format!`) so the braces stay literal.
+        let tpl = TEMPLATE.to_string() + "\nconst EXTRA: &str = \"{{UNKNOWN}}\";\n";
+        let err = render_main_rs(&tpl, &params(), &[], &xor_config()).expect_err("should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("{{UNKNOWN}}"), "unclear error: {msg}");
+        assert!(
+            msg.contains("$...$"),
+            "the error should point at the new syntax: {msg}"
+        );
     }
 
     // --- custom loader stubs ---
@@ -476,7 +515,7 @@ fn run() {
 
     #[test]
     fn custom_stub_substitutes_payload_bytes_and_len() {
-        let template = r#"fn main() { let p = {{PAYLOAD_BYTES}}; let l = {{PAYLOAD_LEN}}; }"#;
+        let template = r#"fn main() { let p = $PAYLOAD_BYTES$; let l = $PAYLOAD_LEN$; }"#;
         let rendered = render_custom_stub(template, &custom_params(), &[], &xor_config())
             .expect("should render");
         let src = rendered.source;
@@ -489,7 +528,7 @@ fn run() {
             src.contains("let l = 7"),
             "payload len not substituted: {src}"
         );
-        assert!(!src.contains("{{"), "no placeholders should remain: {src}");
+        assert!(!src.contains('$'), "no placeholders should remain: {src}");
     }
 
     #[test]
@@ -516,7 +555,7 @@ fn run() {
 
     #[test]
     fn custom_stub_substitutes_arg_placeholders() {
-        let template = "fn main() { let a = {{ARG_0}}; let b = {{ARG_name}}; }";
+        let template = "fn main() { let a = $ARG_0$; let b = $ARG_name$; }";
         let rendered = render_custom_stub(template, &custom_params(), &[], &xor_config())
             .expect("should render");
         let src = rendered.source;
@@ -530,7 +569,7 @@ fn run() {
             "named arg not substituted: {src}"
         );
         assert!(
-            !src.contains("{{ARG_"),
+            !src.contains("$ARG_"),
             "arg placeholders should be gone: {src}"
         );
     }

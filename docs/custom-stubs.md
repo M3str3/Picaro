@@ -30,7 +30,7 @@ loader:
 
 - **Without** `loader`, the builtin template is used (current behavior).
 - **With** `loader`, `path` must point to a readable `.rs` file that defines a
-  `fn main()`. The file is a template: `{{PLACEHOLDER}}` tokens are substituted
+  `fn main()`. The file is a template: `$PLACEHOLDER$` tokens are substituted
   before compilation.
 
 The packer compiles it with the same dependency set as the builtin stub
@@ -43,31 +43,36 @@ Your template must define `fn main()`. Nothing else is imposed.
 
 Available placeholders:
 
-| Placeholder              | Substituted with                                            |
-| ------------------------ | ----------------------------------------------------------- |
-| `{{PAYLOAD_BYTES}}`      | The encrypted payload (ciphertext + tag) as a `[u8; N]` array literal |
-| `{{PAYLOAD_LEN}}`        | The decrypted payload size (`usize`)                        |
-| `{{PAYLOAD_NONCE_DEF}}`  | A `[u8; 24]` array literal rebuilding the nonce             |
-| `{{PAYLOAD_KEY_DEF}}`    | A `[u8; 32]` array literal rebuilding the key               |
-| `{{PREPARATION_BLOCKS}}` | Preparation technique fragments (in pipeline order)         |
-| `{{EXECUTION_BLOCK}}`    | The single Execution technique fragment                     |
-| `{{ARG_<n>}}`            | A positional build argument, substituted literally          |
+| Placeholder            | Substituted with                                             |
+| ---------------------- | ------------------------------------------------------------ |
+| `$PAYLOAD_BYTES$`      | The encrypted payload (ciphertext + tag) as a `[u8; N]` array literal |
+| `$PAYLOAD_LEN$`        | The decrypted payload size (`usize`)                         |
+| `$PAYLOAD_NONCE_DEF$`  | A `[u8; 24]` array literal rebuilding the nonce              |
+| `$PAYLOAD_KEY_DEF$`    | A `[u8; 32]` array literal rebuilding the key                |
+| `$PREPARATION_BLOCKS$` | Preparation technique fragments (in pipeline order)          |
+| `$EXECUTION_BLOCK$`    | The single Execution technique fragment                      |
+| `$ARG_<n>$`            | A positional build argument, substituted literally           |
 
-You may ignore `{{PREPARATION_BLOCKS}}` and `{{EXECUTION_BLOCK}}`. If you do
+Placeholders use the `$NAME$` delimiter. The old `{{NAME}}` form is rejected
+with an error pointing at the new syntax. (`$X$` is not valid Rust, so `rustfmt`
+leaves it untouched; `{{X}}` *is* valid Rust and gets rewritten into nested
+blocks, silently breaking substitution.)
+
+You may ignore `$PREPARATION_BLOCKS$` and `$EXECUTION_BLOCK$`. If you do
 while the YAML declares techniques, the packer emits a warning (not an error):
 
 ```
-warning: loader stub does not reference {{PREPARATION_BLOCKS}}; declared preparation techniques will have no effect
+warning: loader stub does not reference $PREPARATION_BLOCKS$; declared preparation techniques will have no effect
 ```
 
-`{{PAYLOAD_KEY_DEF}}` is only embedded when the template references it, so a
+`$PAYLOAD_KEY_DEF$` is only embedded when the template references it, so a
 stub that never mentions it does not get the key baked in (see
 `examples/stubs/runtime-key.rs`).
 
 ## Build arguments
 
 Positional arguments after the config path are substituted into the YAML as
-`{{build.N}}` (0-based index) and into a custom stub as `{{ARG_N}}`:
+`$build.N$` (0-based index) and into a custom stub as `$ARG_<n>$`:
 
 ```bash
 packerman build config.yaml "C:\\Windows\\System32\\svchost.exe"
@@ -77,11 +82,11 @@ packerman build config.yaml "C:\\Windows\\System32\\svchost.exe"
 # config.yaml
 pipeline:
   - technique: process_hollowing
-    target: "{{build.0}}"
+    target: "$build.0$"
 ```
 
 A referenced-but-missing argument is an error:
-`the config references '{{build.0}}' but no build argument #0 was provided`.
+`the config references '$build.0$' but no build argument #0 was provided`.
 
 ## Examples
 
@@ -98,6 +103,10 @@ A referenced-but-missing argument is an error:
 - **Single file.** No separate modules; everything lives in the one `.rs`.
 - **No custom dependencies.** Only the builtin stub's dependency set is linked.
 - **No template inheritance.** A custom stub fully replaces the builtin one.
+- **Key/nonce are not obfuscated.** `$PAYLOAD_KEY_DEF$` / `$PAYLOAD_NONCE_DEF$`
+  emit plain byte-array literals, so a stub that references them lands the key
+  in `.rdata`. Read the key at runtime (see `examples/stubs/runtime-key.rs`), or
+  use `$PAYLOAD_KEY_DEF_OBFUSCATED$` once it exists.
 
 ## Roadmap
 

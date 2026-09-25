@@ -54,10 +54,10 @@ after the Execution technique.
 
 The stub renders the pipeline into two placeholders:
 
-- `{{PREPARATION_BLOCKS}}` — the Preparation fragments, each wrapped in its own
+- `$PREPARATION_BLOCKS$` — the Preparation fragments, each wrapped in its own
   module (so their `use` statements cannot collide), plus a generated
   `run_preparations()` dispatcher that calls each one in order.
-- `{{EXECUTION_BLOCK}}` — the single Execution fragment, injected at the top
+- `$EXECUTION_BLOCK$` — the single Execution fragment, injected at the top
   level (it provides `execute_payload`).
 
 `run()` calls `run_preparations()?` before `execute_payload(&mut image)`.
@@ -85,7 +85,7 @@ src/
   techniques/ one directory per technique + the registry (mod.rs)
   error.rs    top-level error types
 templates/
-  stub/       Rust stub template with {{placeholders}}
+  stub/       Rust stub template with $placeholders$
 examples/
   configs/    example YAMLs
   payloads/   test payloads
@@ -107,7 +107,7 @@ dist/         (gitignored) final packed binaries
   resolved dynamically from `ntdll.dll` (windows-rs does not export it).
 - **Errors**: `thiserror`, no `panic!`/`unwrap` in the packer.
 - **Input sources**: a local `path` or a remote `url` (fetched in memory via
-  `ureq`, never written to disk). `{{build.N}}` placeholders in the YAML are
+  `ureq`, never written to disk). `$build.N$` placeholders in the YAML are
   resolved from positional CLI arguments before validation.
 - **Static evasion** (phase 5) is measured with `packerman audit` so each later
   technique's impact can be quantified against a known baseline.

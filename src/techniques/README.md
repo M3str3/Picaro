@@ -34,13 +34,13 @@ copied files.
 - Fill in `DEF` — the `TechniqueDef` metadata (name, ATT&CK, stability,
   category, …).
 - Implement `Params::render_fragment` — substitute the technique's
-  `{{PLACEHOLDER}}` values into `DEF.stub_fragment`.
+  `$PLACEHOLDER$` values into `DEF.stub_fragment`.
 
 ## 3. Fill in `stub_fragment.rs`
 
 Write the Rust snippet injected into the generated stub. It must be
 self-contained: its own `use` statements plus the functions/constants the
-technique needs. Use `{{PLACEHOLDER}}` for any per-build value and substitute it
+technique needs. Use `$PLACEHOLDER$` for any per-build value and substitute it
 in `render_fragment`.
 
 A Preparation fragment must expose a `pub fn <name>() -> Result<(), E>` entry

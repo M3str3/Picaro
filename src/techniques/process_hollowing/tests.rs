@@ -44,9 +44,9 @@ fn render_fragment_substitutes_and_obfuscates_target() {
 
     // The placeholders must be gone and the runtime byte literals must not
     // appear in cleartext (comments may still mention the names).
-    assert!(!fragment.contains("HOLLOW_TARGET_DEF"));
-    assert!(!fragment.contains("NTDLL_DEF"));
-    assert!(!fragment.contains("UNMAP_FUNC_DEF"));
+    assert!(!fragment.contains("$HOLLOW_TARGET_DEF$"));
+    assert!(!fragment.contains("$NTDLL_DEF$"));
+    assert!(!fragment.contains("$UNMAP_FUNC_DEF$"));
     assert!(!fragment.contains(r"C:\Windows\System32\svchost.exe"));
     assert!(!fragment.contains("b\"ntdll.dll"));
     assert!(!fragment.contains("b\"NtUnmapViewOfSection"));

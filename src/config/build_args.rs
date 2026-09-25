@@ -1,7 +1,7 @@
-//! Build-time argument substitution (`{{build.N}}`).
+//! Build-time argument substitution (`$build.N$`).
 //!
 //! A YAML config may reference positional arguments passed to
-//! `packerman build config.yaml arg0 arg1 ...` using the `{{build.N}}` syntax
+//! `packerman build config.yaml arg0 arg1 ...` using the `$build.N$` syntax
 //! (`N` is a 0-based index). Substitution happens *before* semantic validation
 //! and typed deserialization, so a substituted value still goes through the
 //! normal type checks (a bad type fails with the usual `serde` error).
@@ -10,7 +10,7 @@ use serde_yml::Value;
 
 use crate::error::{PackerError, Result};
 
-/// Substitutes every `{{build.N}}` token found in `value`'s string fields.
+/// Substitutes every `$build.N$` token found in `value`'s string fields.
 ///
 /// `args` is the list of positional arguments after the config path. A token
 /// whose index has no corresponding argument is an error; extra arguments are
@@ -33,13 +33,13 @@ pub fn substitute(value: &mut Value, args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Replaces every `{{build.N}}` token inside `s` using `args`.
+/// Replaces every `$build.N$` token inside `s` using `args`.
 ///
 /// Tokens are replaced even when embedded in a larger string (e.g.
-/// `"{{build.0}}_payload.exe"`). A missing index or a malformed token is a
+/// `"$build.0$_payload.exe"`). A missing index or a malformed token is a
 /// [`PackerError::Validation`] error.
 fn substitute_string(s: &mut String, args: &[String]) -> Result<()> {
-    const PREFIX: &str = "{{build.";
+    const PREFIX: &str = "$build.";
 
     let mut out = String::with_capacity(s.len());
     let mut rest: &str = s;
@@ -48,7 +48,7 @@ fn substitute_string(s: &mut String, args: &[String]) -> Result<()> {
         out.push_str(&rest[..start]);
 
         let after = &rest[start + PREFIX.len()..];
-        let end = after.find("}}").ok_or_else(|| {
+        let end = after.find('$').ok_or_else(|| {
             PackerError::Validation(format!("unterminated build argument placeholder in '{s}'"))
         })?;
 
@@ -59,12 +59,12 @@ fn substitute_string(s: &mut String, args: &[String]) -> Result<()> {
 
         let arg = args.get(idx).ok_or_else(|| {
             PackerError::Validation(format!(
-                "the config references '{{{{build.{idx}}}}}' but no build argument #{idx} was provided"
+                "the config references '$build.{idx}$' but no build argument #{idx} was provided"
             ))
         })?;
 
         out.push_str(arg);
-        rest = &after[end + 2..];
+        rest = &after[end + 1..];
     }
 
     out.push_str(rest);
@@ -87,21 +87,19 @@ mod tests {
     #[test]
     fn substitutes_positional_tokens() {
         let mut value: Value =
-            serde_yml::from_str("target: \"{{build.0}}\"\noutput: \"{{build.1}}\"\n")
-                .expect("yaml");
+            serde_yml::from_str("target: \"$build.0$\"\noutput: \"$build.1$\"\n").expect("yaml");
 
         substitute(&mut value, &args()).expect("substitute");
 
         let out = rendered(&value);
         assert!(out.contains("svchost.exe"), "rendered: {out}");
         assert!(out.contains("./dist/out.exe"), "rendered: {out}");
-        assert!(!out.contains("{{build."), "rendered: {out}");
+        assert!(!out.contains("$build."), "rendered: {out}");
     }
 
     #[test]
     fn substitutes_token_embedded_in_a_string() {
-        let mut value: Value = serde_yml::from_str("name: \"build_{{build.0}}_x\"\n")
-            .expect("yaml");
+        let mut value: Value = serde_yml::from_str("name: \"build_$build.0$_x\"\n").expect("yaml");
 
         substitute(&mut value, &args()).expect("substitute");
 
@@ -110,15 +108,15 @@ mod tests {
 
     #[test]
     fn missing_argument_is_an_error() {
-        let mut value: Value = serde_yml::from_str("target: \"{{build.5}}\"\n").expect("yaml");
+        let mut value: Value = serde_yml::from_str("target: \"$build.5$\"\n").expect("yaml");
         let err = substitute(&mut value, &args()).expect_err("missing index must fail");
         assert!(err.to_string().contains("build.5"), "err: {err}");
     }
 
     #[test]
     fn invalid_index_is_an_error() {
-        let mut value: Value = serde_yml::from_str("target: \"{{build.not_a_number}}\"\n")
-            .expect("yaml");
+        let mut value: Value =
+            serde_yml::from_str("target: \"$build.not_a_number$\"\n").expect("yaml");
         let err = substitute(&mut value, &args()).expect_err("invalid index must fail");
         assert!(err.to_string().contains("not_a_number"), "err: {err}");
     }

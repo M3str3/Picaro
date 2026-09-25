@@ -1,4 +1,4 @@
-# Example: positional build arguments (`{{build.N}}`).
+# Example: positional build arguments (`$build.N$`).
 # Usage:
 #   packerman build examples/configs/test-build-args.yaml \
 #     "C:\\Windows\\System32\\svchost.exe" ./dist/custom.exe
@@ -15,10 +15,10 @@ payload:
 
 pipeline:
   - technique: process_hollowing
-    target: "{{build.0}}"
+    target: "$build.0$"
 
 output:
-  path: "{{build.1}}"
+  path: "$build.1$"
   arch: x64
   strip: true
   trim_paths: all

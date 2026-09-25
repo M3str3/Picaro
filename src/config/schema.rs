@@ -53,7 +53,7 @@ pub struct Config {
 
 /// `loader` block: a user-provided stub template.
 ///
-/// The file is a Rust source template with `{{PLACEHOLDER}}` slots that the
+/// The file is a Rust source template with `$PLACEHOLDER$` slots that the
 /// packer fills (see `docs/custom-stubs.md`). It must define a `fn main()`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

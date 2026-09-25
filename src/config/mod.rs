@@ -3,7 +3,7 @@
 //! Responsibilities:
 //! - `schema`: `serde` structs modeling the YAML document.
 //! - `validate`: semantic validation after parsing.
-//! - `build_args`: `{{build.N}}` placeholder substitution from CLI args.
+//! - `build_args`: `$build.N$` placeholder substitution from CLI args.
 //! - `load_config`: single entry point that reads a file, resolves build
 //!   arguments, deserializes it and validates it, returning a ready-to-use
 //!   [`Config`].
@@ -18,7 +18,7 @@ use crate::error::{PackerError, Result};
 
 pub use schema::Config;
 
-/// Reads `path`, resolves `{{build.N}}` placeholders, deserializes the YAML and
+/// Reads `path`, resolves `$build.N$` placeholders, deserializes the YAML and
 /// validates the resulting config.
 ///
 /// `build_args` are the positional CLI arguments after the config path
@@ -64,7 +64,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    /// A valid YAML whose `process_hollowing.target` is a `{{build.0}}` token.
+    /// A valid YAML whose `process_hollowing.target` is a `$build.0$` token.
     const ARGS_YAML: &str = r#"
 schema: 1
 name: args-test
@@ -76,7 +76,7 @@ payload:
     key: random
 pipeline:
   - technique: process_hollowing
-    target: "{{build.0}}"
+    target: "$build.0$"
 output:
   path: ./dist/out.exe
   arch: x64

