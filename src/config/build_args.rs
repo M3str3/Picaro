@@ -1,7 +1,7 @@
 //! Build-time argument substitution (`$build.N$`).
 //!
 //! A YAML config may reference positional arguments passed to
-//! `packerman build config.yaml arg0 arg1 ...` using the `$build.N$` syntax
+//! `batesian build config.yaml arg0 arg1 ...` using the `$build.N$` syntax
 //! (`N` is a 0-based index). Substitution happens *before* semantic validation
 //! and typed deserialization, so a substituted value still goes through the
 //! normal type checks (a bad type fails with the usual `serde` error).

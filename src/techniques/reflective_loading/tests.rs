@@ -47,7 +47,7 @@ fn compiles_reflective_loading_stub_to_pe() {
     let key = crate::engine::crypto::generate_key();
     let encrypted = crate::engine::crypto::encrypt_payload(&plaintext, &key).unwrap();
 
-    let build_dir = std::env::temp_dir().join(format!("packerman_refl_{}", std::process::id()));
+    let build_dir = std::env::temp_dir().join(format!("batesian_refl_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&build_dir);
     std::fs::create_dir_all(&build_dir).unwrap();
     std::fs::write(build_dir.join("payload.bin"), &encrypted.ciphertext).unwrap();

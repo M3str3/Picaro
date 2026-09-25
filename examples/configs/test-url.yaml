@@ -1,5 +1,5 @@
 # Example: fetch the input payload from a URL, in memory (no disk write).
-# Usage: packerman build examples/configs/test-url.yaml
+# Usage: batesian build examples/configs/test-url.yaml
 schema: 1
 name: test-url
 

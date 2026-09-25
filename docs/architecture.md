@@ -24,7 +24,7 @@ use is out of scope.
 ## Pipeline (build)
 
 ```
-packerman build config.yaml
+batesian build config.yaml
     │
     ├─ 1. Parse YAML, substitute build args, validate   (src/config)
     ├─ 2. Read (file or URL) + validate payload PE      (src/engine/pe, src/engine/fetch)
@@ -65,7 +65,7 @@ The stub renders the pipeline into two placeholders:
 ## Pipeline (audit)
 
 ```
-packerman audit binary [--focus sections]
+batesian audit binary [--focus sections]
     │
     ├─ PE header + sections + entropy  (src/audit/pe_info)
     ├─ imports / exports              (src/audit/pe_info)
@@ -84,6 +84,7 @@ src/
   audit/      static measurement (pe_info, strings, yara, defender, report)
   techniques/ one directory per technique + the registry (mod.rs)
   error.rs    top-level error types
+  ui.rs       terminal output: banner, palette, formatting primitives
 templates/
   stub/       Rust stub template with $placeholders$
 examples/
@@ -94,6 +95,7 @@ docs/         measurements + this file
 code_examples/  third-party reference material
 build/        (gitignored) intermediate artifacts
 dist/         (gitignored) final packed binaries
+banner.txt    ASCII banner, compiled in by src/ui.rs
 ```
 
 ## Key decisions
@@ -109,12 +111,16 @@ dist/         (gitignored) final packed binaries
 - **Input sources**: a local `path` or a remote `url` (fetched in memory via
   `ureq`, never written to disk). `$build.N$` placeholders in the YAML are
   resolved from positional CLI arguments before validation.
-- **Static evasion** (phase 5) is measured with `packerman audit` so each later
+- **CLI output**: every line goes through `src/ui.rs` (a `Palette` plus the
+  banner, printed before every subcommand; `-q`/`--quiet` skips it).
+  Color is auto-disabled when stdout is not a terminal (`NO_COLOR`,
+  `--no-color`), so piped or pasted output stays plain text.
+- **Static evasion** (phase 5) is measured with `batesian audit` so each later
   technique's impact can be quantified against a known baseline.
 
 ## Cross-compilation from Linux
 
-When `packerman` runs on Linux/WSL, the stub is cross-compiled to
+When `batesian` runs on Linux/WSL, the stub is cross-compiled to
 `x86_64-pc-windows-gnu` instead of natively. Two extra `-L` flags are required
 and are easy to forget:
 

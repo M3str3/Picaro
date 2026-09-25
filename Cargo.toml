@@ -1,5 +1,5 @@
 [package]
-name = "packerman"
+name = "batesian"
 version = "0.1.0"
 edition = "2021"
 description = "Declarative PE packer for authorized red team research"
@@ -19,10 +19,15 @@ hex = "0.4"
 regex = "1"
 # In-memory HTTP(S) fetch of the input payload (URL input).
 ureq = { version = "2.12", features = ["tls"] }
-# Declarative CLI (`packerman build config.yaml`).
+# Declarative CLI (`batesian build config.yaml`).
 clap = { version = "4", features = ["derive"] }
 # Typed errors; we avoid `panic!` and `unwrap` in the main flow.
 thiserror = "2"
+# Terminal colors. `anstream` strips escapes when the stream cannot render
+# them and enables virtual-terminal processing on Windows consoles.
+# `anstyle` defines the styles; both are already in the tree via `clap`.
+anstream = "1"
+anstyle = "1"
 # Windows FFI (windows-rs). Only the generated stub uses it, but it is declared
 # here so its .rlib is available under target/ for `rustc --extern`.
 windows = { version = "0.58", features = [

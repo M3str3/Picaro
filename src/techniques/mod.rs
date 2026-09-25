@@ -2,7 +2,7 @@
 //!
 //! Every evasion/execution technique lives in its own subdirectory (e.g.
 //! [`process_hollowing`]) and is registered in [`all`]. The registry is pure
-//! metadata: it feeds the `packerman techniques` CLI, the `validate` CI check
+//! metadata: it feeds the `batesian techniques` CLI, the `validate` CI check
 //! and the stub renderer. How to add a technique is documented in
 //! `src/techniques/README.md`.
 
@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::engine::obfuscation::StringsConfig;
 use crate::error::{PackerError, Result};
+use crate::ui::{glyph, Palette};
 
 /// One step of the `pipeline` in the YAML config.
 ///
@@ -78,7 +79,7 @@ pub enum Category {
 }
 
 impl Category {
-    /// Lowercase label used by `packerman techniques list`.
+    /// Lowercase label used by `batesian techniques list`.
     pub fn label(self) -> &'static str {
         match self {
             Category::Preparation => "preparation",
@@ -100,7 +101,7 @@ pub enum Stability {
 }
 
 impl Stability {
-    /// Lowercase label used by `packerman techniques list`.
+    /// Lowercase label used by `batesian techniques list`.
     pub fn label(self) -> &'static str {
         match self {
             Stability::Stable => "stable",
@@ -184,25 +185,58 @@ const REQUIRED_SECTIONS: &[&str] = &[
     "## References",
 ];
 
-/// Renders the `packerman techniques list` output (no colors).
-pub fn list() -> String {
+/// Renders the `batesian techniques list` output.
+pub fn list(ui: &Palette) -> String {
     let mut out = String::new();
+    out.push_str(&format!(
+        "{} {} {} {} {}\n",
+        // Pad before styling: applying the width to an already-colored string
+        // would count the escape codes and misalign the header against the rows.
+        ui.dim(format!("{:<18}", "TECHNIQUE")),
+        ui.dim(format!("{:<12}", "CATEGORY")),
+        ui.dim(format!("{:<12}", "STABILITY")),
+        ui.dim(format!("{:<16}", "ATT&CK")),
+        ui.dim("SUMMARY"),
+    ));
     for def in all() {
-        let attck = def.attck.join(", ");
-        let summary = short_description(def.readme);
         out.push_str(&format!(
-            "{:<18} {:<12} {:<12} {:<12} {}\n",
-            def.name,
+            "{} {:<12} {} {:<16} {}\n",
+            ui.bold(format!("{:<18}", def.name)),
             def.category.label(),
-            def.stability.label(),
-            attck,
-            summary
+            stability_label(def, ui),
+            def.attck.join(", "),
+            truncate(short_description(def.readme), 70),
         ));
     }
+
+    let executions = all()
+        .iter()
+        .filter(|d| d.category == Category::Execution)
+        .count();
+    out.push_str(&format!(
+        "\n{} {}\n",
+        glyph::DOT,
+        ui.dim(format!(
+            "{} techniques ({} preparation, {} execution)",
+            all().len(),
+            all().len() - executions,
+            executions
+        ))
+    ));
     out
 }
 
-/// Returns the README of `name` for `packerman techniques show`.
+/// The technique's stability label, padded and colored by maturity.
+fn stability_label(def: &TechniqueDef, ui: &Palette) -> String {
+    let label = format!("{:<12}", def.stability.label());
+    match def.stability {
+        Stability::Stable => ui.ok(label),
+        Stability::Experimental => ui.warn(label),
+        Stability::Deprecated => ui.error(label),
+    }
+}
+
+/// Returns the README of `name` for `batesian techniques show`.
 pub fn show(name: &str) -> Result<String> {
     find(name)
         .map(|def| def.readme.to_string())
@@ -303,6 +337,16 @@ fn short_description(readme: &str) -> &str {
     ""
 }
 
+/// Shortens a summary to at most `max` characters, appending an ellipsis.
+fn truncate(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,13 +401,29 @@ mod tests {
 
     #[test]
     fn list_includes_process_hollowing() {
-        let output = list();
+        let output = list(&Palette::plain());
         assert!(
             output.contains("process_hollowing"),
             "list output: {output}"
         );
         assert!(output.contains("execution"), "list output: {output}");
         assert!(output.contains("preparation"), "list output: {output}");
+    }
+
+    /// The plain palette must not leak escape codes into the listing.
+    #[test]
+    fn plain_list_has_no_escape_codes() {
+        let output = list(&Palette::plain());
+        assert!(!output.contains('\u{1b}'), "escapes leaked: {output:?}");
+    }
+
+    /// Long summaries are truncated so the listing stays readable.
+    #[test]
+    fn truncates_long_summaries() {
+        assert_eq!(truncate("short", 10), "short");
+        let cut = truncate("0123456789abcdef", 8);
+        assert_eq!(cut.chars().count(), 8);
+        assert!(cut.ends_with("…"), "no ellipsis: {cut:?}");
     }
 
     #[test]

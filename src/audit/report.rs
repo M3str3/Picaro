@@ -1,9 +1,18 @@
 //! Rendering of the audit report.
 //!
-//! Produces a plain-text, human-readable report. No colors, no tables: just
-//! aligned labels and short lists, so it survives copy/paste into notes.
+//! The layout follows the `batesian · audit` design: a command echo, a
+//! horizontal metadata bar, uppercase section headings with flush-left content,
+//! an entropy gauge per section and a closing summary whose risk level is the
+//! one thing the eye should land on.
+//!
+//! Color is applied through a [`Palette`] the caller may disable, so the same
+//! renderer serves an interactive terminal and a redirected file (docs, notes)
+//! without leaking escape codes into the latter. Everything that carries
+//! meaning is also encoded in structure and glyphs, never in color alone.
 
 use std::path::Path;
+
+use crate::ui::{glyph, Meta, Palette, Tone};
 
 use super::defender::DefenderResult;
 use super::pe_info::{ImportItem, PeAudit};
@@ -23,6 +32,19 @@ const SUSPICIOUS_IMPORTS: &[&str] = &[
     "CryptEncrypt",
     "CryptDecrypt",
 ];
+
+/// Width of the entropy gauge, in terminal cells.
+const BAR_WIDTH: usize = 20;
+/// Entropy below this reads as ordinary code or data.
+const ENTROPY_LOW_MAX: f64 = 4.0;
+/// Entropy at or above this looks packed/encrypted enough to be worth flagging.
+const ENTROPY_HIGH_MIN: f64 = 6.5;
+/// Width of the rule above the summary.
+const RULE_WIDTH: usize = 60;
+/// Key column width of the `strings` section.
+const STRING_KEY_WIDTH: usize = 18;
+/// The imports list wraps at this width so names stay in the report column.
+const IMPORTS_WRAP: usize = 78;
 
 /// Section filter for `--focus`.
 pub struct Focus {
@@ -50,6 +72,7 @@ impl Focus {
 }
 
 /// Renders the full report.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     path: &Path,
     size: usize,
@@ -58,93 +81,98 @@ pub fn render(
     yara: &YaraResult,
     defender: &DefenderResult,
     focus: &Focus,
+    ui: &Palette,
 ) -> String {
     let mut out = String::new();
 
-    out.push_str(&format!("=== Audit: {} ===\n", path.display()));
-    out.push_str(&format!("Size:     {size} bytes\n"));
-    out.push_str(&format!("Arch:     {}\n", pe.arch));
-    out.push_str(&format!("Subsystem: {}\n", pe.subsystem));
-    out.push_str(&format!(
-        "Signature: {}\n",
-        if pe.has_signature {
-            "present (Authenticode)"
-        } else {
-            "none"
-        }
-    ));
-    out.push_str(&format!(
-        "Manifest:  {}\n",
-        if pe.has_manifest { "present" } else { "none" }
-    ));
-    out.push_str(&format!("Overlay:   {} bytes\n", pe.overlay));
-    out.push_str(&format!("Timestamp: {}\n", format_timestamp(pe.timestamp)));
+    out.push_str(&ui.command_line("audit", path.display()));
+    out.push('\n');
+    out.push('\n');
+    out.push_str(&render_meta(size, pe, ui));
 
     if focus.enabled("sections") {
-        out.push_str(&render_sections(pe));
+        out.push_str(&render_sections(pe, ui));
     }
     if focus.enabled("imports") {
-        out.push_str(&render_imports(pe));
+        out.push_str(&render_imports(pe, ui));
+        out.push_str(&render_suspicious(pe, ui));
     }
     if focus.enabled("exports") {
-        out.push_str(&render_exports(pe));
+        out.push_str(&render_exports(pe, ui));
     }
     if focus.enabled("strings") {
-        out.push_str(&render_strings(strings));
+        out.push_str(&render_strings(strings, ui));
     }
     if focus.enabled("yara") {
-        out.push_str(&render_yara(yara));
+        out.push_str(&render_yara(yara, ui));
     }
     if focus.enabled("defender") {
-        out.push_str(&render_defender(defender));
+        out.push_str(&render_defender(defender, ui));
     }
 
-    out.push_str(&render_summary(pe, strings));
+    out.push_str(&render_summary(pe, strings, defender, ui));
 
     out
 }
 
-fn render_sections(pe: &PeAudit) -> String {
-    let mut out = String::from("\nSections:\n");
-    for s in &pe.sections {
-        let flag = if s.entropy > 7.0 { "  ⚠ high" } else { "" };
-        out.push_str(&format!(
-            "  {:<8} {:>5} KB  entropy {:.2}{}\n",
-            s.name,
-            s.size / 1024,
-            s.entropy,
-            flag
-        ));
-    }
-    out
+/// The metadata bar: size, architecture, subsystem, signature, overlay and
+/// timestamp.
+fn render_meta(size: usize, pe: &PeAudit, ui: &Palette) -> String {
+    let items = [
+        Meta {
+            key: "SIZE",
+            value: format!("{} bytes", group_number(size)),
+            tone: Tone::Value,
+        },
+        Meta {
+            key: "ARCH",
+            value: pe.arch.to_string(),
+            tone: Tone::Value,
+        },
+        Meta {
+            key: "SUBSYSTEM",
+            value: pe.subsystem.to_string(),
+            tone: Tone::Value,
+        },
+        Meta {
+            key: "SIGNATURE",
+            value: if pe.has_signature {
+                "present (Authenticode)".to_string()
+            } else {
+                "none".to_string()
+            },
+            tone: if pe.has_signature {
+                Tone::Ok
+            } else {
+                Tone::Warn
+            },
+        },
+        Meta {
+            key: "OVERLAY",
+            value: format!("{} bytes", group_number(pe.overlay)),
+            tone: Tone::Value,
+        },
+        Meta {
+            key: "TIMESTAMP",
+            value: format_timestamp(pe.timestamp),
+            tone: Tone::Value,
+        },
+    ];
+    ui.meta_bar(&items)
 }
 
-fn render_imports(pe: &PeAudit) -> String {
-    let total_functions: usize = pe.imports.iter().map(|d| d.functions.len()).sum();
-    let mut out = format!(
-        "\nImports ({} DLLs, {} functions):\n",
-        pe.imports.len(),
-        total_functions
-    );
-    for dll in &pe.imports {
-        let names: Vec<String> = dll
-            .functions
-            .iter()
-            .map(|f| match f {
-                ImportItem::Named(n) => n.clone(),
-                ImportItem::Ordinal(o) => format!("Ordinal({o})"),
-            })
-            .collect();
-        out.push_str(&format!(
-            "  {} ({}): {}\n",
-            dll.name,
-            dll.functions.len(),
-            names.join(", ")
-        ));
+/// A blank line, an uppercase heading and an optional dim note, then a newline.
+fn section(ui: &Palette, title: &str, note: Option<String>) -> String {
+    let mut line = ui.heading(title);
+    if let Some(note) = note {
+        line.push_str(&format!("  {}", ui.dim(note)));
     }
+    format!("\n{line}\n")
+}
 
-    let suspicious: Vec<String> = pe
-        .imports
+/// Names of the imports matching the "known malware API" list.
+fn suspicious_imports(pe: &PeAudit) -> Vec<String> {
+    pe.imports
         .iter()
         .flat_map(|d| &d.functions)
         .filter_map(|f| match f {
@@ -154,135 +182,412 @@ fn render_imports(pe: &PeAudit) -> String {
                 .map(|s| s.to_string()),
             ImportItem::Ordinal(_) => None,
         })
-        .collect();
+        .collect()
+}
 
-    out.push_str(&format!(
-        "\nSuspicious imports flagged: {}\n",
-        suspicious.len()
-    ));
+fn render_sections(pe: &PeAudit, ui: &Palette) -> String {
+    let mut out = section(ui, "SECTIONS", None);
+    for s in &pe.sections {
+        let entropy = format!("{:.2}", s.entropy);
+        out.push_str(&format!(
+            "{:<9}{:<7}  {}  {}\n",
+            s.name,
+            kb(s.size),
+            entropy_bar(ui, s.entropy),
+            ui.dim(entropy)
+        ));
+    }
+    out
+}
+
+fn render_imports(pe: &PeAudit, ui: &Palette) -> String {
+    let total_functions: usize = pe.imports.iter().map(|d| d.functions.len()).sum();
+    let note = format!(
+        "{} dlls {} {} functions",
+        pe.imports.len(),
+        glyph::DOT,
+        group_number(total_functions)
+    );
+    let mut out = section(ui, "IMPORTS", Some(note));
+    for dll in &pe.imports {
+        out.push_str(&format!(
+            "{} {}\n",
+            ui.heading(&dll.name),
+            ui.dim(format!("({})", dll.functions.len()))
+        ));
+        let names: Vec<String> = dll
+            .functions
+            .iter()
+            .map(|f| match f {
+                ImportItem::Named(n) => n.clone(),
+                ImportItem::Ordinal(o) => format!("Ordinal({o})"),
+            })
+            .collect();
+        out.push_str(&ui.dim(fill(&names, IMPORTS_WRAP)));
+        out.push('\n');
+    }
+    out
+}
+
+fn render_suspicious(pe: &PeAudit, ui: &Palette) -> String {
+    let mut out = section(ui, "SUSPICIOUS IMPORTS", None);
+    let suspicious = suspicious_imports(pe);
     if suspicious.is_empty() {
-        out.push_str("(none of the \"known malware API\" patterns matched)\n");
+        out.push_str(&status_line(
+            ui,
+            ui.check(),
+            ui.dim("IAT looks minimal"),
+            None,
+        ));
     } else {
-        for s in &suspicious {
-            out.push_str(&format!("  {s}\n"));
+        for name in &suspicious {
+            out.push_str(&format!("{} {}\n", ui.bang(), ui.error(name)));
         }
     }
     out
 }
 
-fn render_exports(pe: &PeAudit) -> String {
+fn render_exports(pe: &PeAudit, ui: &Palette) -> String {
+    let note = (!pe.exports.is_empty()).then(|| pe.exports.len().to_string());
+    let mut out = section(ui, "EXPORTS", note);
     if pe.exports.is_empty() {
-        "\nExports: none\n".to_string()
+        out.push_str(&format!("{} {}\n", ui.faint(glyph::DOT), ui.dim("none")));
     } else {
-        let mut out = format!("\nExports ({}):\n", pe.exports.len());
         for e in &pe.exports {
-            out.push_str(&format!("  {e}\n"));
+            out.push_str(&format!("  {}\n", ui.dim(e)));
         }
-        out
     }
+    out
 }
 
-fn render_strings(strings: &StringFindings) -> String {
-    let mut out = String::from("\nStrings scan:\n");
-    out.push_str(&format!("  Paths (System32): {}\n", strings.paths.len()));
-    for p in &strings.paths {
-        out.push_str(&format!("    {p}\n"));
-    }
-    out.push_str(&format!("  APIs by name:     {}\n", strings.apis.len()));
-    for a in &strings.apis {
-        out.push_str(&format!("    {a}\n"));
-    }
+fn render_strings(strings: &StringFindings, ui: &Palette) -> String {
+    let mut out = section(ui, "STRINGS", None);
+
+    out.push_str(&string_row(ui, "paths (system32)", strings.paths.len()));
+    out.push_str(&list_items(ui, &strings.paths));
+
+    out.push_str(&string_row(ui, "apis by name", strings.apis.len()));
+    out.push_str(&list_items(ui, &strings.apis));
+
+    out.push_str(&string_row(ui, "technique names", strings.techniques.len()));
+    out.push_str(&list_items(ui, &strings.techniques));
+
+    out.push_str(&string_row(ui, "urls / ips", strings.urls_ips.len()));
+    out.push_str(&list_items(ui, &strings.urls_ips));
+
+    out.push_str(&string_row(ui, "sensitive", strings.sensitive.len()));
+    out.push_str(&list_items(ui, &strings.sensitive));
+
+    let flagged = strings.total_flagged();
+    let value = if flagged == 0 {
+        ui.ok(flagged)
+    } else {
+        ui.warn(flagged)
+    };
     out.push_str(&format!(
-        "  Technique names:  {}\n",
-        strings.techniques.len()
-    ));
-    for t in &strings.techniques {
-        out.push_str(&format!("    {t}\n"));
-    }
-    out.push_str(&format!("  URLs/IPs:         {}\n", strings.urls_ips.len()));
-    for u in &strings.urls_ips {
-        out.push_str(&format!("    {u}\n"));
-    }
-    out.push_str(&format!(
-        "  Sensitive:        {}\n",
-        strings.sensitive.len()
-    ));
-    for s in &strings.sensitive {
-        out.push_str(&format!("    {s}\n"));
-    }
-    out.push_str(&format!(
-        "  Total flagged:    {}\n",
-        strings.total_flagged()
+        "{} {}\n",
+        ui.dim(format!(
+            "{:<width$}",
+            "total flagged",
+            width = STRING_KEY_WIDTH
+        )),
+        value
     ));
     out
 }
 
-fn render_yara(yara: &YaraResult) -> String {
+fn render_yara(yara: &YaraResult, ui: &Palette) -> String {
+    let mut out = section(ui, "YARA", None);
     if yara.matches.is_empty() {
-        format!("\nYARA matches: none ({})\n", yara.note)
+        out.push_str(&status_line(
+            ui,
+            ui.check(),
+            ui.dim("no matches"),
+            Some(format!("({})", yara.note)),
+        ));
     } else {
-        let mut out = format!("\nYARA matches: {}\n", yara.matches.len());
         for m in &yara.matches {
-            out.push_str(&format!("  {m}\n"));
+            out.push_str(&format!("{} {}\n", ui.bang(), ui.error(m)));
         }
-        out
     }
+    out
 }
 
-fn render_defender(defender: &DefenderResult) -> String {
-    let line = match defender {
-        DefenderResult::NotAvailable => "not run (MpCmdRun.exe not found)".to_string(),
-        DefenderResult::Clean => "clean (no threats found)".to_string(),
-        DefenderResult::ThreatFound(details) => format!("THREAT FOUND\n{details}"),
-        DefenderResult::Error(e) => format!("error\n{e}"),
-    };
-    format!("\nDefender scan: {line}\n")
+fn render_defender(defender: &DefenderResult, ui: &Palette) -> String {
+    let mut out = section(ui, "DEFENDER", None);
+    match defender {
+        DefenderResult::NotAvailable => {
+            out.push_str(&status_line(
+                ui,
+                ui.faint(glyph::DOT),
+                ui.dim("not run"),
+                Some("(MpCmdRun.exe not found)".to_string()),
+            ));
+        }
+        DefenderResult::Clean => {
+            out.push_str(&status_line(
+                ui,
+                ui.check(),
+                ui.ok("clean"),
+                Some("(no threats found)".to_string()),
+            ));
+        }
+        DefenderResult::ThreatFound(details) => {
+            out.push_str(&status_line(ui, ui.cross(), ui.error("threat found"), None));
+            for line in details.lines() {
+                out.push_str(&format!("  {}\n", ui.error(line)));
+            }
+        }
+        DefenderResult::Error(e) => {
+            out.push_str(&status_line(
+                ui,
+                ui.bang(),
+                ui.warn("scan failed"),
+                defender_note(e),
+            ));
+        }
+    }
+    out
 }
 
-fn render_summary(pe: &PeAudit, strings: &StringFindings) -> String {
-    let suspicious = pe
-        .imports
-        .iter()
-        .flat_map(|d| &d.functions)
-        .filter(|f| match f {
-            ImportItem::Named(n) => SUSPICIOUS_IMPORTS.iter().any(|s| s.eq_ignore_ascii_case(n)),
-            ImportItem::Ordinal(_) => false,
-        })
-        .count();
+/// Condenses the (often very long) `MpCmdRun` failure output into the one
+/// useful token, the HRESULT.
+///
+/// The raw output buries `hr = 0x…` in a multi-line wall of text and a temp
+/// path, which would blow up the report; the HRESULT plus a pointer to the log
+/// is what a reader actually needs.
+fn defender_note(message: &str) -> Option<String> {
+    let collapsed = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
 
-    let high_entropy = pe.sections.iter().any(|s| s.entropy > 7.0);
+    if let Some(start) = collapsed.to_ascii_lowercase().find("hr = ") {
+        let code: String = collapsed[start + "hr = ".len()..]
+            .chars()
+            .take_while(|c| c.is_ascii_hexdigit() || matches!(c, 'x' | 'X'))
+            .collect();
+        if !code.is_empty() {
+            return Some(format!("hr = {code} {} see MpCmdRun.log", glyph::DOT));
+        }
+    }
+
+    Some(truncate_chars(&collapsed, 90))
+}
+
+/// Shortens `text` to at most `max` characters, appending an ellipsis.
+fn truncate_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+fn render_summary(
+    pe: &PeAudit,
+    strings: &StringFindings,
+    defender: &DefenderResult,
+    ui: &Palette,
+) -> String {
+    let suspicious = suspicious_imports(pe).len();
     let string_flags = strings.total_flagged();
+    let high_entropy = pe.sections.iter().any(|s| s.entropy >= ENTROPY_HIGH_MIN);
 
-    let risk = if suspicious == 0 && string_flags == 0 {
-        "LOW"
+    let (label, tone) = if suspicious == 0 && string_flags == 0 {
+        ("LOW RISK", Tone::Ok)
     } else if suspicious <= 2 && string_flags <= 3 {
-        "MEDIUM"
+        ("MEDIUM RISK", Tone::Warn)
     } else {
-        "HIGH"
+        ("HIGH RISK", Tone::Bad)
     };
 
-    let mut out = format!("\n=== Summary ===\nStatic risk: {risk}\n");
+    let mut out = String::new();
+    out.push('\n');
+    out.push_str(&ui.rule(RULE_WIDTH));
+    out.push('\n');
+    out.push_str(&format!("\n{}\n", ui.heading("SUMMARY")));
+    out.push_str(&format!("\n{}\n", ui.bold(ui.tone(tone, label))));
 
     if suspicious == 0 {
-        out.push_str("- IAT is minimal\n");
+        out.push_str(&status_line(ui, ui.check(), ui.dim("IAT is minimal"), None));
     } else {
-        out.push_str(&format!("- {suspicious} suspicious imports\n"));
-    }
-    if string_flags == 0 {
-        out.push_str("- No suspicious strings\n");
-    } else {
-        out.push_str(&format!("- {string_flags} flagged strings\n"));
-    }
-    if high_entropy {
-        out.push_str("- High entropy section present (expected for encrypted payload)\n");
-    }
-    if !pe.has_signature {
-        out.push_str("- No signature (expected for research)\n");
-    }
-    if pe.overlay > 0 {
-        out.push_str(&format!("- Overlay of {} bytes\n", pe.overlay));
+        out.push_str(&status_line(
+            ui,
+            ui.bang(),
+            ui.warn(format!("{suspicious} suspicious imports")),
+            None,
+        ));
     }
 
+    if string_flags == 0 {
+        out.push_str(&status_line(
+            ui,
+            ui.check(),
+            ui.dim("no suspicious strings"),
+            None,
+        ));
+    } else {
+        out.push_str(&status_line(
+            ui,
+            ui.bang(),
+            ui.warn(format!("{string_flags} flagged strings")),
+            None,
+        ));
+    }
+
+    if high_entropy {
+        out.push_str(&status_line(
+            ui,
+            ui.bang(),
+            ui.warn("high entropy section"),
+            Some("expected for the encrypted payload".to_string()),
+        ));
+    }
+    if !pe.has_signature {
+        out.push_str(&status_line(
+            ui,
+            ui.bang(),
+            ui.warn("unsigned binary"),
+            Some("expected for research".to_string()),
+        ));
+    }
+    if pe.has_manifest {
+        out.push_str(&status_line(
+            ui,
+            ui.faint(glyph::DOT),
+            ui.dim("manifest embedded"),
+            None,
+        ));
+    }
+    if pe.overlay > 0 {
+        out.push_str(&status_line(
+            ui,
+            ui.faint(glyph::DOT),
+            ui.dim(format!("overlay of {} bytes", group_number(pe.overlay))),
+            None,
+        ));
+    }
+
+    match defender {
+        DefenderResult::NotAvailable => {}
+        DefenderResult::Clean => {
+            out.push_str(&status_line(ui, ui.check(), ui.dim("defender clean"), None))
+        }
+        DefenderResult::ThreatFound(_) => out.push_str(&status_line(
+            ui,
+            ui.cross(),
+            ui.error("defender flagged this binary"),
+            None,
+        )),
+        DefenderResult::Error(_) => out.push_str(&status_line(
+            ui,
+            ui.bang(),
+            ui.warn("defender scan failed"),
+            Some("(check MpCmdRun.log)".to_string()),
+        )),
+    }
+
+    out
+}
+
+/// A `marker text` line, plus a dim trailing note when present.
+///
+/// Used both for section status lines (`✓ no matches`) and for the summary
+/// bullets; callers pass the note already formatted (some wrap it in
+/// parentheses) so the upstream text is never rewritten.
+fn status_line(
+    ui: &Palette,
+    marker: String,
+    text: impl std::fmt::Display,
+    note: Option<String>,
+) -> String {
+    let mut line = format!("{marker} {text}");
+    if let Some(note) = note {
+        line.push_str(&format!("  {}", ui.dim(note)));
+    }
+    line.push('\n');
+    line
+}
+
+/// A `key  value` row of the `strings` section.
+fn string_row(ui: &Palette, key: &str, value: usize) -> String {
+    format!(
+        "{} {}\n",
+        ui.dim(format!("{key:<width$}", width = STRING_KEY_WIDTH)),
+        ui.value(value)
+    )
+}
+
+/// The found strings of one category, indented under their count.
+fn list_items(ui: &Palette, items: &[String]) -> String {
+    items
+        .iter()
+        .map(|item| format!("  {}\n", ui.dim(item)))
+        .collect()
+}
+
+/// The entropy gauge: a fixed-width bar whose fill tracks `entropy` (0–8) and
+/// whose color encodes how packed the section looks.
+fn entropy_bar(ui: &Palette, entropy: f64) -> String {
+    let ratio = (entropy / 8.0).clamp(0.0, 1.0);
+    let filled = (ratio * BAR_WIDTH as f64).round() as usize;
+    let tone = if entropy < ENTROPY_LOW_MAX {
+        Tone::OkDim
+    } else if entropy < ENTROPY_HIGH_MIN {
+        Tone::Warn
+    } else {
+        Tone::Bad
+    };
+    format!(
+        "{}{}",
+        ui.tone(tone, glyph::BLOCK.repeat(filled)),
+        ui.faint(glyph::SHADE.repeat(BAR_WIDTH - filled))
+    )
+}
+
+/// Fills `items` into lines of at most `width` columns, two spaces apart.
+///
+/// Wrapping here (rather than letting the terminal do it) keeps a long import
+/// list inside the report column instead of running to the window edge.
+fn fill(items: &[String], width: usize) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for item in items {
+        let item_len = item.chars().count();
+        if line.is_empty() {
+            line = item.clone();
+        } else if line.chars().count() + 2 + item_len <= width {
+            line.push_str("  ");
+            line.push_str(item);
+        } else {
+            lines.push(std::mem::take(&mut line));
+            line = item.clone();
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines.join("\n")
+}
+
+/// Formats bytes as whole kilobytes, as the section rows show them.
+fn kb(bytes: usize) -> String {
+    format!("{} KB", bytes / 1024)
+}
+
+/// Groups a number's digits in threes with spaces (`13 824`), which is easier
+/// to scan than an unbroken run at these magnitudes.
+fn group_number(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(' ');
+        }
+        out.push(ch);
+    }
     out
 }
 
@@ -344,57 +649,61 @@ mod tests {
         }
     }
 
-    #[test]
-    fn renders_all_sections() {
+    /// Renders the sample PE through the plain palette (no escape codes).
+    fn render_sample(focus: Option<&str>) -> String {
         let pe = sample_pe();
         let strings = StringFindings::default();
         let yara = YaraResult {
             matches: vec![],
             note: "ruleset empty",
         };
-        let focus = Focus::parse(None);
-        let out = render(
+        render(
             Path::new("test.exe"),
             12345,
             &pe,
             &strings,
             &yara,
             &DefenderResult::NotAvailable,
-            &focus,
-        );
+            &Focus::parse(focus),
+            &Palette::plain(),
+        )
+    }
 
-        assert!(out.contains("=== Audit: test.exe ==="));
-        assert!(out.contains("Sections:"));
-        assert!(out.contains("Imports"));
+    #[test]
+    fn renders_all_sections() {
+        let out = render_sample(None);
+
+        assert!(out.contains("batesian audit"), "missing echo: {out}");
+        assert!(out.contains("test.exe"));
+        assert!(out.contains("SECTIONS"));
+        assert!(out.contains("IMPORTS"));
         assert!(out.contains("VirtualAllocEx"));
-        assert!(out.contains("Strings scan:"));
-        assert!(out.contains("YARA matches:"));
-        assert!(out.contains("Defender scan:"));
-        assert!(out.contains("=== Summary ==="));
+        assert!(out.contains("SUSPICIOUS IMPORTS"));
+        assert!(out.contains("STRINGS"));
+        assert!(out.contains("paths (system32)"));
+        assert!(out.contains("YARA"));
+        assert!(out.contains("DEFENDER"));
+        assert!(out.contains("SUMMARY"));
+        // One suspicious import ⇒ medium risk.
+        assert!(out.contains("MEDIUM RISK"), "missing risk: {out}");
     }
 
     #[test]
     fn focus_limits_sections() {
-        let pe = sample_pe();
-        let strings = StringFindings::default();
-        let yara = YaraResult {
-            matches: vec![],
-            note: "ruleset empty",
-        };
-        let focus = Focus::parse(Some("imports"));
-        let out = render(
-            Path::new("test.exe"),
-            12345,
-            &pe,
-            &strings,
-            &yara,
-            &DefenderResult::NotAvailable,
-            &focus,
-        );
+        let out = render_sample(Some("imports"));
 
-        assert!(out.contains("Imports"));
-        assert!(!out.contains("Sections:"));
-        assert!(!out.contains("Strings scan:"));
+        assert!(out.contains("IMPORTS"));
+        assert!(!out.contains("SECTIONS"));
+        assert!(!out.contains("paths (system32)"));
+        assert!(!out.contains("YARA"));
+    }
+
+    /// The plain palette must not leak escape codes into a report meant to be
+    /// copy-pasted.
+    #[test]
+    fn plain_report_has_no_escape_codes() {
+        let out = render_sample(None);
+        assert!(!out.contains('\u{1b}'), "escapes leaked: {out:?}");
     }
 
     #[test]
@@ -408,6 +717,56 @@ mod tests {
         assert_eq!(
             format_timestamp(Some(1577836800)),
             "2020-01-01 00:00:00 UTC"
+        );
+    }
+
+    #[test]
+    fn groups_thousands() {
+        assert_eq!(group_number(0), "0");
+        assert_eq!(group_number(999), "999");
+        assert_eq!(group_number(1000), "1 000");
+        assert_eq!(group_number(13_824), "13 824");
+        assert_eq!(group_number(1_234_567), "1 234 567");
+    }
+
+    /// The Defender failure note keeps only the HRESULT and the log pointer.
+    #[test]
+    fn defender_note_condenses_to_hresult() {
+        let note = defender_note(
+            "Scan starting...\nCmdTool: Failed with hr = 0x80508023. Check\\Temp\\MpCmdRun.log for more information",
+        )
+        .expect("non-empty message");
+        assert_eq!(
+            note,
+            format!("hr = 0x80508023 {} see MpCmdRun.log", glyph::DOT)
+        );
+        assert_eq!(defender_note("   "), None);
+    }
+
+    /// The gauge is always exactly `BAR_WIDTH` cells wide, whatever the value.
+    #[test]
+    fn entropy_bar_has_fixed_width() {
+        let ui = Palette::plain();
+        for entropy in [0.0, 0.17, 5.89, 7.9, 8.0] {
+            assert_eq!(entropy_bar(&ui, entropy).chars().count(), BAR_WIDTH);
+        }
+        assert_eq!(entropy_bar(&ui, 0.0), glyph::SHADE.repeat(BAR_WIDTH));
+        assert_eq!(entropy_bar(&ui, 8.0), glyph::BLOCK.repeat(BAR_WIDTH));
+    }
+
+    #[test]
+    fn fill_wraps_within_width() {
+        let items: Vec<String> = ["aaaa", "bbbb", "cccc", "dddd"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let filled = fill(&items, 14);
+        for line in filled.lines() {
+            assert!(line.chars().count() <= 14, "too wide: {line:?}");
+        }
+        assert!(
+            filled.lines().count() > 1,
+            "should have wrapped: {filled:?}"
         );
     }
 }

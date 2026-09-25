@@ -75,7 +75,7 @@ Positional arguments after the config path are substituted into the YAML as
 `$build.N$` (0-based index) and into a custom stub as `$ARG_<n>$`:
 
 ```bash
-packerman build config.yaml "C:\\Windows\\System32\\svchost.exe"
+batesian build config.yaml "C:\\Windows\\System32\\svchost.exe"
 ```
 
 ```yaml

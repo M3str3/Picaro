@@ -61,7 +61,7 @@ evasion, not beating CrowdStrike at runtime.
 ## Additional observation (static, on the packer binary)
 
 CrowdStrike also blocks execution of the **packer/audit tool itself**
-(`packerman.exe`) with `Access denied`. The audit module embeds malware-API
+(`batesian.exe`) with `Access denied`. The audit module embeds malware-API
 string literals (`NtUnmapViewOfSection`, `VirtualAllocEx`, `WriteProcessMemory`,
 ...) and technique keywords (`hollow`, `inject`, `loader`, `shellcode`) for its
 string scan, so the measurement tool trips the same static heuristics it is

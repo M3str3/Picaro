@@ -1,6 +1,6 @@
 # Example: positional build arguments (`$build.N$`).
 # Usage:
-#   packerman build examples/configs/test-build-args.yaml \
+#   batesian build examples/configs/test-build-args.yaml \
 #     "C:\\Windows\\System32\\svchost.exe" ./dist/custom.exe
 schema: 1
 name: test-build-args

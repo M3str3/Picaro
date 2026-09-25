@@ -14,6 +14,7 @@ pub mod yara;
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use crate::ui::Palette;
 use pe_info::ImportItem;
 use report::Focus;
 
@@ -35,8 +36,9 @@ pub enum AuditError {
 /// Runs a full static audit of `binary` and returns the rendered report.
 ///
 /// `focus`, when set, restricts the report to a comma-separated list of
-/// sections (e.g. `imports,strings`).
-pub fn run(binary: &Path, focus: Option<&str>) -> Result<String, AuditError> {
+/// sections (e.g. `imports,strings`). `ui` controls whether the report carries
+/// color; it is plain when the output is redirected.
+pub fn run(binary: &Path, focus: Option<&str>, ui: &Palette) -> Result<String, AuditError> {
     let data = std::fs::read(binary).map_err(|source| AuditError::ReadBinary {
         path: binary.display().to_string(),
         source,
@@ -70,6 +72,6 @@ pub fn run(binary: &Path, focus: Option<&str>) -> Result<String, AuditError> {
     let focus = Focus::parse(focus);
 
     Ok(report::render(
-        binary, size, &pe, &strings, &yara, &defender, &focus,
+        binary, size, &pe, &strings, &yara, &defender, &focus, ui,
     ))
 }

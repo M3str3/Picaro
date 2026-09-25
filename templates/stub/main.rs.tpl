@@ -1,4 +1,4 @@
-//! Stub generated automatically by packerman.
+//! Stub generated automatically by batesian.
 //!
 //! Decrypts the embedded payload with XChaCha20-Poly1305, shows a marker
 //! MessageBox, and runs the payload in memory using the selected execution
@@ -36,7 +36,7 @@ fn main() {
     match run() {
         Ok(code) => std::process::exit(code),
         Err(msg) => {
-            show_message_box(&msg, "packerman stub");
+            show_message_box(&msg, "batesian stub");
             std::process::exit(1);
         }
     }

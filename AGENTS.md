@@ -1,4 +1,4 @@
-# packerman — Agent Instructions
+# batesian — Agent Instructions
 
 ## What this project is
 
@@ -37,6 +37,9 @@ Any other use is out of scope and not supported.
 - Public functions get doc comments explaining *why*, not *what*.
 - Test names describe behavior, not implementation.
 - Prefer explicit over clever.
+- **User-facing output goes through `src/ui.rs`.** Use `Palette` (`banner`,
+  headings, `field`/`step`/`done`) instead of hand-written ANSI escapes or
+  ad-hoc formatting; color degrades to plain text when redirected.
 - When adding a technique, grep the fragment for `"` before committing. If the
   string is used at runtime by the stub, it must come from `StringsConfig`.
 
@@ -49,25 +52,27 @@ src/
   audit/        static measurement (pe_info, strings, yara, defender, report)
   techniques/   one directory per technique + the registry (mod.rs)
   error.rs      top-level error types
+  ui.rs         terminal output: banner, palette, formatting helpers
 templates/
-  stub/         Rust stub template with {{placeholders}}
+  stub/         Rust stub template with $placeholders$
 examples/
   configs/      example YAMLs
   payloads/     test payloads for end-to-end verification
 code_examples/  reference material (see below)
 build/          (gitignored) intermediate artifacts
 dist/           (gitignored) final packed binaries
+banner.txt      ASCII banner, compiled in by src/ui.rs
 ```
 
 Each technique lives under `src/techniques/<name>/` (README + stub fragment +
 tests). The registry (`src/techniques/mod.rs`) is metadata-only; inspect it with
-`packerman techniques {list,show,validate}`. Adding a technique is documented in
+`batesian techniques {list,show,validate}`. Adding a technique is documented in
 `src/techniques/README.md`.
 
 ## Current state
 
 **Phase 5 complete.** Static measurement infrastructure:
-- `packerman audit <binary>` reports header, sections + entropy, imports/exports,
+- `batesian audit <binary>` reports header, sections + entropy, imports/exports,
   strings, YARA (stub) and an optional offline Defender scan.
 - The process-hollowing binary's static baseline is documented in
   `docs/measurements/` and `.memory.md`.
@@ -82,7 +87,7 @@ tests). The registry (`src/techniques/mod.rs`) is metadata-only; inspect it with
 vs Execution (`TechniqueDef.category`); a pipeline is `0..N` Preparation followed
 by exactly one Execution. `patch_amsi` (T1562.001) is the first Preparation
 technique. Validation in `src/config/validate.rs`; the stub renders into
-`{{PREPARATION_BLOCKS}}` / `{{EXECUTION_BLOCK}}` (Preparation fragments are
+`$PREPARATION_BLOCKS$` / `$EXECUTION_BLOCK$` (Preparation fragments are
 wrapped in per-technique modules to avoid `use` collisions).
 
 **String-leak consolidation (done).** Every runtime literal in every stub
@@ -94,6 +99,22 @@ are not false positives. The `#[ignore]` test
 literal only when it is in the compiled stub **and** in the generated stub
 source (comments stripped) — a binary hit alone can come from the toolchain
 (e.g. `windows-result` ships `ntdll.dll`).
+
+**CLI UX, app renamed to `batesian` (done).** The crate, binary and CLI are
+`batesian` (previously `husk`, originally `packerman`). UX lives in `src/ui.rs`:
+a truecolor `Palette` with a soft violet brand accent, clear green/yellow/red
+status colors and a steel blue for targets (color auto-disabled when not a
+terminal, plus `NO_COLOR`/`--no-color`). Legibility rules: primary values use
+the terminal's default foreground (a fixed light gray vanishes on a light
+theme), and the secondary slate tone is bright enough to read on dark. The
+banner (`banner.txt`) is printed before every subcommand, followed by the dim
+tagline (`mimicry-based packer · vX.Y.Z`); `-q`/`--quiet` skips it. `build` and `audit` open with a
+`▸ batesian <cmd> · <target>` echo; `build` logs `✓` steps with compact
+path/size detail and a green result line, while `-v`/`--verbose` adds a
+resolved-config block plus per-step detail (template, marker, rustc path,
+timings); `audit` renders the redesigned report (metadata bar, entropy gauges,
+uppercase headings, colored `LOW/MEDIUM/HIGH RISK`); `techniques list` is a
+colored table.
 
 **Phase 6 planned.** Indirect syscalls.
 

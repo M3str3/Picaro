@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>batesian · audit</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --bg:       #0a0a0a;
+  --text:     #b8b8b8;
+  --dim:      #3a3a3a;
+  --label:    #585858;
+  --val:      #d2d2d2;
+  --amber:    #c8893a;  /* section heads, tool name — coral snake */
+  --ok:       #527a5f;  /* clean / safe */
+  --ok-bright:#5c9e70;
+  --warn:     #c89a3a;  /* ! warning */
+  --bad:      #a84848;  /* danger */
+  --blue:     #6a9ec4;  /* filename / target */
+  --line:     #141414;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 13px;
+  line-height: 1.65;
+  padding: 36px 44px;
+  min-height: 100vh;
+}
+
+/* ── Banner ── */
+.banner {
+  color: var(--amber);
+  font-size: 12px;
+  line-height: 1.25;
+  margin-bottom: 2px;
+  white-space: pre;
+}
+
+.tagline {
+  color: var(--dim);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  margin-bottom: 28px;
+}
+
+/* ── Command line ── */
+.cmdline {
+  margin-bottom: 22px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.prompt   { color: var(--dim); }
+.cmd-tool { color: var(--amber); font-weight: 700; }
+.cmd-sub  { color: var(--val); }
+.cmd-sep  { color: var(--dim); }
+.cmd-file { color: var(--blue); }
+
+/* ── Metadata bar ── */
+.meta {
+  display: flex;
+  gap: 0;
+  margin-bottom: 22px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+.meta-item {
+  padding-right: 28px;
+}
+.meta-key {
+  display: block;
+  color: var(--label);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-bottom: 1px;
+}
+.meta-val { color: var(--val); }
+.meta-val.warn { color: var(--warn); }
+
+/* ── Section ── */
+.section { margin-bottom: 22px; }
+
+.sec-head {
+  color: var(--amber);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.sec-head-note {
+  color: var(--label);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: none;
+}
+
+/* ── Entropy table ── */
+.ent-row {
+  display: flex;
+  align-items: center;
+  padding: 1px 0;
+}
+.ent-name { width: 72px;  color: var(--label); flex-shrink: 0; }
+.ent-size { width: 54px;  color: var(--val);   flex-shrink: 0; }
+.ent-bar-wrap {
+  width: 100px;
+  height: 5px;
+  background: #181818;
+  border-radius: 1px;
+  overflow: hidden;
+  margin-right: 10px;
+  flex-shrink: 0;
+}
+.ent-fill { height: 100%; border-radius: 1px; }
+.ent-num  { color: var(--label); font-size: 11px; }
+
+/* ── Imports ── */
+.dll-head {
+  color: var(--amber);
+  margin-top: 8px;
+  margin-bottom: 3px;
+}
+.dll-count { color: var(--label); font-size: 11px; font-weight: 400; }
+.dll-fns {
+  color: var(--label);
+  font-size: 11px;
+  line-height: 1.9;
+  padding-left: 0;
+}
+.fn { color: #6e6e6e; }
+
+/* ── Status line ── */
+.status {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.st-ok   { color: var(--ok-bright); }
+.st-warn { color: var(--warn); }
+.st-bad  { color: var(--bad); }
+.st-label { color: var(--label); }
+
+/* ── Strings table ── */
+.str-row {
+  display: flex;
+  padding: 1px 0;
+  gap: 0;
+}
+.str-key { width: 150px; color: var(--label); flex-shrink: 0; }
+.str-val { color: var(--val); }
+
+/* ── Summary ── */
+.summary-risk {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--ok-bright);
+  letter-spacing: 0.04em;
+  margin-bottom: 10px;
+}
+.sum-items { display: flex; flex-direction: column; gap: 3px; }
+
+hr.divider {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 20px 0;
+}
+</style>
+</head>
+<body>
+
+<div class="banner">  ██████╗  █████╗ ████████╗███████╗███████╗██╗ █████╗ ███╗  ██╗
+  ██╔══██╗██╔══██╗╚══██╔══╝██╔════╝██╔════╝██║██╔══██╗████╗ ██║
+  ██████╦╝███████║   ██║   █████╗  ███████╗██║███████║██╔██╗██║
+  ██╔══██╗██╔══██║   ██║   ██╔══╝  ╚════██║██║██╔══██║██║╚████║
+  ██████╦╝██║  ██║   ██║   ███████╗███████║██║██║  ██║██║ ╚███║
+  ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚══════╝╚══════╝╚═╝╚═╝  ╚═╝╚═╝  ╚═╝</div>
+<div class="tagline">mimicry-based packer  ·  v0.1.0</div>
+
+<div class="cmdline">
+  <span class="prompt">▸</span>
+  <span class="cmd-tool">batesian</span>
+  <span class="cmd-sub">audit</span>
+  <span class="cmd-sep">·</span>
+  <span class="cmd-file">minimal_x64.exe</span>
+</div>
+
+<!-- Metadata -->
+<div class="meta">
+  <div class="meta-item">
+    <span class="meta-key">size</span>
+    <span class="meta-val">13 824 bytes</span>
+  </div>
+  <div class="meta-item">
+    <span class="meta-key">arch</span>
+    <span class="meta-val">x64</span>
+  </div>
+  <div class="meta-item">
+    <span class="meta-key">subsystem</span>
+    <span class="meta-val">console</span>
+  </div>
+  <div class="meta-item">
+    <span class="meta-key">signature</span>
+    <span class="meta-val warn">none</span>
+  </div>
+  <div class="meta-item">
+    <span class="meta-key">overlay</span>
+    <span class="meta-val">0 bytes</span>
+  </div>
+  <div class="meta-item">
+    <span class="meta-key">timestamp</span>
+    <span class="meta-val">2026-09-25 11:02 UTC</span>
+  </div>
+</div>
+
+<!-- Sections -->
+<div class="section">
+  <div class="sec-head">Sections</div>
+
+  <!-- entropy color: <4 → ok, 4–6.5 → warn, >6.5 → bad -->
+  <div class="ent-row">
+    <span class="ent-name">.text</span>
+    <span class="ent-size">6 KB</span>
+    <div class="ent-bar-wrap"><div class="ent-fill" style="width:73.6%;background:#c89a3a;"></div></div>
+    <span class="ent-num">5.89</span>
+  </div>
+  <div class="ent-row">
+    <span class="ent-name">.data</span>
+    <span class="ent-size">0 KB</span>
+    <div class="ent-bar-wrap"><div class="ent-fill" style="width:2.1%;background:#3a5c45;"></div></div>
+    <span class="ent-num" style="color:#3a3a3a;">0.17</span>
+  </div>
+  <div class="ent-row">
+    <span class="ent-name">.rdata</span>
+    <span class="ent-size">1 KB</span>
+    <div class="ent-bar-wrap"><div class="ent-fill" style="width:46.3%;background:#527a5f;"></div></div>
+    <span class="ent-num">3.70</span>
+  </div>
+  <div class="ent-row">
+    <span class="ent-name">.pdata</span>
+    <span class="ent-size">1 KB</span>
+    <div class="ent-bar-wrap"><div class="ent-fill" style="width:28.4%;background:#527a5f;"></div></div>
+    <span class="ent-num">2.27</span>
+  </div>
+  <div class="ent-row">
+    <span class="ent-name">.xdata</span>
+    <span class="ent-size">1 KB</span>
+    <div class="ent-bar-wrap"><div class="ent-fill" style="width:50.9%;background:#527a5f;"></div></div>
+    <span class="ent-num">4.07</span>
+  </div>
+  <div class="ent-row">
+    <span class="ent-name">.bss</span>
+    <span class="ent-size">0 KB</span>
+    <div class="ent-bar-wrap"><div class="ent-fill" style="width:0%;background:#3a5c45;"></div></div>
+    <span class="ent-num" style="color:#3a3a3a;">0.00</span>
+  </div>
+  <div class="ent-row">
+    <span class="ent-name">.idata</span>
+    <span class="ent-size">1 KB</span>
+    <div class="ent-bar-wrap"><div class="ent-fill" style="width:42.8%;background:#527a5f;"></div></div>
+    <span class="ent-num">3.42</span>
+  </div>
+  <div class="ent-row">
+    <span class="ent-name">.CRT</span>
+    <span class="ent-size">0 KB</span>
+    <div class="ent-bar-wrap"><div class="ent-fill" style="width:3.5%;background:#3a5c45;"></div></div>
+    <span class="ent-num" style="color:#3a3a3a;">0.28</span>
+  </div>
+  <div class="ent-row">
+    <span class="ent-name">.tls</span>
+    <span class="ent-size">0 KB</span>
+    <div class="ent-bar-wrap"><div class="ent-fill" style="width:0%;background:#3a5c45;"></div></div>
+    <span class="ent-num" style="color:#3a3a3a;">0.00</span>
+  </div>
+  <div class="ent-row">
+    <span class="ent-name">.reloc</span>
+    <span class="ent-size">0 KB</span>
+    <div class="ent-bar-wrap"><div class="ent-fill" style="width:15.9%;background:#3a5c45;"></div></div>
+    <span class="ent-num">1.27</span>
+  </div>
+</div>
+
+<!-- Imports -->
+<div class="section">
+  <div class="sec-head">
+    Imports
+    <span class="sec-head-note">2 dlls · 35 functions</span>
+  </div>
+
+  <div class="dll-head">KERNEL32.dll <span class="dll-count">(10)</span></div>
+  <div class="dll-fns">
+    <span class="fn">DeleteCriticalSection</span>  <span class="fn">EnterCriticalSection</span>  <span class="fn">GetLastError</span>  <span class="fn">InitializeCriticalSection</span>  <span class="fn">LeaveCriticalSection</span>  <span class="fn">SetUnhandledExceptionFilter</span>  <span class="fn">Sleep</span>  <span class="fn">TlsGetValue</span>  <span class="fn">VirtualProtect</span>  <span class="fn">VirtualQuery</span>
+  </div>
+
+  <div class="dll-head" style="margin-top:10px;">msvcrt.dll <span class="dll-count">(25)</span></div>
+  <div class="dll-fns">
+    <span class="fn">__C_specific_handler</span>  <span class="fn">__getmainargs</span>  <span class="fn">__initenv</span>  <span class="fn">__iob_func</span>  <span class="fn">__set_app_type</span>  <span class="fn">__setusermatherr</span>  <span class="fn">_amsg_exit</span>  <span class="fn">_cexit</span>  <span class="fn">_commode</span>  <span class="fn">_fmode</span>  <span class="fn">_fpreset</span>  <span class="fn">_initterm</span>  <span class="fn">_onexit</span>  <span class="fn">abort</span>  <span class="fn">calloc</span>  <span class="fn">exit</span>  <span class="fn">fprintf</span>  <span class="fn">free</span>  <span class="fn">fwrite</span>  <span class="fn">malloc</span>  <span class="fn">memcpy</span>  <span class="fn">signal</span>  <span class="fn">strlen</span>  <span class="fn">strncmp</span>  <span class="fn">vfprintf</span>
+  </div>
+</div>
+
+<!-- Suspicious imports -->
+<div class="section">
+  <div class="sec-head">Suspicious Imports</div>
+  <div class="status">
+    <span class="st-ok">✓</span>
+    <span class="st-label">IAT looks minimal</span>
+  </div>
+</div>
+
+<!-- Strings -->
+<div class="section">
+  <div class="sec-head">Strings</div>
+  <div class="str-row"><span class="str-key">paths (system32)</span><span class="str-val">0</span></div>
+  <div class="str-row"><span class="str-key">apis by name</span><span class="str-val">0</span></div>
+  <div class="str-row"><span class="str-key">technique names</span><span class="str-val">0</span></div>
+  <div class="str-row"><span class="str-key">urls / ips</span><span class="str-val">0</span></div>
+  <div class="str-row"><span class="str-key">sensitive</span><span class="str-val">0</span></div>
+  <div class="str-row" style="margin-top:4px;"><span class="str-key">total flagged</span><span class="str-val" style="color:var(--ok-bright);">0</span></div>
+</div>
+
+<!-- YARA -->
+<div class="section">
+  <div class="sec-head">YARA</div>
+  <div class="status">
+    <span class="st-ok">✓</span>
+    <span class="st-label">no matches</span>
+    <span style="color:var(--dim); font-size:11px;">(ruleset empty)</span>
+  </div>
+</div>
+
+<!-- Defender -->
+<div class="section">
+  <div class="sec-head">Defender</div>
+  <div class="status">
+    <span class="st-warn">!</span>
+    <span style="color:var(--warn);">scan failed</span>
+    <span style="color:var(--label); font-size:11px;">hr = 0x80508023 · see MpCmdRun.log</span>
+  </div>
+</div>
+
+<hr class="divider">
+
+<!-- Summary -->
+<div class="section">
+  <div class="sec-head">Summary</div>
+  <div class="summary-risk">LOW RISK</div>
+  <div class="sum-items">
+    <div><span class="st-ok">✓</span> <span class="st-label">IAT is minimal</span></div>
+    <div><span class="st-ok">✓</span> <span class="st-label">no suspicious strings</span></div>
+    <div><span class="st-warn">!</span> <span style="color:var(--warn);">unsigned binary</span> <span style="color:var(--dim); font-size:11px;">(expected for research)</span></div>
+    <div><span class="st-warn">!</span> <span style="color:var(--warn);">defender scan failed</span> <span style="color:var(--dim); font-size:11px;">(check MpCmdRun.log)</span></div>
+  </div>
+</div>
+
+</body>
+</html>

@@ -22,7 +22,7 @@ pub use schema::Config;
 /// validates the resulting config.
 ///
 /// `build_args` are the positional CLI arguments after the config path
-/// (`packerman build config.yaml arg0 arg1 ...`). Each stage (read, parse,
+/// (`batesian build config.yaml arg0 arg1 ...`). Each stage (read, parse,
 /// substitute, validate) returns a typed error so the user gets a clear message
 /// without the program panicking.
 pub fn load_config(path: &Path, build_args: &[String]) -> Result<Config> {
@@ -85,7 +85,7 @@ output:
 "#;
 
     fn write_temp(name: &str, contents: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join("packerman_config_tests");
+        let dir = std::env::temp_dir().join("batesian_config_tests");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(name);
         std::fs::write(&path, contents).unwrap();

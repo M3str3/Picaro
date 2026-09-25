@@ -1,5 +1,5 @@
 # Example configuration to pack mimikatz.exe.
-# Usage: packerman build examples/configs/mimikatz.yaml
+# Usage: batesian build examples/configs/mimikatz.yaml
 
 schema: 1
 name: mimikatz-basic

@@ -1,6 +1,6 @@
 # Example: custom loader stub (`loader:` block).
 # Usage:
-#   packerman build examples/configs/test-custom-stub.yaml
+#   batesian build examples/configs/test-custom-stub.yaml
 #
 # `examples/stubs/minimal.rs` ignores the technique blocks, so the packer
 # emits a warning (not an error) and produces a stub that only prints the

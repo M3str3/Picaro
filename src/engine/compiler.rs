@@ -76,6 +76,20 @@ fn find_executable_in_path(path_entries: &OsStr, names: &[&str]) -> Option<PathB
     None
 }
 
+/// Human-readable target the stub is compiled for: the host triple on Windows,
+/// or the GNU cross target when building off-Windows.
+pub fn stub_target_label() -> &'static str {
+    if ON_WINDOWS {
+        if cfg!(target_env = "msvc") {
+            "x86_64-pc-windows-msvc"
+        } else {
+            "x86_64-pc-windows-gnu"
+        }
+    } else {
+        STUB_TARGET
+    }
+}
+
 /// Locates every dependency required to compile the stub.
 pub fn locate_stub_deps() -> Result<StubDeps> {
     if ON_WINDOWS {
@@ -391,7 +405,7 @@ mod tests {
     /// present under a given target directory.
     #[test]
     fn finds_deps_dir_under_debug() {
-        let tmp = std::env::temp_dir().join(format!("packerman_deps_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("batesian_deps_{}", std::process::id()));
         let deps = tmp.join("debug").join("deps");
         std::fs::create_dir_all(&deps).unwrap();
         for crate_name in ["chacha20poly1305", "hex", "windows"] {
@@ -417,7 +431,7 @@ mod tests {
         let key = crate::engine::crypto::generate_key();
         let encrypted = crate::engine::crypto::encrypt_payload(&plaintext, &key).unwrap();
 
-        let build_dir = std::env::temp_dir().join(format!("packerman_it_{}", std::process::id()));
+        let build_dir = std::env::temp_dir().join(format!("batesian_it_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&build_dir);
         std::fs::create_dir_all(&build_dir).unwrap();
 
@@ -476,7 +490,7 @@ mod tests {
         let key = crate::engine::crypto::generate_key();
         let encrypted = crate::engine::crypto::encrypt_payload(&plaintext, &key).unwrap();
 
-        let build_dir = std::env::temp_dir().join(format!("packerman_str_{}", std::process::id()));
+        let build_dir = std::env::temp_dir().join(format!("batesian_str_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&build_dir);
         std::fs::create_dir_all(&build_dir).unwrap();
         std::fs::write(build_dir.join("payload.bin"), &encrypted.ciphertext).unwrap();
@@ -566,7 +580,7 @@ mod tests {
         let key = crate::engine::crypto::generate_key();
         let encrypted = crate::engine::crypto::encrypt_payload(&plaintext, &key).unwrap();
 
-        let build_dir = std::env::temp_dir().join(format!("packerman_leak_{}", std::process::id()));
+        let build_dir = std::env::temp_dir().join(format!("batesian_leak_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&build_dir);
         std::fs::create_dir_all(&build_dir).unwrap();
         std::fs::write(build_dir.join("payload.bin"), &encrypted.ciphertext).unwrap();
@@ -668,7 +682,7 @@ mod tests {
         assert!(rendered.warnings.is_empty(), "no techniques declared");
 
         let build_dir =
-            std::env::temp_dir().join(format!("packerman_custom_{}", std::process::id()));
+            std::env::temp_dir().join(format!("batesian_custom_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&build_dir);
         std::fs::create_dir_all(&build_dir).unwrap();
         let stub_path = build_dir.join("main.rs");

@@ -73,7 +73,7 @@ correctly.
 ## 6. Write the README
 
 Copy the fixed template `src/techniques/_template/README.md` and fill in every
-section. All sections are required; `packerman techniques validate` checks them.
+section. All sections are required; `batesian techniques validate` checks them.
 
 ## 7. Update `docs/measurements/`
 

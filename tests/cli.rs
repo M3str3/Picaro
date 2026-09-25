@@ -1,18 +1,18 @@
-//! Integration tests for the `packerman` CLI.
+//! Integration tests for the `batesian` CLI.
 
 use std::process::Command;
 use std::sync::Mutex;
 
-/// Serializes the e2e `packerman build` tests: they share the repo's `build/`
+/// Serializes the e2e `batesian build` tests: they share the repo's `build/`
 /// directory (wiped by each build), so two of them must not run concurrently.
 static BUILD_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn techniques_list_lists_all_techniques() {
-    let output = Command::new(env!("CARGO_BIN_EXE_packerman"))
+    let output = Command::new(env!("CARGO_BIN_EXE_batesian"))
         .args(["techniques", "list"])
         .output()
-        .expect("run packerman techniques list");
+        .expect("run batesian techniques list");
 
     assert!(output.status.success(), "list must exit 0");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -28,10 +28,10 @@ fn techniques_list_lists_all_techniques() {
 
 #[test]
 fn techniques_show_prints_readme() {
-    let output = Command::new(env!("CARGO_BIN_EXE_packerman"))
+    let output = Command::new(env!("CARGO_BIN_EXE_batesian"))
         .args(["techniques", "show", "process_hollowing"])
         .output()
-        .expect("run packerman techniques show");
+        .expect("run batesian techniques show");
 
     assert!(output.status.success(), "show must exit 0");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -41,17 +41,17 @@ fn techniques_show_prints_readme() {
     );
 }
 
-/// End-to-end: `packerman build` with a Preparation + Execution pipeline
+/// End-to-end: `batesian build` with a Preparation + Execution pipeline
 /// produces a PE. Marked `#[ignore]` because it compiles the stub (needs
 /// `rustc` + the compiled dependencies).
 #[test]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn build_with_amsi_patch_produces_pe() {
     let _guard = BUILD_LOCK.lock().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_packerman"))
+    let output = Command::new(env!("CARGO_BIN_EXE_batesian"))
         .args(["build", "examples/configs/test-amsi-patch.yaml"])
         .output()
-        .expect("run packerman build");
+        .expect("run batesian build");
     assert!(
         output.status.success(),
         "build failed: {}",
@@ -68,10 +68,10 @@ fn build_with_amsi_patch_produces_pe() {
 #[test]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn build_with_invalid_order_fails() {
-    let output = Command::new(env!("CARGO_BIN_EXE_packerman"))
+    let output = Command::new(env!("CARGO_BIN_EXE_batesian"))
         .args(["build", "examples/configs/test-invalid-order.yaml"])
         .output()
-        .expect("run packerman build");
+        .expect("run batesian build");
     assert!(!output.status.success(), "invalid order must fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -80,16 +80,52 @@ fn build_with_invalid_order_fails() {
     );
 }
 
-/// End-to-end: `packerman build` with a custom loader stub produces a PE.
+/// The banner (and its tagline) is printed before every subcommand.
+#[test]
+fn banner_is_printed_by_default() {
+    let output = Command::new(env!("CARGO_BIN_EXE_batesian"))
+        .args(["techniques", "list"])
+        .output()
+        .expect("run batesian techniques list");
+
+    assert!(output.status.success(), "list must exit 0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("mimicry-based packer"),
+        "banner missing: {stdout}"
+    );
+}
+
+/// `--quiet` suppresses the banner but keeps the command output.
+#[test]
+fn quiet_flag_hides_the_banner() {
+    let output = Command::new(env!("CARGO_BIN_EXE_batesian"))
+        .args(["--quiet", "techniques", "list"])
+        .output()
+        .expect("run batesian --quiet techniques list");
+
+    assert!(output.status.success(), "list must exit 0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("mimicry-based packer"),
+        "banner not suppressed: {stdout}"
+    );
+    assert!(
+        stdout.contains("process_hollowing"),
+        "output missing: {stdout}"
+    );
+}
+
+/// End-to-end: `batesian build` with a custom loader stub produces a PE.
 /// Marked `#[ignore]` because it compiles the stub.
 #[test]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn build_with_custom_stub_produces_pe() {
     let _guard = BUILD_LOCK.lock().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_packerman"))
+    let output = Command::new(env!("CARGO_BIN_EXE_batesian"))
         .args(["build", "examples/configs/test-custom-stub.yaml"])
         .output()
-        .expect("run packerman build");
+        .expect("run batesian build");
     assert!(
         output.status.success(),
         "build failed: {}",
