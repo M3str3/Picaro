@@ -1,0 +1,23 @@
+# Example configuration to pack mimikatz.exe.
+# Usage: packerman build examples/configs/mimikatz.yaml
+
+schema: 1
+name: mimikatz-basic
+
+input:
+  path: ./mimikatz.exe
+
+payload:
+  crypto:
+    algo: xchacha20poly1305
+    key: random
+
+pipeline:
+  - technique: process_hollowing
+    target: "C:\\Windows\\System32\\svchost.exe"
+
+output:
+  path: ./dist/mimikatz_packed.exe
+  arch: x64
+  strip: true
+  trim_paths: all

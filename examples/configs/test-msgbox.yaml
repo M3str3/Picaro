@@ -1,0 +1,23 @@
+schema: 1
+name: test-msgbox
+
+input:
+  path: ./examples/payloads/test_payload.exe
+
+payload:
+  crypto:
+    algo: xchacha20poly1305
+    key: random
+  strings:
+    strategy: xor
+    key: random
+
+pipeline:
+  - technique: process_hollowing
+    target: "C:\\Windows\\System32\\svchost.exe"
+
+output:
+  path: ./dist/test_packed.exe
+  arch: x64
+  strip: true
+  trim_paths: all

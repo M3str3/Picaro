@@ -1,0 +1,48 @@
+[package]
+name = "packerman"
+version = "0.1.0"
+edition = "2021"
+description = "Declarative PE packer for authorized red team research"
+license = "MIT"
+
+[dependencies]
+# Serialization/deserialization with `derive` and YAML support.
+serde = { version = "1.0", features = ["derive"] }
+serde_yml = "0.0.12"
+# Authenticated payload encryption: ChaCha20-Poly1305.
+chacha20poly1305 = "0.10"
+# CSPRNG for keys and nonces (`std_rng` enables `thread_rng`).
+rand = { version = "0.8", features = ["std_rng"] }
+# Hex encoding for readable key/nonce output.
+hex = "0.4"
+# Regex matching for the static audit's string scan.
+regex = "1"
+# In-memory HTTP(S) fetch of the input payload (URL input).
+ureq = { version = "2.12", features = ["tls"] }
+# Declarative CLI (`packerman build config.yaml`).
+clap = { version = "4", features = ["derive"] }
+# Typed errors; we avoid `panic!` and `unwrap` in the main flow.
+thiserror = "2"
+# Windows FFI (windows-rs). Only the generated stub uses it, but it is declared
+# here so its .rlib is available under target/ for `rustc --extern`.
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+    # CreateProcessA takes SECURITY_ATTRIBUTES.
+    "Win32_Security",
+    # Process hollowing: VirtualAllocEx + memory constants.
+    "Win32_System_Memory",
+    # Process hollowing: Read/WriteProcessMemory, Get/SetThreadContext.
+    "Win32_System_Diagnostics_Debug",
+    # The x64 CONTEXT struct lives here (gates Get/SetThreadContext).
+    "Win32_System_Kernel",
+    # GetModuleHandleA/GetProcAddress to resolve ntdll exports dynamically.
+    "Win32_System_LibraryLoader",
+    # PE structures for reflective loading (IMAGE_DOS_HEADER, IMAGE_IMPORT_DESCRIPTOR, ...).
+    "Win32_System_SystemServices",
+    # IMAGE_NT_HEADERS64 pulls IMAGE_FILE_MACHINE (its FileHeader.Machine field).
+    "Win32_System_SystemInformation",
+    # IMAGE_THUNK_DATA64 for reflective import resolution.
+    "Win32_System_WindowsProgramming",
+] }

@@ -1,0 +1,24 @@
+schema: 1
+name: test-invalid-order
+
+input:
+  path: ./examples/payloads/test_payload.exe
+
+payload:
+  crypto:
+    algo: xchacha20poly1305
+    key: random
+  strings:
+    strategy: xor
+    key: random
+
+# Preparation after Execution is invalid: patch_amsi must come first.
+pipeline:
+  - technique: reflective_loading
+  - technique: patch_amsi
+
+output:
+  path: ./dist/test_invalid_order.exe
+  arch: x64
+  strip: true
+  trim_paths: all

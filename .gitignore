@@ -1,0 +1,21 @@
+code_examples/
+
+# Local scratch configs (not part of the project).
+/mimi.yaml
+/mimi copy.yaml
+
+/target
+/build
+/dist
+/payload_decrypted.bin
+/mimikatz.exe
+
+# Debug symbols and linker side artifacts (MSVC + MinGW).
+*.pdb
+*.ilk
+*.exp
+*.exe
+
+# Keep the checked-in test payload and the PE parser fixture.
+!examples/payloads/test_payload.exe
+!tests/fixtures/minimal_x64.exe
