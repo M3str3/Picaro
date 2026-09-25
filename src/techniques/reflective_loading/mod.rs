@@ -26,6 +26,10 @@ pub const DEF: TechniqueDef = TechniqueDef {
     stub_fragment: include_str!("stub_fragment.rs"),
     params_example: "technique: reflective_loading\n",
     readme: include_str!("README.md"),
+    // Reflective loading still calls VirtualAlloc/VirtualProtect/CreateThread
+    // directly; they migrate to the syscall layer in a later phase.
+    syscalls: &[],
+    resolves_imports: true,
 };
 
 impl Params {

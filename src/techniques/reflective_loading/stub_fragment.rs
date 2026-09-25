@@ -1,6 +1,6 @@
 // --- Reflective loading (technique fragment) ---
 
-use std::ffi::{c_void, CStr};
+use std::ffi::c_void;
 use std::ptr;
 
 use windows::Win32::Foundation::{CloseHandle, GetLastError, BOOL, HINSTANCE};
@@ -8,21 +8,18 @@ use windows::Win32::System::Diagnostics::Debug::{
     IMAGE_DIRECTORY_ENTRY_BASERELOC, IMAGE_DIRECTORY_ENTRY_IMPORT, IMAGE_DIRECTORY_ENTRY_TLS,
     IMAGE_FILE_DLL, IMAGE_NT_HEADERS64, IMAGE_SECTION_HEADER,
 };
-use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 use windows::Win32::System::Memory::{
     VirtualAlloc, VirtualProtect, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READ,
     PAGE_EXECUTE_READWRITE, PAGE_PROTECTION_FLAGS, PAGE_READONLY, PAGE_READWRITE,
 };
 use windows::Win32::System::SystemServices::{
     DLL_PROCESS_ATTACH, IMAGE_BASE_RELOCATION, IMAGE_DOS_HEADER, IMAGE_DOS_SIGNATURE,
-    IMAGE_IMPORT_BY_NAME, IMAGE_IMPORT_DESCRIPTOR, IMAGE_NT_SIGNATURE, IMAGE_ORDINAL_FLAG64,
-    IMAGE_REL_BASED_ABSOLUTE, IMAGE_REL_BASED_DIR64, IMAGE_REL_BASED_HIGH, IMAGE_REL_BASED_HIGHLOW,
-    IMAGE_REL_BASED_LOW, IMAGE_TLS_DIRECTORY64, PIMAGE_TLS_CALLBACK,
+    IMAGE_NT_SIGNATURE, IMAGE_REL_BASED_ABSOLUTE, IMAGE_REL_BASED_DIR64, IMAGE_REL_BASED_HIGH,
+    IMAGE_REL_BASED_HIGHLOW, IMAGE_REL_BASED_LOW, IMAGE_TLS_DIRECTORY64, PIMAGE_TLS_CALLBACK,
 };
 use windows::Win32::System::Threading::{
     CreateThread, GetExitCodeThread, WaitForSingleObject, THREAD_CREATION_FLAGS,
 };
-use windows::Win32::System::WindowsProgramming::IMAGE_THUNK_DATA64;
 
 /// Entry point signature of a mapped EXE (returns the process exit code).
 type ExeEntryPoint = unsafe extern "system" fn() -> u32;
@@ -45,10 +42,10 @@ enum ReflectiveLoadingError {
     AllocateFailed(u32),
     #[error("section '{section}' is out of file bounds")]
     SectionOutOfBounds { section: String },
-    #[error("could not load '{dll}'")]
-    ImportLoadFailed { dll: String },
-    #[error("could not resolve '{func}' from '{dll}'")]
-    ImportResolutionFailed { dll: String, func: String },
+    /// The payload's import table could not be resolved (see
+    /// `engine::imports`).
+    #[error(transparent)]
+    Imports(#[from] crate::ImportError),
     #[error("could not change protection for section '{section}' (error {error})")]
     VirtualProtectFailed { section: String, error: u32 },
     #[error("could not create execution thread (error {0})")]
@@ -234,59 +231,20 @@ fn fix_imports(
             return Ok(());
         }
 
-        let mut desc = (image_base as usize + import_dir.VirtualAddress as usize)
-            as *const IMAGE_IMPORT_DESCRIPTOR;
-        while (*desc).Name != 0 {
-            let dll_name_ptr = (image_base as usize + (*desc).Name as usize) as *const i8;
-            let dll_name = CStr::from_ptr(dll_name_ptr).to_string_lossy().into_owned();
-            let module = LoadLibraryA(PCSTR(dll_name_ptr as *const u8)).map_err(|_| {
-                ReflectiveLoadingError::ImportLoadFailed {
-                    dll: dll_name.clone(),
-                }
+        // The mapped image has RVA == offset from `image_base`, so the shared
+        // file-image walker can read it directly with an identity mapping.
+        let view = std::slice::from_raw_parts(
+            image_base as *const u8,
+            (*nt).OptionalHeader.SizeOfImage as usize,
+        );
+        let imports =
+            crate::resolve_imports(view, import_dir.VirtualAddress, import_dir.Size, |rva| {
+                Some(rva as usize)
             })?;
 
-            let original_thunk_rva = (*desc).Anonymous.OriginalFirstThunk;
-            let first_thunk_rva = (*desc).FirstThunk;
-            let mut i = 0usize;
-
-            loop {
-                let orig = (image_base as usize
-                    + original_thunk_rva as usize
-                    + i * std::mem::size_of::<IMAGE_THUNK_DATA64>())
-                    as *const IMAGE_THUNK_DATA64;
-                let thunk = (image_base as usize
-                    + first_thunk_rva as usize
-                    + i * std::mem::size_of::<IMAGE_THUNK_DATA64>())
-                    as *mut IMAGE_THUNK_DATA64;
-
-                if (*orig).u1.Function == 0 {
-                    break;
-                }
-
-                let (address, func_name) = if (*orig).u1.Ordinal & IMAGE_ORDINAL_FLAG64 != 0 {
-                    let ordinal = (*orig).u1.Ordinal & 0xFFFF;
-                    (
-                        GetProcAddress(module, PCSTR(ordinal as *const u8)),
-                        format!("#{ordinal}"),
-                    )
-                } else {
-                    let by_name = (image_base as usize + (*orig).u1.AddressOfData as usize)
-                        as *const IMAGE_IMPORT_BY_NAME;
-                    let name_ptr = (*by_name).Name.as_ptr() as *const i8;
-                    let name = CStr::from_ptr(name_ptr).to_string_lossy().into_owned();
-                    (GetProcAddress(module, PCSTR(name_ptr as *const u8)), name)
-                };
-
-                let address =
-                    address.ok_or_else(|| ReflectiveLoadingError::ImportResolutionFailed {
-                        dll: dll_name.clone(),
-                        func: func_name,
-                    })?;
-                (*thunk).u1.Function = address as usize as u64;
-                i += 1;
-            }
-
-            desc = desc.add(1);
+        for (iat_rva, address) in imports {
+            let slot = (image_base as usize + iat_rva as usize) as *mut u64;
+            *slot = address;
         }
     }
     Ok(())

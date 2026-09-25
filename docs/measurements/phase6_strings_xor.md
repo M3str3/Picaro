@@ -5,15 +5,16 @@ Static audit of the phase 6 binary with the formal `xor` strategy active.
 ## Binary
 
 - `dist/test_packed.exe` (process hollowing, test payload)
-- `payload.strings: { strategy: xor, key: random }`
+- `build.strings: { strategy: xor, key: random }`
 
 ## Config (YAML)
 
 ```yaml
-payload:
-  crypto:
-    algo: xchacha20poly1305
-    key: random
+build:
+  payload:
+    crypto:
+      algo: xchacha20poly1305
+      key: random
   strings:
     strategy: xor
     key: random

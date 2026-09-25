@@ -48,7 +48,7 @@ Any other use is out of scope and not supported.
 ```text
 src/
   config/       YAML parsing and validation
-  engine/       crypto, stub generation, compilation
+  engine/       crypto, stub generation, compilation, syscall layer
   audit/        static measurement (pe_info, strings, yara, defender, report)
   techniques/   one directory per technique + the registry (mod.rs)
   error.rs      top-level error types
@@ -71,13 +71,61 @@ tests). The registry (`src/techniques/mod.rs`) is metadata-only; inspect it with
 
 ## Current state
 
+**YAML schema 2 (done).** The config document is now schema 2; a document that
+declares `schema: 1` is rejected at parse time with a migration hint (full
+mapping in `docs/migration-v1-v2.md`). `build` groups `payload` (`source` +
+`crypto`), `strings`, `stub` (`path`/`syscalls`) and `output`; the technique
+list is `runtime`. Build args move from `$build.N$` to `$arg.N$` (`$arg.0$`,
+`$arg.1$`, or a named `$arg.foo$` from a `foo=value` CLI arg); the stub still
+accesses already-resolved args as `$ARG_<key>$`. The old
+`InputConfig`/`LoaderConfig` are gone (`src/config/schema.rs`); `PipelineStep`
+is renamed `RuntimeStep` (`src/techniques/mod.rs`). `build.payload.source` is a
+single string: `http(s)://` is fetched in memory, `file://` is read from disk,
+`ftp://` is rejected, anything else is a local path.
+
+**Payload import resolution (done).** New `src/engine/imports.rs` renders
+`$IMPORTS_BLOCK$`: one `resolve_imports(image, import_rva, import_size,
+RVA→offset)` walk that loads each imported DLL (`LoadLibraryA`; API set names
+are resolved by the OS loader, with a CRT/`kernel32` family fallback) and
+returns `(IAT RVA, address)` pairs. Gated by `TechniqueDef.resolves_imports`
+(both execution techniques). `process_hollowing` patches the payload's IAT after
+relocations and before writing the image (failures abort before
+`SetThreadContext`); `reflective_loading`'s duplicated `fix_imports` was
+replaced by the shared resolver. The hollowing fragment now uses a 16-byte
+aligned `CONTEXT` for `Get/SetThreadContext` (x64 requirement).
+
+**Process hollowing still does not run a full PE — see Known limitations.**
+A `CREATE_SUSPENDED` target has not run its loader (`PEB->Ldr == NULL`; only
+`ntdll` + the main image mapped), so the payload's imported DLLs are absent.
+Measured evidence + proposed follow-up: `docs/techniques/process_hollowing.md`.
+
+**Phase 6a: indirect syscalls (Hell's Gate) done.** New `build.stub.syscalls`
+block (`mode: none|indirect`, `resolver: hells_gate`; defaults
+`none`/`hells_gate`).
+It is a *loader* config, not a pipeline technique. The stub template gains
+`$SYSCALLS_BLOCK$`, rendered by `src/engine/syscalls.rs` from the union of
+`TechniqueDef::syscalls` requirements (only `process_hollowing` opts in for
+now: `NtAllocateVirtualMemory`, `NtWriteVirtualMemory`, `NtReadVirtualMemory`,
+`NtResumeThread`, `NtUnmapViewOfSection`). Technique fragments always call the
+`nt_*` helpers (`crate::nt_alloc_vm`, ...) — `mode: none` maps them to the
+Win32 APIs, `mode: indirect` resolves SSNs at runtime (prologue
+`4C 8B D1 B8 ?? ?? ?? ??` via `GetProcAddress`) and invokes the kernel through
+the first `syscall; ret` gadget in ntdll's `.text` (a `global_asm!` trampoline,
+`nt_invoke`; signature + stack-shuffle documented in the generated code).
+Verified on `x86_64-pc-windows-msvc` (rustc 1.90, `-C target-feature=+crt-static`
+works). All Nt*/DLL names go through `StringsConfig`. IAT after indirect:
+`VirtualAllocEx`/`WriteProcessMemory`/`ReadProcessMemory`/`ResumeThread` gone,
+`NtUnmapViewOfSection` string gone. Docs: `docs/techniques/indirect_syscalls.md`,
+`docs/measurements/phase6a_iat_reduction.md`. Not done (by design): Tartarus
+Gate (6b), reflective_loading/patch_amsi migration, stack spoofing, unhooking (7).
+
 **Phase 5 complete.** Static measurement infrastructure:
 - `batesian audit <binary>` reports header, sections + entropy, imports/exports,
   strings, YARA (stub) and an optional offline Defender scan.
 - The process-hollowing binary's static baseline is documented in
   `docs/measurements/` and `.memory.md`.
 
-**String obfuscation (done).** `payload.strings` (`strategy: xor|stack`,
+**String obfuscation (done).** `build.strings` (`strategy: xor|stack`,
 `key: random|literal:<hex>`) obfuscates every stub string literal through
 `src/engine/obfuscation.rs`. Replaces the old hardcoded XOR `0x5A`. Docs in
 `docs/techniques/string_obfuscation.md`, measurements in
@@ -118,25 +166,41 @@ colored table.
 
 **Phase 6 planned.** Indirect syscalls.
 
-**Custom loader stubs (done).** A YAML `loader:` block (`loader.path`) replaces
-the builtin stub with a user `.rs` template rendered through the same
-substitution engine (see `docs/custom-stubs.md`). Placeholders use the `$X$`
-delimiter (`$PAYLOAD_BYTES$`, `$PAYLOAD_LEN$`, `$PAYLOAD_NONCE_DEF$`,
-`$PAYLOAD_KEY_DEF$` (embedded only when referenced), `$PREPARATION_BLOCKS$`,
-`$EXECUTION_BLOCK$`, `$ARG_<n>$`; YAML build args are `$build.N$`). The stub must
-define `fn main()`; ignoring the technique blocks is a warning, not an error.
-Build args reuse the existing `$build.N$` positional mechanism (no separate
+**Custom loader stubs (done).** A YAML `build.stub.path` replaces the builtin
+stub with a user `.rs` template rendered through the same substitution engine
+(see `docs/custom-stubs.md`); `build.stub` may be set for `syscalls` alone.
+Placeholders use the `$X$` delimiter (`$PAYLOAD_BYTES$`, `$PAYLOAD_LEN$`,
+`$PAYLOAD_NONCE_DEF$`, `$PAYLOAD_KEY_DEF$` (embedded only when referenced),
+`$PREPARATION_BLOCKS$`, `$SYSCALLS_BLOCK$`, `$EXECUTION_BLOCK$`, `$ARG_<key>$`;
+YAML build args are `$arg.N$`). The stub must define `fn main()`; ignoring the
+technique blocks is a warning, not an error (a custom stub that skips
+`$SYSCALLS_BLOCK$` while declaring syscall-using techniques also warns). Build
+args are the positional args plus optional `name=value` pairs (no separate
 `--arg` flag). `$X$` is invalid Rust, so `rustfmt` cannot rewrite it; never go
 back to `{{X}}` (valid Rust — `rustfmt` reformats it into nested blocks and
-silently breaks substitution).
-See `.memory.md` for the rolling state.
+silently breaks substitution). See `.memory.md` for the rolling state.
 
 ## Known limitations
 
+- **Process hollowing does not run a full PE even with the IAT fixed.** The
+  payload's IAT is now resolved (`src/engine/imports.rs`), but a
+  `CREATE_SUSPENDED` target has not run its loader (`PEB->Ldr == NULL`; only
+  `ntdll` + the main image are mapped), so the payload's other imported DLLs
+  (`kernel32`, `user32`, …) are absent and the first import call jumps to
+  unmapped memory (`0xC0000005`). Letting the target's loader initialize the
+  swapped-in image fails (`0xC0000142`) even for a bare `jmp $` entry, and
+  manually mapped images never get an OS TLS slot (Rust payloads then abort
+  with `0xC0000409`). Provisioning loader/TLS state before hand-off is the
+  follow-up; evidence in `docs/techniques/process_hollowing.md`.
 - Custom stubs do not obfuscate the key/nonce by default. If the custom stub
   uses `$PAYLOAD_KEY_DEF$` / `$PAYLOAD_NONCE_DEF$`, the values land in `.rdata`.
   Use `$PAYLOAD_KEY_DEF_OBFUSCATED$` when available, or read the key at runtime
   (see `examples/stubs/runtime-key.rs`).
+- Phase 6a only migrates the hollowing calls. `GetThreadContext`/
+  `SetThreadContext`/`WaitForSingleObject`/`GetExitCodeProcess` and the
+  reflective-loading APIs still import statically.
+- Windows Defender flags the packed artifacts (unavoidable); the dev machine
+  had it disabled during the 6a runtime tests.
 
 ## code_examples/ — how to use it
 

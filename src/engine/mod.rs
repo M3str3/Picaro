@@ -11,9 +11,11 @@
 pub mod compiler;
 pub mod crypto;
 pub mod fetch;
+pub mod imports;
 pub mod obfuscation;
 pub mod pe;
 pub mod stub;
+pub mod syscalls;
 
 /// Build engine error (stub rendering and compilation).
 #[derive(Debug, thiserror::Error)]

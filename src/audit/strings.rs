@@ -30,6 +30,10 @@ pub const SENSITIVE_LITERALS: &[&str] = &[
     r"C:\Windows",
     "svchost",
     "NtUnmapViewOfSection",
+    "NtAllocateVirtualMemory",
+    "NtWriteVirtualMemory",
+    "NtReadVirtualMemory",
+    "NtResumeThread",
 ];
 
 /// Findings of the string scan.

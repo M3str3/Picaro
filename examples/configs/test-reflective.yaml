@@ -1,0 +1,17 @@
+schema: 2
+name: test-reflective
+
+build:
+  payload:
+    source: ./examples/payloads/test_payload.exe
+    crypto:
+      algo: xchacha20poly1305
+      key: random
+  output:
+    path: ./dist/test_packed_reflective.exe
+    arch: x64
+    strip: true
+    trim_paths: all
+
+runtime:
+  - technique: reflective_loading

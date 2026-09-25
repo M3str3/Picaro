@@ -3,7 +3,7 @@
 ## Metadata
 
 - **ATT&CK**: T1562.001 (Impair Defenses: Disable or Modify Tools)
-- **Stability**: Experimental
+- **Stability**: Stable
 - **Category**: Preparation
 - **YAML key**: `patch_amsi`
 - **Introduced in**: Phase 7
@@ -22,7 +22,7 @@ None.
 ## YAML example
 
 ```yaml
-pipeline:
+runtime:
   - technique: patch_amsi
 ```
 

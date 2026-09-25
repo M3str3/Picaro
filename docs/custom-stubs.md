@@ -21,16 +21,17 @@ arguments instead (see below) — no custom stub required.
 
 ## How it works
 
-Add a `loader` block to the YAML:
+Add a `build.stub` block to the YAML:
 
 ```yaml
-loader:
-  path: ./my_stub.rs
+build:
+  stub:
+    path: ./my_stub.rs
 ```
 
-- **Without** `loader`, the builtin template is used (current behavior).
-- **With** `loader`, `path` must point to a readable `.rs` file that defines a
-  `fn main()`. The file is a template: `$PLACEHOLDER$` tokens are substituted
+- **Without** `build.stub.path` (null or absent), the builtin template is used.
+- **With** `build.stub.path`, it must point to a readable `.rs` file that defines
+  a `fn main()`. The file is a template: `$PLACEHOLDER$` tokens are substituted
   before compilation.
 
 The packer compiles it with the same dependency set as the builtin stub
@@ -49,9 +50,11 @@ Available placeholders:
 | `$PAYLOAD_LEN$`        | The decrypted payload size (`usize`)                         |
 | `$PAYLOAD_NONCE_DEF$`  | A `[u8; 24]` array literal rebuilding the nonce              |
 | `$PAYLOAD_KEY_DEF$`    | A `[u8; 32]` array literal rebuilding the key                |
-| `$PREPARATION_BLOCKS$` | Preparation technique fragments (in pipeline order)          |
+| `$PREPARATION_BLOCKS$` | Preparation technique fragments (in runtime order)        |
+| `$SYSCALLS_BLOCK$`     | The syscall layer (from `build.stub.syscalls`)               |
+| `$IMPORTS_BLOCK$`      | The shared payload import resolver                           |
 | `$EXECUTION_BLOCK$`    | The single Execution technique fragment                      |
-| `$ARG_<n>$`            | A positional build argument, substituted literally           |
+| `$ARG_<key>$`          | A build argument (index or name), substituted literally      |
 
 Placeholders use the `$NAME$` delimiter. The old `{{NAME}}` form is rejected
 with an error pointing at the new syntax. (`$X$` is not valid Rust, so `rustfmt`
@@ -72,7 +75,8 @@ stub that never mentions it does not get the key baked in (see
 ## Build arguments
 
 Positional arguments after the config path are substituted into the YAML as
-`$build.N$` (0-based index) and into a custom stub as `$ARG_<n>$`:
+`$arg.N$` (0-based index) and into a custom stub as `$ARG_<key>$`. An argument
+of the form `name=value` is available as `$arg.name$` (and `$ARG_name$`):
 
 ```bash
 batesian build config.yaml "C:\\Windows\\System32\\svchost.exe"
@@ -80,13 +84,13 @@ batesian build config.yaml "C:\\Windows\\System32\\svchost.exe"
 
 ```yaml
 # config.yaml
-pipeline:
+runtime:
   - technique: process_hollowing
-    target: "$build.0$"
+    target: "$arg.0$"
 ```
 
 A referenced-but-missing argument is an error:
-`the config references '$build.0$' but no build argument #0 was provided`.
+`the config references '$arg.0$' but no build argument '0' was provided`.
 
 ## Examples
 

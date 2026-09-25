@@ -1,0 +1,24 @@
+schema: 2
+name: test-etw-anti-debug
+
+build:
+  payload:
+    source: ./examples/payloads/test_payload.exe
+    crypto:
+      algo: xchacha20poly1305
+      key: random
+  strings:
+    strategy: xor
+    key: random
+  output:
+    path: ./dist/test_etw_anti_debug.exe
+    arch: x64
+    strip: true
+    trim_paths: all
+
+runtime:
+  - technique: anti_debug
+    action: abort
+  - technique: patch_etw
+    full: true
+  - technique: reflective_loading

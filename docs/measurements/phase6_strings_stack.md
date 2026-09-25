@@ -5,15 +5,16 @@ Static audit of the phase 6 binary with the `stack` strategy active.
 ## Binary
 
 - `dist/test_packed_stack.exe` (process hollowing, test payload)
-- `payload.strings: { strategy: stack }` (no key)
+- `build.strings: { strategy: stack }` (no key)
 
 ## Config (YAML)
 
 ```yaml
-payload:
-  crypto:
-    algo: xchacha20poly1305
-    key: random
+build:
+  payload:
+    crypto:
+      algo: xchacha20poly1305
+      key: random
   strings:
     strategy: stack
 ```

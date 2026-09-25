@@ -6,7 +6,9 @@
 //! and the stub renderer. How to add a technique is documented in
 //! `src/techniques/README.md`.
 
+pub mod anti_debug;
 pub mod patch_amsi;
+pub mod patch_etw;
 pub mod process_hollowing;
 pub mod reflective_loading;
 
@@ -18,15 +20,21 @@ use crate::engine::obfuscation::StringsConfig;
 use crate::error::{PackerError, Result};
 use crate::ui::{glyph, Palette};
 
-/// One step of the `pipeline` in the YAML config.
+/// One step of the `runtime` list in the YAML config.
 ///
 /// Internally-tagged enum: each technique carries its own parameters as extra
 /// keys in the same YAML object (`technique: <name>` + the technique's fields).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "technique", rename_all = "snake_case")]
-pub enum PipelineStep {
+pub enum RuntimeStep {
+    /// Detect a debugger in the current process, aborting by default
+    /// (preparation).
+    AntiDebug(anti_debug::Params),
     /// Patch AmsiScanBuffer in the current process (preparation).
     PatchAmsi(patch_amsi::Params),
+    /// Patch the ETW event-writing exports in the current process
+    /// (preparation).
+    PatchEtw(patch_etw::Params),
     /// Process hollowing: run the payload inside a suspended, legitimate
     /// process instead of on disk.
     ProcessHollowing(process_hollowing::Params),
@@ -35,7 +43,7 @@ pub enum PipelineStep {
     ReflectiveLoading(reflective_loading::Params),
 }
 
-impl PipelineStep {
+impl RuntimeStep {
     /// Renders the technique's stub fragment for this step's parameters.
     ///
     /// `strings` is the active string-obfuscation configuration, used to
@@ -43,33 +51,42 @@ impl PipelineStep {
     /// result is injected verbatim into the generated stub (see `engine::stub`).
     pub fn render_fragment(&self, strings: &StringsConfig) -> String {
         match self {
-            PipelineStep::PatchAmsi(params) => params.render_fragment(strings),
-            PipelineStep::ProcessHollowing(params) => params.render_fragment(strings),
-            PipelineStep::ReflectiveLoading(params) => params.render_fragment(strings),
+            RuntimeStep::AntiDebug(params) => params.render_fragment(strings),
+            RuntimeStep::PatchAmsi(params) => params.render_fragment(strings),
+            RuntimeStep::PatchEtw(params) => params.render_fragment(strings),
+            RuntimeStep::ProcessHollowing(params) => params.render_fragment(strings),
+            RuntimeStep::ReflectiveLoading(params) => params.render_fragment(strings),
         }
     }
 
     /// The technique's YAML key (used by semantic validation).
     pub fn name(&self) -> &'static str {
         match self {
-            PipelineStep::PatchAmsi(_) => patch_amsi::DEF.name,
-            PipelineStep::ProcessHollowing(_) => process_hollowing::DEF.name,
-            PipelineStep::ReflectiveLoading(_) => reflective_loading::DEF.name,
+            RuntimeStep::AntiDebug(_) => anti_debug::DEF.name,
+            RuntimeStep::PatchAmsi(_) => patch_amsi::DEF.name,
+            RuntimeStep::PatchEtw(_) => patch_etw::DEF.name,
+            RuntimeStep::ProcessHollowing(_) => process_hollowing::DEF.name,
+            RuntimeStep::ReflectiveLoading(_) => reflective_loading::DEF.name,
         }
     }
 
     /// The technique's [`Category`] (Preparation vs Execution).
     pub fn category(&self) -> Category {
         match self {
-            PipelineStep::PatchAmsi(_) => Category::Preparation,
-            PipelineStep::ProcessHollowing(_) => Category::Execution,
-            PipelineStep::ReflectiveLoading(_) => Category::Execution,
+            RuntimeStep::AntiDebug(_) => Category::Preparation,
+            RuntimeStep::PatchAmsi(_) => Category::Preparation,
+            RuntimeStep::PatchEtw(_) => Category::Preparation,
+            RuntimeStep::ProcessHollowing(_) => Category::Execution,
+            RuntimeStep::ReflectiveLoading(_) => Category::Execution,
         }
     }
 }
 
 /// Which role a technique plays in the pipeline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Variant order is meaningful: it defines the sort key used by
+/// [`list`] (Preparation before Execution).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Category {
     /// Modifies the current process state (e.g. patches AMSI) but never runs
     /// the payload.
@@ -92,8 +109,11 @@ impl Category {
 ///
 /// Variants are part of the metadata vocabulary; only the ones used by the
 /// currently-registered techniques are constructed.
+///
+/// Variant order is meaningful: it defines the sort key used by [`list`]
+/// (Stable before Experimental before Deprecated).
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Stability {
     Stable,
     Experimental,
@@ -144,10 +164,19 @@ pub struct TechniqueDef {
     pub doc_path: &'static str,
     /// The technique's stub fragment source (embedded via `include_str!`).
     pub stub_fragment: &'static str,
-    /// A YAML snippet (parseable as a [`PipelineStep`]) documenting the params.
+    /// A YAML snippet (parseable as a [`RuntimeStep`]) documenting the params.
     pub params_example: &'static str,
     /// The technique's README, embedded via `include_str!` for `techniques show`.
     pub readme: &'static str,
+    /// Nt* functions this technique invokes through the syscall layer when
+    /// `build.stub.syscalls.mode: indirect` is active. The packer resolves only
+    /// the union of the active techniques' requirements (see
+    /// `engine::syscalls::required`).
+    pub syscalls: &'static [&'static str],
+    /// Whether the technique needs the shared payload import resolver
+    /// (`engine::imports`) rendered into the stub. The resolver is emitted only
+    /// when an active technique declares it, so no unused code is injected.
+    pub resolves_imports: bool,
 }
 
 /// All registered techniques.
@@ -156,6 +185,8 @@ pub fn all() -> &'static [TechniqueDef] {
         process_hollowing::DEF,
         reflective_loading::DEF,
         patch_amsi::DEF,
+        anti_debug::DEF,
+        patch_etw::DEF,
     ]
 }
 
@@ -198,7 +229,12 @@ pub fn list(ui: &Palette) -> String {
         ui.dim(format!("{:<16}", "ATT&CK")),
         ui.dim("SUMMARY"),
     ));
-    for def in all() {
+    // Grouped by category, then maturity, then name: the listing reads as a
+    // pipeline (Preparation before Execution) with the most reliable entries
+    // first inside each group.
+    let mut defs: Vec<&TechniqueDef> = all().iter().collect();
+    defs.sort_by_key(|def| (def.category, def.stability, def.name));
+    for def in defs {
         out.push_str(&format!(
             "{} {:<12} {} {:<16} {}\n",
             ui.bold(format!("{:<18}", def.name)),
@@ -275,8 +311,8 @@ pub fn validate() -> Vec<String> {
             ));
         }
 
-        // `params_example` must parse as a pipeline step.
-        if serde_yml::from_str::<PipelineStep>(def.params_example).is_err() {
+        // `params_example` must parse as a runtime step.
+        if serde_yml::from_str::<RuntimeStep>(def.params_example).is_err() {
             problems.push(format!("{}: params_example does not parse", def.name));
         }
 
@@ -374,9 +410,9 @@ mod tests {
     #[test]
     fn every_technique_has_a_parseable_yaml_example() {
         for def in all() {
-            let step: PipelineStep = serde_yml::from_str(def.params_example)
+            let step: RuntimeStep = serde_yml::from_str(def.params_example)
                 .unwrap_or_else(|e| panic!("{} params_example does not parse: {e}", def.name));
-            let round_tripped = serde_yml::to_string(&step).expect("serialize PipelineStep");
+            let round_tripped = serde_yml::to_string(&step).expect("serialize RuntimeStep");
             assert!(
                 !round_tripped.trim().is_empty(),
                 "{} params_example must serialize",
@@ -408,6 +444,23 @@ mod tests {
         );
         assert!(output.contains("execution"), "list output: {output}");
         assert!(output.contains("preparation"), "list output: {output}");
+    }
+
+    /// Rows are ordered by category, then stability, then technique name.
+    #[test]
+    fn list_is_ordered_by_category_stability_then_name() {
+        let output = list(&Palette::plain());
+        let names: Vec<&str> = output
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .filter(|token| find(token).is_some())
+            .collect();
+
+        let mut expected: Vec<&TechniqueDef> = all().iter().collect();
+        expected.sort_by_key(|def| (def.category, def.stability, def.name));
+        let expected: Vec<&str> = expected.iter().map(|def| def.name).collect();
+
+        assert_eq!(names, expected, "list output: {output}");
     }
 
     /// The plain palette must not leak escape codes into the listing.

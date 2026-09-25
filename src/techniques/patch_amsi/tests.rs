@@ -2,13 +2,13 @@
 
 use super::{Params, DEF};
 use crate::engine::obfuscation::StringsConfig;
-use crate::techniques::PipelineStep;
+use crate::techniques::RuntimeStep;
 
 #[test]
 fn parses_params_from_empty_yaml() {
-    let step: PipelineStep =
+    let step: RuntimeStep =
         serde_yml::from_str("technique: patch_amsi\n").expect("patch_amsi should parse");
-    assert_eq!(step, PipelineStep::PatchAmsi(Params {}));
+    assert_eq!(step, RuntimeStep::PatchAmsi(Params {}));
 }
 
 #[test]

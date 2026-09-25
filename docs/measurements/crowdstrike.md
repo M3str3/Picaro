@@ -14,26 +14,24 @@
 ## Config (YAML used)
 
 ```yaml
-schema: 1
-name: test-msgbox
+schema: 2
+name: test-hollowing
 
-input:
-  path: ./examples/payloads/test_payload.exe
+build:
+  payload:
+    source: ./examples/payloads/test_payload.exe
+    crypto:
+      algo: xchacha20poly1305
+      key: random
+  output:
+    path: ./dist/test_packed.exe
+    arch: x64
+    strip: true
+    trim_paths: all
 
-payload:
-  crypto:
-    algo: xchacha20poly1305
-    key: random
-
-pipeline:
+runtime:
   - technique: process_hollowing
     target: "C:\\Windows\\System32\\svchost.exe"
-
-output:
-  path: ./dist/test_packed.exe
-  arch: x64
-  strip: true
-  trim_paths: all
 ```
 
 ## Result
@@ -42,7 +40,7 @@ output:
 - [ ] Allowed
 - [x] Partial
 
-The stub runs and shows its own `STUB_MARKER_<hex>` MessageBox, but the payload
+The stub prints its own `STUB_MARKER_<hex>` to stderr, but the payload
 is **not** executed inside `svchost.exe`: CrowdStrike detects the hollowing in
 runtime and prevents the payload from running.
 

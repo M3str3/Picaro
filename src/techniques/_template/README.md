@@ -20,7 +20,7 @@
 ## YAML example
 
 ```yaml
-pipeline:
+runtime:
   - technique: <technique_key>
     <param>: <value>
 ```

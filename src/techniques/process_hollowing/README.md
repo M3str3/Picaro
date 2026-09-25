@@ -3,7 +3,7 @@
 ## Metadata
 
 - **ATT&CK**: T1055.012 (Process Injection: Process Hollowing)
-- **Stability**: Stable
+- **Stability**: Experimental
 - **YAML key**: `process_hollowing`
 - **Introduced in**: Phase 4
 
@@ -23,7 +23,7 @@ name.
 ## YAML example
 
 ```yaml
-pipeline:
+runtime:
   - technique: process_hollowing
     target: "C:\\Windows\\System32\\svchost.exe"
 ```
@@ -38,10 +38,40 @@ pipeline:
    from `ntdll.dll`).
 4. Allocate memory at the same base with `VirtualAllocEx`
    (`MEM_COMMIT | MEM_RESERVE`, `PAGE_EXECUTE_READWRITE`).
-5. Write the payload's headers and sections with `WriteProcessMemory`.
-6. Fix up base relocations if the preferred image base changed.
-7. Redirect the thread to the payload entry point (`SetThreadContext` → `Rcx`).
-8. Resume the thread (`ResumeThread`).
+5. Fix up base relocations if the preferred image base changed.
+6. Resolve the payload's import table and fill in its IAT (see below).
+7. Write the payload's headers and sections with `WriteProcessMemory`.
+8. Redirect the thread to the payload entry point (`SetThreadContext` → `Rcx`).
+9. Resume the thread (`ResumeThread`).
+
+### Import resolution
+
+Step 6 walks the payload's import descriptors and, for every thunk, calls
+`LoadLibraryA` + `GetProcAddress` and writes the resulting address into the
+payload's IAT slot, before the image is written to the target. This is the same
+walk reflective loading uses; both share the resolver injected as
+`$IMPORTS_BLOCK$` (`src/engine/imports.rs`), so it is not duplicated between the
+two execution fragments. Any import that cannot be resolved aborts the build of
+the process *before* the thread is redirected, so a payload never starts with a
+half-filled IAT.
+
+The addresses are resolved in the packer stub's **current** process. Windows
+assigns system DLLs one base per session (ASLR for system DLLs is session-wide,
+not per-process), so a resolved address is valid in the target as long as the
+target has that DLL mapped. API set names (`api-ms-win-*`) are virtual and are
+resolved by the loader through the API set schema; `LoadLibraryA` therefore
+returns the contract host's module (with a family-based fallback for the CRT
+contracts).
+
+> **Known limitation (open).** A process created with `CREATE_SUSPENDED` has
+> **not run its loader yet** (`PEB->Ldr` is `NULL`; only `ntdll.dll` and the main
+> image are mapped). Resolving the IAT is necessary but not yet sufficient: the
+> payload's other imports (`kernel32.dll`, `user32.dll`, …) may be absent from
+> the target, in which case the first import call jumps to unmapped memory. The
+> Windows loader also refuses to initialize the swapped-in image (it exits with
+> `STATUS_DLL_INIT_FAILED`), so the target's own loader cannot be used to load
+these DLLs either. See `docs/techniques/process_hollowing.md` for the measured
+evidence and the proposed follow-up.
 
 ## What it evades
 
@@ -72,6 +102,15 @@ pipeline:
   later phase should switch to RW → write → RX via `VirtualProtectEx`.
 - The PEB's `ImageBaseAddress` is not rewritten, so payloads that read it to
   locate themselves may misbehave. The current test payload does not.
+- The IAT is patched in the local image buffer before it is written, so the
+  target receives a complete image in one write sequence and a resolution
+  failure cannot leave a half-patched IAT behind.
+- `GetThreadContext`/`SetThreadContext` are given a 16-byte aligned `CONTEXT`
+  (`AlignedContext`): x64 requires it, while the `windows` binding only
+  guarantees 8.
+- Import resolution is shared with reflective loading
+  (`src/engine/imports.rs`); the fragment only supplies an RVA→file-offset
+  mapper.
 
 ## References
 

@@ -20,10 +20,10 @@ use std::time::Instant;
 
 use clap::{CommandFactory, Parser, Subcommand};
 
-use config::schema::{Arch, CryptoAlgorithm, InputConfig, KeySource, TrimPaths};
-use engine::{compiler, crypto, obfuscation, pe, stub};
+use config::schema::{Arch, CryptoAlgorithm, KeySource, TrimPaths};
+use engine::{compiler, crypto, obfuscation, pe, stub, syscalls};
 use error::Result;
-use techniques::PipelineStep;
+use techniques::RuntimeStep;
 use ui::{format_elapsed, glyph, human_size, Palette};
 
 /// Extra help printed under the generated usage block.
@@ -67,7 +67,7 @@ enum Commands {
         #[arg(value_name = "CONFIG")]
         config: PathBuf,
 
-        /// Positional arguments referenced by the YAML as `$build.N$`.
+        /// Positional arguments referenced by the YAML as `$arg.N$`.
         #[arg(value_name = "ARG")]
         args: Vec<String>,
     },
@@ -139,8 +139,9 @@ fn run() -> Result<()> {
     match command {
         Commands::Build { config, args } => {
             let config_path = config.clone();
-            let config = config::load_config(&config, &args)?;
-            build(&config, &args, &config_path, &ui, cli.verbose)?;
+            let build_args = config::build_args::parse(&args);
+            let config = config::load_config(&config, &build_args)?;
+            build(&config, &build_args, &config_path, &ui, cli.verbose)?;
         }
         Commands::Audit { binary, focus } => {
             let report = audit::run(&binary, focus.as_deref(), &ui)?;
@@ -205,7 +206,7 @@ fn validate_techniques(ui: &Palette) {
 /// timings; the compact form stays on one line per step.
 fn build(
     config: &config::Config,
-    args: &[String],
+    build_args: &BTreeMap<String, String>,
     config_path: &Path,
     ui: &Palette,
     verbose: bool,
@@ -221,7 +222,7 @@ fn build(
 
     // 1. Read the input payload and validate that it is an x64 PE (fail early).
     let timer = Instant::now();
-    let plaintext = load_input(&config.input)?;
+    let plaintext = load_source(&config.build.payload.source)?;
     let pe_info = pe::parse(&plaintext)?;
     if !pe::is_x64(pe_info.machine) {
         return Err(error::PackerError::Validation(format!(
@@ -237,7 +238,7 @@ fn build(
             dotted(
                 ui,
                 &[
-                    ui.target(describe_input(&config.input)),
+                    ui.target(describe_source(&config.build.payload.source)),
                     ui.dim("x64 PE"),
                     human_size(plaintext.len()),
                 ]
@@ -254,7 +255,7 @@ fn build(
 
     // 2. Derive the key and encrypt the payload with XChaCha20-Poly1305.
     let timer = Instant::now();
-    let key = match config.payload.crypto.key {
+    let key = match config.build.payload.crypto.key {
         KeySource::Random => crypto::generate_key(),
     };
     let encrypted = crypto::encrypt_payload(&plaintext, &key)?;
@@ -266,7 +267,7 @@ fn build(
             dotted(
                 ui,
                 &[
-                    ui.brand(crypto_label(config.payload.crypto.algo)),
+                    ui.brand(crypto_label(config.build.payload.crypto.algo)),
                     format!(
                         "{} {} {}",
                         human_size(plaintext.len()),
@@ -300,16 +301,29 @@ fn build(
         );
     }
 
-    // 3. Per-build marker and the string-obfuscation configuration.
+    // 3. Per-build marker, the string-obfuscation and syscall configurations.
     let stub_marker = stub::generate_stub_marker();
-    if config.payload.strings.is_none() {
+    if config.build.strings.is_none() {
         anstream::eprintln!(
             "  {} {}",
             ui.bang(),
             ui.warn("obfuscation.strings not specified, defaulting to xor+random")
         );
     }
-    let strings = obfuscation::StringsConfig::from_yaml(config.payload.strings.as_ref())?;
+    let strings = obfuscation::StringsConfig::from_yaml(config.build.strings.as_ref())?;
+    let syscalls = syscalls::SyscallsConfig::from_yaml(config.build.stub.syscalls.as_ref())?;
+    if syscalls.mode == syscalls::SyscallsMode::Indirect
+        && syscalls::required(&config.runtime).is_empty()
+    {
+        anstream::eprintln!(
+            "  {} {}",
+            ui.bang(),
+            ui.warn(
+                "build.stub.syscalls.mode is 'indirect' but no technique in the pipeline \
+                 uses NT syscalls yet (phase 6a: only process_hollowing does)"
+            )
+        );
+    }
 
     // 4. Prepare `build/` and write the ciphertext the builtin template embeds.
     let timer = Instant::now();
@@ -319,16 +333,17 @@ fn build(
 
     // 5. Load the stub template: the builtin one, or a custom loader stub.
     //    A custom stub receives the payload as `$PAYLOAD_BYTES$` and does not
-    //    need `build/payload.bin`.
-    let (template, template_display, is_custom) = match &config.loader {
-        Some(loader) => {
-            let source = std::fs::read_to_string(&loader.path).map_err(|source| {
+    //    need `build/payload.bin`. `build.stub.syscalls` applies to both.
+    let (template, template_display, is_custom) = match &config.build.stub.path {
+        Some(path) => {
+            let path = path.clone();
+            let source = std::fs::read_to_string(&path).map_err(|source| {
                 error::PackerError::ReadLoader {
-                    path: loader.path.clone(),
+                    path: path.clone(),
                     source,
                 }
             })?;
-            let display = format!("custom {} {}", glyph::DOT, loader.path.display());
+            let display = format!("custom {} {}", glyph::DOT, path.display());
             (source, display, true)
         }
         None => {
@@ -339,12 +354,6 @@ fn build(
         }
     };
 
-    let build_args: BTreeMap<String, String> = args
-        .iter()
-        .enumerate()
-        .map(|(index, value)| (index.to_string(), value.clone()))
-        .collect();
-
     let params = stub::StubParams {
         nonce: encrypted.nonce,
         key: encrypted.key,
@@ -352,18 +361,19 @@ fn build(
         plaintext_len: encrypted.plaintext_len,
         stub_marker: stub_marker.clone(),
         payload_path: "payload.bin".to_string(),
-        build_args,
+        build_args: build_args.clone(),
     };
 
     let stub_src = if is_custom {
         stub::validate_custom_stub_template(&template)?;
-        let rendered = stub::render_custom_stub(&template, &params, &config.pipeline, &strings)?;
+        let rendered =
+            stub::render_custom_stub(&template, &params, &config.runtime, &strings, &syscalls)?;
         for warning in &rendered.warnings {
             anstream::eprintln!("  {} {}", ui.bang(), ui.warn(format!("warning: {warning}")));
         }
         rendered.source
     } else {
-        stub::render_main_rs(&template, &params, &config.pipeline, &strings)?
+        stub::render_main_rs(&template, &params, &config.runtime, &strings, &syscalls)?
     };
     let stub_path = build_dir.join("main.rs");
     std::fs::write(&stub_path, &stub_src)?;
@@ -376,8 +386,9 @@ fn build(
             dotted(
                 ui,
                 &[
-                    pipeline_chain(ui, &config.pipeline),
+                    pipeline_chain(ui, &config.runtime),
                     format!("{} {}", ui.dim("strings"), strings.strategy.label()),
+                    format!("{} {}", ui.dim("syscalls"), syscalls.mode.label()),
                 ]
             )
         )
@@ -385,6 +396,10 @@ fn build(
     if verbose {
         anstream::println!("{}", ui.detail("template", ui.dim(&template_display)));
         anstream::println!("{}", ui.detail("marker", ui.dim(&stub_marker)));
+        anstream::println!(
+            "{}",
+            ui.detail("resolver", ui.dim(syscalls.resolver.label()))
+        );
         anstream::println!(
             "{}",
             ui.detail(
@@ -432,13 +447,13 @@ fn build(
     }
 
     // 7. Copy `out.exe` to the output path from the YAML.
-    if let Some(parent) = config.output.path.parent() {
+    if let Some(parent) = config.build.output.path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
         }
     }
-    std::fs::copy(&out, &config.output.path)?;
-    let out_size = std::fs::metadata(&config.output.path)?.len() as usize;
+    std::fs::copy(&out, &config.build.output.path)?;
+    let out_size = std::fs::metadata(&config.build.output.path)?.len() as usize;
     let total = started.elapsed();
 
     // 8. The result, standing apart from the per-step lines.
@@ -450,7 +465,7 @@ fn build(
             dotted(
                 ui,
                 &[
-                    ui.target(config.output.path.display().to_string()),
+                    ui.target(config.build.output.path.display().to_string()),
                     human_size(out_size),
                     ui.dim(format_elapsed(total)),
                 ]
@@ -490,28 +505,42 @@ fn print_config(config: &config::Config, config_path: &Path, ui: &Palette) {
     anstream::println!("{}", ui.field("config", ui.target(config_path.display())));
     anstream::println!(
         "{}",
-        ui.field("input", ui.target(describe_input(&config.input)))
+        ui.field(
+            "source",
+            ui.target(describe_source(&config.build.payload.source))
+        )
     );
     anstream::println!(
         "{}",
-        ui.field("output", ui.target(config.output.path.display()))
+        ui.field("output", ui.target(config.build.output.path.display()))
     );
-    anstream::println!("{}", ui.field("arch", arch_label(config.output.arch)));
+    anstream::println!("{}", ui.field("arch", arch_label(config.build.output.arch)));
     anstream::println!(
         "{}",
-        ui.field("strip", if config.output.strip { "yes" } else { "no" })
+        ui.field(
+            "strip",
+            if config.build.output.strip {
+                "yes"
+            } else {
+                "no"
+            }
+        )
     );
     anstream::println!(
         "{}",
-        ui.field("trim paths", trim_label(config.output.trim_paths))
+        ui.field("trim paths", trim_label(config.build.output.trim_paths))
     );
-    anstream::println!("{}", ui.field("loader", loader_label(config)));
+    anstream::println!("{}", ui.field("stub", stub_label(config)));
+    anstream::println!(
+        "{}",
+        ui.field("runtime", pipeline_chain(ui, &config.runtime))
+    );
     anstream::println!("{}", ui.field("schema", config.schema));
     anstream::println!();
 }
 
 /// `patch_amsi → reflective_loading`, technique names in the brand color.
-fn pipeline_chain(ui: &Palette, pipeline: &[PipelineStep]) -> String {
+fn pipeline_chain(ui: &Palette, pipeline: &[RuntimeStep]) -> String {
     if pipeline.is_empty() {
         return ui.dim("no techniques");
     }
@@ -544,20 +573,37 @@ fn trim_label(trim: TrimPaths) -> &'static str {
     }
 }
 
-/// Which stub template the build resolved to.
-fn loader_label(config: &config::Config) -> String {
-    match &config.loader {
-        Some(loader) => format!("custom {}", loader.path.display()),
-        None => "builtin (templates/stub/main.rs.tpl)".to_string(),
+/// Which stub template the build resolved to (plus the syscall mode).
+fn stub_label(config: &config::Config) -> String {
+    match &config.build.stub.path {
+        Some(path) => format!("custom {}", path.display()),
+        None => {
+            let mode = stub_mode_label(config);
+            format!("builtin (syscalls {mode})")
+        }
     }
 }
 
-/// `input.path` or `input.url`, however the payload is configured.
-fn describe_input(input: &InputConfig) -> String {
-    match (input.path.as_ref(), input.url.as_ref()) {
-        (Some(path), _) => path.display().to_string(),
-        (None, Some(url)) => url.clone(),
-        _ => "(unspecified)".to_string(),
+/// Lowercase label of the resolved syscall mode (used by [`stub_label`]).
+fn stub_mode_label(config: &config::Config) -> &'static str {
+    config
+        .build
+        .stub
+        .syscalls
+        .as_ref()
+        .map(|s| match s.mode.as_str() {
+            "indirect" => "indirect",
+            _ => "none",
+        })
+        .unwrap_or("none")
+}
+
+/// The configured `build.payload.source`, or a placeholder when empty.
+fn describe_source(source: &str) -> String {
+    if source.trim().is_empty() {
+        "(unspecified)".to_string()
+    } else {
+        source.to_string()
     }
 }
 
@@ -570,18 +616,41 @@ fn crypto_label(algo: CryptoAlgorithm) -> &'static str {
 
 /// Reads the input payload into memory from its configured source.
 ///
-/// A `path` is read from disk; a `url` is fetched over HTTP(S) without writing
-/// to disk. Validation has already guaranteed exactly one of the two is set.
-fn load_input(input: &InputConfig) -> Result<Vec<u8>> {
-    match (input.path.as_ref(), input.url.as_ref()) {
-        (Some(path), None) => std::fs::read(path).map_err(|source| error::PackerError::ReadInput {
-            path: path.clone(),
-            source,
-        }),
-        (None, Some(url)) => engine::fetch::fetch_url(url),
-        _ => Err(error::PackerError::Validation(
-            "'input' must set exactly one of 'path' or 'url'".to_string(),
-        )),
+/// `http://` and `https://` sources are fetched in memory (never written to
+/// disk); a `file://` source is read from disk after stripping the scheme; any
+/// other value is treated as a local path. `ftp://` is recognized but rejected
+/// with a clear message because no FTP client is implemented.
+fn load_source(source: &str) -> Result<Vec<u8>> {
+    if source.starts_with("http://") || source.starts_with("https://") {
+        return engine::fetch::fetch_url(source);
+    }
+    if source.starts_with("ftp://") {
+        return Err(error::PackerError::Validation(
+            "'build.payload.source' uses ftp://, which is not supported; \
+             use http(s):// or a local path"
+                .to_string(),
+        ));
+    }
+    let path = match source.strip_prefix("file://") {
+        Some(rest) => file_url_to_path(rest),
+        None => source.to_string(),
+    };
+    std::fs::read(&path).map_err(|source| error::PackerError::ReadInput {
+        path: PathBuf::from(path),
+        source,
+    })
+}
+
+/// Turns the part after `file://` into a local path.
+///
+/// Handles the `file:///C:/x` form produced by URL libraries, which points at
+/// `C:/x` (the leading slash before a drive letter is an artifact).
+fn file_url_to_path(rest: &str) -> String {
+    let bytes = rest.as_bytes();
+    if bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':' {
+        rest[1..].to_string()
+    } else {
+        rest.to_string()
     }
 }
 

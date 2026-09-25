@@ -43,6 +43,15 @@ self-contained: its own `use` statements plus the functions/constants the
 technique needs. Use `$PLACEHOLDER$` for any per-build value and substitute it
 in `render_fragment`.
 
+**Kernel-facing calls go through the syscall layer, never the Win32 APIs
+ directly.** List the technique's Nt* requirements in `TechniqueDef::syscalls`
+ (e.g. `&["NtAllocateVirtualMemory", ...]`) and call the `nt_*` helpers
+ (`crate::nt_alloc_vm`, `crate::nt_write_vm`, …) from the fragment. The stub
+ provides the helpers with two implementations — direct Win32 calls when
+ `build.stub.syscalls.mode` is `none`, indirect syscalls when it is `indirect` — so
+ the fragment must not care which mode is active. See
+ `docs/techniques/indirect_syscalls.md`.
+
 A Preparation fragment must expose a `pub fn <name>() -> Result<(), E>` entry
 point (where `<name>` is the technique key); the stub wraps each Preparation
 fragment in its own module and calls that entry point from the generated
@@ -55,11 +64,11 @@ unqualified).
 In `src/techniques/mod.rs`:
 
 1. `pub mod my_technique;`
-2. A `PipelineStep` variant: `MyTechnique(my_technique::Params)`.
+2. A `RuntimeStep` variant: `MyTechnique(my_technique::Params)`.
 3. An entry in `all()`: `&[process_hollowing::DEF, my_technique::DEF]`.
 
-Also add match arms to `PipelineStep::render_fragment`, `PipelineStep::name`
-and `PipelineStep::category` so the stub renderer and validation dispatch
+Also add match arms to `RuntimeStep::render_fragment`, `RuntimeStep::name`
+and `RuntimeStep::category` so the stub renderer and validation dispatch
 correctly.
 
 ## 5. Write tests
@@ -105,9 +114,7 @@ not — route it through `StringsConfig`.
 ## 9. Conventions
 
 - **Names**: snake_case, matching the YAML key.
-- **Stability**: `Stable` only after the technique has a measurement baseline;
-  otherwise `Experimental`. Use `Deprecated` for techniques superseded by a
-  better one.
+- **Stability**: `Stable` once the technique is complete and verified (a measurement baseline or passing runtime checks); `Experimental` while gaps remain; `Deprecated` for techniques superseded by a better one.
 - **ATT&CK**: use the specific sub-technique ID when available (e.g.
   `T1055.012`).
 - Keep `stub_fragment.rs` self-contained; prefer reusing the stub skeleton's

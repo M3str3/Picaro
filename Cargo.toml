@@ -32,7 +32,6 @@ anstyle = "1"
 # here so its .rlib is available under target/ for `rustc --extern`.
 windows = { version = "0.58", features = [
     "Win32_Foundation",
-    "Win32_UI_WindowsAndMessaging",
     "Win32_System_Threading",
     # CreateProcessA takes SECURITY_ATTRIBUTES.
     "Win32_Security",

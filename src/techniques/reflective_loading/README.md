@@ -22,7 +22,7 @@ None. (Payload arguments are not supported yet and are left for a later phase.)
 ## YAML example
 
 ```yaml
-pipeline:
+runtime:
   - technique: reflective_loading
 ```
 

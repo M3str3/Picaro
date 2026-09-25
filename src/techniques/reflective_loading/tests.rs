@@ -1,13 +1,13 @@
 //! Tests for the reflective loading technique.
 
 use super::{Params, DEF};
-use crate::techniques::PipelineStep;
+use crate::techniques::RuntimeStep;
 
 #[test]
 fn parses_params_from_empty_yaml() {
-    let step: PipelineStep = serde_yml::from_str("technique: reflective_loading\n")
+    let step: RuntimeStep = serde_yml::from_str("technique: reflective_loading\n")
         .expect("reflective_loading should parse");
-    assert_eq!(step, PipelineStep::ReflectiveLoading(Params {}));
+    assert_eq!(step, RuntimeStep::ReflectiveLoading(Params {}));
 }
 
 #[test]
@@ -68,10 +68,16 @@ fn compiles_reflective_loading_stub_to_pe() {
         payload_path: "payload.bin".to_string(),
         build_args: std::collections::BTreeMap::new(),
     };
-    let pipeline = vec![PipelineStep::ReflectiveLoading(Params {})];
+    let pipeline = vec![RuntimeStep::ReflectiveLoading(Params {})];
     let strings = crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap();
-    let stub_src =
-        crate::engine::stub::render_main_rs(&template, &params, &pipeline, &strings).unwrap();
+    let stub_src = crate::engine::stub::render_main_rs(
+        &template,
+        &params,
+        &pipeline,
+        &strings,
+        &crate::engine::syscalls::SyscallsConfig::default(),
+    )
+    .unwrap();
     let stub_path = build_dir.join("main.rs");
     std::fs::write(&stub_path, stub_src).unwrap();
 

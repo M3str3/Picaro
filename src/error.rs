@@ -31,7 +31,7 @@ pub enum PackerError {
         source: std::io::Error,
     },
 
-    /// The custom loader stub (`loader.path`) could not be read.
+    /// The custom loader stub (`build.stub.path`) could not be read.
     #[error("could not read loader stub '{path}': {source}")]
     ReadLoader {
         path: PathBuf,

@@ -1,7 +1,9 @@
 # Manual end-to-end tests
 
-This example uses a test payload (`test_payload.exe`) that shows a
-`MessageBoxA` with the fixed marker `PAYLOAD_MARKER_7f3a9c2e`.
+The test payload (`test_payload.exe`) **prints** the fixed marker
+`PAYLOAD_MARKER_7f3a9c2e` to stdout and exits `0`. It opens no dialog, so a run
+never blocks and its output can be captured from a terminal (or by an agent).
+The stub itself prints its per-build `STUB_MARKER_<hex>` to stderr.
 
 ## Process hollowing
 
@@ -20,7 +22,7 @@ powershell -ExecutionPolicy Bypass -File examples/payloads/build_test_payload.ps
 ## 2. Pack
 
 ```powershell
-cargo run -- build examples/configs/test-msgbox.yaml
+cargo run -- build examples/configs/test-hollowing.yaml
 ```
 
 This produces `dist/test_packed.exe` (and leaves intermediate artifacts in
@@ -28,8 +30,8 @@ This produces `dist/test_packed.exe` (and leaves intermediate artifacts in
 
 ## 3. Open Process Explorer / Process Hacker
 
-Open it *before* running the packed binary so you can see which process owns
-the second MessageBox.
+Open it *before* running the packed binary so you can watch which process runs
+the payload.
 
 ## 4. Run the packed binary
 
@@ -37,17 +39,22 @@ the second MessageBox.
 .\dist\test_packed.exe
 ```
 
-Two `MessageBox` windows appear, in order:
+The terminal shows the stub's marker on stderr, e.g.:
 
-1. `STUB_MARKER_<hex>` (title `Stub`) — shown by the stub.
-2. `PAYLOAD_MARKER_7f3a9c2e` (title `Payload`) — shown by the hollowed payload.
+```
+STUB_MARKER_<hex>
+```
+
+The payload runs in the hollowed `svchost.exe`, which has **no console attached**
+(the stub does not inherit handles and `svchost.exe` is a GUI-subsystem
+process), so the payload's stdout is not visible from the parent. Look for the
+marker in Process Explorer instead (step 5).
 
 ## 5. Confirm the hollowing (the key check)
 
-The second MessageBox must be shown by **svchost.exe**, not `test_packed.exe`.
-In Process Explorer, find the process that owns the `PAYLOAD_MARKER_7f3a9c2e`
-window: it should be `svchost.exe` (the process the stub hollowed), not the
-stub itself.
+The payload runs **inside `svchost.exe`**, not in `test_packed.exe`. In Process
+Explorer, the `svchost.exe` created by the stub is the process hosting the
+payload; `test_packed.exe` only waits for it.
 
 ## 6. Verify no cleartext payload on disk
 
@@ -70,15 +77,16 @@ strings dist/test_packed.exe | grep -i svchost        # should print nothing
 Loads the payload into the current process (no external target).
 
 ```powershell
-cargo run -- build examples/configs/test-msgbox-reflective.yaml
+cargo run -- build examples/configs/test-reflective.yaml
 .\dist\test_packed_reflective.exe
 ```
 
-Two `MessageBox` windows appear, in order, **both owned by the packed binary
-itself** (there is no `svchost.exe`):
+Both markers go to the same terminal, because everything runs in one process:
 
-1. `STUB_MARKER_<hex>` (title `Stub`) — shown by the stub.
-2. `PAYLOAD_MARKER_7f3a9c2e` (title `Payload`) — shown by the mapped payload.
+```
+STUB_MARKER_<hex>
+PAYLOAD_MARKER_7f3a9c2e
+```
 
 Verify the payload was mapped, not spawned:
 

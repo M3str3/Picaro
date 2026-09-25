@@ -1,19 +1,17 @@
-schema: 1
+schema: 2
 name: peloader
 
-input:
-  path: "$build.0$"
+build:
+  payload:
+    source: "$arg.0$"
+    crypto:
+      algo: xchacha20poly1305
+      key: random
+  output:
+    path: "$arg.1$"
+    arch: x64
+    strip: true
+    trim_paths: all
 
-payload:
-  crypto:
-    algo: xchacha20poly1305
-    key: random
-
-pipeline:
+runtime:
   - technique: reflective_loading
-
-output:
-  path: "$build.1$"
-  arch: x64
-  strip: true
-  trim_paths: all

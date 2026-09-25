@@ -1,7 +1,7 @@
 //! Tests for <technique name>.
 
 use super::{Params, DEF};
-use crate::techniques::PipelineStep;
+use crate::techniques::RuntimeStep;
 
 // TODO: replace with real tests. At minimum:
 //  1. the params YAML parses (with defaults and with explicit values);
@@ -17,7 +17,7 @@ fn def_is_well_formed() {
 
 #[test]
 fn params_example_parses() {
-    let step: PipelineStep =
+    let step: RuntimeStep =
         serde_yml::from_str(DEF.params_example).expect("params_example should parse");
     // Ensure the variant round-trips.
     let _ = step;

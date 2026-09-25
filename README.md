@@ -1,0 +1,299 @@
+```
+  ██████╗  █████╗ ████████╗███████╗███████╗██╗ █████╗ ███╗  ██╗
+  ██╔══██╗██╔══██╗╚══██╔══╝██╔════╝██╔════╝██║██╔══██╗████╗ ██║
+  ██████╦╝███████║   ██║   █████╗  ███████╗██║███████║██╔██╗██║
+  ██╔══██╗██╔══██║   ██║   ██╔══╝  ╚════██║██║██╔══██║██║╚████║
+  ██████╦╝██║  ██║   ██║   ███████╗███████║██║██║  ██║██║ ╚███║
+  ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚══════╝╚══════╝╚═╝╚═╝  ╚═╝╚═╝  ╚═╝
+```
+
+**mimicry-based packer**
+
+> Batesian mimicry is nature's original loader: a harmless species evolves the
+> warning colors of a dangerous one, and predators look right past it. This is
+> that idea, but for PEs.
+
+`batesian` takes a PE file and a YAML config, and emits a packed PE with the
+selected evasion techniques baked into a freshly generated Rust stub. No
+cleartext payload ever touches disk: the payload is authenticated-encrypted at
+build time and only ever exists decrypted in memory at run time.
+
+Everything — packer and stub — is Rust. Nothing is embedded: if `rustc` is not
+on your `PATH`, it tells you so and stops.
+
+## Authorized use only
+
+This is a malware loader packer for **authorized red team engagements,
+lab environments and security research**. Packing and executing a binary you
+do not own, or do not have written permission to test, is out of scope and
+not supported. You are responsible for what you build with it. The techniques
+here exist to be measured and understood, not aimed at systems you don't
+control.
+
+## Quick start
+
+Requirements:
+
+- **`rustc` on `PATH`** (the stub is compiled with bare `rustc`, not cargo).
+- Workspace dependencies already built: run `cargo build` once at the repo
+  root so the stub can link the `.rlib` files out of `target/`.
+- Windows (x64). On Linux/WSL the stub is cross-compiled to
+  `x86_64-pc-windows-gnu` (see [`docs/architecture.md`](docs/architecture.md)).
+
+```bash
+# Pack the bundled test payload: hollow it into a suspended svchost.exe.
+cargo run -- build examples/configs/test-hollowing.yaml
+
+# The artifact lands where the config says (here, dist/test_packed.exe).
+./dist/test_packed.exe
+
+# Measure what the packer actually did.
+cargo run -- audit dist/test_packed.exe
+
+# Look around the technique registry.
+cargo run -- techniques list
+```
+
+`batesian` prints a banner before every subcommand; `-q`/`--quiet` skips it,
+`-v`/`--verbose` adds per-step detail (resolved config, paths, sizes, timings),
+and `--no-color` (or `NO_COLOR=1`) turns off color — it is disabled
+automatically when output is redirected.
+
+## Configuration
+
+A build is one YAML document. Strict by design: unknown keys are an error, so
+typos surface immediately instead of silently doing nothing.
+
+```yaml
+schema: 2                 # only version 2 is accepted
+name: mimikatz-basic
+
+build:
+  payload:
+    source: ./payload.exe # a local path, or an http(s):// URL (fetched in memory)
+    crypto:
+      algo: xchacha20poly1305
+      key: random
+  strings:
+    strategy: xor         # xor | stack
+    key: random           # random | literal:<64 hex chars>
+  stub:
+    path: null            # null = builtin stub; or a path to a custom .rs
+    syscalls:
+      mode: indirect      # none | indirect
+      resolver: hells_gate
+  output:
+    path: ./dist/mimikatz_packed.exe
+    arch: x64
+    strip: true
+    trim_paths: all       # all | none | relative
+
+runtime:                  # 0..N preparation, then exactly one execution
+  - technique: patch_amsi
+  - technique: process_hollowing
+    target: "C:\\Windows\\System32\\svchost.exe"
+```
+
+| Block | What it decides |
+| --- | --- |
+| `build.payload.source` | The PE to pack: a local path or an `http(s)://` URL (fetched in memory, never written to disk). |
+| `build.payload.crypto` | Payload encryption. XChaCha20-Poly1305, 24-byte nonce, fresh random key per build. |
+| `build.strings` | How every runtime literal in the stub is obfuscated (`xor` or `stack`). Defaults to `xor` + random key, with a warning. |
+| `build.stub` | The stub itself: a custom template (`path`, `null` = builtin) and/or the syscall layer (`syscalls`). |
+| `build.output` | Where the packed PE goes and how it is finalized. `arch` is validated and reported; the stub toolchain is x64 today. |
+| `runtime` | The techniques to apply, in order. `0..N` Preparation followed by exactly one Execution. |
+
+**Build arguments.** Positional args after the config path are substituted in
+the YAML as `$arg.N$` (0-based); an arg of the form `name=value` is available
+as `$arg.name$`. One config can target several hosts:
+
+```bash
+batesian build config.yaml "C:\\Windows\\System32\\svchost.exe"
+```
+
+```yaml
+runtime:
+  - technique: process_hollowing
+    target: "$arg.0$"
+```
+
+A referenced-but-missing argument is a clear error, not a silent empty string.
+
+## Techniques
+
+Techniques are split into two categories. **Preparation** techniques change the
+current process state but never run the payload; **Execution** techniques run
+the decrypted payload. A valid pipeline is `0..N` Preparation techniques in
+order, followed by exactly one Execution technique.
+
+| YAML key | Category | ATT&CK | Stability | What it does |
+| --- | --- | --- | --- | --- |
+| `anti_debug` | preparation | T1622 | stable | Detects a debugger and, by default, aborts before the payload runs. |
+| `patch_amsi` | preparation | T1562.001 | stable | Patches `AmsiScanBuffer` in the current process. |
+| `patch_etw` | preparation | T1562.006 | stable | Patches the ETW event-writing exports in the current process. |
+| `process_hollowing` | execution | T1055.012 | experimental | Runs the payload inside a suspended, legitimate process instead of on disk. |
+| `reflective_loading` | execution | T1620 | experimental | Maps the payload into the current process and runs its entry point. |
+
+The registry is metadata-only. Inspect it, don't guess:
+
+```bash
+batesian techniques list                 # colored table: category, ATT&CK, stability
+batesian techniques show process_hollowing   # the technique's full README
+batesian techniques validate             # CI helper: registry well-formedness
+```
+
+Adding one is a documented, four-file ritual — see
+[`src/techniques/README.md`](src/techniques/README.md).
+
+## How it works
+
+```mermaid
+flowchart TD
+    Y[YAML config] --> V[Parse and validate]
+    V --> I[Load input PE]
+    I --> E[Encrypt payload]
+    E --> R[Render Rust stub]
+    R --> C[Compile stub with rustc]
+    C --> O[Write packed PE]
+```
+
+The generated stub does the reverse at run time: decrypt in memory, run the
+Preparation techniques, then hand the payload to the Execution technique.
+Payload literals, technique strings and the syscall names all pass through the
+string-obfuscation layer, so sensitive names stay out of the binary's data
+sections.
+
+### Syscall layer
+
+`build.stub.syscalls` is not a pipeline technique — it is a property of the loader.
+It changes how the stub talks to the kernel without the techniques caring:
+
+- `mode: none` — technique fragments call the `nt_*` helpers, which map to the
+  Win32 APIs.
+- `mode: indirect` — the helpers resolve SSNs at run time (Hell's Gate: read
+  each SSN from the `Nt*` stub prologue in `ntdll`) and enter the kernel
+  through a `syscall; ret` gadget found in `ntdll`'s `.text`.
+
+Technique fragments always call the same `nt_*` helpers, so a technique is
+written once and works under either mode. Each technique declares its `Nt*`
+requirements; the packer only resolves the union of the active pipeline's
+requirements. Details and measurements:
+[`docs/techniques/indirect_syscalls.md`](docs/techniques/indirect_syscalls.md),
+[`docs/measurements/phase6a_iat_reduction.md`](docs/measurements/phase6a_iat_reduction.md).
+
+### Custom stubs
+
+Need a loader shape the builtin stub doesn't have? Point `build.stub.path` at
+your own Rust template and the packer fills in the same placeholders:
+
+```yaml
+build:
+  stub:
+    path: ./my_stub.rs
+```
+
+`$PAYLOAD_BYTES$`, `$PAYLOAD_LEN$`, `$PAYLOAD_NONCE_DEF$`, `$PAYLOAD_KEY_DEF$`,
+`$PREPARATION_BLOCKS$`, `$EXECUTION_BLOCK$`, `$SYSCALLS_BLOCK$`, `$ARG_<n>$`.
+Your template must define `fn main()`; ignoring a technique block is a warning,
+not an error. Full contract and examples:
+[`docs/custom-stubs.md`](docs/custom-stubs.md).
+
+### Audit
+
+Evasion claims are worth nothing unmeasured. `batesian audit` is the
+measurement half of the project:
+
+```bash
+batesian audit dist/test_packed.exe --focus imports,strings
+```
+
+It reports PE headers, sections and their entropy, imports/exports, a strings
+scan (including a `Sensitive:` line for names that should never have survived),
+YARA matches and an optional offline Defender scan. Baselines for every phase
+live in [`docs/measurements/`](docs/measurements/).
+
+## Repository layout
+
+```text
+src/
+  config/       YAML parsing and validation
+  engine/       crypto, PE parsing, stub generation, compilation, syscall layer, imports
+  audit/        static measurement (pe_info, strings, yara, defender, report)
+  techniques/   one directory per technique + the registry (mod.rs)
+  error.rs      top-level error types
+  ui.rs         terminal output: banner, palette, formatting helpers
+templates/stub/ Rust stub template with $placeholders$
+examples/       example configs, test payloads, sample custom stubs
+docs/           architecture, technique notes and measurement reports
+yara/           YARA rules (placeholder for now)
+tests/          CLI integration tests
+build/  dist/   (gitignored) intermediate artifacts and final binaries
+banner.txt      ASCII banner, compiled in by src/ui.rs
+```
+
+## Development
+
+```bash
+cargo test                       # unit + CLI integration tests
+cargo test -- --ignored          # compiles a stub per technique + string-leak check
+cargo clippy --all-targets       # must be clean before any commit
+cargo fmt
+```
+
+The ignored suite is the safety net: it compiles a stub for every registered
+technique and fails if a sensitive literal (`AmsiScanBuffer`, `amsi.dll`,
+`ntdll.dll`, …) leaks into the binary in cleartext. A literal only counts as a
+leak when it appears both in the compiled stub **and** in the generated stub
+source (comments stripped), so names the toolchain embeds regardless of our
+code don't produce false positives.
+
+House rules, in short: everything in Rust, crypto is always XChaCha20-Poly1305,
+no `unsafe` in the packer, errors via `thiserror` (no `panic!`/`unwrap` in
+user-facing paths), every stub string goes through `StringsConfig`, and all
+user-facing output goes through `src/ui.rs`. The full list is in
+[`AGENTS.md`](AGENTS.md).
+
+## Status & roadmap
+
+| Phase | State | Scope |
+| --- | --- | --- |
+| 1 | done | CLI + YAML parsing + validation |
+| 2 | done | XChaCha20-Poly1305 payload encryption |
+| 3 | done | Rust stub generation + `rustc` compilation |
+| 4 | done | Process hollowing (in-memory execution) |
+| 5 | done | Static measurement infrastructure (`audit`) |
+| 6 | in progress | Indirect syscalls (6a done: Hell's Gate; 6b: Tartarus Gate) |
+| 7 | done | AMSI patching (`patch_amsi`), technique categories |
+
+## Known limitations
+
+- **Process hollowing does not yet run a full PE.** The payload's IAT is
+  resolved, but a `CREATE_SUSPENDED` target has not run its loader
+  (`PEB->Ldr == NULL`; only `ntdll` plus the main image are mapped), so the
+  payload's other imported DLLs are absent and its first import call faults.
+  Provisioning loader/TLS state before hand-off is the follow-up. Evidence:
+  [`docs/techniques/process_hollowing.md`](docs/techniques/process_hollowing.md).
+- **Phase 6a migrates only the hollowing calls.** `Get`/`SetThreadContext`,
+  `WaitForSingleObject`, `GetExitCodeProcess` and the reflective-loading APIs
+  still import statically.
+- **Custom stubs do not obfuscate the key/nonce** when they reference
+  `$PAYLOAD_KEY_DEF$` / `$PAYLOAD_NONCE_DEF$`; prefer reading the key at run
+  time ([`examples/stubs/runtime-key.rs`](examples/stubs/runtime-key.rs)).
+- **Windows Defender flags the packed artifacts.** That is the point of the
+  exercise, not a bug.
+
+## Documentation
+
+- [`docs/architecture.md`](docs/architecture.md) — how the pieces fit together
+  and why.
+- [`docs/custom-stubs.md`](docs/custom-stubs.md) — the custom-stub contract.
+- [`docs/techniques/`](docs/techniques/) — per-technique deep dives with
+  measured evidence.
+- [`docs/measurements/`](docs/measurements/) — phase-by-phase static and
+  dynamic results.
+- [`src/techniques/README.md`](src/techniques/README.md) — adding a technique.
+
+## License
+
+MIT. See [`Cargo.toml`](Cargo.toml). Provided as-is, with no warranty, for
+authorized use only.

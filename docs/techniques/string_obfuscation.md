@@ -3,7 +3,7 @@
 A packer-level feature (not a pipeline technique): it obfuscates every
 sensitive string literal that the packer embeds into the generated stub, and
 emits code that rebuilds the string at runtime. The strategy and key are
-configurable in `payload.strings`.
+configurable in `build.strings`.
 
 ## What it does
 
@@ -22,7 +22,7 @@ obfuscation flows through `src/engine/obfuscation.rs`.
 ## YAML parameters
 
 ```yaml
-payload:
+build:
   strings:            # optional; omitted => xor + random key (with a warning)
     strategy: xor     # xor | stack
     key: random       # random | literal:<hex>   (xor only; ignored by stack)
@@ -38,10 +38,11 @@ is not valid hex or not exactly 32 bytes is a clear error.
 ## YAML example
 
 ```yaml
-payload:
-  crypto:
-    algo: xchacha20poly1305
-    key: random
+build:
+  payload:
+    crypto:
+      algo: xchacha20poly1305
+      key: random
   strings:
     strategy: xor
     key: random
@@ -86,7 +87,7 @@ Use for short strings that must appear zero times in `.rdata`.
 - **Decoder patterns** — `xor`'s `dec_xor` loop (XOR of a byte array with a
   key) is a classic tell that a heuristic or ML classifier can flag.
 - **Runtime reconstruction hooking** — both strategies must materialize the
-  string before use, so a runtime hook on `MessageBoxA`/`CreateProcessA` or a
+  string before use, so a runtime hook on `LoadLibraryA`/`CreateProcessA` or a
   memory scan for the reconstructed value will still see it.
 
 ## Measurements

@@ -7,27 +7,27 @@ hollowing target) with a hardcoded XOR key `0x5A`.
 ## Binary
 
 - `dist/test_packed.exe` (process hollowing, test payload)
-- Built before the `payload.strings` feature (hardcoded XOR `0x5A`).
+- Built before the `build.strings` feature (hardcoded XOR `0x5A`).
 
 ## Config (YAML)
 
 ```yaml
-schema: 1
-name: test-msgbox
-input:
-  path: ./examples/payloads/test_payload.exe
-payload:
-  crypto:
-    algo: xchacha20poly1305
-    key: random
-pipeline:
+schema: 2
+name: test-hollowing
+build:
+  payload:
+    source: ./examples/payloads/test_payload.exe
+    crypto:
+      algo: xchacha20poly1305
+      key: random
+  output:
+    path: ./dist/test_packed.exe
+    arch: x64
+    strip: true
+    trim_paths: all
+runtime:
   - technique: process_hollowing
     target: "C:\\Windows\\System32\\svchost.exe"
-output:
-  path: ./dist/test_packed.exe
-  arch: x64
-  strip: true
-  trim_paths: all
 ```
 
 ## Audit summary

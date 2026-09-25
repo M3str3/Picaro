@@ -2,15 +2,15 @@
 
 use super::{default_target, Params, DEF};
 use crate::engine::obfuscation::{StringStrategy, StringsConfig};
-use crate::techniques::PipelineStep;
+use crate::techniques::RuntimeStep;
 
 #[test]
 fn parses_params_with_default_target() {
-    let step: PipelineStep = serde_yml::from_str("technique: process_hollowing\n")
+    let step: RuntimeStep = serde_yml::from_str("technique: process_hollowing\n")
         .expect("process_hollowing without target should parse");
     assert_eq!(
         step,
-        PipelineStep::ProcessHollowing(Params {
+        RuntimeStep::ProcessHollowing(Params {
             target: default_target(),
         })
     );
@@ -18,14 +18,14 @@ fn parses_params_with_default_target() {
 
 #[test]
 fn parses_params_with_explicit_target() {
-    let step: PipelineStep = serde_yml::from_str(
+    let step: RuntimeStep = serde_yml::from_str(
         r#"technique: process_hollowing
 target: "C:\\Windows\\System32\\notepad.exe""#,
     )
     .expect("process_hollowing with target should parse");
     assert_eq!(
         step,
-        PipelineStep::ProcessHollowing(Params {
+        RuntimeStep::ProcessHollowing(Params {
             target: r"C:\Windows\System32\notepad.exe".to_string(),
         })
     );
