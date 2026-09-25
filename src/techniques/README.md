@@ -84,11 +84,18 @@ Add a measurement file under `docs/measurements/` and link it from the README's
 
 ```bash
 cargo test
+cargo test -- --ignored          # compiles each technique's stub + string-leak check
 cargo clippy --all-targets
 cargo run -- techniques list
 cargo run -- techniques show my_technique
 cargo run -- techniques validate
 ```
+
+`cargo test -- --ignored` includes
+`engine::compiler::tests::no_sensitive_literals_in_generated_stubs`: it compiles
+a stub for every registered technique and fails if any sensitive literal
+(`AmsiScanBuffer`, `amsi.dll`, `ntdll.dll`, …) leaks in cleartext. This test is
+mandatory before merging a new technique.
 
 ## 9. Conventions
 

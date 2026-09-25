@@ -443,4 +443,32 @@ mod tests {
         let uniform: Vec<u8> = (0..=255).collect();
         assert!(shannon_entropy(&uniform) > 7.9);
     }
+
+    #[test]
+    fn code_data_excludes_metadata_sections() {
+        // "AAAA" (.text), "BBBB" (.idata, excluded), "CCCCDDDD" (.rdata).
+        let data = b"AAAABBBBCCCCDDDD";
+        let sections = vec![
+            SectionAudit {
+                name: ".text".to_string(),
+                size: 4,
+                entropy: 0.0,
+                file_offset: 0,
+            },
+            SectionAudit {
+                name: ".idata".to_string(),
+                size: 4,
+                entropy: 0.0,
+                file_offset: 4,
+            },
+            SectionAudit {
+                name: ".rdata".to_string(),
+                size: 8,
+                entropy: 0.0,
+                file_offset: 8,
+            },
+        ];
+
+        assert_eq!(code_data(data, &sections), b"AAAACCCCDDDD".to_vec());
+    }
 }

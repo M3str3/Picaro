@@ -324,9 +324,8 @@ fn redirect_entry(thread: HANDLE, base: u64, entry_rva: u32) -> Result<(), Strin
 }
 
 fn resolve_unmap() -> Result<NtUnmapViewOfSectionFn, String> {
-    // `NTDLL_DEF` and `UNMAP_FUNC_DEF` are substituted at build time with code
-    // that rebuilds the names at runtime (obfuscated), so they do not appear
-    // in `strings`.
+    // The DLL and function names are substituted at build time with code that
+    // rebuilds them at runtime (obfuscated), so they do not appear in `strings`.
     let ntdll = std::ffi::CString::new(NTDLL_DEF).map_err(|_| "invalid ntdll name".to_string())?;
     let unmap =
         std::ffi::CString::new(UNMAP_FUNC_DEF).map_err(|_| "invalid unmap name".to_string())?;

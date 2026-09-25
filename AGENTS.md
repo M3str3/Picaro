@@ -22,6 +22,11 @@ Any other use is out of scope and not supported.
   only in the generated stub, for FFI.
 - **Errors via `thiserror`.** Never `panic!` in user-facing code paths.
   Never `.unwrap()` outside tests.
+- **No string literals in stub fragments.** Every string that ends up in the
+  generated stub must go through `StringsConfig::obfuscate`. The packer's
+  `render_fragment` receives `&StringsConfig` for exactly this reason. Literals
+  that never reach the generated stub (compile-time constants, format strings
+  in build-time code) are exempt.
 - **`cargo clippy --all-targets` must be clean** before any commit.
 
 ## Coding conventions
@@ -32,6 +37,8 @@ Any other use is out of scope and not supported.
 - Public functions get doc comments explaining *why*, not *what*.
 - Test names describe behavior, not implementation.
 - Prefer explicit over clever.
+- When adding a technique, grep the fragment for `"` before committing. If the
+  string is used at runtime by the stub, it must come from `StringsConfig`.
 
 ## Repo layout
 
@@ -77,6 +84,11 @@ by exactly one Execution. `patch_amsi` (T1562.001) is the first Preparation
 technique. Validation in `src/config/validate.rs`; the stub renders into
 `{{PREPARATION_BLOCKS}}` / `{{EXECUTION_BLOCK}}` (Preparation fragments are
 wrapped in per-technique modules to avoid `use` collisions).
+
+**String-leak consolidation (done).** Every runtime literal in every stub
+fragment goes through `StringsConfig` (`patch_amsi`, `process_hollowing`
+included). `audit` reports a `Sensitive:` line (`SENSITIVE_LITERALS`); the
+`#[ignore]` test `no_sensitive_literals_in_generated_stubs` is the CI safety net.
 
 **Phase 6 planned.** Indirect syscalls.
 See `.memory.md` for the rolling state.

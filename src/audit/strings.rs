@@ -13,10 +13,9 @@ use regex::Regex;
 /// stub's code/data sections.
 ///
 /// This is the shared list used by both the audit's string scan and the
-/// `#[ignore]` integration test. Import-table DLL names (`kernel32.dll`,
-/// `ntdll.dll`) are deliberately omitted: they are legitimate PE metadata in
-/// `.idata`, not stub string literals (the scan of the code/data sections
-/// excludes `.idata` anyway).
+/// `#[ignore]` integration test. `ntdll.dll`/`kernel32.dll` are checked too:
+/// the scan runs over [`crate::audit::pe_info::code_data`], which excludes the
+/// import table (`.idata`) where those DLL names legitimately appear.
 pub const SENSITIVE_LITERALS: &[&str] = &[
     "AmsiScanBuffer",
     "AmsiOpenSession",
@@ -24,6 +23,8 @@ pub const SENSITIVE_LITERALS: &[&str] = &[
     "amsi.dll",
     "EtwEventWrite",
     "EtwEventWriteFull",
+    "ntdll.dll",
+    "kernel32.dll",
     "powershell",
     r"C:\Windows",
     "svchost",
@@ -202,5 +203,21 @@ mod tests {
         // `\0` is not printable, so it splits the two runs; "abc" is too short.
         let s = extract_strings(b"abc\0defgh", 4);
         assert_eq!(s, vec!["defgh".to_string()]);
+    }
+
+    #[test]
+    fn finds_sensitive_literals() {
+        let data = b"junk AmsiScanBuffer and amsi.dll and EtwEventWrite";
+        let found = find_sensitive_literals(data);
+        assert!(found.contains(&"AmsiScanBuffer".to_string()));
+        assert!(found.contains(&"amsi.dll".to_string()));
+        assert!(found.contains(&"EtwEventWrite".to_string()));
+        assert!(!found.contains(&"powershell".to_string()));
+    }
+
+    #[test]
+    fn sensitive_literals_are_case_insensitive() {
+        let found = find_sensitive_literals(b"AMSISCANBUFFER");
+        assert!(found.contains(&"AmsiScanBuffer".to_string()));
     }
 }

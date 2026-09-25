@@ -214,10 +214,6 @@ fn render_strings(strings: &StringFindings) -> String {
         "  Total flagged:    {}\n",
         strings.total_flagged()
     ));
-    out.push_str(&format!(
-        "  Total flagged:    {}\n",
-        strings.total_flagged()
-    ));
     out
 }
 

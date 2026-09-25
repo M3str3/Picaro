@@ -544,4 +544,82 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&build_dir);
     }
+
+    /// Compiles a stub for each registered technique and asserts that no
+    /// sensitive string literal (AMSI/ETW/DLL names, paths, technique keywords)
+    /// appears in cleartext in the resulting PE's code/data sections.
+    ///
+    /// This is the safety net that stops a new technique fragment from
+    /// introducing a cleartext literal. Marked `#[ignore]` because it compiles
+    /// one stub per technique. Run it with `cargo test -- --ignored`.
+    #[test]
+    #[ignore = "requires rustc and the compiled dependencies"]
+    fn no_sensitive_literals_in_generated_stubs() {
+        use crate::audit::{pe_info, strings};
+        use crate::techniques::{Category, PipelineStep};
+
+        let plaintext: Vec<u8> = (0..1024u32).map(|i| (i % 251) as u8).collect();
+        let key = crate::engine::crypto::generate_key();
+        let encrypted = crate::engine::crypto::encrypt_payload(&plaintext, &key).unwrap();
+
+        let build_dir = std::env::temp_dir().join(format!("packerman_leak_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&build_dir);
+        std::fs::create_dir_all(&build_dir).unwrap();
+        std::fs::write(build_dir.join("payload.bin"), &encrypted.ciphertext).unwrap();
+
+        let template = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("templates")
+                .join("stub")
+                .join("main.rs.tpl"),
+        )
+        .unwrap();
+
+        let deps = locate_stub_deps().unwrap();
+        let strings = crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap();
+
+        for def in crate::techniques::all() {
+            let step: PipelineStep = serde_yml::from_str(def.params_example)
+                .unwrap_or_else(|e| panic!("{} params_example does not parse: {e}", def.name));
+
+            // A Preparation technique needs an Execution technique so the stub
+            // compiles; `reflective_loading` is used as the filler.
+            let pipeline = if def.category == Category::Preparation {
+                let execution: PipelineStep =
+                    serde_yml::from_str("technique: reflective_loading\n").unwrap();
+                vec![step, execution]
+            } else {
+                vec![step]
+            };
+
+            let params = crate::engine::stub::StubParams {
+                nonce_hex: hex::encode(encrypted.nonce),
+                key_hex: hex::encode(encrypted.key),
+                plaintext_len: encrypted.plaintext_len,
+                stub_marker: crate::engine::stub::generate_stub_marker(),
+                payload_path: "payload.bin".to_string(),
+            };
+            let stub_src =
+                crate::engine::stub::render_main_rs(&template, &params, &pipeline, &strings)
+                    .unwrap();
+            let stub_path = build_dir.join(format!("main_{}.rs", def.name));
+            std::fs::write(&stub_path, stub_src).unwrap();
+
+            let out = build_dir.join(format!("out_{}.exe", def.name));
+            compile_stub(&stub_path, &out, &deps).unwrap();
+
+            let binary = std::fs::read(&out).unwrap();
+            let pe = pe_info::analyze(&binary).unwrap();
+            let code = pe_info::code_data(&binary, &pe.sections);
+            let leaked = strings::find_sensitive_literals(&code);
+            assert!(
+                leaked.is_empty(),
+                "technique '{}' leaks sensitive literals into the generated stub: {:?}. Route them through StringsConfig.",
+                def.name,
+                leaked
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&build_dir);
+    }
 }
