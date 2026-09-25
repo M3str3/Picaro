@@ -429,11 +429,13 @@ mod tests {
             .join("main.rs.tpl");
         let template = std::fs::read_to_string(tpl_path).unwrap();
         let params = crate::engine::stub::StubParams {
-            nonce_hex: hex::encode(encrypted.nonce),
-            key_hex: hex::encode(encrypted.key),
+            nonce: encrypted.nonce,
+            key: encrypted.key,
+            ciphertext: encrypted.ciphertext.clone(),
             plaintext_len: encrypted.plaintext_len,
             stub_marker: crate::engine::stub::generate_stub_marker(),
             payload_path: "payload.bin".to_string(),
+            build_args: std::collections::BTreeMap::new(),
         };
         let pipeline = vec![crate::techniques::PipelineStep::ProcessHollowing(
             crate::techniques::process_hollowing::Params {
@@ -511,11 +513,13 @@ mod tests {
 
         for (name, strings) in strategies {
             let params = crate::engine::stub::StubParams {
-                nonce_hex: hex::encode(encrypted.nonce),
-                key_hex: hex::encode(encrypted.key),
+                nonce: encrypted.nonce,
+                key: encrypted.key,
+                ciphertext: encrypted.ciphertext.clone(),
                 plaintext_len: encrypted.plaintext_len,
                 stub_marker: marker.clone(),
                 payload_path: "payload.bin".to_string(),
+                build_args: std::collections::BTreeMap::new(),
             };
             let pipeline = vec![crate::techniques::PipelineStep::ProcessHollowing(
                 crate::techniques::process_hollowing::Params {
@@ -593,25 +597,37 @@ mod tests {
             };
 
             let params = crate::engine::stub::StubParams {
-                nonce_hex: hex::encode(encrypted.nonce),
-                key_hex: hex::encode(encrypted.key),
+                nonce: encrypted.nonce,
+                key: encrypted.key,
+                ciphertext: encrypted.ciphertext.clone(),
                 plaintext_len: encrypted.plaintext_len,
                 stub_marker: crate::engine::stub::generate_stub_marker(),
                 payload_path: "payload.bin".to_string(),
+                build_args: std::collections::BTreeMap::new(),
             };
             let stub_src =
                 crate::engine::stub::render_main_rs(&template, &params, &pipeline, &strings)
                     .unwrap();
             let stub_path = build_dir.join(format!("main_{}.rs", def.name));
-            std::fs::write(&stub_path, stub_src).unwrap();
+            std::fs::write(&stub_path, &stub_src).unwrap();
 
             let out = build_dir.join(format!("out_{}.exe", def.name));
             compile_stub(&stub_path, &out, &deps).unwrap();
 
             let binary = std::fs::read(&out).unwrap();
             let pe = pe_info::analyze(&binary).unwrap();
-            let code = pe_info::code_data(&binary, &pe.sections);
-            let leaked = strings::find_sensitive_literals(&code);
+            let code = pe_info::code_data(&binary, &pe.sections, &pe.import_text_ranges);
+            // A hit in the binary alone is not proof of a leak: the `windows`
+            // crate graph embeds `ntdll.dll` (via `windows-result`'s
+            // `hresult.rs`) and the import table carries every imported DLL
+            // name, none of which the packer controls. Only a literal that is
+            // *also* present in the generated stub source — which is entirely
+            // ours — is a real fragment leak.
+            let in_source = strings::find_sensitive_literals_in_source(&stub_src);
+            let leaked: Vec<String> = strings::find_sensitive_literals(&code)
+                .into_iter()
+                .filter(|lit| in_source.contains(lit))
+                .collect();
             assert!(
                 leaked.is_empty(),
                 "technique '{}' leaks sensitive literals into the generated stub: {:?}. Route them through StringsConfig.",
@@ -619,6 +635,51 @@ mod tests {
                 leaked
             );
         }
+
+        let _ = std::fs::remove_dir_all(&build_dir);
+    }
+
+    /// Compiles `examples/stubs/minimal.rs` (a custom loader stub) and checks
+    /// it produces a PE. Marked `#[ignore]` because it needs `rustc` and the
+    /// compiled dependencies.
+    #[test]
+    #[ignore = "requires rustc and the compiled dependencies"]
+    fn custom_stub_compiles_to_pe() {
+        let template = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("examples")
+                .join("stubs")
+                .join("minimal.rs"),
+        )
+        .unwrap();
+
+        let params = crate::engine::stub::StubParams {
+            nonce: [0u8; 24],
+            key: [0u8; 32],
+            ciphertext: vec![0xAA, 0xBB, 0xCC, 0xDD],
+            plaintext_len: 4,
+            stub_marker: crate::engine::stub::generate_stub_marker(),
+            payload_path: "payload.bin".to_string(),
+            build_args: std::collections::BTreeMap::new(),
+        };
+        let strings = crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap();
+        let rendered =
+            crate::engine::stub::render_custom_stub(&template, &params, &[], &strings).unwrap();
+        assert!(rendered.warnings.is_empty(), "no techniques declared");
+
+        let build_dir =
+            std::env::temp_dir().join(format!("packerman_custom_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&build_dir);
+        std::fs::create_dir_all(&build_dir).unwrap();
+        let stub_path = build_dir.join("main.rs");
+        std::fs::write(&stub_path, &rendered.source).unwrap();
+
+        let deps = locate_stub_deps().unwrap();
+        let out = build_dir.join("out.exe");
+        compile_stub(&stub_path, &out, &deps).unwrap();
+
+        let bytes = std::fs::read(&out).unwrap();
+        assert_eq!(&bytes[..2], b"MZ", "custom stub must compile to a PE");
 
         let _ = std::fs::remove_dir_all(&build_dir);
     }

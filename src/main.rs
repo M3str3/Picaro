@@ -10,6 +10,7 @@ mod engine;
 mod error;
 mod techniques;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
@@ -96,7 +97,7 @@ fn run() -> Result<()> {
     match cli.command {
         Commands::Build { config, args } => {
             let config = config::load_config(&config, &args)?;
-            build(&config)?;
+            build(&config, &args)?;
         }
         Commands::Audit { binary, focus } => {
             let report = audit::run(&binary, focus.as_deref())?;
@@ -122,7 +123,7 @@ fn run() -> Result<()> {
 }
 
 /// Runs the full packing flow.
-fn build(config: &config::Config) -> Result<()> {
+fn build(config: &config::Config, args: &[String]) -> Result<()> {
     // 1. Read the input payload (from a local file, or in memory from a URL).
     let plaintext = load_input(&config.input)?;
 
@@ -159,20 +160,55 @@ fn build(config: &config::Config) -> Result<()> {
     // 8. Write `build/payload.bin` (the ciphertext).
     std::fs::write(build_dir.join("payload.bin"), &encrypted.ciphertext)?;
 
-    // 9. Render the stub from the template and write it.
-    let template_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("templates")
-        .join("stub")
-        .join("main.rs.tpl");
-    let template = std::fs::read_to_string(&template_path)?;
+    // 9. Load the stub template: the builtin one, or a custom loader stub.
+    //    The payload bytes are written to `build/payload.bin` so the builtin
+    //    template's `include_bytes!` works; a custom stub uses `{{PAYLOAD_BYTES}}`
+    //    (an inline array literal) and does not need that file.
+    let (template, is_custom) = match &config.loader {
+        Some(loader) => {
+            let source = std::fs::read_to_string(&loader.path).map_err(|source| {
+                error::PackerError::ReadLoader {
+                    path: loader.path.clone(),
+                    source,
+                }
+            })?;
+            (source, true)
+        }
+        None => {
+            let template_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("templates")
+                .join("stub")
+                .join("main.rs.tpl");
+            (std::fs::read_to_string(&template_path)?, false)
+        }
+    };
+
+    let build_args: BTreeMap<String, String> = args
+        .iter()
+        .enumerate()
+        .map(|(index, value)| (index.to_string(), value.clone()))
+        .collect();
+
     let params = stub::StubParams {
-        nonce_hex: hex::encode(encrypted.nonce),
-        key_hex: hex::encode(encrypted.key),
+        nonce: encrypted.nonce,
+        key: encrypted.key,
+        ciphertext: encrypted.ciphertext.clone(),
         plaintext_len: encrypted.plaintext_len,
         stub_marker,
         payload_path: "payload.bin".to_string(),
+        build_args,
     };
-    let stub_src = stub::render_main_rs(&template, &params, &config.pipeline, &strings)?;
+
+    let stub_src = if is_custom {
+        stub::validate_custom_stub_template(&template)?;
+        let rendered = stub::render_custom_stub(&template, &params, &config.pipeline, &strings)?;
+        for warning in &rendered.warnings {
+            eprintln!("warning: {warning}");
+        }
+        rendered.source
+    } else {
+        stub::render_main_rs(&template, &params, &config.pipeline, &strings)?
+    };
     let stub_path = build_dir.join("main.rs");
     std::fs::write(&stub_path, stub_src)?;
 

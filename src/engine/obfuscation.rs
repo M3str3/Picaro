@@ -220,7 +220,10 @@ fn resolve_key(spec: &str) -> Result<[u8; XOR_KEY_LEN]> {
 }
 
 /// Renders `bytes` as a Rust byte-array literal, e.g. `[0x53, 0x54, 0x55]`.
-fn byte_array_literal(bytes: &[u8]) -> String {
+///
+/// Also used by the stub renderer for `{{PAYLOAD_BYTES}}` / `{{PAYLOAD_NONCE_DEF}}`
+/// / `{{PAYLOAD_KEY_DEF}}` (custom loader stubs).
+pub(crate) fn byte_array_literal(bytes: &[u8]) -> String {
     let mut out = String::from("[");
     for (i, b) in bytes.iter().enumerate() {
         if i > 0 {

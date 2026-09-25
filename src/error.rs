@@ -8,9 +8,9 @@
 use std::path::PathBuf;
 
 use crate::audit::AuditError;
-use crate::engine::BuildError;
 use crate::engine::crypto::CryptoError;
 use crate::engine::pe::PeError;
+use crate::engine::BuildError;
 
 /// Main project error.
 #[derive(Debug, thiserror::Error)]
@@ -26,6 +26,14 @@ pub enum PackerError {
     /// The input payload (the PE to be packed) could not be read.
     #[error("could not read input payload '{path}': {source}")]
     ReadInput {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// The custom loader stub (`loader.path`) could not be read.
+    #[error("could not read loader stub '{path}': {source}")]
+    ReadLoader {
         path: PathBuf,
         #[source]
         source: std::io::Error,

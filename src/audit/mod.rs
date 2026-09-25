@@ -58,9 +58,11 @@ pub fn run(binary: &Path, focus: Option<&str>) -> Result<String, AuditError> {
         .collect();
 
     let strings_scan = strings::scan(&data, &imported);
-    // Sensitive literals are checked over the code/data sections only, so
-    // import-table DLL names (in `.idata`) are not false positives.
-    let code_data = pe_info::code_data(&data, &pe.sections);
+    // Sensitive literals are checked over the code/data sections only, with the
+    // import table's own strings blanked out, so its DLL/function names (e.g.
+    // `kernel32.dll`) are not false positives regardless of where the linker
+    // placed them.
+    let code_data = pe_info::code_data(&data, &pe.sections, &pe.import_text_ranges);
     let mut strings = strings_scan;
     strings.sensitive = strings::find_sensitive_literals(&code_data);
     let yara = yara::scan(&data);

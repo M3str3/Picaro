@@ -42,8 +42,24 @@ pub struct Config {
     #[serde(default)]
     pub pipeline: Vec<PipelineStep>,
 
+    /// Optional custom loader stub (a Rust template). When absent, the builtin
+    /// stub (`templates/stub/main.rs.tpl`) is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loader: Option<LoaderConfig>,
+
     /// Output block: how to produce the packed PE.
     pub output: OutputConfig,
+}
+
+/// `loader` block: a user-provided stub template.
+///
+/// The file is a Rust source template with `{{PLACEHOLDER}}` slots that the
+/// packer fills (see `docs/custom-stubs.md`). It must define a `fn main()`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoaderConfig {
+    /// Path to the stub template (`.rs`).
+    pub path: PathBuf,
 }
 
 /// `input` block: locates the input binary.
@@ -238,6 +254,25 @@ output:
     fn strings_block_is_optional() {
         let config: Config = serde_yml::from_str(VALID_YAML).expect("valid YAML should parse");
         assert_eq!(config.payload.strings, None);
+    }
+
+    #[test]
+    fn loader_block_is_optional() {
+        let config: Config = serde_yml::from_str(VALID_YAML).expect("valid YAML should parse");
+        assert_eq!(config.loader, None);
+    }
+
+    #[test]
+    fn parses_loader_block() {
+        let yaml = VALID_YAML.replace(
+            "output:\n  path: ./dist/mimikatz_packed.exe",
+            "loader:\n  path: ./my_stub.rs\n\noutput:\n  path: ./dist/mimikatz_packed.exe",
+        );
+        let config: Config = serde_yml::from_str(&yaml).expect("loader block should parse");
+        assert_eq!(
+            config.loader.map(|l| l.path),
+            Some(PathBuf::from("./my_stub.rs"))
+        );
     }
 
     #[test]

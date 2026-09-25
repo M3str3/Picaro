@@ -340,6 +340,7 @@ mod tests {
                 functions: vec![ImportItem::Named("VirtualAllocEx".to_string())],
             }],
             exports: vec![],
+            import_text_ranges: vec![],
         }
     }
 

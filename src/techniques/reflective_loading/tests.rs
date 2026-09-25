@@ -60,11 +60,13 @@ fn compiles_reflective_loading_stub_to_pe() {
     )
     .unwrap();
     let params = crate::engine::stub::StubParams {
-        nonce_hex: hex::encode(encrypted.nonce),
-        key_hex: hex::encode(encrypted.key),
+        nonce: encrypted.nonce,
+        key: encrypted.key,
+        ciphertext: encrypted.ciphertext.clone(),
         plaintext_len: encrypted.plaintext_len,
         stub_marker: crate::engine::stub::generate_stub_marker(),
         payload_path: "payload.bin".to_string(),
+        build_args: std::collections::BTreeMap::new(),
     };
     let pipeline = vec![PipelineStep::ReflectiveLoading(Params {})];
     let strings = crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap();

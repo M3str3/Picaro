@@ -26,6 +26,9 @@ const RT_MANIFEST: u32 = 24;
 // Certificate type for Authenticode (PKCS #7 signed data).
 const WIN_CERT_TYPE_PKCS_SIGNED_DATA: u16 = 0x0002;
 
+/// A `[start, end)` byte range within the file.
+pub type FileRange = (usize, usize);
+
 /// A section with its size, file offset and Shannon entropy.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SectionAudit {
@@ -62,6 +65,12 @@ pub struct PeAudit {
     pub sections: Vec<SectionAudit>,
     pub imports: Vec<DllImport>,
     pub exports: Vec<String>,
+    /// File-offset ranges of the import table's text (DLL and function names).
+    ///
+    /// The sensitive-literal scan must ignore these: they are import metadata,
+    /// not stub literals, and the toolchain may place them in a dedicated
+    /// `.idata` section or inside `.rdata`.
+    pub import_text_ranges: Vec<FileRange>,
 }
 
 /// Internal section view used for RVA → file-offset mapping.
@@ -147,12 +156,14 @@ pub fn analyze(data: &[u8]) -> Result<PeAudit, AuditError> {
     let data_dir_rva =
         |idx: usize| -> Result<u32, AuditError> { read_u32(data, opt + 112 + idx * 8) };
 
-    // Imports.
+    // Imports. The parser also reports the file ranges of the import-table
+    // strings (DLL/function names), which are metadata rather than stub data.
     let mut imports = Vec::new();
+    let mut import_text_ranges = Vec::new();
     let import_rva = data_dir_rva(DIR_IMPORT)?;
     if import_rva != 0 {
         if let Some(off) = rva_to_offset(import_rva) {
-            imports = parse_imports(data, off, is_pe32plus, &rva_to_offset)?;
+            (imports, import_text_ranges) = parse_imports(data, off, is_pe32plus, &rva_to_offset)?;
         }
     }
 
@@ -197,6 +208,7 @@ pub fn analyze(data: &[u8]) -> Result<PeAudit, AuditError> {
         sections,
         imports,
         exports,
+        import_text_ranges,
     })
 }
 
@@ -205,7 +217,7 @@ fn parse_imports(
     start: usize,
     is_pe32plus: bool,
     rva_to_offset: &dyn Fn(u32) -> Option<usize>,
-) -> Result<Vec<DllImport>, AuditError> {
+) -> Result<(Vec<DllImport>, Vec<FileRange>), AuditError> {
     let thunk_size = if is_pe32plus { 8 } else { 4 };
     let ord_flag: u64 = if is_pe32plus {
         0x8000_0000_0000_0000
@@ -219,6 +231,7 @@ fn parse_imports(
     };
 
     let mut imports = Vec::new();
+    let mut text_ranges = Vec::new();
     let mut i = 0usize;
     loop {
         let desc = start + i * 20;
@@ -234,6 +247,9 @@ fn parse_imports(
         let dll_name = rva_to_offset(name_rva)
             .and_then(|o| read_cstring(data, o))
             .unwrap_or_else(|| "<unnamed>".to_string());
+        if let Some(range) = rva_to_offset(name_rva).and_then(|o| cstring_range(data, o)) {
+            text_ranges.push(range);
+        }
 
         let thunk_rva = if orig_thunk != 0 {
             orig_thunk
@@ -256,7 +272,15 @@ fn parse_imports(
                 if thunk & ord_flag != 0 {
                     functions.push(ImportItem::Ordinal((thunk & 0xFFFF) as u16));
                 } else {
-                    let name = rva_to_offset((thunk & name_mask) as u32)
+                    let name_rva = (thunk & name_mask) as u32;
+                    // An import-by-name entry is a 2-byte hint followed by a
+                    // NUL-terminated name; both live in the import table.
+                    if let Some(range) =
+                        rva_to_offset(name_rva).and_then(|o| cstring_range(data, o + 2))
+                    {
+                        text_ranges.push(range);
+                    }
+                    let name = rva_to_offset(name_rva)
                         .and_then(|o| read_cstring(data, o + 2))
                         .map(ImportItem::Named)
                         .unwrap_or(ImportItem::Ordinal(0));
@@ -271,7 +295,7 @@ fn parse_imports(
         });
         i += 1;
     }
-    Ok(imports)
+    Ok((imports, text_ranges))
 }
 
 fn parse_exports(
@@ -329,6 +353,22 @@ fn read_cstring(data: &[u8], off: usize) -> Option<String> {
     Some(String::from_utf8_lossy(&data[off..end]).to_string())
 }
 
+/// Returns the `[start, end)` file range of the NUL-terminated string at `off`
+/// (including the terminator), or `None` if it is empty or out of bounds.
+fn cstring_range(data: &[u8], off: usize) -> Option<FileRange> {
+    if off >= data.len() {
+        return None;
+    }
+    let mut end = off;
+    while end < data.len() && data[end] != 0 {
+        end += 1;
+    }
+    if end == off {
+        return None;
+    }
+    Some((off, end + 1))
+}
+
 /// Shannon entropy in bits per byte (0.0 ..= 8.0).
 pub fn shannon_entropy(data: &[u8]) -> f64 {
     if data.is_empty() {
@@ -357,25 +397,51 @@ const METADATA_SECTIONS: &[&str] = &[
 ];
 
 /// Returns the concatenated raw bytes of the stub's code and data sections
-/// (everything except the metadata sections in [`METADATA_SECTIONS`]).
+/// (everything except the metadata sections in [`METADATA_SECTIONS`]), with the
+/// import-table text ranges in `import_text_ranges` blanked (zeroed) out.
 ///
 /// This is the slice to scan when looking for cleartext stub string literals:
-/// the import table (`.idata`) legitimately contains DLL/function names that
-/// are not under the packer's control.
-pub fn code_data(data: &[u8], sections: &[SectionAudit]) -> Vec<u8> {
+/// the import table legitimately contains DLL/function names that are not under
+/// the packer's control. They cannot be excluded by section name alone, because
+/// the toolchain may place them in a dedicated `.idata` section or merge them
+/// into `.rdata`, so they are removed by precise byte range instead.
+///
+/// A literal leaked elsewhere in the same section is still scanned (only the
+/// exact import-table bytes are blanked), so real leaks remain detectable.
+pub fn code_data(
+    data: &[u8],
+    sections: &[SectionAudit],
+    import_text_ranges: &[FileRange],
+) -> Vec<u8> {
     let mut out = Vec::new();
     for section in sections {
-        if METADATA_SECTIONS
-            .iter()
-            .any(|m| section.name.eq_ignore_ascii_case(m))
-        {
+        if is_metadata_section(&section.name) {
             continue;
         }
-        let start = section.file_offset.min(data.len());
-        let end = start.saturating_add(section.size).min(data.len());
-        out.extend_from_slice(&data[start..end]);
+        let abs_start = section.file_offset.min(data.len());
+        let abs_end = abs_start.saturating_add(section.size).min(data.len());
+        let base = out.len();
+        out.extend_from_slice(&data[abs_start..abs_end]);
+
+        // Blank any import-table text that falls inside this section.
+        for &(start, end) in import_text_ranges {
+            let lo = start.max(abs_start);
+            let hi = end.min(abs_end);
+            if lo < hi {
+                for byte in &mut out[base + (lo - abs_start)..base + (hi - abs_start)] {
+                    *byte = 0;
+                }
+            }
+        }
     }
     out
+}
+
+/// Whether `name` is one of the metadata sections in [`METADATA_SECTIONS`].
+fn is_metadata_section(name: &str) -> bool {
+    METADATA_SECTIONS
+        .iter()
+        .any(|m| name.eq_ignore_ascii_case(m))
 }
 
 fn read_u16(data: &[u8], off: usize) -> Result<u16, AuditError> {
@@ -469,6 +535,27 @@ mod tests {
             },
         ];
 
-        assert_eq!(code_data(data, &sections), b"AAAACCCCDDDD".to_vec());
+        assert_eq!(code_data(data, &sections, &[]), b"AAAACCCCDDDD".to_vec());
+    }
+
+    #[test]
+    fn code_data_blanks_import_text_ranges() {
+        // A `.rdata` section holding a leaked-looking DLL name as import text.
+        let data = b"AAkernel32.dllBB";
+        let sections = vec![SectionAudit {
+            name: ".rdata".to_string(),
+            size: data.len(),
+            entropy: 0.0,
+            file_offset: 0,
+        }];
+        // "kernel32.dll" spans bytes 2..14.
+        let out = code_data(data, &sections, &[(2, 14)]);
+
+        assert_eq!(&out[..2], b"AA");
+        assert_eq!(&out[14..], b"BB");
+        assert!(
+            out[2..14].iter().all(|&b| b == 0),
+            "import text must be blanked: {out:?}"
+        );
     }
 }

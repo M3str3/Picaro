@@ -1,6 +1,11 @@
 //! Integration tests for the `packerman` CLI.
 
 use std::process::Command;
+use std::sync::Mutex;
+
+/// Serializes the e2e `packerman build` tests: they share the repo's `build/`
+/// directory (wiped by each build), so two of them must not run concurrently.
+static BUILD_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn techniques_list_lists_all_techniques() {
@@ -42,6 +47,7 @@ fn techniques_show_prints_readme() {
 #[test]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn build_with_amsi_patch_produces_pe() {
+    let _guard = BUILD_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_packerman"))
         .args(["build", "examples/configs/test-amsi-patch.yaml"])
         .output()
@@ -72,4 +78,24 @@ fn build_with_invalid_order_fails() {
         stderr.contains("appears after the Execution technique"),
         "unclear error: {stderr}"
     );
+}
+
+/// End-to-end: `packerman build` with a custom loader stub produces a PE.
+/// Marked `#[ignore]` because it compiles the stub.
+#[test]
+#[ignore = "requires rustc and the compiled dependencies"]
+fn build_with_custom_stub_produces_pe() {
+    let _guard = BUILD_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_packerman"))
+        .args(["build", "examples/configs/test-custom-stub.yaml"])
+        .output()
+        .expect("run packerman build");
+    assert!(
+        output.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let bytes = std::fs::read("dist/test_custom_stub.exe").expect("read output");
+    assert_eq!(&bytes[..2], b"MZ", "output must be a PE");
 }

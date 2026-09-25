@@ -87,10 +87,27 @@ wrapped in per-technique modules to avoid `use` collisions).
 
 **String-leak consolidation (done).** Every runtime literal in every stub
 fragment goes through `StringsConfig` (`patch_amsi`, `process_hollowing`
-included). `audit` reports a `Sensitive:` line (`SENSITIVE_LITERALS`); the
-`#[ignore]` test `no_sensitive_literals_in_generated_stubs` is the CI safety net.
+included). `audit` reports a `Sensitive:` line (`SENSITIVE_LITERALS`) and blanks
+the import table's own DLL/function-name strings (`import_text_ranges`) so those
+are not false positives. The `#[ignore]` test
+`no_sensitive_literals_in_generated_stubs` is the CI safety net: it flags a
+literal only when it is in the compiled stub **and** in the generated stub
+source (comments stripped) — a binary hit alone can come from the toolchain
+(e.g. `windows-result` ships `ntdll.dll`).
 
 **Phase 6 planned.** Indirect syscalls.
+
+**Custom loader stubs (done).** A YAML `loader:` block (`loader.path`) replaces
+the builtin stub with a user `.rs` template rendered through the same
+substitution engine (see `docs/custom-stubs.md`). Placeholders:
+`{{PAYLOAD_BYTES}}`, `{{PAYLOAD_LEN}}`, `{{PAYLOAD_NONCE_DEF}}`,
+`{{PAYLOAD_KEY_DEF}}` (embedded only when referenced), `{{PREPARATION_BLOCKS}}`,
+`{{EXECUTION_BLOCK}}`, and `{{ARG_<n>}}` (positional build args). The stub must
+define `fn main()`; ignoring the technique blocks is a warning, not an error.
+Build args reuse the existing `{{build.N}}` positional mechanism (no separate
+`--arg` flag). **Gotcha:** `write_file`/rustfmt mangles bare `{{...}}`
+placeholders in `.rs` files (parses them as nested blocks) — write custom-stub
+examples with `cat >`/terminal, not the file writer.
 See `.memory.md` for the rolling state.
 
 ## code_examples/ — how to use it

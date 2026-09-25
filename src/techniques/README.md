@@ -94,8 +94,13 @@ cargo run -- techniques validate
 `cargo test -- --ignored` includes
 `engine::compiler::tests::no_sensitive_literals_in_generated_stubs`: it compiles
 a stub for every registered technique and fails if any sensitive literal
-(`AmsiScanBuffer`, `amsi.dll`, `ntdll.dll`, …) leaks in cleartext. This test is
-mandatory before merging a new technique.
+(`AmsiScanBuffer`, `amsi.dll`, `ntdll.dll`, …) leaks in cleartext. A literal
+counts as a leak only when it appears both in the compiled stub and in the
+generated stub source (comments stripped): names the toolchain embeds
+regardless of our code (the import table, `windows-result`'s `ntdll.dll`) are
+ignored. This test is mandatory before merging a new technique: mentioning a
+name in a doc comment is fine, but hardcoding it as a runtime string literal is
+not — route it through `StringsConfig`.
 
 ## 9. Conventions
 
