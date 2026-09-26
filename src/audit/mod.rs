@@ -3,20 +3,44 @@
 //!
 //! This is the measurement infrastructure for the static-evasion axis: it
 //! reports what a binary looks like on disk before we add evasion, so each
-//! later technique can be measured against this baseline.
+//! later technique can be measured against this baseline. `audit --json` emits
+//! the same data as [`model::Report`], and `audit --baseline` turns it into a
+//! regression gate (see [`baseline`]).
 
+pub mod baseline;
 pub mod defender;
+pub mod model;
 pub mod pe_info;
 pub mod report;
 pub mod strings;
 pub mod yara;
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use serde::Serialize;
 
 use crate::ui::Palette;
 use pe_info::ImportItem;
 use report::Focus;
+
+/// Imported functions widely used as malware signatures.
+///
+/// Shared by the report's risk summary and the baseline regression gate: a
+/// build that reintroduces one of these has lost IAT-level evasion. Kept
+/// deliberately short and high-signal to avoid noise.
+pub const SUSPICIOUS_IMPORTS: &[&str] = &[
+    "VirtualAllocEx",
+    "WriteProcessMemory",
+    "CreateRemoteThread",
+    "NtUnmapViewOfSection",
+    "NtCreateThreadEx",
+    "NtWriteVirtualMemory",
+    "SetWindowsHookEx",
+    "QueueUserAPC",
+    "CryptEncrypt",
+    "CryptDecrypt",
+];
 
 /// Audit error.
 #[derive(Debug, thiserror::Error)]
@@ -31,14 +55,82 @@ pub enum AuditError {
     /// The file is not a valid PE (or is truncated).
     #[error("not a valid PE: {0}")]
     InvalidPe(String),
+    /// The baseline file could not be read.
+    #[error("could not read baseline '{path}': {source}")]
+    BaselineRead {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    /// The baseline file is not a valid audit report.
+    #[error("could not parse baseline '{path}': {source}")]
+    BaselineParse {
+        path: String,
+        #[source]
+        source: serde_json::Error,
+    },
+    /// The JSON report could not be serialized.
+    #[error("could not serialize the audit report: {0}")]
+    Json(serde_json::Error),
 }
 
-/// Runs a full static audit of `binary` and returns the rendered report.
+/// What `batesian audit` should produce.
+#[derive(Debug, Clone)]
+pub struct AuditOptions {
+    /// `--focus`: comma-separated section list (pretty output only).
+    pub focus: Option<String>,
+    /// `--json`: emit the machine-readable report instead of the pretty one.
+    pub json: bool,
+    /// `--baseline`: compare against a previous `--json` report.
+    pub baseline: Option<PathBuf>,
+    /// `--entropy-tolerance`: entropy increase tolerated before it fails.
+    pub entropy_tolerance: f64,
+}
+
+impl Default for AuditOptions {
+    fn default() -> Self {
+        Self {
+            focus: None,
+            json: false,
+            baseline: None,
+            entropy_tolerance: DEFAULT_ENTROPY_TOLERANCE,
+        }
+    }
+}
+
+/// Default entropy tolerance, in bits per byte.
 ///
-/// `focus`, when set, restricts the report to a comma-separated list of
-/// sections (e.g. `imports,strings`). `ui` controls whether the report carries
-/// color; it is plain when the output is redirected.
-pub fn run(binary: &Path, focus: Option<&str>, ui: &Palette) -> Result<String, AuditError> {
+/// The payload ciphertext makes a section's entropy wobble slightly between
+/// builds, so a small increase is noise, not a regression.
+pub const DEFAULT_ENTROPY_TOLERANCE: f64 = 0.1;
+
+/// The rendered report plus the baseline outcome.
+pub struct Outcome {
+    /// What to print: pretty text or pretty JSON.
+    pub output: String,
+    /// Number of baseline regressions (0 when no baseline was given).
+    pub regressions: usize,
+}
+
+/// The JSON document printed by `audit --json`.
+///
+/// The report is flattened at the top level so its own output is a valid
+/// baseline: `serde` ignores the extra `baseline` key when reading it back.
+#[derive(Serialize)]
+struct JsonOutput<'a> {
+    #[serde(flatten)]
+    report: &'a model::Report,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    baseline: Option<&'a baseline::Comparison>,
+}
+
+/// Runs a static audit of `binary` and returns the rendered output.
+///
+/// `options.focus` restricts the *pretty* report to a comma-separated list of
+/// sections; `--json` always emits the full report. When a baseline is given,
+/// the comparison is appended (pretty) or embedded (JSON) and its regressions
+/// are reported in [`Outcome::regressions`] for the caller to set an exit code.
+pub fn run(binary: &Path, options: &AuditOptions, ui: &Palette) -> Result<Outcome, AuditError> {
     let data = std::fs::read(binary).map_err(|source| AuditError::ReadBinary {
         path: binary.display().to_string(),
         source,
@@ -69,9 +161,57 @@ pub fn run(binary: &Path, focus: Option<&str>, ui: &Palette) -> Result<String, A
     strings.sensitive = strings::find_sensitive_literals(&code_data);
     let yara = yara::scan(&data);
     let defender = defender::scan(binary);
-    let focus = Focus::parse(focus);
 
-    Ok(report::render(
-        binary, size, &pe, &strings, &yara, &defender, &focus, ui,
+    let report = model::Report::from_parts(binary, size, &pe, &strings, &yara, &defender);
+    let comparison = match &options.baseline {
+        Some(path) => Some(load_comparison(path, &report, options.entropy_tolerance)?),
+        None => None,
+    };
+
+    let output = if options.json {
+        let envelope = JsonOutput {
+            report: &report,
+            baseline: comparison.as_ref(),
+        };
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&envelope).map_err(AuditError::Json)?
+        )
+    } else {
+        let focus = Focus::parse(options.focus.as_deref());
+        let mut out = report::render(binary, size, &pe, &strings, &yara, &defender, &focus, ui);
+        if let Some(comparison) = &comparison {
+            out.push_str(&baseline::render(comparison, ui));
+        }
+        out
+    };
+
+    Ok(Outcome {
+        output,
+        regressions: comparison.map_or(0, |c| c.regressions.len()),
+    })
+}
+
+/// Loads a baseline report and compares `current` against it.
+fn load_comparison(
+    path: &Path,
+    current: &model::Report,
+    entropy_tolerance: f64,
+) -> Result<baseline::Comparison, AuditError> {
+    let label = path.display().to_string();
+    let text = std::fs::read_to_string(path).map_err(|source| AuditError::BaselineRead {
+        path: label.clone(),
+        source,
+    })?;
+    let baseline: model::Report =
+        serde_json::from_str(&text).map_err(|source| AuditError::BaselineParse {
+            path: label.clone(),
+            source,
+        })?;
+    Ok(baseline::compare(
+        &baseline,
+        current,
+        &label,
+        entropy_tolerance,
     ))
 }

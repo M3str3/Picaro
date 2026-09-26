@@ -26,6 +26,11 @@ build:
     arch: x64
     strip: true
     trim_paths: all
+    resources:
+      version_info:
+        randomize: true
+    sign:
+      mode: lab
 
 runtime:
 

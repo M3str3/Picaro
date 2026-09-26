@@ -28,10 +28,17 @@ batesian build config.yaml
     │
     ├─ 1. Parse YAML, substitute build args, validate   (src/config)
     ├─ 2. Read (file or URL) + validate payload PE      (src/engine/pe, src/engine/fetch)
+    │      + verify build.payload.sha256 when pinned
     ├─ 3. Encrypt payload              (src/engine/crypto, XChaCha20-Poly1305)
     ├─ 4. Render Rust stub             (src/engine/stub, templates/stub/main.rs.tpl)
     ├─ 5. Compile stub with rustc      (src/engine/compiler, --extern from target/)
-    └─ 6. Copy to output path
+    ├─ 5b. Embed PE resources (.rsrc)  (src/engine/resources)
+    ├─ 6. Copy to output path
+    ├─ 6b. Sign the artifact           (src/engine/signing, signtool; optional)
+    └─ 7. Write the provenance manifest (src/engine/manifest)
+
+`batesian build config.yaml --dry-run` stops after step 2 (no encryption,
+compilation or output).
 ```
 
 The stub (generated) decrypts the payload in memory and runs it via process
@@ -127,14 +134,19 @@ same doc for how it would work).
 ## Pipeline (audit)
 
 ```
-batesian audit binary [--focus sections]
+batesian audit binary [--focus sections] [--json] [--baseline report.json]
     │
     ├─ PE header + sections + entropy  (src/audit/pe_info)
     ├─ imports / exports              (src/audit/pe_info)
     ├─ strings scan                   (src/audit/strings)
     ├─ YARA (stub)                    (src/audit/yara)
     ├─ Defender offline scan          (src/audit/defender)
-    └─ report                         (src/audit/report)
+    ├─ report                         (src/audit/report)
+    └─ baseline comparison            (src/audit/baseline)
+
+`--json` emits the same data as a serializable [`audit::model::Report`];
+`--baseline` compares it against a saved report and fails (exit 3) on a
+regression. `--focus` only affects the pretty output.
 ```
 
 ## Repo layout
@@ -142,7 +154,9 @@ batesian audit binary [--focus sections]
 ```text
 src/
   config/     YAML parsing and validation
-  engine/     crypto, pe parsing, stub generation, compilation, syscall layer
+  engine/     crypto, pe parsing, stub generation, compilation, syscall layer,
+              imports, resources (icon/VERSIONINFO/manifest), identity, signing,
+              manifest, hash
   audit/      static measurement (pe_info, strings, yara, defender, report)
   techniques/ one directory per technique + the registry (mod.rs)
   error.rs    top-level error types
@@ -154,7 +168,6 @@ examples/
   payloads/   test payloads
 yara/         YARA rules (empty for now)
 docs/         measurements + this file
-code_examples/  third-party reference material
 build/        (gitignored) intermediate artifacts
 dist/         (gitignored) final packed binaries
 banner.txt    ASCII banner, compiled in by src/ui.rs
@@ -190,6 +203,18 @@ banner.txt    ASCII banner, compiled in by src/ui.rs
   `--no-color`), so piped or pasted output stays plain text.
 - **Static evasion** (phase 5) is measured with `batesian audit` so each later
   technique's impact can be quantified against a known baseline.
+
+## PE resources (`build.output.resources`)
+
+Icon, `VERSIONINFO` and the Windows application manifest are built in Rust
+(`src/engine/resources/`), not by `rc.exe`: the tree builder (`tree.rs`) emits
+the `.rsrc` directory, `icon.rs`/`version.rs`/`manifest.rs` produce the three
+payload types, and `inject.rs` appends the result as a new section to the
+already-compiled stub (resolving the section RVA so the data entries can carry
+it), patching `SizeOfImage` and the `RESOURCE` data directory. Offsets in the
+directory tree are relative to the section, while
+`IMAGE_RESOURCE_DATA_ENTRY.OffsetToData` is an image RVA — the one detail that
+has to be right for Windows to load the resources.
 
 ## Cross-compilation from Linux
 

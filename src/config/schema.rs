@@ -128,6 +128,14 @@ pub struct PayloadConfig {
 
     /// Sub-block with the cryptographic configuration.
     pub crypto: CryptoConfig,
+
+    /// Optional expected SHA-256 (hex) of the input payload.
+    ///
+    /// Pins a remote `http(s)://` source to a known build: a mismatch aborts
+    /// before anything is encrypted. Useful to stop a URL (or a tampered local
+    /// file) from silently changing what gets packed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 /// `stub` block: the stub configuration.
@@ -201,6 +209,235 @@ pub struct OutputConfig {
 
     /// Path-remapping policy for the debug info.
     pub trim_paths: TrimPaths,
+
+    /// Whether to write the build manifest next to the artifact (default: yes).
+    ///
+    /// The manifest (`<stem>.manifest.json`) records the artifact and payload
+    /// hashes, the resolved config and the toolchain, for provenance.
+    #[serde(default = "default_true")]
+    pub manifest: bool,
+
+    /// Optional PE resources embedded into the artifact (`output.resources`).
+    ///
+    /// Distinct from `manifest` above: that one is the build-provenance JSON,
+    /// this one is the executable's own resources (icon, version info and the
+    /// Windows application manifest) written into a `.rsrc` section.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ResourcesConfig>,
+
+    /// Subsystem of the packed binary: `console` (default) or `windows` (GUI).
+    ///
+    /// A `windows` build hides the console window a console process would
+    /// flash, which is what a normal GUI application looks like.
+    #[serde(default, skip_serializing_if = "Subsystem::is_console")]
+    pub subsystem: Subsystem,
+
+    /// Optional Authenticode signing (`output.sign`).
+    ///
+    /// The packer signs the artifact with `signtool`, either with a self-signed
+    /// lab certificate (`mode: lab`), one already in the user's store
+    /// (`mode: store`) or a `.pfx` (`mode: file`). A self-signed signature is
+    /// for integrity and lab verification only; it does not buy SmartScreen
+    /// reputation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sign: Option<SignConfig>,
+}
+
+/// Subsystem of the packed binary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Subsystem {
+    /// A console application (a console window is allocated).
+    #[default]
+    Console,
+    /// A GUI application (no console window).
+    Windows,
+}
+
+impl Subsystem {
+    /// Whether this is the default subsystem (used to skip it when serializing).
+    pub fn is_console(&self) -> bool {
+        matches!(self, Subsystem::Console)
+    }
+
+    /// Lowercase label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Subsystem::Console => "console",
+            Subsystem::Windows => "windows",
+        }
+    }
+}
+
+/// `output.sign`: Authenticode signing of the artifact.
+///
+/// Every field is optional except `mode`; which of the others matter depends on
+/// the mode:
+///
+/// - `none` — no signing (default).
+/// - `lab` — use (or create) an automatic CA + code-signing chain in the
+///   current user's store, matched by `subject`. When signing runs, the CA's
+///   public certificate is exported next to the artifact
+///   (`<stem>.ca.cer`) so it can be trusted on the lab machine; nothing is
+///   added to the local trust stores.
+/// - `store` — use a certificate already in the current user's store, matched by
+///   `thumbprint` or `subject`.
+/// - `file` — sign with a `.pfx`/`.p12` file; the password is read from the
+///   environment variable named by `password_env` (never from the YAML).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignConfig {
+    /// `none`, `lab`, `store` or `file`.
+    #[serde(default = "default_sign_mode")]
+    pub mode: String,
+
+    /// Certificate subject to use or create (e.g. `CN=batesian lab`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+
+    /// Certificate thumbprint, for `mode: store`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbprint: Option<String>,
+
+    /// Path to a `.pfx`/`.p12`, for `mode: file`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<PathBuf>,
+
+    /// Environment variable holding the `.pfx` password, for `mode: file`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password_env: Option<String>,
+
+    /// RFC 3161 timestamp server; without it the signature expires with the
+    /// certificate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp_url: Option<String>,
+
+    /// Explicit `signtool.exe` path, overriding PATH and the Windows SDK search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signtool: Option<PathBuf>,
+}
+
+/// Default signing mode: no signing.
+fn default_sign_mode() -> String {
+    "none".to_string()
+}
+
+/// `output.resources`: the PE resources to embed into the artifact.
+///
+/// All fields are optional; each one that is set adds the matching resource
+/// type. The resources are built programmatically (no `rc.exe`/`windres`), so
+/// the build stays pure Rust and cross-platform.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourcesConfig {
+    /// Path to a `.ico` file, embedded as `RT_GROUP_ICON` + `RT_ICON`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<PathBuf>,
+
+    /// `VERSIONINFO` strings, embedded as `RT_VERSION`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_info: Option<VersionInfoConfig>,
+
+    /// Windows application manifest (UAC/DPI), embedded as `RT_MANIFEST`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<ManifestConfig>,
+}
+
+/// `output.resources.version_info`: the strings of the `VERSIONINFO` resource.
+///
+/// Every field is optional; the ones present are emitted. Versions are
+/// `MAJOR.MINOR.PATCH.BUILD` (1 to 4 dot-separated numbers; missing parts are
+/// zero).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VersionInfoConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub company: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_filename: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub internal_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copyright: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product_version: Option<String>,
+
+    /// Fill the unset fields with plausible random values (company, product,
+    /// description, versions, copyright) instead of leaving them out.
+    ///
+    /// Explicit fields always win, so this can be combined with a fixed company
+    /// and a randomized version. When the lab certificate has no `subject`, the
+    /// generated company is used for it too, so the artifact and the signature
+    /// agree.
+    #[serde(default)]
+    pub randomize: bool,
+}
+
+/// `output.resources.manifest`: the Windows application manifest to embed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestConfig {
+    /// Requested UAC execution level (default: `as_invoker`).
+    #[serde(default)]
+    pub level: ExecutionLevel,
+
+    /// `uiAccess` attribute (default: false); needs a signed, installed app.
+    #[serde(default)]
+    pub ui_access: bool,
+
+    /// Whether to declare DPI awareness (default: true).
+    #[serde(default = "default_true")]
+    pub dpi_aware: bool,
+}
+
+impl Default for ManifestConfig {
+    fn default() -> Self {
+        Self {
+            level: ExecutionLevel::AsInvoker,
+            ui_access: false,
+            dpi_aware: true,
+        }
+    }
+}
+
+/// UAC execution level for the embedded application manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionLevel {
+    /// Run with the caller's privileges (default).
+    AsInvoker,
+    /// Elevate when the user is an administrator, without prompting.
+    HighestAvailable,
+    /// Always prompt for elevation.
+    RequireAdministrator,
+}
+
+impl Default for ExecutionLevel {
+    fn default() -> Self {
+        Self::AsInvoker
+    }
+}
+
+impl ExecutionLevel {
+    /// The XML attribute value (`asInvoker`, `highestAvailable`, ...).
+    pub fn xml_value(self) -> &'static str {
+        match self {
+            ExecutionLevel::AsInvoker => "asInvoker",
+            ExecutionLevel::HighestAvailable => "highestAvailable",
+            ExecutionLevel::RequireAdministrator => "requireAdministrator",
+        }
+    }
+}
+
+/// `serde` default for boolean fields that default to enabled.
+fn default_true() -> bool {
+    true
 }
 
 /// Target architectures.
@@ -217,11 +454,15 @@ pub enum Arch {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TrimPaths {
-    /// Remap all absolute paths.
+    /// Rewrite every absolute build path the compiler emits (the project and the
+    /// Cargo home). Best effort: source paths baked into prebuilt dependency
+    /// rlibs are outside `rustc`'s control, so `strip: true` is what removes
+    /// those.
     All,
-    /// Do not remap anything.
+    /// Leave build paths untouched.
     None,
-    /// Remap only absolute paths pointing outside the project.
+    /// Rewrite the project's own paths to relative; absolute paths outside the
+    /// project (e.g. the Cargo home) are left untouched.
     Relative,
 }
 

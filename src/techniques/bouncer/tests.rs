@@ -72,9 +72,10 @@ fn parses_every_documented_field() {
 
 #[test]
 fn a_false_vote_disables_the_check() {
-    let step: RuntimeStep =
-        serde_yml::from_str("technique: bouncer\nparams:\n  not_in_vm: false\n  not_in_sandbox: false\n")
-            .expect("bouncer should parse");
+    let step: RuntimeStep = serde_yml::from_str(
+        "technique: bouncer\nparams:\n  not_in_vm: false\n  not_in_sandbox: false\n",
+    )
+    .expect("bouncer should parse");
     let RuntimeStep::Bouncer { params } = step else {
         panic!("expected a bouncer step");
     };

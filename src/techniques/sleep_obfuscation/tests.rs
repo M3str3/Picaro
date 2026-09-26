@@ -60,10 +60,9 @@ fn rejects_unknown_encrypt_region() {
 
 #[test]
 fn parses_bare_all_region_scalar() {
-    let step: RuntimeStep = serde_yml::from_str(
-        "technique: sleep_obfuscation\nparams:\n  encrypt_regions: all\n",
-    )
-    .expect("the bare 'all' scalar should parse");
+    let step: RuntimeStep =
+        serde_yml::from_str("technique: sleep_obfuscation\nparams:\n  encrypt_regions: all\n")
+            .expect("the bare 'all' scalar should parse");
     assert_eq!(
         step,
         RuntimeStep::SleepObfuscation {
@@ -242,7 +241,13 @@ fn compiles_sleep_obfuscation_stub_to_pe() {
     let deps = crate::engine::compiler::locate_stub_deps().unwrap();
     let out = build_dir.join("out.exe");
     // `compile_stub` verifies the `MZ` header before returning.
-    crate::engine::compiler::compile_stub(&stub_path, &out, &deps).unwrap();
+    crate::engine::compiler::compile_stub(
+        &stub_path,
+        &out,
+        &deps,
+        crate::engine::compiler::CompileOptions::default(),
+    )
+    .unwrap();
 
     let _ = std::fs::remove_dir_all(&build_dir);
 }

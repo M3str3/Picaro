@@ -207,15 +207,15 @@ fn build_with_custom_stub_produces_pe() {
     assert_eq!(&bytes[..2], b"MZ", "output must be a PE");
 }
 
-/// `build interactive` reads its answers from stdin. Declining the final
-/// confirmation must write nothing and exit cleanly — no `rustc` needed, so the
-/// test runs in the fast suite.
+/// `build interactive` reads its answers from stdin. Choosing `quit` at the
+/// review screen must write nothing and exit cleanly — no `rustc` needed, so
+/// the test runs in the fast suite.
 #[test]
-fn build_interactive_declines_without_writing() {
+fn build_interactive_quit_writes_nothing() {
     use std::io::Write;
     use std::process::Stdio;
 
-    let config_out = std::env::temp_dir().join("batesian_wizard_cli_decline.yaml");
+    let config_out = std::env::temp_dir().join("batesian_wizard_cli_quit.yaml");
     let _ = std::fs::remove_file(&config_out);
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_batesian"))
@@ -228,11 +228,11 @@ fn build_interactive_declines_without_writing() {
         .spawn()
         .expect("spawn batesian build interactive");
 
-    // Nine blank answers walk the menus with their defaults; the tenth declines
-    // the write, so the wizard stops before compiling anything.
+    // Nine blank answers walk the first pass with their defaults; `3` quits the
+    // review screen, so the wizard stops before writing (or compiling) anything.
     let mut stdin = child.stdin.take().expect("stdin is piped");
     stdin.write_all(&b"\n".repeat(9)).expect("write answers");
-    stdin.write_all(b"n\n").expect("write the decline");
+    stdin.write_all(b"3\n").expect("write the quit choice");
     drop(stdin);
 
     let output = child.wait_with_output().expect("wait for batesian");
@@ -241,10 +241,7 @@ fn build_interactive_declines_without_writing() {
         "wizard failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        !config_out.exists(),
-        "the declined config must not be written"
-    );
+    assert!(!config_out.exists(), "the quit config must not be written");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("build interactive"),
@@ -389,4 +386,317 @@ fn payload_override_mode_prefers_runtime_args() {
 
     let argv = run_packed(&exe, &[]);
     assert_eq!(&argv[1..], &["yaml-a", "yaml-b"]);
+}
+
+// --- audit --json / --baseline ---
+
+/// A checked-in x64 PE used by the hermetic audit tests.
+const AUDIT_FIXTURE: &str = "tests/fixtures/minimal_x64.exe";
+
+/// Runs `batesian` with `args` and returns the output.
+fn batesian(args: &[&std::ffi::OsStr]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_batesian"))
+        .args(args)
+        .output()
+        .expect("run batesian")
+}
+
+/// `audit --json` emits a JSON report whose top level is the report itself.
+#[test]
+fn audit_json_emits_a_machine_readable_report() {
+    let out = batesian(&[
+        "--quiet".as_ref(),
+        "audit".as_ref(),
+        AUDIT_FIXTURE.as_ref(),
+        "--json".as_ref(),
+    ]);
+    assert!(
+        out.status.success(),
+        "audit --json failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout must be valid JSON");
+    assert_eq!(report["report_schema"], 1, "report: {report}");
+    assert!(
+        report["sections"].as_array().is_some_and(|s| !s.is_empty()),
+        "the report must list sections"
+    );
+    assert!(
+        report.get("baseline").is_none(),
+        "no baseline was given, so none must be emitted"
+    );
+}
+
+/// `audit` writes its JSON to a file and compares a later run against it: the
+/// same binary is clean, a forced entropy jump exits 3.
+#[test]
+fn audit_baseline_gates_a_regression() {
+    let json = batesian(&[
+        "--quiet".as_ref(),
+        "audit".as_ref(),
+        AUDIT_FIXTURE.as_ref(),
+        "--json".as_ref(),
+    ]);
+    assert!(json.status.success());
+
+    let baseline = std::env::temp_dir().join("batesian_cli_baseline.json");
+    std::fs::write(&baseline, &json.stdout).expect("write the baseline");
+
+    // The same binary must not regress against its own report.
+    let clean = batesian(&[
+        "--quiet".as_ref(),
+        "audit".as_ref(),
+        AUDIT_FIXTURE.as_ref(),
+        "--baseline".as_ref(),
+        baseline.as_os_str(),
+    ]);
+    assert!(
+        clean.status.success(),
+        "a self-baseline must pass: {}",
+        String::from_utf8_lossy(&clean.stdout)
+    );
+    assert!(String::from_utf8_lossy(&clean.stdout).contains("no regressions"));
+
+    // Fake an entropy regression in the baseline, then it must fail with exit 3.
+    let mut report: serde_json::Value = serde_json::from_slice(&json.stdout).expect("valid JSON");
+    report["sections"][0]["entropy"] = serde_json::json!(0.0);
+    std::fs::write(&baseline, serde_json::to_vec(&report).unwrap()).expect("rewrite baseline");
+
+    let regressed = batesian(&[
+        "--quiet".as_ref(),
+        "audit".as_ref(),
+        AUDIT_FIXTURE.as_ref(),
+        "--baseline".as_ref(),
+        baseline.as_os_str(),
+    ]);
+    assert_eq!(
+        regressed.status.code(),
+        Some(3),
+        "a regression must exit 3: {}",
+        String::from_utf8_lossy(&regressed.stdout)
+    );
+    assert!(String::from_utf8_lossy(&regressed.stdout).contains("regression"));
+}
+
+// --- build --dry-run / build.payload.sha256 ---
+
+/// A minimal build config (reflective loading, builtin stub) for `out`.
+fn minimal_build_config(out: &Path, sha256: Option<&str>) -> String {
+    let sha_line = match sha256 {
+        Some(hash) => format!("    sha256: \"{hash}\"\n"),
+        None => String::new(),
+    };
+    let out = out.display().to_string().replace('\\', "/");
+    format!(
+        r#"schema: 4
+name: cli-dry-run
+build:
+  payload:
+    source: examples/payloads/test_payload.exe
+{sha_line}    crypto:
+      algo: xchacha20poly1305
+      key: random
+  output:
+    path: "{out}"
+    arch: x64
+    strip: true
+    trim_paths: all
+runtime:
+  - technique: reflective_loading
+"#
+    )
+}
+
+fn write_temp_config(name: &str, body: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(name);
+    std::fs::write(&path, body).expect("write the temp config");
+    path
+}
+
+/// `build --dry-run` validates the config and payload but writes nothing — and
+/// therefore needs no `rustc`, so it runs in the fast suite.
+#[test]
+fn build_dry_run_validates_without_writing() {
+    let out = std::env::temp_dir().join("batesian_dry_run_out.exe");
+    let manifest = std::env::temp_dir().join("batesian_dry_run_out.manifest.json");
+    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_file(&manifest);
+
+    let config = write_temp_config("batesian_dry_run.yaml", &minimal_build_config(&out, None));
+    let output = batesian(&[
+        "--quiet".as_ref(),
+        "build".as_ref(),
+        config.as_os_str(),
+        "--dry-run".as_ref(),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "dry run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("dry run"));
+    assert!(!out.exists(), "a dry run must not write the artifact");
+    assert!(!manifest.exists(), "a dry run must not write a manifest");
+}
+
+/// A `build.payload.sha256` that does not match the payload aborts the build
+/// with a clear message, before anything is compiled.
+#[test]
+fn build_rejects_a_payload_sha256_mismatch() {
+    let out = std::env::temp_dir().join("batesian_sha_out.exe");
+    let wrong = "0".repeat(64);
+    let config = write_temp_config(
+        "batesian_sha_mismatch.yaml",
+        &minimal_build_config(&out, Some(&wrong)),
+    );
+
+    let output = batesian(&["--quiet".as_ref(), "build".as_ref(), config.as_os_str()]);
+    assert!(!output.status.success(), "a mismatch must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("sha256 mismatch"),
+        "unclear error: {stderr}"
+    );
+    assert!(!out.exists(), "nothing must be written on a mismatch");
+}
+
+// --- output.resources (icon / version info / manifest) ---
+
+/// `build --dry-run` validates the resources (icon parsing, version strings and
+/// manifest) without compiling, so it runs in the fast suite.
+#[test]
+fn build_dry_run_validates_resources() {
+    let output = batesian(&[
+        "--quiet".as_ref(),
+        "build".as_ref(),
+        "examples/configs/test-resources.yaml".as_ref(),
+        "--dry-run".as_ref(),
+    ]);
+    assert!(
+        output.status.success(),
+        "resource dry run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("icon"), "resources not shown: {stdout}");
+    assert!(
+        stdout.contains("resources"),
+        "resources not shown: {stdout}"
+    );
+}
+
+/// End-to-end: a config with icon + version info + manifest embeds a `.rsrc`
+/// section, which `audit --json` reports. Marked `#[ignore]` (compiles a stub).
+#[test]
+#[ignore = "requires rustc and the compiled dependencies"]
+fn build_with_resources_embeds_a_resource_section() {
+    let _guard = BUILD_LOCK.lock().unwrap();
+    let build = batesian(&[
+        "build".as_ref(),
+        "examples/configs/test-resources.yaml".as_ref(),
+    ]);
+    assert!(
+        build.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let audit = batesian(&[
+        "--quiet".as_ref(),
+        "audit".as_ref(),
+        "dist/test_resources.exe".as_ref(),
+        "--json".as_ref(),
+    ]);
+    assert!(audit.status.success(), "audit failed");
+    let report: serde_json::Value = serde_json::from_slice(&audit.stdout).expect("valid JSON");
+    assert_eq!(
+        report["has_manifest"], true,
+        "no manifest resource: {report}"
+    );
+    assert_eq!(
+        report["has_manifest"], true,
+        "no manifest resource: {report}"
+    );
+    assert!(
+        report["sections"]
+            .as_array()
+            .is_some_and(|s| s.iter().any(|s| s["name"] == ".rsrc")),
+        "no .rsrc section: {report}"
+    );
+}
+
+// --- output.sign / output.subsystem ---
+
+/// A `sign.file` that does not exist is caught by `--dry-run` (no `signtool`
+/// needed for this path, so the test is hermetic).
+#[test]
+fn build_dry_run_rejects_a_missing_signing_file() {
+    let out = std::env::temp_dir().join("batesian_sign_out.exe");
+    let yaml = minimal_build_config(&out, None).replace(
+        "    trim_paths: all\n",
+        "    trim_paths: all\n    sign:\n      mode: file\n      file: ./does-not-exist.pfx\n",
+    );
+    let config = write_temp_config("batesian_sign_missing.yaml", &yaml);
+
+    let output = batesian(&[
+        "--quiet".as_ref(),
+        "build".as_ref(),
+        config.as_os_str(),
+        "--dry-run".as_ref(),
+    ]);
+    assert!(!output.status.success(), "a missing .pfx must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("does not exist"), "unclear error: {stderr}");
+}
+
+/// An unknown `sign.mode` is rejected before anything runs.
+#[test]
+fn build_rejects_an_unknown_signing_mode() {
+    let out = std::env::temp_dir().join("batesian_sign_mode_out.exe");
+    let yaml = minimal_build_config(&out, None).replace(
+        "    trim_paths: all\n",
+        "    trim_paths: all\n    sign:\n      mode: bogus\n",
+    );
+    let config = write_temp_config("batesian_sign_mode.yaml", &yaml);
+
+    let output = batesian(&[
+        "--quiet".as_ref(),
+        "build".as_ref(),
+        config.as_os_str(),
+        "--dry-run".as_ref(),
+    ]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("output.sign.mode"),
+        "unclear error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `version_info.randomize` is resolved during `--dry-run` (no `rustc` or
+/// `signtool` needed), so the generated metadata is exercised hermetically.
+#[test]
+fn build_dry_run_resolves_randomized_metadata() {
+    let out = std::env::temp_dir().join("batesian_random_out.exe");
+    let yaml = minimal_build_config(&out, None).replace(
+        "    trim_paths: all\n",
+        "    trim_paths: all\n    resources:\n      version_info:\n        randomize: true\n",
+    );
+    let config = write_temp_config("batesian_random.yaml", &yaml);
+
+    let output = batesian(&[
+        "--quiet".as_ref(),
+        "build".as_ref(),
+        config.as_os_str(),
+        "--dry-run".as_ref(),
+    ]);
+    assert!(
+        output.status.success(),
+        "randomized dry run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("resources"));
 }

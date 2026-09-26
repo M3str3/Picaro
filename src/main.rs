@@ -22,7 +22,7 @@ use std::time::Instant;
 
 use clap::{CommandFactory, Parser, Subcommand};
 
-use config::schema::{Arch, CryptoAlgorithm, KeySource, PayloadConfig, TrimPaths};
+use config::schema::{Arch, CryptoAlgorithm, KeySource, PayloadConfig, Subsystem, TrimPaths};
 use engine::{compiler, crypto, obfuscation, pe, stub, syscalls};
 use error::Result;
 use techniques::RuntimeStep;
@@ -32,14 +32,20 @@ use ui::{format_elapsed, glyph, human_size, Palette};
 const AFTER_HELP: &str = "\
 Examples:
   batesian build examples/configs/mimikatz.yaml
+  batesian build examples/configs/mimikatz.yaml --dry-run
   batesian build interactive mimikatz.exe
   batesian audit dist/test_amsi_patch.exe --focus imports,strings
+  batesian audit dist/out.exe --json > baseline.json
+  batesian audit dist/out.exe --baseline baseline.json
   batesian techniques list
 
 Colors are disabled automatically when the output is not a terminal; set
 NO_COLOR=1 (or pass --no-color) to disable them explicitly. Pass -q (or
 --quiet) to skip the banner, and -v (or --verbose) to print per-step build
-detail (paths, sizes, timings).";
+detail (paths, sizes, timings).
+
+audit --baseline exits 3 when it finds a regression, so it can gate a CI
+job; every other failure exits 1.";
 
 /// `batesian` CLI.
 #[derive(Debug, Parser)]
@@ -78,6 +84,10 @@ enum Commands {
         /// Positional arguments referenced by the YAML as `$arg.N$`.
         #[arg(value_name = "ARG")]
         args: Vec<String>,
+
+        /// Resolve and validate the build without compiling or writing anything.
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Run a static audit of a PE and print a readable report.
@@ -89,6 +99,19 @@ enum Commands {
         /// Comma-separated sections to report (e.g. "imports,strings").
         #[arg(long)]
         focus: Option<String>,
+
+        /// Emit the machine-readable report (JSON) instead of the pretty one.
+        #[arg(long)]
+        json: bool,
+
+        /// Compare against a previous `--json` report and fail on regressions.
+        #[arg(long, value_name = "FILE")]
+        baseline: Option<PathBuf>,
+
+        /// Entropy increase (bits/byte) tolerated before it counts as a
+        /// regression (only used with --baseline).
+        #[arg(long, value_name = "F", default_value_t = audit::DEFAULT_ENTROPY_TOLERANCE)]
+        entropy_tolerance: f64,
     },
 
     /// Inspect the technique registry.
@@ -132,11 +155,29 @@ enum TechniquesCommand {
 
 fn main() {
     // `run` returns `Result`; here we turn it into an exit code and a clean
-    // error message, with no `unwrap`/`panic` traces.
+    // error message, with no `unwrap`/`panic` traces. A cancelled interactive
+    // prompt is not a failure (exit 0); a baseline regression is a distinct,
+    // non-zero code (3) so CI can tell it apart from a broken run (1).
     if let Err(err) = run() {
         let ui = Palette::auto();
-        anstream::eprintln!("{} {}", ui.cross(), ui.error(format!("error: {err}")));
-        std::process::exit(1);
+        match err {
+            error::PackerError::Cancelled => {
+                anstream::eprintln!("  {}", ui.dim("cancelled"));
+                std::process::exit(0);
+            }
+            error::PackerError::AuditRegression { count } => {
+                anstream::eprintln!(
+                    "{} {}",
+                    ui.bang(),
+                    ui.error(format!("baseline regression: {count} change(s)"))
+                );
+                std::process::exit(3);
+            }
+            _ => {
+                anstream::eprintln!("{} {}", ui.cross(), ui.error(format!("error: {err}")));
+                std::process::exit(1);
+            }
+        }
     }
 }
 
@@ -164,6 +205,7 @@ fn run() -> Result<()> {
             action,
             config,
             args,
+            dry_run: is_dry_run,
         } => match action {
             Some(BuildAction::Interactive {
                 payload,
@@ -179,7 +221,11 @@ fn run() -> Result<()> {
                 if let Some(path) = wizard::run(&payload, config_out.as_deref(), &ui)? {
                     let build_args = BTreeMap::new();
                     let config = config::load_config(&path, &build_args)?;
-                    build(&config, &build_args, &path, &ui, cli.verbose)?;
+                    if is_dry_run {
+                        dry_run(&config, &path, &ui)?;
+                    } else {
+                        build(&config, &build_args, &path, &ui, cli.verbose)?;
+                    }
                 }
             }
             None => {
@@ -193,12 +239,33 @@ fn run() -> Result<()> {
                 let config_path = config.clone();
                 let build_args = config::build_args::parse(&args);
                 let config = config::load_config(&config, &build_args)?;
-                build(&config, &build_args, &config_path, &ui, cli.verbose)?;
+                if is_dry_run {
+                    dry_run(&config, &config_path, &ui)?;
+                } else {
+                    build(&config, &build_args, &config_path, &ui, cli.verbose)?;
+                }
             }
         },
-        Commands::Audit { binary, focus } => {
-            let report = audit::run(&binary, focus.as_deref(), &ui)?;
-            anstream::print!("{report}");
+        Commands::Audit {
+            binary,
+            focus,
+            json,
+            baseline,
+            entropy_tolerance,
+        } => {
+            let options = audit::AuditOptions {
+                focus,
+                json,
+                baseline,
+                entropy_tolerance,
+            };
+            let outcome = audit::run(&binary, &options, &ui)?;
+            anstream::print!("{}", outcome.output);
+            if outcome.regressions > 0 {
+                return Err(error::PackerError::AuditRegression {
+                    count: outcome.regressions,
+                });
+            }
         }
         Commands::Techniques { command } => match command {
             TechniquesCommand::List => {
@@ -276,6 +343,7 @@ fn build(
     // 1. Read the input payload and validate that it is an x64 PE (fail early).
     let timer = Instant::now();
     let plaintext = load_source(&config.build.payload.source)?;
+    verify_payload_hash(&plaintext, config.build.payload.sha256.as_deref())?;
     let pe_info = pe::parse(&plaintext)?;
     if !pe::is_x64(pe_info.machine) {
         return Err(error::PackerError::Validation(format!(
@@ -302,6 +370,10 @@ fn build(
         anstream::println!(
             "{}",
             ui.detail("machine", ui.dim(format!("0x{:04x}", pe_info.machine)))
+        );
+        anstream::println!(
+            "{}",
+            ui.detail("sha256", ui.dim(engine::hash::sha256_hex(&plaintext)))
         );
         anstream::println!("{}", ui.detail("time", ui.dim(format_elapsed(read_time))));
     }
@@ -434,6 +506,7 @@ fn build(
     } else {
         stub::render_main_rs(&template, &params, &config.runtime, &strings, &syscalls)?
     };
+    let stub_src = apply_subsystem(stub_src, config.build.output.subsystem);
     let stub_path = build_dir.join("main.rs");
     std::fs::write(&stub_path, &stub_src)?;
     let stub_time = timer.elapsed();
@@ -484,7 +557,15 @@ fn build(
     let timer = Instant::now();
     let deps = compiler::locate_stub_deps()?;
     let out = build_dir.join("out.exe");
-    compiler::compile_stub(&stub_path, &out, &deps)?;
+    let options = compiler::CompileOptions {
+        strip: config.build.output.strip,
+        trim_paths: match config.build.output.trim_paths {
+            TrimPaths::None => compiler::PathTrim::None,
+            TrimPaths::Relative => compiler::PathTrim::Relative,
+            TrimPaths::All => compiler::PathTrim::All,
+        },
+    };
+    compiler::compile_stub(&stub_path, &out, &deps, options)?;
     let compile_time = timer.elapsed();
 
     anstream::println!(
@@ -512,6 +593,27 @@ fn build(
         );
     }
 
+    // 6b. Embed PE resources into the compiled stub (icon, VERSIONINFO and the
+    //     application manifest), written into a new `.rsrc` section. Nothing is
+    //     injected when `output.resources` is absent.
+    let resources = resolve_resources(config);
+    if let Some(resources) = &resources {
+        let pe = std::fs::read(&out)?;
+        let injected = engine::resources::embed(&pe, resources)?;
+        if injected.len() != pe.len() {
+            std::fs::write(&out, &injected)?;
+            if verbose {
+                anstream::println!(
+                    "{}",
+                    ui.detail(
+                        "resources",
+                        ui.dim(format!("+{} bytes (.rsrc)", injected.len() - pe.len()))
+                    )
+                );
+            }
+        }
+    }
+
     // 7. Copy `out.exe` to the output path from the YAML.
     if let Some(parent) = config.build.output.path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -520,6 +622,49 @@ fn build(
     }
     std::fs::copy(&out, &config.build.output.path)?;
     let out_size = std::fs::metadata(&config.build.output.path)?.len() as usize;
+
+    // 7b. Sign the artifact (Authenticode), if configured. Signing must be the
+    //     last modification, so the manifest below hashes the signed file.
+    let sign_config = resolve_sign(config, resources.as_ref());
+    let signature = engine::signing::sign(&config.build.output.path, sign_config.as_ref())?;
+    if let Some(sig) = &signature {
+        let mut parts = vec![ui.brand(sig.mode.clone())];
+        if let Some(thumbprint) = &sig.thumbprint {
+            parts.push(ui.dim(short_thumbprint(thumbprint)));
+        }
+        if sig.timestamp_url.is_some() {
+            parts.push(ui.dim("timestamped"));
+        }
+        anstream::println!("{}", ui.done("sign", dotted(ui, &parts)));
+        if verbose {
+            if let Some(ca_file) = &sig.ca_file {
+                anstream::println!("{}", ui.detail("certificate", ui.dim(ca_file.clone())));
+            }
+        }
+    }
+
+    // 7c. Provenance: a manifest next to the artifact (artifact and payload
+    //     hashes, resolved config, toolchain). The payload key is never written.
+    if config.build.output.manifest {
+        let manifest_path = engine::manifest::manifest_path(&config.build.output.path);
+        let mut manifest = engine::manifest::BuildManifest::new(
+            config,
+            config_path,
+            &config.build.output.path,
+            &plaintext,
+            encrypted.nonce,
+        )?;
+        manifest.signature = signature;
+        manifest.version_info = resources.as_ref().and_then(|r| r.version_info.clone());
+        manifest.write(&manifest_path)?;
+        if verbose {
+            anstream::println!(
+                "{}",
+                ui.detail("manifest", ui.dim(manifest_path.display().to_string()))
+            );
+        }
+    }
+
     let total = started.elapsed();
 
     // 8. The result, standing apart from the per-step lines.
@@ -558,6 +703,97 @@ fn build(
         }
     }
 
+    Ok(())
+}
+
+/// Resolves and validates a build without encrypting, compiling or writing.
+///
+/// `build --dry-run` is a pre-flight check: it loads the payload (fetching a URL
+/// as a real build would), verifies `build.payload.sha256` when pinned,
+/// validates the PE and prints the resolved config. Nothing is written, so it is
+/// safe to run against a config before committing it.
+fn dry_run(config: &config::Config, config_path: &Path, ui: &Palette) -> Result<()> {
+    anstream::println!("{}", ui.command_line("build", config_path.display()));
+    anstream::println!();
+    print_config(config, config_path, ui);
+
+    let payload = load_source(&config.build.payload.source)?;
+    verify_payload_hash(&payload, config.build.payload.sha256.as_deref())?;
+    let pe_info = pe::parse(&payload)?;
+    if !pe::is_x64(pe_info.machine) {
+        return Err(error::PackerError::Validation(format!(
+            "input payload is not an x64 PE (machine 0x{:04x})",
+            pe_info.machine
+        )));
+    }
+
+    let mut parts = vec![
+        ui.target(describe_source(&config.build.payload.source)),
+        ui.dim("x64 PE"),
+        human_size(payload.len()),
+    ];
+    if config.build.output.subsystem == Subsystem::Windows {
+        parts.push(ui.dim("windows subsystem"));
+    }
+    if config.build.payload.sha256.is_some() {
+        parts.push(ui.ok("sha256 verified"));
+    }
+    // Resource building is cheap and validates the icon/versions, so a dry run
+    // can check it without touching the compiled stub.
+    let resources = resolve_resources(config);
+    if let Some(resources) = &resources {
+        let blob = engine::resources::build(resources, 0)?;
+        if !blob.is_empty() {
+            parts.push(ui.ok(format!("{} B resources", blob.len())));
+        }
+    }
+    anstream::println!("{}", ui.done("payload", dotted(ui, &parts)));
+
+    // Signing is validated without signing: locate `signtool` and check the
+    // configured .pfx exists (the certificate itself is resolved at build time).
+    let sign = resolve_sign(config, resources.as_ref());
+    if let Some(sign) = &sign {
+        if sign.mode != "none" {
+            let tool = engine::signing::signtool_path(sign)?;
+            if let Some(file) = &sign.file {
+                if !file.is_file() {
+                    return Err(error::PackerError::Validation(format!(
+                        "output.sign.file '{}' does not exist",
+                        file.display()
+                    )));
+                }
+            }
+            anstream::println!("{}", ui.detail("sign", ui.dim(sign_label(sign))));
+            anstream::println!(
+                "{}",
+                ui.detail("signtool", ui.dim(tool.display().to_string()))
+            );
+        }
+    }
+
+    anstream::println!();
+    anstream::println!(
+        "{}",
+        ui.warn("dry run: nothing was encrypted, compiled or written")
+    );
+    Ok(())
+}
+
+/// Fails when the payload does not match `build.payload.sha256`.
+///
+/// The comparison is case-insensitive hex; the format is already validated in
+/// `config::validate`, so a mismatch here means the payload changed.
+fn verify_payload_hash(payload: &[u8], expected: Option<&str>) -> Result<()> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let expected = expected.trim();
+    let actual = engine::hash::sha256_hex(payload);
+    if !actual.eq_ignore_ascii_case(expected) {
+        return Err(error::PackerError::Validation(format!(
+            "payload sha256 mismatch: config expects {expected}, payload is {actual}"
+        )));
+    }
     Ok(())
 }
 
@@ -600,7 +836,33 @@ fn print_config(config: &config::Config, config_path: &Path, ui: &Palette) {
         "{}",
         ui.field("trim paths", trim_label(config.build.output.trim_paths))
     );
+    anstream::println!(
+        "{}",
+        ui.field("subsystem", config.build.output.subsystem.label())
+    );
     anstream::println!("{}", ui.field("stub", stub_label(config)));
+    if let Some(resources) = &config.build.output.resources {
+        anstream::println!("{}", ui.field("resources", resources_label(resources)));
+    }
+    if let Some(sign) = &config.build.output.sign {
+        // A lab certificate without a subject takes its name from the generated
+        // metadata, so the echo says where the name comes from.
+        let derived = sign.mode == "lab"
+            && sign.subject.is_none()
+            && config
+                .build
+                .output
+                .resources
+                .as_ref()
+                .and_then(|resources| resources.version_info.as_ref())
+                .is_some_and(|info| info.randomize);
+        let label = if derived {
+            "lab (subject derived from metadata)".to_string()
+        } else {
+            sign_label(sign)
+        };
+        anstream::println!("{}", ui.field("sign", label));
+    }
     anstream::println!(
         "{}",
         ui.field("runtime", pipeline_chain(ui, &config.runtime))
@@ -666,6 +928,104 @@ fn stub_mode_label(config: &config::Config) -> &'static str {
             _ => "none",
         })
         .unwrap_or("none")
+}
+
+/// Prepends `#![windows_subsystem = "windows"]` for a GUI build.
+///
+/// Runs on the rendered source (builtin or custom) so `rustc` links a GUI
+/// binary. A source that already sets `windows_subsystem` is left untouched.
+fn apply_subsystem(source: String, subsystem: Subsystem) -> String {
+    if subsystem == Subsystem::Windows && !source.contains("windows_subsystem") {
+        let mut out = String::with_capacity(source.len() + 40);
+        out.push_str("#![windows_subsystem = \"windows\"]\n");
+        out.push_str(&source);
+        out
+    } else {
+        source
+    }
+}
+
+/// First 16 hex digits of a thumbprint, for a compact step line.
+fn short_thumbprint(thumbprint: &str) -> String {
+    thumbprint.chars().take(16).collect()
+}
+
+/// Human summary of `output.sign`.
+fn sign_label(sign: &config::schema::SignConfig) -> String {
+    match sign.mode.as_str() {
+        "lab" => format!(
+            "lab ({})",
+            sign.subject.as_deref().unwrap_or("default subject")
+        ),
+        "store" => format!(
+            "store ({})",
+            sign.thumbprint
+                .as_deref()
+                .or(sign.subject.as_deref())
+                .unwrap_or("?")
+        ),
+        "file" => format!(
+            "file ({})",
+            sign.file
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        ),
+        other => other.to_string(),
+    }
+}
+
+/// Human summary of the configured PE resources (`output.resources`).
+fn resources_label(resources: &config::schema::ResourcesConfig) -> String {
+    let mut parts = Vec::new();
+    if let Some(icon) = &resources.icon {
+        parts.push(format!("icon {}", icon.display()));
+    }
+    if resources.version_info.is_some() {
+        parts.push("version info".to_string());
+    }
+    if let Some(manifest) = &resources.manifest {
+        parts.push(format!("manifest ({})", manifest.level.xml_value()));
+    }
+    if parts.is_empty() {
+        "(none)".to_string()
+    } else {
+        parts.join(", ")
+    }
+}
+
+/// Resolves `output.resources`, applying random metadata when requested.
+///
+/// `version_info.randomize` fills the unset fields with generated values, so the
+/// artifact carries plausible company/product/version metadata instead of empty
+/// strings. The generated company is later reused as the lab certificate
+/// subject (see [`resolve_sign`]).
+fn resolve_resources(config: &config::Config) -> Option<config::schema::ResourcesConfig> {
+    let resources = config.build.output.resources.as_ref()?;
+    let mut resolved = resources.clone();
+    if let Some(info) = &resolved.version_info {
+        resolved.version_info = Some(engine::identity::apply(info));
+    }
+    Some(resolved)
+}
+
+/// Resolves `output.sign`, deriving the lab certificate subject from the
+/// generated company when one is available and no subject was configured.
+fn resolve_sign(
+    config: &config::Config,
+    resources: Option<&config::schema::ResourcesConfig>,
+) -> Option<config::schema::SignConfig> {
+    let sign = config.build.output.sign.as_ref()?;
+    let mut resolved = sign.clone();
+    if resolved.mode == "lab" && resolved.subject.is_none() {
+        if let Some(company) = resources
+            .and_then(|r| r.version_info.as_ref())
+            .and_then(|info| info.company.clone())
+        {
+            resolved.subject = Some(format!("CN={company}"));
+        }
+    }
+    Some(resolved)
 }
 
 /// The configured `build.payload.source`, or a placeholder when empty.
@@ -741,4 +1101,35 @@ fn prepare_build_dir(dir: &Path) -> Result<()> {
     }
     std::fs::create_dir_all(dir)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn console_subsystem_leaves_the_source_untouched() {
+        let source = "fn main() {}\n".to_string();
+        assert_eq!(apply_subsystem(source.clone(), Subsystem::Console), source);
+    }
+
+    #[test]
+    fn windows_subsystem_prepends_the_attribute() {
+        let source = "fn main() {}\n".to_string();
+        let out = apply_subsystem(source, Subsystem::Windows);
+        assert!(out.starts_with("#![windows_subsystem = \"windows\"]\n"));
+        assert!(out.ends_with("fn main() {}\n"));
+    }
+
+    #[test]
+    fn an_existing_subsystem_attribute_is_not_duplicated() {
+        let source = "#![windows_subsystem = \"console\"]\nfn main() {}\n".to_string();
+        let out = apply_subsystem(source.clone(), Subsystem::Windows);
+        assert_eq!(out, source, "a stub that sets its own subsystem wins");
+    }
+
+    #[test]
+    fn short_thumbprint_keeps_the_first_16_digits() {
+        assert_eq!(short_thumbprint("DEADBEEF00112233AABB"), "DEADBEEF00112233");
+    }
 }

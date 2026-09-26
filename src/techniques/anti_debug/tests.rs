@@ -36,10 +36,9 @@ fn parses_explicit_continue() {
 
 #[test]
 fn rejects_an_unknown_action() {
-    let err = serde_yml::from_str::<RuntimeStep>(
-        "technique: anti_debug\nparams:\n  action: nope\n",
-    )
-    .expect_err("an unknown action must be rejected");
+    let err =
+        serde_yml::from_str::<RuntimeStep>("technique: anti_debug\nparams:\n  action: nope\n")
+            .expect_err("an unknown action must be rejected");
     assert!(
         err.to_string().contains("unknown variant") && err.to_string().contains("abort"),
         "unclear error: {err}"

@@ -1,0 +1,31 @@
+schema: 4
+name: test-resources
+
+build:
+  payload:
+    source: ./examples/payloads/test_payload.exe
+    crypto:
+      algo: xchacha20poly1305
+      key: random
+  output:
+    path: ./dist/test_resources.exe
+    arch: x64
+    strip: true
+    trim_paths: all
+    resources:
+      icon: ./examples/assets/sample.ico
+      version_info:
+        company: "Contoso Ltd"
+        product: "Widget"
+        description: "Widget Helper"
+        original_filename: "widget.exe"
+        internal_name: "widget"
+        copyright: "Copyright (C) 2026 Contoso"
+        file_version: "2.5.1.0"
+        product_version: "2.5.0.0"
+      manifest:
+        level: as_invoker
+        dpi_aware: true
+
+runtime:
+  - technique: reflective_loading

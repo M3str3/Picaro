@@ -267,7 +267,11 @@ impl Palette {
     /// the choices stand out from the question printed above them.
     pub fn menu(self, index: usize, name: &str, description: &str) -> String {
         if description.is_empty() {
-            format!("      {} {}", self.dim(format!("{index}.")), self.bold(name))
+            format!(
+                "      {} {}",
+                self.dim(format!("{index}.")),
+                self.bold(name)
+            )
         } else {
             format!(
                 "      {} {}  {}",
@@ -600,7 +604,10 @@ mod tests {
     #[test]
     fn menu_numbers_name_and_description() {
         let ui = Palette::plain();
-        assert_eq!(ui.menu(2, "stack", "decoder-free"), "      2. stack  decoder-free");
+        assert_eq!(
+            ui.menu(2, "stack", "decoder-free"),
+            "      2. stack  decoder-free"
+        );
         assert_eq!(ui.menu(1, "xor", ""), "      1. xor");
     }
 }

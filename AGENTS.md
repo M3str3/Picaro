@@ -48,7 +48,8 @@ Any other use is out of scope and not supported.
 ```text
 src/
   config/       YAML parsing and validation
-  engine/       crypto, stub generation, compilation, syscall layer
+  engine/       crypto, stub generation, compilation, syscall layer,
+                resources, manifest, hash
   audit/        static measurement (pe_info, strings, yara, defender, report)
   techniques/   one directory per technique + the registry (mod.rs)
   error.rs      top-level error types
@@ -58,7 +59,6 @@ templates/
 examples/
   configs/      example YAMLs
   payloads/     test payloads for end-to-end verification
-code_examples/  reference material (see below)
 build/          (gitignored) intermediate artifacts
 dist/           (gitignored) final packed binaries
 banner.txt      ASCII banner, compiled in by src/ui.rs
@@ -222,14 +222,58 @@ writes it, then hands the file to the normal build, so the written YAML is the
 source of truth and `batesian build <file>` reproduces the artifact.
 `--config-out` sets the path (default `dist/<name>.yaml`). `build` gained an
 optional `interactive` subcommand (`subcommand_precedence_over_arg`), so `CONFIG`
-is now optional and validated in `run`. A technique the wizard has no prompts for
-falls back to parsing its `params_example`, so a newly registered technique still
-works before its questions exist. Prompts are `Prompter<R: BufRead, W: Write>`,
-which keeps the whole session testable; output uses `ui::Palette`
-(`question`/`menu`/`glyph::ASK` were added) and `techniques::summary` is now
-public so the wizard and `techniques list` share wording. Not prompted yet:
-`strings.key`, `build.stub.path`, `args_mode: override`, non-default
+is now optional and validated in `run`. Prompts are a `Prompt` trait with two
+backends: `InquirePrompt` (arrow-key menus, checkbox multi-select, confirmations;
+the `inquire` crate) when stdin/stdout is a terminal, and `LinePrompt` (plain
+line reader) otherwise — so the session is scriptable in tests. A final **review**
+screen (`build now` / `edit answers` / `quit`) re-asks the questions with the
+previous answers as defaults; `Esc` cancels via a new `PackerError::Cancelled`
+(exit 0). A technique the wizard has no prompts for falls back to parsing its
+`params_example`. `ui.rs` gained `question`/`menu`/`glyph::ASK`; `techniques::summary`
+is now public so the wizard and `techniques list` share wording. **Compiler fix:**
+`windows_crate_version` resolves the import-lib version through
+`windows` → `windows-targets` → the per-arch crate, because a second
+`windows-targets` (e.g. `windows-sys 0.48` via `inquire`'s `crossterm`/`mio`)
+made the old "first match" pick the wrong `windows_x86_64_msvc`. Not prompted
+yet: `strings.key`, `build.stub.path`, `args_mode: override`, non-default
 `sleep_obfuscation` regions.
+
+**PE resources (done).** `build.output.resources` embeds an icon (`RT_GROUP_ICON`
++ `RT_ICON`), `VERSIONINFO` (`RT_VERSION`) and the Windows application manifest
+(`RT_MANIFEST`, UAC/DPI) into the artifact. All generated in Rust — no
+`rc.exe`/`windres`, so the build stays cross-platform. `src/engine/resources/`
+(`tree.rs` directory builder, `icon.rs`, `version.rs`, `manifest.rs`, plus
+`inject.rs` which appends a `.rsrc` section to the compiled stub). Directory
+offsets are section-relative, but `IMAGE_RESOURCE_DATA_ENTRY.OffsetToData` is an
+image RVA — that is why `embed()` resolves the RVA before building the blob.
+Verified against `FindResource`/`LoadResource` and `version.dll`
+(`GetFileVersionInfo`/`VerQueryValue`) on Windows. Example:
+`examples/configs/test-resources.yaml`, asset `examples/assets/sample.ico`.
+Note the name clash: `build.output.manifest` (bool) is the provenance JSON;
+`build.output.manifest` is **not** the embedded manifest — that is
+`build.output.resources.manifest`.
+
+**Signing + subsystem (done).** `build.output.sign` signs the artifact with
+`signtool.exe` (`src/engine/signing.rs`) after resources are embedded and before
+the manifest, in three modes: `lab` (an automatic CA + leaf — a self-signed
+`<subject> Root CA` in `Cert:\CurrentUser\My` via PowerShell, plus a
+code-signing leaf signed by it; the CA's public cert is exported next to the
+artifact as `<stem>.ca.cer` and **no trust store is modified**: the lab installs
+that file in its own Trusted Root), `store` (an existing cert by
+`thumbprint`/`subject`) and `file` (a `.pfx`; password from `password_env`, never
+the YAML). `signtool` is discovered in PATH → `BATESIAN_SIGNTOOL` → Windows Kits
+(`...\Windows Kits\10\bin\<ver>\x64`) → `output.sign.signtool`. Optional
+`timestamp_url` (RFC 3161). `src/engine/identity.rs` generates plausible metadata
+when `output.resources.version_info.randomize: true` (company/product/
+description/versions/copyright; explicit fields win), and the generated company
+becomes the lab certificate subject when none is set, so the artifact and the
+signature agree. The manifest records `signature.{mode,subject,issuer,thumbprint,
+ca_file}` and the resolved `version_info`. `build.output.subsystem`
+(`console`|`windows`) prepends `#![windows_subsystem = "windows"]` to the
+rendered stub (skipped if the stub sets its own). A lab signature verifies only
+where its CA is trusted; it gives no SmartScreen reputation.
+`.pfx`/`.p12`/`.pem`/`.key` are gitignored. Examples:
+`examples/configs/test-sign.yaml`, `test-fake.yaml`.
 
 ## Known limitations
 
@@ -265,23 +309,6 @@ public so the wizard and `techniques list` share wording. Not prompted yet:
   reflective-loading APIs still import statically.
 - Windows Defender flags the packed artifacts (unavoidable); the dev machine
   had it disabled during the 6a runtime tests.
-
-## code_examples/ — how to use it
-
-This directory contains reference implementations from public projects
-(vx-underground, PEzor, RustPacker, etc.). Use it as REFERENCE, not as
-code to paste.
-
-Rules:
-1. **Read it, understand it, then reimplement in our style.**
-   Do not copy code verbatim unless it's clearly marked as reusable
-   (MIT/CC0/public domain).
-2. **Check licenses before copying anything.** If in doubt, don't copy,
-   reimplement.
-3. **Document provenance.** When a pattern clearly comes from a specific
-   project, note it in a comment: `// Adapted from: <project> <URL>`.
-4. **Never copy code we don't understand.** If it's not clear what a
-   line does, ask before using it.
 
 ## Session workflow
 

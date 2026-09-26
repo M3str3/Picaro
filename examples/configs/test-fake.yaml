@@ -1,0 +1,24 @@
+schema: 4
+name: test-fake
+
+build:
+  payload:
+    source: ./examples/payloads/test_payload.exe
+    crypto:
+      algo: xchacha20poly1305
+      key: random
+
+  output:
+    path: ./dist/test_fake.exe
+    arch: x64
+    strip: true
+    trim_paths: all
+    resources:
+      icon: ./widget.ico
+      version_info:
+        randomize: true
+    sign:
+      mode: lab
+
+runtime:
+  - technique: reflective_loading

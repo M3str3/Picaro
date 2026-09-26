@@ -16,6 +16,12 @@ code_examples/
 *.exp
 *.exe
 
+# Signing material: never commit a private key or certificate.
+*.pfx
+*.p12
+*.pem
+*.key
+
 # Keep the checked-in test payload and the PE parser fixture.
 !examples/payloads/test_payload.exe
 !tests/fixtures/minimal_x64.exe

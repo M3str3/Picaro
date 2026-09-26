@@ -7,16 +7,15 @@
 
 ## What it does
 
-Sustituye las llamadas a APIs Win32 sospechosas por syscalls NT con el SSN
-resuelto en runtime vía Hell's Gate. El `syscall` se ejecuta a través de un
-gadget `syscall; ret` dentro de ntdll, de modo que la instrucción `syscall`
-siempre "origina" en ntdll (no en código privado del stub), se evitan los hooks
-en userland de ntdll y el IAT del stub deja de contener los imports
-sospechosos.
+Replaces calls to suspicious Win32 APIs with NT syscalls whose SSN is resolved
+at run time via Hell's Gate. The `syscall` instruction is executed through a
+`syscall; ret` gadget inside `ntdll`, so it always appears to originate in
+`ntdll` (not in private stub code), userland hooks in `ntdll` are bypassed, and
+the stub's IAT no longer contains the suspicious imports.
 
-No es una técnica de pipeline: es una configuración del loader
-(`build.stub.syscalls`), porque cambia cómo el stub habla con el kernel, no
-cómo se ejecuta el payload.
+This is not a pipeline technique: it is a loader configuration
+(`build.stub.syscalls`), because it changes how the stub talks to the kernel,
+not how the payload runs.
 
 ## YAML example
 
@@ -25,13 +24,13 @@ build:
   stub:
     syscalls:
       mode: indirect      # none | indirect
-      resolver: hells_gate  # hells_gate (tartarus_gate vendrá en 6b)
+      resolver: hells_gate  # hells_gate (tartarus_gate arrives in 6b)
 ```
 
-Sin el bloque, los defaults son `mode: none`, `resolver: hells_gate`.
+Without the block the defaults are `mode: none`, `resolver: hells_gate`.
 
 ```yaml
-# examples/configs/test-syscalls.yaml (resumen)
+# examples/configs/test-syscalls.yaml (abridged)
 build:
   stub:
     syscalls:
@@ -45,38 +44,40 @@ runtime:
 
 ## How it works
 
-1. **Contrato de fragments.** Los fragments de técnica siempre llaman a los
-   helpers `nt_*` (`nt_alloc_vm`, `nt_write_vm`, `nt_read_vm`,
-   `nt_resume_thread`, `nt_unmap_view`). El stub template provee el bloque
-   `$SYSCALLS_BLOCK$` con DOS implementaciones de cada helper:
-   - `mode: none`: llamada directa a la API Win32 (`VirtualAllocEx`,
-     `WriteProcessMemory`, `ReadProcessMemory`, `ResumeThread`; el unmap se
-     resuelve dinámicamente vía `GetProcAddress` como antes).
-   - `mode: indirect`: syscall a través del gadget de ntdll.
+1. **Fragment contract.** Technique fragments always call the `nt_*` helpers
+   (`nt_alloc_vm`, `nt_write_vm`, `nt_read_vm`, `nt_resume_thread`,
+   `nt_unmap_view`). The stub template provides the `$SYSCALLS_BLOCK$` block
+   with two implementations of each helper:
+   - `mode: none`: a direct call to the Win32 API (`VirtualAllocEx`,
+     `WriteProcessMemory`, `ReadProcessMemory`, `ResumeThread`; the unmap is
+     resolved dynamically via `GetProcAddress` as before).
+   - `mode: indirect`: a syscall through the `ntdll` gadget.
 
-   El fragment no sabe qué modo está activo: el código es idéntico en ambos.
+   The fragment does not know which mode is active: the code is identical in
+   both.
 
-2. **Resolución de SSN (Hell's Gate).** `init_syscalls()` se ejecuta una vez,
-   antes de las técnicas. Para cada función Nt* requerida por las técnicas del
-   build (la unión de `TechniqueDef::syscalls`, deduplicada):
-   - se obtiene su dirección en ntdll con `GetProcAddress` (el nombre va
-     ofuscado con `StringsConfig`, reconstruido en runtime);
-   - se leen los primeros 8 bytes del stub;
-   - se verifica el prólogo canónico `4C 8B D1 B8 ?? ?? ?? ??`
-     (`mov r10, rcx; mov eax, <SSN>`) y se extrae el SSN de los bytes 4..8.
-   - Si el prólogo no coincide (hook de EDR), `resolve_ssns` devuelve
-     `PatternMismatch` con un mensaje claro; Tartarus Gate (fase 6b) lo
-     manejará. Si `GetProcAddress` falla, `FunctionNotFound`.
+2. **SSN resolution (Hell's Gate).** `init_syscalls()` runs once, before the
+   techniques. For each Nt* function required by the build's techniques (the
+   deduplicated union of `TechniqueDef::syscalls`):
+   - its address in `ntdll` is obtained with `GetProcAddress` (the name is
+     obfuscated with `StringsConfig` and rebuilt at run time);
+   - the first 8 bytes of the stub are read;
+   - the canonical prologue `4C 8B D1 B8 ?? ?? ?? ??`
+     (`mov r10, rcx; mov eax, <SSN>`) is verified and the SSN is extracted from
+     bytes 4..8.
+   - If the prologue does not match (an EDR hook), `resolve_ssns` returns
+     `PatternMismatch` with a clear message; Tartarus Gate (phase 6b) will
+     handle it. If `GetProcAddress` fails, `FunctionNotFound`.
 
-   Solo se resuelven las funciones necesarias: si una técnica no está en el
-   pipeline, sus SSNs no se resuelven (menos tiempo y menos strings).
+   Only the required functions are resolved: if a technique is not in the
+   pipeline its SSNs are not resolved (less time, fewer strings).
 
-3. **Gadget `syscall; ret`.** Se camina la tabla de secciones de la imagen PE
-   de ntdll en memoria para localizar `.text`, y se escanea en busca del
-   primer `0F 05 C3`. Su dirección se guarda como el gadget.
+3. **The `syscall; ret` gadget.** The ntdll image's PE section table is walked
+   in memory to locate `.text`, which is scanned for the first `0F 05 C3`. Its
+   address is stored as the gadget.
 
-4. **Trampoline ASM (`nt_invoke`).** En Rust estable se usa
-   `core::arch::global_asm!` con una función exportada. La firma Rust es:
+4. **ASM trampoline (`nt_invoke`).** On stable Rust this uses
+   `core::arch::global_asm!` with an exported function. The Rust signature is:
 
    ```rust
    extern "system" {
@@ -87,30 +88,30 @@ runtime:
    }
    ```
 
-   Los argumentos 1-4 llegan en rcx/rdx/r8/r9; los 5-8 en el stack del caller
-   (`[rsp+40]` a `[rsp+64]` tras el return address y el shadow space de 32
-   bytes). El `syscall` espera: `r10` = arg1, `eax` = SSN, args 1-4 en los
-   mismos registros, args 5-6 en `[rsp+8]`/`[rsp+16]` (con `rsp` apuntando al
-   return address). El trampoline recoloca el frame y hace `jmp r11` al
-   gadget; el `ret` del gadget devuelve directamente al caller Rust.
+   Arguments 1-4 arrive in rcx/rdx/r8/r9; 5-8 on the caller's stack (`[rsp+40]`
+   through `[rsp+64]`, after the return address and the 32-byte shadow space).
+   The `syscall` expects: `r10` = arg1, `eax` = SSN, args 1-4 in the same
+   registers, args 5-6 in `[rsp+8]`/`[rsp+16]` (with `rsp` pointing at the
+   return address). The trampoline rearranges the frame and `jmp r11`s to the
+   gadget; the gadget's `ret` returns straight to the Rust caller.
 
    ```asm
    nt_invoke:
        mov r10, rcx        ; r10 = arg1
        mov rax, [rsp + 40] ; rax = arg5
-       mov [rsp + 8], rax  ; el syscall lee arg5 de [rsp+8]
+       mov [rsp + 8], rax  ; the syscall reads arg5 from [rsp+8]
        mov rax, [rsp + 48] ; rax = arg6
-       mov [rsp + 16], rax ; el syscall lee arg6 de [rsp+16]
+       mov [rsp + 16], rax ; the syscall reads arg6 from [rsp+16]
        mov eax, [rsp + 56] ; eax = SSN
        mov r11, [rsp + 64] ; r11 = gadget (syscall; ret)
        jmp r11
    ```
 
-   Verificado en `x86_64-pc-windows-msvc` (rustc 1.90) y con
-   `-C target-feature=+crt-static`; el ensamblador integrado de LLVM acepta
-   `.intel_syntax noprefix` en ambos targets Windows.
+   Verified on `x86_64-pc-windows-msvc` (rustc 1.90) and with
+   `-C target-feature=+crt-static`; LLVM's integrated assembler accepts
+   `.intel_syntax noprefix` on both Windows targets.
 
-5. **Helpers.** Cada helper envuelve `nt_invoke` con la firma de la función NT:
+5. **Helpers.** Each helper wraps `nt_invoke` with the NT function's signature:
 
    - `nt_alloc_vm(process, &base, zero_bits, &size, alloc_type, protect)`
    - `nt_write_vm(process, base, buf, size, &written)`
@@ -118,58 +119,56 @@ runtime:
    - `nt_resume_thread(thread, &previous_count)`
    - `nt_unmap_view(process, base)`
 
-   Todos devuelven `NTSTATUS` (`i32`); los fragments tratan `< 0` como error.
+   All return `NTSTATUS` (`i32`); fragments treat `< 0` as an error.
 
 ## What it evades
 
-- Hooks en ntdll de userland (EDR): el SSN se lee de la propia ntdll y la
-  llamada entra al kernel sin pasar por el stub exportado hookeado.
-- Análisis estático del IAT: `VirtualAllocEx`, `WriteProcessMemory`,
-  `ReadProcessMemory` y `ResumeThread` desaparecen del import table; la string
-  `NtUnmapViewOfSection` ya no aparece en el binario (medido).
+- Userland hooks in `ntdll` (EDR): the SSN is read from `ntdll` itself and the
+  call reaches the kernel without passing through the hooked exported stub.
+- Static IAT analysis: `VirtualAllocEx`, `WriteProcessMemory`,
+  `ReadProcessMemory` and `ResumeThread` disappear from the import table; the
+  `NtUnmapViewOfSection` string no longer appears in the binary (measured).
 
 ## What detects it
 
-- Kernel callbacks (PsSetCreateProcessNotifyRoutine, ObRegisterCallbacks) y
-  ETW-TI: la syscall es indistinguible de una llamada legítima de ntdll.
-- Verificación del origen de la instrucción `syscall` (syscall-origin check):
-  con indirectas la instrucción ya apunta a ntdll, que es exactamente lo que
-  este método soluciona frente a las syscalls directas.
-- Inspección de stack / stack-spoofing detectors (el call stack no muestra
-  ntdll): pendiente de una fase futura.
-- Anomalías de SSN (firmas por SSN cambiados entre builds de Windows).
+- Kernel callbacks (PsSetCreateProcessNotifyRoutine, ObRegisterCallbacks) and
+  ETW-TI: the syscall is indistinguishable from a legitimate `ntdll` call.
+- Syscall-origin checks: with indirect calls the instruction already points into
+  `ntdll`, which is exactly what this method fixes relative to direct syscalls.
+- Stack inspection / stack-spoofing detectors (the call stack does not show
+  `ntdll`): pending a future phase.
+- SSN anomalies (signatures built from SSNs that change between Windows builds).
 
 ## Measurements
 
-Ver `docs/measurements/phase6a_iat_reduction.md`: antes/después del IAT con
-`batesian audit`, tamaños y confirmación de que las strings Nt* no aparecen
-en el binario.
+See `docs/measurements/phase6a_iat_reduction.md`: the before/after IAT with
+`batesian audit`, sizes, and confirmation that the Nt* strings do not appear in
+the binary.
 
 ## Implementation notes
 
-- **Por qué indirectas > directas.** Una syscall directa (`syscall` en código
-  propio) se detecta con el syscall-origin check (la instrucción debe residir
-  en un módulo firmado por Microsoft). Saltando a un gadget `syscall; ret`
-  dentro de ntdll, la instrucción origina en ntdll y ese check se supera.
-- **Qué pasa si ntdll está hookeada.** El prólogo ya no es
-  `mov r10, rcx; mov eax, <SSN>` y Hell's Gate no puede leer el SSN: el stub
-  falla con `PatternMismatch` (mensaje claro). Tartarus Gate (fase 6b) hará
-  el fallback recorriendo la sección `.text` de ntdll byte a byte buscando
-  los prólogos por patrón completo (incluyendo SSN vecinos).
-- El renderizado es programático (`src/engine/syscalls.rs`): el bloque se
-  ensambla a partir de `TechniqueDef::syscalls` (unión de requerimientos del
-  pipeline), así que una técnica nueva solo declara sus funciones Nt* y sus
-  helpers se emiten si (y solo si) es necesaria.
-- Los nombres Nt* nunca llegan al binario: se reconstruyen en runtime vía
-  `StringsConfig` (igual que `patch_amsi`). El guardrail
-  `no_sensitive_literals_in_generated_stubs` cubre estas strings.
-- Las referencias de `code_examples/RustRedOps` (MIT/Apache) resuelven SSNs
-  por API-hashing en vez de `GetProcAddress`; esa mejora (eliminar del
-  binario incluso los nombres ofuscados) queda como dirección futura.
+- **Why indirect over direct.** A direct syscall (`syscall` in our own code) is
+  caught by the syscall-origin check (the instruction must reside in a
+  Microsoft-signed module). By jumping to a `syscall; ret` gadget inside
+  `ntdll`, the instruction originates in `ntdll` and that check is passed.
+- **What happens if ntdll is hooked.** The prologue is no longer
+  `mov r10, rcx; mov eax, <SSN>` and Hell's Gate cannot read the SSN: the stub
+  fails with `PatternMismatch` (clear message). Tartarus Gate (phase 6b) will
+  provide the fallback by scanning `ntdll`'s `.text` byte by byte, matching
+  whole prologues (including neighbouring SSNs).
+- Rendering is programmatic (`src/engine/syscalls.rs`): the block is assembled
+  from `TechniqueDef::syscalls` (the union of the pipeline's requirements), so a
+  new technique only declares its Nt* functions and its helpers are emitted if
+  (and only if) they are needed.
+- The Nt* names never reach the binary: they are rebuilt at run time via
+  `StringsConfig` (as with `patch_amsi`). The
+  `no_sensitive_literals_in_generated_stubs` guardrail covers these strings.
+- Resolving SSNs by API hashing instead of `GetProcAddress` (so not even the
+  obfuscated names are needed) remains a future direction.
 
 ## References
 
-- Hell's Gate (am0nsec, RtlMateusz — VX Underground):
+- Hell's Gate (am0nsec, RtlMateusz — VX-Underground):
   https://vxug.fakedoma.in/papers/VXUG/Exclusive/HellsGate.pdf
 - Tartarus' Gate (trickster0):
   https://github.com/trickster0/TartarusGate
@@ -179,7 +178,3 @@ en el binario.
   https://www.outflank.nl/blog/2023/12/13/direct-syscalls-vs-indirect-syscalls/
 - Syscall detection / instrumentation callbacks (n4r1b):
   https://github.com/Deputation/instrumentation_callbacks
-- Reference implementations in this repo:
-  `code_examples/RustRedOps/Syscalls`,
-  `code_examples/RustRedOps/Hells-Halos-Tartarus-Gate`,
-  `code_examples/OffensiveRust/asm_syscall` (patrón de trampoline).

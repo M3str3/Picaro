@@ -35,6 +35,8 @@ pub fn validate(config: &Config) -> Result<()> {
     }
 
     validate_arch(config)?;
+    validate_payload_sha256(config)?;
+    validate_sign(config)?;
     validate_runtime(&config.runtime)?;
     validate_conflicts(&config.runtime)?;
     validate_sleep_obfuscation(&config.runtime)?;
@@ -72,6 +74,65 @@ pub fn advisories(config: &Config) -> Vec<String> {
 fn validate_stub(stub: &StubConfig) -> Result<()> {
     SyscallsConfig::from_yaml(stub.syscalls.as_ref())?;
     StringsConfig::from_yaml(stub.strings.as_ref())?;
+    Ok(())
+}
+
+/// Rejects a `build.payload.sha256` that is not exactly 64 hex characters.
+///
+/// Catching a malformed pin here gives a clear message instead of a confusing
+/// "payload mismatch" at build time.
+fn validate_payload_sha256(config: &Config) -> Result<()> {
+    let Some(hash) = config.build.payload.sha256.as_deref() else {
+        return Ok(());
+    };
+    let hash = hash.trim();
+    if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(PackerError::Validation(format!(
+            "'build.payload.sha256' must be 64 hex characters (got '{hash}')"
+        )));
+    }
+    Ok(())
+}
+
+/// Validates `output.sign`.
+///
+/// Only the mode-specific requirements are checked here; locating `signtool`
+/// and the certificate happens at build time (so the error names what is
+/// actually missing on the machine).
+fn validate_sign(config: &Config) -> Result<()> {
+    let Some(sign) = &config.build.output.sign else {
+        return Ok(());
+    };
+    match sign.mode.as_str() {
+        "none" => {}
+        "lab" => {}
+        "store" => {
+            if sign.thumbprint.is_none() && sign.subject.is_none() {
+                return Err(PackerError::Validation(
+                    "output.sign.mode 'store' needs either 'thumbprint' or 'subject'".to_string(),
+                ));
+            }
+        }
+        "file" => {
+            if sign.file.is_none() {
+                return Err(PackerError::Validation(
+                    "output.sign.mode 'file' needs 'file' (a .pfx/.p12 path)".to_string(),
+                ));
+            }
+        }
+        other => {
+            return Err(PackerError::Validation(format!(
+                "invalid output.sign.mode '{other}': expected none, lab, store or file"
+            )));
+        }
+    }
+    if let Some(url) = &sign.timestamp_url {
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return Err(PackerError::Validation(format!(
+                "output.sign.timestamp_url '{url}' must be an http(s) URL"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -523,5 +584,94 @@ runtime:
         assert!(msg.contains("build.output.arch"), "unclear error: {msg}");
         assert!(msg.contains("x86"), "unclear error: {msg}");
         assert!(msg.contains("not integrated"), "unclear error: {msg}");
+    }
+
+    #[test]
+    fn accepts_a_valid_payload_sha256() {
+        let yaml = VALID.replace(
+            "    source: ./payload.exe\n",
+            "    source: ./payload.exe\n    sha256: \
+             e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n",
+        );
+        validate(&parse(&yaml)).expect("a 64-hex hash must be accepted");
+    }
+
+    #[test]
+    fn rejects_a_malformed_payload_sha256() {
+        let yaml = VALID.replace(
+            "    source: ./payload.exe\n",
+            "    source: ./payload.exe\n    sha256: deadbeef\n",
+        );
+        let err = validate(&parse(&yaml)).expect_err("a short hash must be rejected");
+        assert!(
+            err.to_string().contains("build.payload.sha256"),
+            "unclear error: {err}"
+        );
+    }
+
+    #[test]
+    fn requires_a_sha256_longer_than_a_prefix() {
+        // 63 hex chars: right alphabet, wrong length.
+        let yaml = VALID.replace(
+            "    source: ./payload.exe\n",
+            "    source: ./payload.exe\n    sha256: \
+             e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85\n",
+        );
+        validate(&parse(&yaml)).expect_err("63 hex characters must be rejected");
+    }
+
+    /// `VALID` with `block` appended to the `output` mapping.
+    fn with_sign(block: &str) -> Config {
+        let yaml = VALID.replace(
+            "    trim_paths: all\n",
+            &format!("    trim_paths: all\n{block}"),
+        );
+        parse(&yaml)
+    }
+
+    #[test]
+    fn accepts_the_signing_modes() {
+        for mode in ["none", "lab"] {
+            validate(&with_sign(&format!("    sign:\n      mode: {mode}\n")))
+                .unwrap_or_else(|e| panic!("mode {mode} must be valid: {e}"));
+        }
+        validate(&with_sign(
+            "    sign:\n      mode: store\n      thumbprint: DEADBEEF\n",
+        ))
+        .expect("store with a thumbprint must be valid");
+        validate(&with_sign(
+            "    sign:\n      mode: file\n      file: ./cert.pfx\n",
+        ))
+        .expect("file with a path must be valid");
+    }
+
+    #[test]
+    fn rejects_an_unknown_signing_mode() {
+        let err = validate(&with_sign("    sign:\n      mode: bogus\n"))
+            .expect_err("an unknown mode must fail");
+        assert!(err.to_string().contains("output.sign.mode"), "{err}");
+    }
+
+    #[test]
+    fn store_signing_needs_a_subject_or_thumbprint() {
+        let err = validate(&with_sign("    sign:\n      mode: store\n"))
+            .expect_err("store without an identifier must fail");
+        assert!(err.to_string().contains("thumbprint"), "{err}");
+    }
+
+    #[test]
+    fn file_signing_needs_a_path() {
+        let err = validate(&with_sign("    sign:\n      mode: file\n"))
+            .expect_err("file without a path must fail");
+        assert!(err.to_string().contains("file"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_non_http_timestamp_url() {
+        let err = validate(&with_sign(
+            "    sign:\n      mode: lab\n      timestamp_url: ftp://ts.example\n",
+        ))
+        .expect_err("a non-http timestamp url must fail");
+        assert!(err.to_string().contains("timestamp_url"), "{err}");
     }
 }

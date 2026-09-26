@@ -9,6 +9,10 @@ license = "MIT"
 # Serialization/deserialization with `derive` and YAML support.
 serde = { version = "1.0", features = ["derive"] }
 serde_yml = "0.0.12"
+# JSON output for `audit --json` and the build manifest.
+serde_json = "1"
+# SHA-256 for build provenance and `build.payload.sha256` pinning.
+sha2 = "0.10"
 # Authenticated payload encryption: ChaCha20-Poly1305.
 chacha20poly1305 = "0.10"
 # CSPRNG for keys and nonces (`std_rng` enables `thread_rng`).
@@ -28,6 +32,10 @@ thiserror = "2"
 # `anstyle` defines the styles; both are already in the tree via `clap`.
 anstream = "1"
 anstyle = "1"
+# Interactive prompts (arrow-key menus, checkbox multi-select, confirmations)
+# for `batesian build interactive`. Used only when stdin/stdout is a terminal;
+# scripted/redirected input falls back to a plain line reader.
+inquire = "0.7"
 # Windows FFI (windows-rs). Only the generated stub uses it, but it is declared
 # here so its .rlib is available under target/ for `rustc --extern`.
 windows = { version = "0.58", features = [

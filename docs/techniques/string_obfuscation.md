@@ -114,5 +114,5 @@ rounding error by comparison.
 
 - litcrypt / litcrypt2 — Rust string-literal encryption crates (compile-time
   macro that encrypts literals and decrypts them lazily at runtime).
-- Common string-obfuscation patterns: XOR with key, stack construction, and
-  split/stacked fragments. See `code_examples/` for reference implementations.
+- Common string-obfuscation patterns: XOR with a key, stack construction, and
+  split/stacked fragments.

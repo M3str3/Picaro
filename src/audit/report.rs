@@ -18,20 +18,7 @@ use super::defender::DefenderResult;
 use super::pe_info::{ImportItem, PeAudit};
 use super::strings::StringFindings;
 use super::yara::YaraResult;
-
-/// Imported function names that are widely used as malware signatures.
-const SUSPICIOUS_IMPORTS: &[&str] = &[
-    "VirtualAllocEx",
-    "WriteProcessMemory",
-    "CreateRemoteThread",
-    "NtUnmapViewOfSection",
-    "NtCreateThreadEx",
-    "NtWriteVirtualMemory",
-    "SetWindowsHookEx",
-    "QueueUserAPC",
-    "CryptEncrypt",
-    "CryptDecrypt",
-];
+use super::SUSPICIOUS_IMPORTS;
 
 /// Width of the entropy gauge, in terminal cells.
 const BAR_WIDTH: usize = 20;

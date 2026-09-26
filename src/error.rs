@@ -71,6 +71,14 @@ pub enum PackerError {
     #[error("build error: {0}")]
     Build(#[from] BuildError),
 
+    /// PE resource embedding error.
+    #[error("resources: {0}")]
+    Resources(#[from] crate::engine::resources::ResourceError),
+
+    /// Artifact signing error.
+    #[error("signing: {0}")]
+    Signing(#[from] crate::engine::signing::SigningError),
+
     /// Generic I/O error during the build flow.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -78,6 +86,19 @@ pub enum PackerError {
     /// Static audit error.
     #[error("audit error: {0}")]
     Audit(#[from] AuditError),
+
+    /// `audit --baseline` found a regression.
+    ///
+    /// The report already explains the changes; the CLI turns this into exit
+    /// code 3 so a CI gate can tell a regression from a broken run.
+    #[error("baseline regression: {count} change(s)")]
+    AuditRegression { count: usize },
+
+    /// The operator cancelled an interactive prompt (Esc) before the build.
+    ///
+    /// Not a failure: the CLI exits 0 without writing anything.
+    #[error("cancelled")]
+    Cancelled,
 }
 
 /// `Result` alias used across the crate.

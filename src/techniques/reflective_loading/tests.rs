@@ -86,7 +86,13 @@ fn compiles_reflective_loading_stub_to_pe() {
     let deps = crate::engine::compiler::locate_stub_deps().unwrap();
     let out = build_dir.join("out.exe");
     // `compile_stub` verifies the `MZ` header before returning.
-    crate::engine::compiler::compile_stub(&stub_path, &out, &deps).unwrap();
+    crate::engine::compiler::compile_stub(
+        &stub_path,
+        &out,
+        &deps,
+        crate::engine::compiler::CompileOptions::default(),
+    )
+    .unwrap();
 
     let _ = std::fs::remove_dir_all(&build_dir);
 }

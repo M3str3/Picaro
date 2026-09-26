@@ -1,27 +1,32 @@
 //! Interactive `build` wizard (`batesian build interactive <payload>`).
 //!
-//! The wizard walks through the same decisions a schema-3 YAML encodes
-//! (payload, techniques, stub and output), assembles a [`Config`], shows it and
-//! writes it to disk. It then hands the file back to the normal build flow, so
-//! the generated YAML is the single source of truth: editing it and running
-//! `batesian build <file>` reproduces the build without any prompts.
+//! The wizard walks through the same decisions a schema YAML encodes (payload,
+//! techniques, stub and output), assembles a [`Config`], shows it and writes it.
+//! It then hands the file back to the normal build flow, so the generated YAML
+//! is the single source of truth: editing it and running `batesian build <file>`
+//! reproduces the build without any prompts.
 //!
-//! Prompts are answered on stdin and every value the stub will carry at runtime
-//! (target path, bouncer checks, payload args) goes through the same YAML
-//! validation as a hand-written config, so the wizard can never emit a document
-//! the packer would reject. Only the questions are interactive: the format,
-//! defaults and string obfuscation come from the existing code, keeping a single
-//! implementation of each rule.
+//! When stdin/stdout is a terminal the questions are rendered with
+//! [`inquire`](https://docs.rs/inquire) — arrow-key menus, checkbox multi-selects
+//! and confirmations — so choosing a technique is a matter of moving a cursor,
+//! not typing numbers. The answers feed a final **review** screen
+//! (`Build` / `Edit` / `Quit`); choosing `Edit` re-runs the questions with the
+//! previous answers as the defaults, so a mistake is one cursor move away, never
+//! a restart.
 //!
-//! The prompt primitives live in [`Prompter`], generic over the input reader and
-//! the output writer so the whole session is testable end to end.
+//! The prompting primitives live behind the [`Prompt`] trait with two backends:
+//! [`InquirePrompt`] for a real terminal and [`LinePrompt`] (a plain line reader)
+//! for redirected or scripted input. That keeps the whole session testable: the
+//! same wizard logic runs against `Cursor`/`Vec` in the unit tests.
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+
+use inquire::{Confirm, MultiSelect, Select, Text};
 
 use crate::config::schema::{
     Arch, BuildConfig, Config, CryptoAlgorithm, CryptoConfig, KeySource, OutputConfig,
-    PayloadConfig, StubConfig, TrimPaths, SUPPORTED_SCHEMA,
+    PayloadConfig, StubConfig, Subsystem, TrimPaths, SUPPORTED_SCHEMA,
 };
 use crate::config::validate;
 use crate::engine::args::ArgsMode;
@@ -34,11 +39,12 @@ use crate::techniques::{
 };
 use crate::ui::Palette;
 
-/// Runs the wizard against stdin/stdout.
+/// Runs the wizard against stdin/stdout, picking the prompt backend by whether
+/// both streams are a terminal.
 ///
-/// Returns the path of the written YAML, or `None` when the operator declined
-/// the final confirmation (nothing is written in that case). The payload path is
-/// checked before the first question so a typo fails before a dozen prompts.
+/// Returns the path of the written YAML, or `None` when the operator quit the
+/// review screen without writing. The payload path is checked before the first
+/// question so a typo fails before a dozen prompts.
 pub fn run(payload: &Path, config_out: Option<&Path>, ui: &Palette) -> Result<Option<PathBuf>> {
     if !payload.is_file() {
         return Err(PackerError::Validation(format!(
@@ -47,227 +53,853 @@ pub fn run(payload: &Path, config_out: Option<&Path>, ui: &Palette) -> Result<Op
         )));
     }
 
-    let stdin = std::io::stdin();
-    let stdout = anstream::stdout();
-    run_with(payload, config_out, ui, stdin.lock(), stdout)
+    let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let mut prompts: Box<dyn Prompt> = if interactive {
+        Box::new(InquirePrompt::new())
+    } else {
+        Box::new(LinePrompt {
+            reader: std::io::stdin().lock(),
+            out: anstream::stdout(),
+            ui: *ui,
+        })
+    };
+
+    run_wizard(payload, config_out, ui, prompts.as_mut())
 }
 
-/// Testable core of [`run`]: reads answers from `reader`, prompts into `out`.
-pub fn run_with<R: BufRead, W: Write>(
+/// Testable core of [`run`]: runs the wizard over `reader`/`out` with the plain
+/// line backend, so unit tests can script a whole session.
+#[cfg(test)]
+fn run_with<R: BufRead, W: Write>(
     payload: &Path,
     config_out: Option<&Path>,
     ui: &Palette,
     reader: R,
     out: W,
 ) -> Result<Option<PathBuf>> {
-    let mut p = Prompter {
+    let mut line = LinePrompt {
         reader,
         out,
         ui: *ui,
     };
+    run_wizard(payload, config_out, ui, &mut line)
+}
 
-    let echo = p.ui.command_line("build interactive", payload.display());
-    writeln!(p.out, "{echo}")?;
-    p.blank()?;
-
-    // --- Payload -----------------------------------------------------------
-    p.section("PAYLOAD")?;
-    p.echo_field("source", &payload.display().to_string())?;
-    let name = p.ask_text("name", Some(&default_name(payload)))?;
-    let payload_args = p.ask_list("payload args", "comma-separated, blank for none")?;
-
-    // --- Techniques --------------------------------------------------------
-    p.section("TECHNIQUES")?;
-    let execution_choices = execution_defs();
-    let execution_options = describe(&execution_choices);
-    let default_execution = execution_choices
-        .iter()
-        .position(|def| def.name == "reflective_loading")
-        .unwrap_or(0);
-    let execution = execution_choices[p.ask_choice(
-        "execution",
-        &execution_options,
-        default_execution,
-    )?];
-
-    // Syscalls only help an execution technique that routes Nt* through the
-    // layer; defaulting to `indirect` otherwise would produce a warning.
-    let default_syscalls = usize::from(!execution.syscalls.is_empty());
-
-    // Ask the execution technique's own parameters right after the choice, but
-    // hold the step back: preparations run first in the generated runtime.
-    let execution_step = p.ask_execution(execution)?;
-
-    let preparation_choices = preparation_defs();
-    let preparation_options = describe(&preparation_choices);
-    let chosen_preparations = p.ask_multi("preparation", &preparation_options)?;
-
-    let mut runtime = Vec::new();
-    for index in chosen_preparations {
-        runtime.push(p.ask_preparation(preparation_choices[index])?);
-    }
-    runtime.push(execution_step);
-
-    // --- Stub --------------------------------------------------------------
-    p.section("STUB")?;
-    let strings_strategy = match p.ask_choice(
-        "strings",
-        &[
-            ("xor", "single-byte XOR per string, with a random key"),
-            ("stack", "decoder-free, built on the stack"),
-        ],
-        0,
-    )? {
-        0 => "xor",
-        _ => "stack",
-    };
-    let syscalls_mode = match p.ask_choice(
-        "syscalls",
-        &[
-            ("none", "call the Win32 APIs directly"),
-            ("indirect", "resolve SSNs and invoke the kernel directly"),
-        ],
-        default_syscalls,
-    )? {
-        0 => "none",
-        _ => "indirect",
+/// Shared wizard flow, independent of the prompt backend.
+fn run_wizard(
+    payload: &Path,
+    config_out: Option<&Path>,
+    ui: &Palette,
+    prompts: &mut dyn Prompt,
+) -> Result<Option<PathBuf>> {
+    let mut wizard = Wizard {
+        ui: *ui,
+        prompts,
+        payload: payload.to_path_buf(),
+        config_out: config_out.map(Path::to_path_buf),
     };
 
-    // --- Output ------------------------------------------------------------
-    p.section("OUTPUT")?;
-    let output_path = p.ask_text(
-        "output path",
-        Some(&format!("./dist/{name}_packed.exe")),
-    )?;
-    let strip = p.ask_yes_no("strip symbols", true)?;
-    let trim_paths = match p.ask_choice(
-        "trim paths",
-        &[
-            ("all", "remap every absolute path in the debug info"),
-            ("none", "leave paths untouched"),
-            ("relative", "remap only paths outside the project"),
-        ],
-        0,
-    )? {
-        0 => TrimPaths::All,
-        1 => TrimPaths::None,
-        _ => TrimPaths::Relative,
-    };
+    wizard.echo(&ui.command_line("build interactive", payload.display()))?;
+    wizard.blank()?;
 
-    let config_path = match config_out {
-        Some(path) => {
-            let display = path.display().to_string();
-            p.echo_field("config file", &display)?;
-            path.to_path_buf()
+    // First pass, then a review loop: build, or re-ask with the previous answers
+    // as the defaults, or quit.
+    let mut answers = wizard.ask_all(None)?;
+    loop {
+        let config = assemble(payload, &answers);
+        validate::validate(&config)?;
+        let yaml = serde_yml::to_string(&config).map_err(|source| {
+            PackerError::Validation(format!(
+                "could not serialize the generated config: {source}"
+            ))
+        })?;
+
+        wizard.blank()?;
+        wizard.section("CONFIG")?;
+        let preview = wizard.ui.dim(yaml.trim_end());
+        wizard.echo(&preview)?;
+        wizard.blank()?;
+
+        match wizard.prompts.select(
+            "what now",
+            &[
+                ("build now", "write the config and run the build"),
+                ("edit answers", "go back and change something"),
+                ("quit", "discard and exit"),
+            ],
+            0,
+        )? {
+            0 => {
+                let path = write_config(&config, &yaml, wizard.config_out.as_deref())?;
+                wizard.blank()?;
+                let line = wizard.ui.done("config", wizard.ui.target(path.display()));
+                wizard.echo(&line)?;
+                wizard.blank()?;
+                return Ok(Some(path));
+            }
+            1 => answers = wizard.ask_all(Some(&answers))?,
+            _ => {
+                wizard.blank()?;
+                let mark = wizard.ui.bang();
+                let message = wizard.ui.warn("quit; nothing was written");
+                wizard.echo(&format!("  {mark} {message}"))?;
+                return Ok(None);
+            }
         }
-        None => PathBuf::from(p.ask_text(
-            "config file",
-            Some(&format!("./dist/{name}.yaml")),
-        )?),
-    };
-
-    // --- Assemble, validate and confirm ------------------------------------
-    let config = assemble(
-        payload,
-        name,
-        payload_args,
-        runtime,
-        strings_strategy,
-        syscalls_mode,
-        output_path,
-        strip,
-        trim_paths,
-    );
-    validate::validate(&config)?;
-    let yaml = serde_yml::to_string(&config).map_err(|source| {
-        PackerError::Validation(format!("could not serialize the generated config: {source}"))
-    })?;
-
-    p.blank()?;
-    p.section("CONFIG")?;
-    let preview = p.ui.dim(yaml.trim_end());
-    writeln!(p.out, "{preview}")?;
-    p.blank()?;
-
-    if !p.ask_yes_no("write this config and build", true)? {
-        let mark = p.ui.bang();
-        let message = p.ui.warn("aborted; nothing was written");
-        writeln!(p.out, "  {mark} {message}")?;
-        return Ok(None);
     }
+}
 
-    if let Some(parent) = config_path.parent() {
+/// Writes the serialized config to disk, creating the parent directory, and
+/// returns the path it was written to.
+fn write_config(config: &Config, yaml: &str, config_out: Option<&Path>) -> Result<PathBuf> {
+    let path = config_out
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("dist").join(format!("{}.yaml", config.name)));
+    if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
         }
     }
-    std::fs::write(&config_path, &yaml)?;
-
-    p.blank()?;
-    let line = p
-        .ui
-        .done("config", p.ui.target(config_path.display().to_string()));
-    writeln!(p.out, "{line}")?;
-    p.blank()?;
-    p.out.flush()?;
-
-    Ok(Some(config_path))
+    std::fs::write(&path, yaml)?;
+    Ok(path)
 }
 
-/// Assembles the [`Config`] from the answered questions.
-///
-/// Kept pure (no I/O) so the mapping from answers to YAML is one reviewable
-/// function; `runtime` arrives already ordered (preparations, then execution),
-/// matching what [`validate`] requires.
-#[allow(clippy::too_many_arguments)]
-fn assemble(
-    payload: &Path,
+/// All the raw answers the wizard collects, kept separate from the assembled
+/// [`Config`] so a review pass can seed each field's default from its previous
+/// value.
+#[derive(Debug, Clone)]
+struct Answers {
     name: String,
     payload_args: Vec<String>,
-    runtime: Vec<RuntimeStep>,
-    strings_strategy: &str,
-    syscalls_mode: &str,
+    execution: RuntimeStep,
+    preparations: Vec<RuntimeStep>,
+    strings_strategy: String,
+    syscalls_mode: String,
     output_path: String,
     strip: bool,
     trim_paths: TrimPaths,
-) -> Config {
-    Config {
-        schema: SUPPORTED_SCHEMA,
-        name,
-        build: BuildConfig {
-            payload: PayloadConfig {
-                source: payload.display().to_string(),
-                args: (!payload_args.is_empty()).then_some(payload_args),
-                args_mode: ArgsMode::Join,
-                crypto: CryptoConfig {
-                    algo: CryptoAlgorithm::XChaCha20Poly1305,
-                    key: KeySource::Random,
-                },
-            },
-            stub: StubConfig {
-                // The wizard always renders the builtin stub.
-                path: None,
-                // Omitted when `none` so the generated YAML stays minimal.
-                syscalls: (syscalls_mode == "indirect").then(|| YamlSyscallsConfig {
-                    mode: syscalls_mode.to_string(),
-                    resolver: "hells_gate".to_string(),
-                }),
-                strings: Some(YamlStringsConfig {
-                    strategy: strings_strategy.to_string(),
-                    // A literal key is an advanced setting; edit it in the YAML.
-                    key: "random".to_string(),
-                }),
-            },
-            output: OutputConfig {
-                path: PathBuf::from(output_path),
-                // The stub is always compiled for x86-64.
-                arch: Arch::X64,
-                strip,
-                trim_paths,
-            },
-        },
-        runtime,
+}
+
+/// The prompting primitives, backend-agnostic. Both implementations share the
+/// same semantics so the wizard (and its tests) never branch on the backend.
+trait Prompt {
+    /// Renders an already-styled, non-interactive line.
+    fn echo(&mut self, line: &str) -> Result<()>;
+    /// Single choice; returns the selected index.
+    fn select(&mut self, label: &str, options: &[(&str, &str)], default: usize) -> Result<usize>;
+    /// Checkbox multi-choice; returns the selected indexes, sorted.
+    fn multi_select(
+        &mut self,
+        label: &str,
+        options: &[(&str, &str)],
+        default: &[usize],
+    ) -> Result<Vec<usize>>;
+    /// Yes/no; returns the choice.
+    fn confirm(&mut self, label: &str, default: bool) -> Result<bool>;
+    /// Free text; an empty answer yields `default` (or `""` when `default` is
+    /// `None`). `default` is also the editable starting value.
+    fn text(&mut self, label: &str, default: Option<&str>) -> Result<String>;
+    /// Optional free text; an empty answer yields `None`.
+    fn optional_text(&mut self, label: &str, default: Option<&str>) -> Result<Option<String>>;
+}
+
+/// Interactive backend built on [`inquire`]: menus, checkboxes and confirmations
+/// rendered by the terminal. Writes the non-interactive lines to stdout.
+struct InquirePrompt {
+    out: anstream::AutoStream<std::io::Stdout>,
+}
+
+impl InquirePrompt {
+    fn new() -> Self {
+        Self {
+            out: anstream::stdout(),
+        }
     }
+}
+
+/// Maps an [`inquire`] error, treating Esc/interrupt as a clean cancellation.
+fn map_inquire(error: inquire::InquireError) -> PackerError {
+    match error {
+        inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted => {
+            PackerError::Cancelled
+        }
+        other => PackerError::Validation(format!("interactive prompt failed: {other}")),
+    }
+}
+
+/// `"name  description"` strings for an [`inquire`] menu.
+fn menu_items(options: &[(&str, &str)]) -> Vec<String> {
+    options
+        .iter()
+        .map(|(name, description)| {
+            if description.is_empty() {
+                (*name).to_string()
+            } else {
+                format!("{name}  {description}")
+            }
+        })
+        .collect()
+}
+
+impl Prompt for InquirePrompt {
+    fn echo(&mut self, line: &str) -> Result<()> {
+        writeln!(self.out, "{line}")?;
+        self.out.flush()?;
+        Ok(())
+    }
+
+    fn select(&mut self, label: &str, options: &[(&str, &str)], default: usize) -> Result<usize> {
+        let items = menu_items(options);
+        let choice = Select::new(label, items.clone())
+            .with_starting_cursor(default)
+            .prompt()
+            .map_err(map_inquire)?;
+        Ok(items
+            .iter()
+            .position(|item| *item == choice)
+            .unwrap_or(default))
+    }
+
+    fn multi_select(
+        &mut self,
+        label: &str,
+        options: &[(&str, &str)],
+        default: &[usize],
+    ) -> Result<Vec<usize>> {
+        let items = menu_items(options);
+        let chosen = MultiSelect::new(label, items.clone())
+            .with_default(default)
+            .prompt()
+            .map_err(map_inquire)?;
+        let mut selected: Vec<usize> = chosen
+            .iter()
+            .filter_map(|item| items.iter().position(|candidate| candidate == item))
+            .collect();
+        selected.sort_unstable();
+        selected.dedup();
+        Ok(selected)
+    }
+
+    fn confirm(&mut self, label: &str, default: bool) -> Result<bool> {
+        Confirm::new(label)
+            .with_default(default)
+            .prompt()
+            .map_err(map_inquire)
+    }
+
+    fn text(&mut self, label: &str, default: Option<&str>) -> Result<String> {
+        let mut question = Text::new(label);
+        if let Some(default) = default {
+            question = question.with_initial_value(default).with_default(default);
+        }
+        let value = question.prompt().map_err(map_inquire)?;
+        Ok(value.trim().to_string())
+    }
+
+    fn optional_text(&mut self, label: &str, default: Option<&str>) -> Result<Option<String>> {
+        let mut question = Text::new(label).with_help_message("leave empty to skip");
+        if let Some(default) = default {
+            question = question.with_initial_value(default);
+        }
+        let value = question.prompt().map_err(map_inquire)?;
+        let value = value.trim();
+        Ok((!value.is_empty()).then(|| value.to_string()))
+    }
+}
+
+/// Plain line backend: used when the input is not a terminal (redirected or
+/// scripted), and by the unit tests. Prompts print a `? label [default]:` line.
+struct LinePrompt<R: BufRead, W: Write> {
+    reader: R,
+    out: W,
+    ui: Palette,
+}
+
+impl<R: BufRead, W: Write> LinePrompt<R, W> {
+    /// Reads one line, failing when the input ends mid-session.
+    fn read_line(&mut self) -> Result<String> {
+        let mut line = String::new();
+        if self.reader.read_line(&mut line)? == 0 {
+            return Err(PackerError::Validation(
+                "interactive input ended before the wizard finished".to_string(),
+            ));
+        }
+        Ok(line)
+    }
+
+    /// Writes a `? label [hint]: ` prompt and flushes it before blocking.
+    fn prompt_line(&mut self, label: &str, hint: Option<&str>) -> Result<()> {
+        let question = self.ui.question(label);
+        let hint = match hint {
+            Some(hint) => format!(" {}", self.ui.dim(format!("[{hint}]"))),
+            None => String::new(),
+        };
+        let colon = self.ui.dim(":");
+        write!(self.out, "{question}{hint}{colon} ")?;
+        self.out.flush()?;
+        Ok(())
+    }
+
+    /// A recoverable input problem, shown before re-asking.
+    fn notice(&mut self, message: &str) -> Result<()> {
+        let mark = self.ui.bang();
+        let text = self.ui.warn(message);
+        writeln!(self.out, "    {mark} {text}")?;
+        Ok(())
+    }
+}
+
+impl<R: BufRead, W: Write> Prompt for LinePrompt<R, W> {
+    fn echo(&mut self, line: &str) -> Result<()> {
+        writeln!(self.out, "{line}")?;
+        self.out.flush()?;
+        Ok(())
+    }
+
+    fn select(&mut self, label: &str, options: &[(&str, &str)], default: usize) -> Result<usize> {
+        let question = self.ui.question(label);
+        writeln!(self.out, "{question}")?;
+        for (index, (name, description)) in options.iter().enumerate() {
+            let entry = self.ui.menu(index + 1, name, description);
+            writeln!(self.out, "{entry}")?;
+        }
+        loop {
+            self.prompt_line("select", Some(&(default + 1).to_string()))?;
+            let line = self.read_line()?;
+            match parse_choice(line.trim(), options, default) {
+                Some(index) => return Ok(index),
+                None => self.notice(&format!("enter a number between 1 and {}", options.len()))?,
+            }
+        }
+    }
+
+    fn multi_select(
+        &mut self,
+        label: &str,
+        options: &[(&str, &str)],
+        default: &[usize],
+    ) -> Result<Vec<usize>> {
+        if options.is_empty() {
+            return Ok(Vec::new());
+        }
+        let question = self.ui.question(label);
+        writeln!(self.out, "{question}")?;
+        for (index, (name, description)) in options.iter().enumerate() {
+            let entry = self.ui.menu(index + 1, name, description);
+            writeln!(self.out, "{entry}")?;
+        }
+        loop {
+            self.prompt_line("select", Some("comma-separated, blank for none"))?;
+            let line = self.read_line()?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return Ok(default.to_vec());
+            }
+            match parse_multi(trimmed, options) {
+                Some(selected) => return Ok(selected),
+                None => self.notice(&format!("enter numbers between 1 and {}", options.len()))?,
+            }
+        }
+    }
+
+    fn confirm(&mut self, label: &str, default: bool) -> Result<bool> {
+        let hint = if default { "[Y/n]" } else { "[y/N]" };
+        loop {
+            self.prompt_line(label, Some(hint))?;
+            let line = self.read_line()?;
+            match parse_yes_no(line.trim(), default) {
+                Some(value) => return Ok(value),
+                None => self.notice("please answer y or n")?,
+            }
+        }
+    }
+
+    fn text(&mut self, label: &str, default: Option<&str>) -> Result<String> {
+        self.prompt_line(label, default)?;
+        let line = self.read_line()?;
+        let answer = line.trim();
+        if !answer.is_empty() {
+            return Ok(answer.to_string());
+        }
+        Ok(default.unwrap_or("").to_string())
+    }
+
+    fn optional_text(&mut self, label: &str, default: Option<&str>) -> Result<Option<String>> {
+        self.prompt_line(label, Some("blank to skip"))?;
+        let line = self.read_line()?;
+        let answer = line.trim();
+        if !answer.is_empty() {
+            return Ok(Some(answer.to_string()));
+        }
+        Ok(default.map(str::to_string))
+    }
+}
+
+/// The wizard: the prompt backend plus the [`Palette`] for its own headings.
+struct Wizard<'a> {
+    ui: Palette,
+    prompts: &'a mut dyn Prompt,
+    payload: PathBuf,
+    config_out: Option<PathBuf>,
+}
+
+impl Wizard<'_> {
+    fn blank(&mut self) -> Result<()> {
+        self.prompts.echo("")
+    }
+
+    fn echo(&mut self, line: &str) -> Result<()> {
+        self.prompts.echo(line)
+    }
+
+    fn section(&mut self, title: &str) -> Result<()> {
+        let heading = self.ui.heading(title);
+        self.prompts.echo(&heading)
+    }
+
+    fn echo_field(&mut self, label: &str, value: &str) -> Result<()> {
+        let line = self.ui.field(label, self.ui.dim(value));
+        self.prompts.echo(&line)
+    }
+
+    /// A recoverable input problem, shown before re-asking.
+    fn notice(&mut self, message: &str) -> Result<()> {
+        let mark = self.ui.bang();
+        let text = self.ui.warn(message);
+        self.echo(&format!("    {mark} {text}"))
+    }
+
+    /// Asks a required text field; an empty answer falls back to `default`.
+    fn ask_text(&mut self, label: &str, default: &str) -> Result<String> {
+        let value = self.prompts.text(label, Some(default))?;
+        if value.is_empty() {
+            Ok(default.to_string())
+        } else {
+            Ok(value)
+        }
+    }
+
+    fn ask_optional_text(&mut self, label: &str, default: Option<&str>) -> Result<Option<String>> {
+        self.prompts.optional_text(label, default)
+    }
+
+    fn ask_list(&mut self, label: &str, previous: &[String]) -> Result<Vec<String>> {
+        let default = previous.join(", ");
+        let value = if default.is_empty() {
+            self.prompts.text(label, None)?
+        } else {
+            self.prompts.text(label, Some(&default))?
+        };
+        Ok(split_list(&value))
+    }
+
+    fn ask_number(&mut self, label: &str, default: u64, min: u64, max: u64) -> Result<u64> {
+        loop {
+            let value = self.prompts.text(label, Some(&default.to_string()))?;
+            match parse_number(&value, default, min, max) {
+                Some(number) => return Ok(number),
+                None => self.notice(&format!("enter a number between {min} and {max}"))?,
+            }
+        }
+    }
+
+    fn ask_optional_number(
+        &mut self,
+        label: &str,
+        max: u64,
+        previous: Option<u32>,
+    ) -> Result<Option<u32>> {
+        loop {
+            let default = previous
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "0".to_string());
+            let value = self.prompts.text(label, Some(&default))?;
+            match parse_number(&value, 0, 0, max) {
+                Some(0) => return Ok(None),
+                Some(number) => return Ok(Some(number as u32)),
+                None => self.notice(&format!("enter a number between 0 and {max}"))?,
+            }
+        }
+    }
+
+    /// Collects every field, seeding defaults from `previous` on a review pass.
+    fn ask_all(&mut self, previous: Option<&Answers>) -> Result<Answers> {
+        self.blank()?;
+        self.section("PAYLOAD")?;
+        self.echo_field("source", &self.payload.display().to_string())?;
+
+        let default_name = previous
+            .map(|answers| answers.name.clone())
+            .unwrap_or_else(|| default_name(&self.payload));
+        let name = self.ask_text("name", &default_name)?;
+
+        let payload_args = self.ask_list(
+            "payload args (comma-separated)",
+            previous.map_or(&[], |answers| answers.payload_args.as_slice()),
+        )?;
+
+        self.section("TECHNIQUES")?;
+        let execution = self.ask_execution(previous.map(|answers| &answers.execution))?;
+        let preparations = self.ask_preparations(
+            previous.map_or(&[][..], |answers| answers.preparations.as_slice()),
+        )?;
+
+        self.section("STUB")?;
+        let strings_strategy = match self.ask_select(
+            "strings",
+            &[
+                ("xor", "single-byte XOR per string, with a random key"),
+                ("stack", "decoder-free, built on the stack"),
+            ],
+            previous
+                .map(|answers| usize::from(answers.strings_strategy == "stack"))
+                .unwrap_or(0),
+        )? {
+            0 => "xor".to_string(),
+            _ => "stack".to_string(),
+        };
+        let default_syscalls = previous
+            .map(|answers| usize::from(answers.syscalls_mode == "indirect"))
+            .unwrap_or_else(|| {
+                usize::from(
+                    techniques::find(execution.name()).is_some_and(|def| !def.syscalls.is_empty()),
+                )
+            });
+        let syscalls_mode = match self.ask_select(
+            "syscalls",
+            &[
+                ("none", "call the Win32 APIs directly"),
+                ("indirect", "resolve SSNs and invoke the kernel directly"),
+            ],
+            default_syscalls,
+        )? {
+            0 => "none".to_string(),
+            _ => "indirect".to_string(),
+        };
+
+        self.section("OUTPUT")?;
+        let default_output = previous
+            .map(|answers| answers.output_path.clone())
+            .unwrap_or_else(|| format!("./dist/{name}_packed.exe"));
+        let output_path = self.ask_text("output path", &default_output)?;
+        let strip = self.prompts.confirm(
+            "strip symbols",
+            previous.is_none_or(|answers| answers.strip),
+        )?;
+        let trim_paths = match self.ask_select(
+            "trim paths",
+            &[
+                ("all", "remap every absolute path in the debug info"),
+                ("none", "leave paths untouched"),
+                ("relative", "remap only paths outside the project"),
+            ],
+            previous
+                .map(|answers| trim_index(answers.trim_paths))
+                .unwrap_or(0),
+        )? {
+            0 => TrimPaths::All,
+            1 => TrimPaths::None,
+            _ => TrimPaths::Relative,
+        };
+
+        Ok(Answers {
+            name,
+            payload_args,
+            execution,
+            preparations,
+            strings_strategy,
+            syscalls_mode,
+            output_path,
+            strip,
+            trim_paths,
+        })
+    }
+
+    fn ask_select(
+        &mut self,
+        label: &str,
+        options: &[(&str, &str)],
+        default: usize,
+    ) -> Result<usize> {
+        self.prompts.select(label, options, default)
+    }
+
+    /// Asks for the execution technique and its parameters.
+    fn ask_execution(&mut self, previous: Option<&RuntimeStep>) -> Result<RuntimeStep> {
+        let choices = execution_defs();
+        let options = describe(&choices);
+        let default = previous
+            .and_then(|step| choices.iter().position(|def| def.name == step.name()))
+            .unwrap_or_else(|| {
+                choices
+                    .iter()
+                    .position(|def| def.name == "reflective_loading")
+                    .unwrap_or(0)
+            });
+        let index = self.prompts.select("execution", &options, default)?;
+        let def = choices[index];
+        let previous = previous.filter(|step| step.name() == def.name);
+
+        match def.name {
+            "process_hollowing" => {
+                let default_target = match previous {
+                    Some(RuntimeStep::ProcessHollowing { params }) => params.target.clone(),
+                    _ => process_hollowing::default_target(),
+                };
+                let target = self.ask_text("target", &default_target)?;
+                Ok(RuntimeStep::ProcessHollowing {
+                    params: process_hollowing::Params { target },
+                })
+            }
+            _ => default_step(def),
+        }
+    }
+
+    /// Asks which preparations to apply, then each one's parameters.
+    fn ask_preparations(&mut self, previous: &[RuntimeStep]) -> Result<Vec<RuntimeStep>> {
+        let choices = preparation_defs();
+        let options = describe(&choices);
+        let default: Vec<usize> = choices
+            .iter()
+            .enumerate()
+            .filter(|(_, def)| previous.iter().any(|step| step.name() == def.name))
+            .map(|(index, _)| index)
+            .collect();
+        let selected = self
+            .prompts
+            .multi_select("preparation", &options, &default)?;
+
+        let mut out = Vec::new();
+        for index in selected {
+            let def = choices[index];
+            let previous = previous.iter().find(|step| step.name() == def.name);
+            out.push(self.ask_preparation(def, previous)?);
+        }
+        Ok(out)
+    }
+
+    /// Asks the parameters of one preparation technique.
+    fn ask_preparation(
+        &mut self,
+        def: &TechniqueDef,
+        previous: Option<&RuntimeStep>,
+    ) -> Result<RuntimeStep> {
+        self.blank()?;
+        let heading = self.ui.heading(def.name);
+        let subtitle = self.ui.dim(techniques::summary(def));
+        self.echo(&format!("{heading}  {subtitle}"))?;
+
+        match def.name {
+            "bouncer" => {
+                let previous = previous.and_then(|step| match step {
+                    RuntimeStep::Bouncer { params } => Some(params),
+                    _ => None,
+                });
+                Ok(RuntimeStep::Bouncer {
+                    params: self.ask_bouncer(previous)?,
+                })
+            }
+            "anti_debug" => {
+                let previous = previous.and_then(|step| match step {
+                    RuntimeStep::AntiDebug { params } => Some(params.action),
+                    _ => None,
+                });
+                let action = match self.ask_select(
+                    "action",
+                    &[
+                        ("abort", "never run the payload when a debugger is seen"),
+                        ("continue", "note the detection and carry on"),
+                    ],
+                    matches!(previous, Some(anti_debug::Action::Continue)).into(),
+                )? {
+                    0 => anti_debug::Action::Abort,
+                    _ => anti_debug::Action::Continue,
+                };
+                Ok(RuntimeStep::AntiDebug {
+                    params: anti_debug::Params { action },
+                })
+            }
+            "patch_amsi" => Ok(RuntimeStep::PatchAmsi {
+                params: patch_amsi::Params {},
+            }),
+            "patch_etw" => {
+                let previous = previous.and_then(|step| match step {
+                    RuntimeStep::PatchEtw { params } => Some(params.full),
+                    _ => None,
+                });
+                let full = self
+                    .prompts
+                    .confirm("also patch EtwEventWriteFull", previous.unwrap_or(true))?;
+                Ok(RuntimeStep::PatchEtw {
+                    params: patch_etw::Params { full },
+                })
+            }
+            "sleep_obfuscation" => {
+                let previous = previous.and_then(|step| match step {
+                    RuntimeStep::SleepObfuscation { params } => Some(params.sleep_ms),
+                    _ => None,
+                });
+                // Only `ekko` and `[payload]` are implemented, so the variant and
+                // the encrypted regions are not questions yet.
+                let sleep_ms =
+                    self.ask_number("sleep_ms", previous.unwrap_or(5000), 1, u32::MAX as u64)?;
+                Ok(RuntimeStep::SleepObfuscation {
+                    params: sleep_obfuscation::Params {
+                        variant: sleep_obfuscation::Variant::Ekko,
+                        sleep_ms,
+                        encrypt_regions: vec![sleep_obfuscation::EncryptRegion::Payload],
+                    },
+                })
+            }
+            _ => default_step(def),
+        }
+    }
+
+    /// The bouncer gate: how the checks combine, what to do on rejection, and
+    /// which checks to declare (each with its own value question).
+    fn ask_bouncer(&mut self, previous: Option<&bouncer::Params>) -> Result<bouncer::Params> {
+        let mode = match self.ask_select(
+            "mode",
+            &[
+                ("all", "every declared check must pass"),
+                ("any", "at least one declared check must pass"),
+            ],
+            matches!(previous.map(|params| params.mode), Some(bouncer::Mode::Any)).into(),
+        )? {
+            0 => bouncer::Mode::All,
+            _ => bouncer::Mode::Any,
+        };
+        let on_fail = match self.ask_select(
+            "on_fail",
+            &[
+                ("silent", "stop with exit code 0"),
+                ("exit", "stop with exit code 1"),
+            ],
+            matches!(
+                previous.map(|params| params.on_fail),
+                Some(bouncer::OnFail::Exit)
+            )
+            .into(),
+        )? {
+            0 => bouncer::OnFail::Silent,
+            _ => bouncer::OnFail::Exit,
+        };
+
+        let checks: [(&str, &str); 9] = [
+            ("hostname", "required computer name (glob)"),
+            ("username", "required user name (glob)"),
+            ("domain", "required DNS domain (glob)"),
+            ("language", "accepted BCP-47 locales"),
+            ("keyboard", "accepted 4-digit layout codes"),
+            ("not_in_vm", "require no hypervisor (CPUID)"),
+            ("not_in_sandbox", "require the sandbox heuristic to pass"),
+            ("min_uptime_min", "minimum uptime, in minutes"),
+            ("min_ram_mb", "minimum physical memory, in MiB"),
+        ];
+        let default: Vec<usize> = checks
+            .iter()
+            .enumerate()
+            .filter(|(_, (name, _))| check_is_declared(name, previous))
+            .map(|(index, _)| index)
+            .collect();
+        let selected = self.prompts.multi_select("checks", &checks, &default)?;
+
+        let mut params = bouncer::Params {
+            mode,
+            on_fail,
+            ..Default::default()
+        };
+        for index in selected {
+            match checks[index].0 {
+                "hostname" => {
+                    params.hostname = self.ask_optional_text(
+                        "hostname",
+                        previous.and_then(|params| params.hostname.as_deref()),
+                    )?
+                }
+                "username" => {
+                    params.username = self.ask_optional_text(
+                        "username",
+                        previous.and_then(|params| params.username.as_deref()),
+                    )?
+                }
+                "domain" => {
+                    params.domain = self.ask_optional_text(
+                        "domain",
+                        previous.and_then(|params| params.domain.as_deref()),
+                    )?
+                }
+                "language" => {
+                    params.language = self.ask_list(
+                        "language",
+                        previous.map_or(&[], |params| params.language.as_slice()),
+                    )?
+                }
+                "keyboard" => {
+                    params.keyboard = self.ask_list(
+                        "keyboard",
+                        previous.map_or(&[], |params| params.keyboard.as_slice()),
+                    )?
+                }
+                // Selecting either flag means "require it"; `false` and absent
+                // skip the check alike, so there is nothing more to ask.
+                "not_in_vm" => params.not_in_vm = Some(true),
+                "not_in_sandbox" => params.not_in_sandbox = Some(true),
+                "min_uptime_min" => {
+                    params.min_uptime_min = self.ask_optional_number(
+                        "min_uptime_min",
+                        u32::MAX as u64,
+                        previous.and_then(|params| params.min_uptime_min),
+                    )?
+                }
+                "min_ram_mb" => {
+                    params.min_ram_mb = self.ask_optional_number(
+                        "min_ram_mb",
+                        u32::MAX as u64,
+                        previous.and_then(|params| params.min_ram_mb),
+                    )?
+                }
+                _ => {}
+            }
+        }
+        Ok(params)
+    }
+}
+
+/// Whether a bouncer check field is declared (i.e. activates a check).
+fn check_is_declared(name: &str, previous: Option<&bouncer::Params>) -> bool {
+    let Some(params) = previous else {
+        return false;
+    };
+    match name {
+        "hostname" => params.hostname.is_some(),
+        "username" => params.username.is_some(),
+        "domain" => params.domain.is_some(),
+        "language" => !params.language.is_empty(),
+        "keyboard" => !params.keyboard.is_empty(),
+        "not_in_vm" => params.not_in_vm == Some(true),
+        "not_in_sandbox" => params.not_in_sandbox == Some(true),
+        "min_uptime_min" => params.min_uptime_min.is_some(),
+        "min_ram_mb" => params.min_ram_mb.is_some(),
+        _ => false,
+    }
+}
+
+/// The index of a [`TrimPaths`] in the wizard's menu.
+fn trim_index(trim: TrimPaths) -> usize {
+    match trim {
+        TrimPaths::All => 0,
+        TrimPaths::None => 1,
+        TrimPaths::Relative => 2,
+    }
+}
+
+/// The registered Execution techniques, in registry order.
+fn execution_defs() -> Vec<&'static TechniqueDef> {
+    techniques::all()
+        .iter()
+        .filter(|def| def.category == Category::Execution)
+        .collect()
 }
 
 /// Preparation techniques in the order the wizard offers them.
@@ -297,19 +929,77 @@ fn prep_rank(name: &str) -> usize {
     }
 }
 
-/// The registered Execution techniques, in registry order.
-fn execution_defs() -> Vec<&'static TechniqueDef> {
-    techniques::all()
-        .iter()
-        .filter(|def| def.category == Category::Execution)
-        .collect()
-}
-
 /// `(name, one-line summary)` pairs for a menu.
 fn describe(defs: &[&'static TechniqueDef]) -> Vec<(&'static str, &'static str)> {
     defs.iter()
         .map(|def| (def.name, techniques::summary(def)))
         .collect()
+}
+
+/// Assembles the [`Config`] from the answered questions.
+fn assemble(payload: &Path, answers: &Answers) -> Config {
+    let mut runtime = answers.preparations.clone();
+    runtime.push(answers.execution.clone());
+
+    Config {
+        schema: SUPPORTED_SCHEMA,
+        name: answers.name.clone(),
+        build: BuildConfig {
+            payload: PayloadConfig {
+                source: payload.display().to_string(),
+                args: (!answers.payload_args.is_empty()).then(|| answers.payload_args.clone()),
+                args_mode: ArgsMode::Join,
+                crypto: CryptoConfig {
+                    algo: CryptoAlgorithm::XChaCha20Poly1305,
+                    key: KeySource::Random,
+                },
+                // Integrity pinning is an advanced setting; edit it in the YAML.
+                sha256: None,
+            },
+            stub: StubConfig {
+                // The wizard always renders the builtin stub.
+                path: None,
+                // Omitted when `none` so the generated YAML stays minimal.
+                syscalls: (answers.syscalls_mode == "indirect").then(|| YamlSyscallsConfig {
+                    mode: answers.syscalls_mode.clone(),
+                    resolver: "hells_gate".to_string(),
+                }),
+                strings: Some(YamlStringsConfig {
+                    strategy: answers.strings_strategy.clone(),
+                    // A literal key is an advanced setting; edit it in the YAML.
+                    key: "random".to_string(),
+                }),
+            },
+            output: OutputConfig {
+                path: PathBuf::from(&answers.output_path),
+                // The stub is always compiled for x86-64.
+                arch: Arch::X64,
+                strip: answers.strip,
+                trim_paths: answers.trim_paths,
+                manifest: true,
+                // PE resources are an advanced setting; edit them in the YAML.
+                resources: None,
+                // The stub prints markers for the tests, so it stays a console app.
+                subsystem: Subsystem::Console,
+                sign: None,
+            },
+        },
+        runtime,
+    }
+}
+
+/// Builds a step from the technique's documented `params_example`.
+///
+/// Used for techniques the wizard has no tailored questions for yet: the
+/// registry guarantees the snippet parses, so a newly registered technique
+/// arrives with its YAML defaults instead of being unreachable.
+fn default_step(def: &TechniqueDef) -> Result<RuntimeStep> {
+    serde_yml::from_str(def.params_example).map_err(|source| {
+        PackerError::Validation(format!(
+            "technique '{}' has unparsable default params: {source}",
+            def.name
+        ))
+    })
 }
 
 /// Derives the default build name from the payload filename.
@@ -363,7 +1053,10 @@ fn parse_multi(input: &str, options: &[(&str, &str)]) -> Option<Vec<usize>> {
         return Some(Vec::new());
     }
     let mut selected = Vec::new();
-    for token in input.split([',', ' ', ';']).filter(|token| !token.is_empty()) {
+    for token in input
+        .split([',', ' ', ';'])
+        .filter(|token| !token.is_empty())
+    {
         selected.push(parse_choice(token, options, 0)?);
     }
     selected.sort_unstable();
@@ -380,345 +1073,6 @@ fn parse_number(input: &str, default: u64, min: u64, max: u64) -> Option<u64> {
     (min..=max).contains(&value).then_some(value)
 }
 
-/// Reads answers from a [`BufRead`] and formats prompts into a [`Write`].
-struct Prompter<R: BufRead, W: Write> {
-    reader: R,
-    out: W,
-    ui: Palette,
-}
-
-impl<R: BufRead, W: Write> Prompter<R, W> {
-    /// Reads one line, failing when the input ends mid-session.
-    ///
-    /// Silently accepting the defaults on EOF would build something the operator
-    /// never confirmed, so a truncated input is an error.
-    fn read_line(&mut self) -> Result<String> {
-        let mut line = String::new();
-        if self.reader.read_line(&mut line)? == 0 {
-            return Err(PackerError::Validation(
-                "interactive input ended before the wizard finished".to_string(),
-            ));
-        }
-        Ok(line)
-    }
-
-    fn blank(&mut self) -> Result<()> {
-        writeln!(self.out)?;
-        Ok(())
-    }
-
-    fn section(&mut self, title: &str) -> Result<()> {
-        let heading = self.ui.heading(title);
-        writeln!(self.out, "{heading}")?;
-        Ok(())
-    }
-
-    /// Prints an answered/summary value: `  label  value`.
-    fn echo_field(&mut self, label: &str, value: &str) -> Result<()> {
-        let line = self.ui.field(label, self.ui.dim(value));
-        writeln!(self.out, "{line}")?;
-        Ok(())
-    }
-
-    /// A recoverable input problem: re-ask after saying what was expected.
-    fn notice(&mut self, message: &str) -> Result<()> {
-        let mark = self.ui.bang();
-        let text = self.ui.warn(message);
-        writeln!(self.out, "    {mark} {text}")?;
-        Ok(())
-    }
-
-    /// Writes a prompt (with an optional hint) and flushes it before blocking.
-    fn prompt_line(&mut self, label: &str, hint: Option<String>) -> Result<()> {
-        let question = self.ui.question(label);
-        let hint = match hint {
-            Some(hint) => format!(" {}", self.ui.dim(hint)),
-            None => String::new(),
-        };
-        let colon = self.ui.dim(":");
-        write!(self.out, "{question}{hint}{colon} ")?;
-        self.out.flush()?;
-        Ok(())
-    }
-
-    /// Prints a numbered menu for `options`.
-    fn menu(&mut self, options: &[(&str, &str)]) -> Result<()> {
-        for (index, (name, description)) in options.iter().enumerate() {
-            let entry = self.ui.menu(index + 1, name, description);
-            writeln!(self.out, "{entry}")?;
-        }
-        Ok(())
-    }
-
-    /// Asks for a required value; blank falls back to `default`.
-    fn ask_text(&mut self, label: &str, default: Option<&str>) -> Result<String> {
-        loop {
-            self.prompt_line(label, default.map(|d| format!("[{d}]")))?;
-            let line = self.read_line()?;
-            let answer = line.trim();
-            if !answer.is_empty() {
-                return Ok(answer.to_string());
-            }
-            if let Some(default) = default {
-                return Ok(default.to_string());
-            }
-            self.notice("a value is required")?;
-        }
-    }
-
-    /// Asks for an optional value; blank (or EOF-free empty input) means "skip".
-    fn ask_optional_text(&mut self, label: &str) -> Result<Option<String>> {
-        self.prompt_line(label, Some("blank to skip".to_string()))?;
-        let line = self.read_line()?;
-        let answer = line.trim();
-        Ok((!answer.is_empty()).then(|| answer.to_string()))
-    }
-
-    /// Asks for a comma-separated list; blank means "none".
-    fn ask_list(&mut self, label: &str, hint: &str) -> Result<Vec<String>> {
-        self.prompt_line(label, Some(hint.to_string()))?;
-        let line = self.read_line()?;
-        Ok(split_list(&line))
-    }
-
-    /// Asks a yes/no question; blank takes `default`.
-    fn ask_yes_no(&mut self, label: &str, default: bool) -> Result<bool> {
-        let hint = if default { "[Y/n]" } else { "[y/N]" };
-        loop {
-            self.prompt_line(label, Some(hint.to_string()))?;
-            let line = self.read_line()?;
-            match parse_yes_no(line.trim(), default) {
-                Some(value) => return Ok(value),
-                None => self.notice("please answer y or n")?,
-            }
-        }
-    }
-
-    /// Asks a single-choice question; blank takes the default index.
-    fn ask_choice(
-        &mut self,
-        label: &str,
-        options: &[(&str, &str)],
-        default: usize,
-    ) -> Result<usize> {
-        let question = self.ui.question(label);
-        writeln!(self.out, "{question}")?;
-        self.menu(options)?;
-        loop {
-            self.prompt_line("select", Some(format!("[{}]", default + 1)))?;
-            let line = self.read_line()?;
-            match parse_choice(line.trim(), options, default) {
-                Some(index) => return Ok(index),
-                None => self.notice(&format!(
-                    "enter a number between 1 and {}",
-                    options.len()
-                ))?,
-            }
-        }
-    }
-
-    /// Asks a multi-select question; blank selects nothing.
-    fn ask_multi(&mut self, label: &str, options: &[(&str, &str)]) -> Result<Vec<usize>> {
-        if options.is_empty() {
-            return Ok(Vec::new());
-        }
-        let question = self.ui.question(label);
-        writeln!(self.out, "{question}")?;
-        self.menu(options)?;
-        loop {
-            self.prompt_line("select", Some("comma-separated, blank for none".to_string()))?;
-            let line = self.read_line()?;
-            match parse_multi(line.trim(), options) {
-                Some(selected) => return Ok(selected),
-                None => self.notice(&format!(
-                    "enter numbers between 1 and {}",
-                    options.len()
-                ))?,
-            }
-        }
-    }
-
-    /// Asks for a bounded number; blank takes `default`.
-    fn ask_number(&mut self, label: &str, default: u64, min: u64, max: u64) -> Result<u64> {
-        loop {
-            self.prompt_line(label, Some(format!("[{default}]")))?;
-            let line = self.read_line()?;
-            match parse_number(line.trim(), default, min, max) {
-                Some(value) => return Ok(value),
-                None => self.notice(&format!("enter a number between {min} and {max}"))?,
-            }
-        }
-    }
-
-    /// Asks for an optional number; blank or `0` means "skip".
-    fn ask_optional_number(&mut self, label: &str, max: u64) -> Result<Option<u32>> {
-        loop {
-            self.prompt_line(label, Some("0 to skip".to_string()))?;
-            let line = self.read_line()?;
-            match parse_number(line.trim(), 0, 0, max) {
-                Some(0) => return Ok(None),
-                Some(value) => return Ok(Some(value as u32)),
-                None => self.notice(&format!("enter a number between 0 and {max}"))?,
-            }
-        }
-    }
-
-    /// Asks the follow-up questions for one Preparation technique.
-    fn ask_preparation(&mut self, def: &TechniqueDef) -> Result<RuntimeStep> {
-        self.blank()?;
-        let heading = self.ui.heading(def.name);
-        let subtitle = self.ui.dim(techniques::summary(def));
-        writeln!(self.out, "{heading}  {subtitle}")?;
-
-        match def.name {
-            "bouncer" => Ok(RuntimeStep::Bouncer {
-                params: self.ask_bouncer()?,
-            }),
-            "anti_debug" => {
-                let action = match self.ask_choice(
-                    "action",
-                    &[
-                        ("abort", "never run the payload when a debugger is seen"),
-                        ("continue", "note the detection and carry on"),
-                    ],
-                    0,
-                )? {
-                    0 => anti_debug::Action::Abort,
-                    _ => anti_debug::Action::Continue,
-                };
-                Ok(RuntimeStep::AntiDebug {
-                    params: anti_debug::Params { action },
-                })
-            }
-            "patch_amsi" => Ok(RuntimeStep::PatchAmsi {
-                params: patch_amsi::Params {},
-            }),
-            "patch_etw" => {
-                let full = self.ask_yes_no("also patch EtwEventWriteFull", true)?;
-                Ok(RuntimeStep::PatchEtw {
-                    params: patch_etw::Params { full },
-                })
-            }
-            "sleep_obfuscation" => {
-                // Only `ekko` and `[payload]` are implemented, so the variant and
-                // the encrypted regions are not questions yet.
-                let sleep_ms = self.ask_number("sleep_ms", 5000, 1, u32::MAX as u64)?;
-                Ok(RuntimeStep::SleepObfuscation {
-                    params: sleep_obfuscation::Params {
-                        variant: sleep_obfuscation::Variant::Ekko,
-                        sleep_ms,
-                        encrypt_regions: vec![sleep_obfuscation::EncryptRegion::Payload],
-                    },
-                })
-            }
-            // A preparation without wizard questions uses its documented
-            // defaults, so a new technique still works before its prompts exist.
-            _ => default_step(def),
-        }
-    }
-
-    /// Asks the follow-up questions for the chosen Execution technique.
-    fn ask_execution(&mut self, def: &TechniqueDef) -> Result<RuntimeStep> {
-        self.blank()?;
-        let heading = self.ui.heading(def.name);
-        let subtitle = self.ui.dim(techniques::summary(def));
-        writeln!(self.out, "{heading}  {subtitle}")?;
-
-        match def.name {
-            "process_hollowing" => {
-                let target = self.ask_text("target", Some(&process_hollowing::default_target()))?;
-                Ok(RuntimeStep::ProcessHollowing {
-                    params: process_hollowing::Params { target },
-                })
-            }
-            _ => default_step(def),
-        }
-    }
-
-    /// The bouncer gate: how the checks combine, what to do on rejection, and
-    /// which checks to declare (each with its own value question).
-    fn ask_bouncer(&mut self) -> Result<bouncer::Params> {
-        let mode = match self.ask_choice(
-            "mode",
-            &[
-                ("all", "every declared check must pass"),
-                ("any", "at least one declared check must pass"),
-            ],
-            0,
-        )? {
-            0 => bouncer::Mode::All,
-            _ => bouncer::Mode::Any,
-        };
-        let on_fail = match self.ask_choice(
-            "on_fail",
-            &[
-                ("silent", "stop with exit code 0"),
-                ("exit", "stop with exit code 1"),
-            ],
-            0,
-        )? {
-            0 => bouncer::OnFail::Silent,
-            _ => bouncer::OnFail::Exit,
-        };
-
-        let checks: [(&str, &str); 9] = [
-            ("hostname", "required computer name (glob)"),
-            ("username", "required user name (glob)"),
-            ("domain", "required DNS domain (glob)"),
-            ("language", "accepted BCP-47 locales"),
-            ("keyboard", "accepted 4-digit layout codes"),
-            ("not_in_vm", "require no hypervisor (CPUID)"),
-            ("not_in_sandbox", "require the sandbox heuristic to pass"),
-            ("min_uptime_min", "minimum uptime, in minutes"),
-            ("min_ram_mb", "minimum physical memory, in MiB"),
-        ];
-        let selected = self.ask_multi("checks", &checks)?;
-
-        let mut params = bouncer::Params {
-            mode,
-            on_fail,
-            ..Default::default()
-        };
-        for index in selected {
-            match checks[index].0 {
-                "hostname" => params.hostname = self.ask_optional_text("hostname")?,
-                "username" => params.username = self.ask_optional_text("username")?,
-                "domain" => params.domain = self.ask_optional_text("domain")?,
-                "language" => params.language = self.ask_list("language", "comma-separated")?,
-                "keyboard" => params.keyboard = self.ask_list("keyboard", "comma-separated")?,
-                // Selecting either flag means "require it"; `false` and absent
-                // skip the check alike, so there is nothing more to ask.
-                "not_in_vm" => params.not_in_vm = Some(true),
-                "not_in_sandbox" => params.not_in_sandbox = Some(true),
-                "min_uptime_min" => {
-                    params.min_uptime_min =
-                        self.ask_optional_number("min_uptime_min", u32::MAX as u64)?
-                }
-                "min_ram_mb" => {
-                    params.min_ram_mb =
-                        self.ask_optional_number("min_ram_mb", u32::MAX as u64)?
-                }
-                _ => {}
-            }
-        }
-        Ok(params)
-    }
-}
-
-/// Builds a step from the technique's documented `params_example`.
-///
-/// Used for techniques the wizard has no tailored questions for yet: the
-/// registry guarantees the snippet parses, so a newly registered technique
-/// arrives with its YAML defaults instead of being unreachable.
-fn default_step(def: &TechniqueDef) -> Result<RuntimeStep> {
-    serde_yml::from_str(def.params_example).map_err(|source| {
-        PackerError::Validation(format!(
-            "technique '{}' has unparsable default params: {source}",
-            def.name
-        ))
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -726,7 +1080,6 @@ mod tests {
     use std::io::Cursor;
 
     use crate::config::load_config;
-    use crate::techniques::{bouncer, process_hollowing};
 
     /// Joins answer lines the way a terminal would deliver them.
     fn script(lines: &[&str]) -> String {
@@ -737,7 +1090,9 @@ mod tests {
 
     /// A unique, empty directory for one test's generated config.
     fn temp_dir(test: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join("batesian_wizard_tests").join(test);
+        let dir = std::env::temp_dir()
+            .join("batesian_wizard_tests")
+            .join(test);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir
@@ -758,7 +1113,10 @@ mod tests {
             &mut out,
         )
         .expect("the scripted session should succeed");
-        (result, String::from_utf8(out).expect("the transcript is utf-8"))
+        (
+            result,
+            String::from_utf8(out).expect("the transcript is utf-8"),
+        )
     }
 
     #[test]
@@ -812,8 +1170,8 @@ mod tests {
         assert_eq!(default_name(Path::new("payload")), "payload");
     }
 
-    /// A blank script walks every menu with its defaults and produces a config
-    /// the packer accepts as-is.
+    /// Nine blank first-pass answers plus a blank review selection (`build now`)
+    /// produce a config the packer accepts as-is.
     #[test]
     fn defaults_produce_a_valid_reflective_config() {
         let dir = temp_dir("defaults");
@@ -823,7 +1181,10 @@ mod tests {
         let (written, transcript) = session("payload.exe", &answers, Some(&config_path));
 
         assert_eq!(written.as_deref(), Some(config_path.as_path()));
-        assert!(transcript.contains("build interactive"), "no echo: {transcript}");
+        assert!(
+            transcript.contains("build interactive"),
+            "no echo: {transcript}"
+        );
 
         let config = load_config(&config_path, &BTreeMap::new()).expect("valid config");
         assert_eq!(config.name, "payload");
@@ -840,7 +1201,6 @@ mod tests {
             "got {:?}",
             config.runtime[0]
         );
-        // No syscall-using technique, so the block stays out of the YAML.
         assert!(config.build.stub.syscalls.is_none());
         assert!(config.build.stub.strings.is_some());
     }
@@ -866,7 +1226,7 @@ mod tests {
             "",                  // output path
             "",                  // strip
             "",                  // trim paths
-            "",                  // confirm
+            "",                  // review -> build now
         ];
 
         let (written, _) = session("mimikatz.exe", &answers, Some(&config_path));
@@ -879,7 +1239,6 @@ mod tests {
             Some(vec!["a".to_string(), "b".to_string()])
         );
 
-        // Preparation first, then the execution technique.
         assert_eq!(config.runtime.len(), 2);
         let RuntimeStep::Bouncer { params } = &config.runtime[0] else {
             panic!("expected a bouncer first, got {:?}", config.runtime[0]);
@@ -890,7 +1249,10 @@ mod tests {
         assert_eq!(params.not_in_vm, Some(true));
 
         let RuntimeStep::ProcessHollowing { params } = &config.runtime[1] else {
-            panic!("expected process_hollowing second, got {:?}", config.runtime[1]);
+            panic!(
+                "expected process_hollowing second, got {:?}",
+                config.runtime[1]
+            );
         };
         assert_eq!(params.target, process_hollowing::default_target());
 
@@ -899,12 +1261,48 @@ mod tests {
         assert_eq!(syscalls.resolver, "hells_gate");
     }
 
-    /// Declining the confirmation leaves the disk untouched.
+    /// Choosing `edit answers` at the review re-asks the questions with the
+    /// previous values as defaults, so a single field can be corrected.
     #[test]
-    fn declining_the_confirmation_writes_nothing() {
+    fn editing_answers_updates_a_single_field() {
+        let dir = temp_dir("edit");
+        let config_path = dir.join("out.yaml");
+        let answers = [
+            "first",  // name
+            "",       // payload args
+            "",       // execution
+            "",       // preparation
+            "",       // strings
+            "",       // syscalls
+            "",       // output path
+            "",       // strip
+            "",       // trim paths
+            "2",      // review -> edit answers
+            "second", // name (corrected)
+            "",       // payload args
+            "",       // execution
+            "",       // preparation
+            "",       // strings
+            "",       // syscalls
+            "",       // output path
+            "",       // strip
+            "",       // trim paths
+            "",       // review -> build now
+        ];
+
+        let (written, _) = session("payload.exe", &answers, Some(&config_path));
+        assert!(written.is_some());
+
+        let config = load_config(&config_path, &BTreeMap::new()).expect("valid config");
+        assert_eq!(config.name, "second");
+    }
+
+    /// Choosing `quit` at the review leaves the disk untouched.
+    #[test]
+    fn quitting_the_review_writes_nothing() {
         let dir = temp_dir("aborted");
         let config_path = dir.join("out.yaml");
-        let answers = ["", "", "", "", "", "", "", "", "", "n"];
+        let answers = ["", "", "", "", "", "", "", "", "", "3"];
 
         let (written, _) = session("payload.exe", &answers, Some(&config_path));
 

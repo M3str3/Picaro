@@ -10,6 +10,10 @@
 //! Note: we do not use `-C lto=fat` because the `.rlib` files produced by
 //! cargo do not carry bitcode (`.llvmbc`), so `lto=fat` with `--extern` fails.
 //! We keep `-O` for optimizing the stub itself.
+//!
+//! `build.output` reaches this module as [`CompileOptions`]: `strip` maps to
+//! `-C strip=...` and `trim_paths` to `--remap-path-prefix`, so both actually
+//! shape the final binary instead of being display-only configuration.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -88,6 +92,28 @@ pub fn stub_target_label() -> &'static str {
     } else {
         STUB_TARGET
     }
+}
+
+/// The `rustc --version` line of the compiler the stub is built with.
+///
+/// Recorded in the build manifest so an artifact can be traced back to the
+/// exact toolchain that produced it.
+pub fn rustc_version() -> Result<String> {
+    let rustc = find_rustc()?;
+    let out = Command::new(&rustc)
+        .arg("--version")
+        .output()
+        .map_err(|e| {
+            BuildError::RustcVersion(format!("could not run '{}': {e}", rustc.display()))
+        })?;
+    if !out.status.success() {
+        return Err(BuildError::RustcVersion(format!(
+            "'{}' --version exited with {}",
+            rustc.display(),
+            out.status
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// Locates every dependency required to compile the stub.
@@ -284,6 +310,13 @@ fn cargo_home() -> Result<PathBuf> {
 }
 
 /// Reads the resolved version of a `windows_x86_64_*` crate from `Cargo.lock`.
+///
+/// `windows` links against the import library provided by the `windows_x86_64_*`
+/// crate that its `windows-targets` dependency pulls in. The lock file can hold
+/// several `windows_x86_64_*` versions at once (e.g. `windows-sys 0.48` pulls
+/// `windows-targets 0.48` while `windows` uses `windows-targets 0.52`), so we
+/// resolve the chain `windows` → `windows-targets` → per-arch crate instead of
+/// trusting the first `windows_x86_64_*` entry, which need not match.
 fn windows_crate_version(crate_name: &str) -> Result<String> {
     let lock_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock");
     let content = std::fs::read_to_string(&lock_path).map_err(|e| {
@@ -292,31 +325,176 @@ fn windows_crate_version(crate_name: &str) -> Result<String> {
             lock_path.display()
         ))
     })?;
+    windows_crate_version_in(&content, crate_name)
+}
 
-    let name_marker = format!("name = \"{crate_name}\"");
-    let start = content.find(&name_marker).ok_or_else(|| {
-        BuildError::WindowsImportLibNotFound(format!("'{crate_name}' was not found in Cargo.lock"))
-    })?;
-    let rest = &content[start + name_marker.len()..];
+/// Resolves the per-arch `windows_*` version from a `Cargo.lock` document.
+fn windows_crate_version_in(lock: &str, crate_name: &str) -> Result<String> {
+    let targets_version = dependency_version(lock, "windows", "windows-targets")?;
+    dependency_version(
+        lock,
+        &format!("windows-targets {targets_version}"),
+        crate_name,
+    )
+}
 
-    let ver_marker = "version = \"";
-    let vstart = rest.find(ver_marker).ok_or_else(|| {
+/// The version of `dep` that the package `spec` lists in its dependencies.
+///
+/// `spec` is either a bare crate name (`windows`) or a disambiguated
+/// `"name version"` pair when the lock has several versions of the same crate.
+fn dependency_version(lock: &str, spec: &str, dep: &str) -> Result<String> {
+    let block = package_block(lock, spec)?;
+    let marker = "dependencies = [";
+    let start = block.find(marker).ok_or_else(|| {
         BuildError::WindowsImportLibNotFound(format!(
-            "could not read the '{crate_name}' version from Cargo.lock"
+            "'{spec}' has no dependencies list in Cargo.lock"
         ))
-    })? + ver_marker.len();
-    let vend = rest[vstart..].find('"').ok_or_else(|| {
+    })? + marker.len();
+    let end = block[start..].find(']').ok_or_else(|| {
         BuildError::WindowsImportLibNotFound(format!(
-            "malformed '{crate_name}' version in Cargo.lock"
+            "malformed dependencies list for '{spec}' in Cargo.lock"
         ))
-    })? + vstart;
+    })? + start;
 
-    Ok(rest[vstart..vend].to_string())
+    for line in block[start..end].lines() {
+        let entry = line.trim().trim_matches(',').trim().trim_matches('"');
+        // `windows-targets` is listed with a version when several exist (the
+        // only case we need to disambiguate); a bare name is left to the caller
+        // to never hit.
+        if let Some(version) = entry.strip_prefix(&format!("{dep} ")) {
+            return Ok(version.trim_matches('"').to_string());
+        }
+    }
+
+    Err(BuildError::WindowsImportLibNotFound(format!(
+        "'{dep}' is not a dependency of '{spec}' in Cargo.lock"
+    )))
+}
+
+/// The text of one `[[package]]` block for `spec` (`"name"` or `"name version"`).
+fn package_block<'a>(lock: &'a str, spec: &str) -> Result<&'a str> {
+    let (name, wanted_version) = match spec.split_once(' ') {
+        Some((name, version)) => (name, Some(version)),
+        None => (spec, None),
+    };
+
+    let mut offset = 0;
+    while let Some(relative) = lock[offset..].find("[[package]]") {
+        let start = offset + relative;
+        let end = lock[start..]
+            .find("\n[[package]]")
+            .map(|next| start + next)
+            .unwrap_or(lock.len());
+        let block = &lock[start..end];
+        if package_field(block, "name") == Some(name)
+            && wanted_version.is_none_or(|version| package_field(block, "version") == Some(version))
+        {
+            return Ok(block);
+        }
+        offset = end;
+    }
+
+    Err(BuildError::WindowsImportLibNotFound(format!(
+        "'{spec}' was not found in Cargo.lock"
+    )))
+}
+
+/// The string value of a `key = "value"` field inside a package block.
+fn package_field<'a>(block: &'a str, key: &str) -> Option<&'a str> {
+    let marker = format!("{key} = \"");
+    let start = block.find(&marker)? + marker.len();
+    let end = block[start..].find('"')? + start;
+    Some(&block[start..end])
+}
+
+/// How the compiled stub is finalized, resolved from `build.output`.
+///
+/// The compiler is the only place that can actually apply these, so the values
+/// are threaded down from the config instead of being display-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompileOptions {
+    /// Strip symbols and debug info (`-C strip=symbols`) when true.
+    pub strip: bool,
+    /// How build-time paths embedded in the binary are rewritten.
+    pub trim_paths: PathTrim,
+}
+
+impl Default for CompileOptions {
+    /// Strip symbols and trim every path (the previous hardcoded behaviour).
+    fn default() -> Self {
+        Self {
+            strip: true,
+            trim_paths: PathTrim::All,
+        }
+    }
+}
+
+/// Build-time path rewriting applied with `--remap-path-prefix`.
+///
+/// Rust bakes absolute source paths into panic locations and debug info, which
+/// leaks the operator's profile and build layout into the packed binary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathTrim {
+    /// Leave paths untouched.
+    None,
+    /// Make the project's own paths relative (remap the manifest dir to `.`).
+    Relative,
+    /// Also scrub the Cargo home, so no path under the user profile survives.
+    All,
+}
+
+/// The replacement every remapped prefix is rewritten to.
+const REMAP_TO: &str = ".";
+
+/// The `-C strip=...` value for the requested output.
+fn strip_flag(strip: bool) -> &'static str {
+    if strip {
+        "strip=symbols"
+    } else {
+        "strip=none"
+    }
+}
+
+/// Appends one `--remap-path-prefix=<from>=<to>` pair to `flags`.
+fn push_remap(from: &Path, to: &str, flags: &mut Vec<String>) {
+    flags.push("--remap-path-prefix".to_string());
+    flags.push(format!("{}={to}", from.display()));
+}
+
+/// Builds the flags that shape the final binary.
+///
+/// Split out from [`compile_stub`] so the mapping from [`CompileOptions`] to
+/// `rustc` flags is unit-testable without invoking the compiler. `cargo_home`
+/// is only needed for [`PathTrim::All`], hence optional.
+fn hardening_flags(
+    options: CompileOptions,
+    manifest_dir: &Path,
+    cargo_home: Option<&Path>,
+) -> Vec<String> {
+    let mut flags = vec!["-C".to_string(), strip_flag(options.strip).to_string()];
+    match options.trim_paths {
+        PathTrim::None => {}
+        PathTrim::Relative => push_remap(manifest_dir, REMAP_TO, &mut flags),
+        PathTrim::All => {
+            push_remap(manifest_dir, REMAP_TO, &mut flags);
+            if let Some(home) = cargo_home {
+                push_remap(home, REMAP_TO, &mut flags);
+            }
+        }
+    }
+    flags
 }
 
 /// Compiles the generated stub into a final binary.
-pub fn compile_stub(stub_rs: &Path, output: &Path, deps: &StubDeps) -> Result<()> {
+pub fn compile_stub(
+    stub_rs: &Path,
+    output: &Path,
+    deps: &StubDeps,
+    options: CompileOptions,
+) -> Result<()> {
     let rustc = find_rustc()?;
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let home = cargo_home().ok();
 
     let mut cmd = Command::new(rustc);
     if !ON_WINDOWS {
@@ -326,8 +504,7 @@ pub fn compile_stub(stub_rs: &Path, output: &Path, deps: &StubDeps) -> Result<()
         .arg("--edition")
         .arg("2021")
         .arg("-O")
-        .arg("-C")
-        .arg("strip=symbols")
+        .args(hardening_flags(options, manifest_dir, home.as_deref()))
         .arg("-C")
         .arg("panic=abort")
         .arg("-C")
@@ -401,6 +578,14 @@ mod tests {
         assert!(msg.contains("rustc"), "unclear error message: {msg}");
     }
 
+    #[test]
+    fn rustc_version_reports_a_toolchain() {
+        // `cargo test` cannot run without rustc, so this is not an extra
+        // requirement; the manifest needs the same call to succeed.
+        let version = rustc_version().expect("rustc --version should work");
+        assert!(version.starts_with("rustc "), "unexpected: {version}");
+    }
+
     /// `find_deps_dir_in` must locate `debug/deps` when the three rlibs are
     /// present under a given target directory.
     #[test]
@@ -416,6 +601,127 @@ mod tests {
         assert!(found.ends_with("debug/deps"));
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The per-arch crate version must be resolved through `windows`'s own
+    /// `windows-targets` dependency, not the first `windows_x86_64_*` entry — a
+    /// second `windows-targets` (e.g. from `windows-sys 0.48`) must not win.
+    #[test]
+    fn windows_crate_version_follows_the_windows_dependency_chain() {
+        let lock = "\
+[[package]]
+name = \"windows\"
+version = \"0.58.0\"
+dependencies = [
+ \"windows-core\",
+ \"windows-targets 0.52.6\",
+]
+
+[[package]]
+name = \"windows-targets\"
+version = \"0.48.5\"
+dependencies = [
+ \"windows_x86_64_msvc 0.48.5\",
+]
+
+[[package]]
+name = \"windows-targets\"
+version = \"0.52.6\"
+dependencies = [
+ \"windows_x86_64_msvc 0.52.6\",
+]
+";
+
+        let version = windows_crate_version_in(lock, "windows_x86_64_msvc")
+            .expect("should resolve through windows -> windows-targets");
+        assert_eq!(version, "0.52.6");
+    }
+
+    /// Extracts the `FROM=TO` pairs following each `--remap-path-prefix` flag.
+    fn remaps(flags: &[String]) -> Vec<&str> {
+        flags
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.as_str() == "--remap-path-prefix")
+            .filter_map(|(i, _)| flags.get(i + 1).map(String::as_str))
+            .collect()
+    }
+
+    #[test]
+    fn strip_flag_follows_the_option() {
+        let manifest = Path::new("/proj");
+        let stripped = hardening_flags(
+            CompileOptions {
+                strip: true,
+                trim_paths: PathTrim::None,
+            },
+            manifest,
+            None,
+        );
+        assert!(stripped.contains(&"strip=symbols".to_string()));
+
+        let kept = hardening_flags(
+            CompileOptions {
+                strip: false,
+                trim_paths: PathTrim::None,
+            },
+            manifest,
+            None,
+        );
+        assert!(kept.contains(&"strip=none".to_string()));
+        assert!(!kept.contains(&"strip=symbols".to_string()));
+    }
+
+    #[test]
+    fn trim_paths_none_emits_no_remap() {
+        let flags = hardening_flags(
+            CompileOptions {
+                strip: true,
+                trim_paths: PathTrim::None,
+            },
+            Path::new("/proj"),
+            Some(Path::new("/home/dev")),
+        );
+        assert!(remaps(&flags).is_empty(), "flags: {flags:?}");
+    }
+
+    #[test]
+    fn trim_paths_relative_remaps_only_the_manifest_dir() {
+        let flags = hardening_flags(
+            CompileOptions {
+                strip: true,
+                trim_paths: PathTrim::Relative,
+            },
+            Path::new("/proj"),
+            Some(Path::new("/home/dev")),
+        );
+        assert_eq!(remaps(&flags), vec!["/proj=."]);
+    }
+
+    #[test]
+    fn trim_paths_all_also_scrubs_the_cargo_home() {
+        let flags = hardening_flags(
+            CompileOptions {
+                strip: true,
+                trim_paths: PathTrim::All,
+            },
+            Path::new("/proj"),
+            Some(Path::new("/home/dev/.cargo")),
+        );
+        assert_eq!(remaps(&flags), vec!["/proj=.", "/home/dev/.cargo=."]);
+    }
+
+    #[test]
+    fn trim_paths_all_tolerates_a_missing_cargo_home() {
+        let flags = hardening_flags(
+            CompileOptions {
+                strip: true,
+                trim_paths: PathTrim::All,
+            },
+            Path::new("/proj"),
+            None,
+        );
+        assert_eq!(remaps(&flags), vec!["/proj=."]);
     }
 
     /// Full packing flow with a 1 KB payload.
@@ -468,7 +774,7 @@ mod tests {
 
         let deps = locate_stub_deps().unwrap();
         let out = build_dir.join("out.exe");
-        compile_stub(&stub_path, &out, &deps).unwrap();
+        compile_stub(&stub_path, &out, &deps, CompileOptions::default()).unwrap();
 
         let meta = std::fs::metadata(&out).unwrap();
         assert!(
@@ -558,7 +864,7 @@ mod tests {
             std::fs::write(&stub_path, stub_src).unwrap();
 
             let out = build_dir.join(format!("out_{name}.exe"));
-            compile_stub(&stub_path, &out, &deps).unwrap();
+            compile_stub(&stub_path, &out, &deps, CompileOptions::default()).unwrap();
 
             let binary = std::fs::read(&out).unwrap();
             assert!(
@@ -644,7 +950,7 @@ mod tests {
             std::fs::write(&stub_path, &stub_src).unwrap();
 
             let out = build_dir.join(format!("out_{}.exe", def.name));
-            compile_stub(&stub_path, &out, &deps).unwrap();
+            compile_stub(&stub_path, &out, &deps, CompileOptions::default()).unwrap();
 
             let binary = std::fs::read(&out).unwrap();
             let pe = pe_info::analyze(&binary).unwrap();
@@ -716,7 +1022,7 @@ mod tests {
 
         let deps = locate_stub_deps().unwrap();
         let out = build_dir.join("out.exe");
-        compile_stub(&stub_path, &out, &deps).unwrap();
+        compile_stub(&stub_path, &out, &deps, CompileOptions::default()).unwrap();
 
         let bytes = std::fs::read(&out).unwrap();
         assert_eq!(&bytes[..2], b"MZ", "custom stub must compile to a PE");
@@ -771,7 +1077,7 @@ mod tests {
 
         let deps = locate_stub_deps().unwrap();
         let out = build_dir.join(format!("out_{name}.exe"));
-        compile_stub(&stub_path, &out, &deps).unwrap();
+        compile_stub(&stub_path, &out, &deps, CompileOptions::default()).unwrap();
         out
     }
 

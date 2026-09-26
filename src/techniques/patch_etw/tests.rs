@@ -9,14 +9,24 @@ use crate::techniques::{Category, RuntimeStep};
 fn parses_params_from_empty_yaml_and_defaults_full_to_true() {
     let step: RuntimeStep =
         serde_yml::from_str("technique: patch_etw\n").expect("patch_etw should parse");
-    assert_eq!(step, RuntimeStep::PatchEtw { params: Params { full: true } });
+    assert_eq!(
+        step,
+        RuntimeStep::PatchEtw {
+            params: Params { full: true }
+        }
+    );
 }
 
 #[test]
 fn parses_explicit_full_false() {
     let step: RuntimeStep = serde_yml::from_str("technique: patch_etw\nparams:\n  full: false\n")
         .expect("patch_etw should parse");
-    assert_eq!(step, RuntimeStep::PatchEtw { params: Params { full: false } });
+    assert_eq!(
+        step,
+        RuntimeStep::PatchEtw {
+            params: Params { full: false }
+        }
+    );
 }
 
 #[test]

@@ -125,6 +125,7 @@ name: mimikatz-basic
 build:
   payload:
     source: ./payload.exe # a local path, or an http(s):// URL (fetched in memory)
+    sha256: null          # optional: pin the input's SHA-256 (64 hex chars)
     crypto:
       algo: xchacha20poly1305
       key: random
@@ -141,6 +142,18 @@ build:
     arch: x64
     strip: true
     trim_paths: all       # all | none | relative
+    manifest: true        # write <stem>.manifest.json (provenance)
+    subsystem: console    # console | windows (GUI; no console window)
+    resources:            # optional PE resources (no rc.exe/windres needed)
+      icon: ./app.ico
+      version_info:
+        randomize: true    # fill unset fields with generated values
+        company: "Contoso" # explicit fields always win
+      manifest:
+        level: as_invoker # as_invoker | highest_available | require_administrator
+        dpi_aware: true
+    sign:                 # optional Authenticode signing
+      mode: lab           # none | lab | store | file
 
 runtime:                  # 0..N preparation, then exactly one execution
   - technique: patch_amsi
@@ -152,10 +165,14 @@ runtime:                  # 0..N preparation, then exactly one execution
 | Block | What it decides |
 | --- | --- |
 | `build.payload.source` | The PE to pack: a local path or an `http(s)://` URL (fetched in memory, never written to disk). |
+| `build.payload.sha256` | Optional SHA-256 of the input. A mismatch aborts before anything is encrypted, so a URL (or a swapped file) cannot silently change what gets packed. |
 | `build.payload.crypto` | Payload encryption. XChaCha20-Poly1305, 24-byte nonce, fresh random key per build. |
 | `build.stub.strings` | How every runtime literal in the stub is obfuscated (`xor` or `stack`). Defaults to `xor` + random key, with a warning. |
 | `build.stub` | The stub itself: a custom template (`path`, `null` = builtin), the syscall layer (`syscalls`) and string obfuscation (`strings`). |
-| `build.output` | Where the packed PE goes and how it is finalized. `arch` is `x64`; `x86` is recognized but rejected as not integrated yet. |
+| `build.output` | Where the packed PE goes and how it is finalized. `arch` is `x64`; `x86` is recognized but rejected as not integrated yet. `manifest` writes the provenance file. |
+| `build.output.subsystem` | `console` (default) or `windows` (GUI, no console window). |
+| `build.output.resources` | Optional PE resources embedded into the artifact: `icon`, `version_info` and `manifest` (Windows app manifest / UAC). Built in Rust and written into a `.rsrc` section. |
+| `build.output.sign` | Optional Authenticode signing via `signtool`: `lab` (self-signed), `store` (an existing cert) or `file` (a `.pfx`). |
 | `runtime` | The techniques to apply, in order. `0..N` Preparation followed by exactly one Execution. A technique's parameters go under a nested `params:` mapping. |
 
 **Build arguments.** Positional args after the config path are substituted in
@@ -192,10 +209,18 @@ wrote, so re-running `batesian build dist/mimikatz.yaml` reproduces the artifact
 with no prompts. `--config-out <path>` picks where the YAML lands (default
 `dist/<name>.yaml`).
 
+The wizard is a form, not a list of numbered prompts: arrow keys move through
+single-choice menus, the spacebar toggles checkboxes on multi-selects, and `Esc`
+cancels. When you finish, a **review** screen shows the YAML it will write and
+lets you **build now**, **edit answers** (re-ask with your previous answers as
+the defaults, so a mistake is one cursor move away, never a restart) or **quit**.
+
 Generated configs pass through the same validation as hand-written ones, so they
 are never the reason a build fails. Questions cover the common path only: a
 literal `strings.key`, a custom `build.stub.path`, `args_mode: override` or
 non-default `sleep_obfuscation` regions are one edit away in the written file.
+The fancy prompts require a real terminal; when stdin or stdout is redirected
+(e.g. a pipe or a script) the wizard falls back to plain line prompts.
 
 ## Techniques
 
@@ -290,6 +315,102 @@ It reports PE headers, sections and their entropy, imports/exports, a strings
 scan (including a `Sensitive:` line for names that should never have survived),
 YARA matches and an optional offline Defender scan. Baselines for every phase
 live in [`docs/measurements/`](docs/measurements/).
+
+**Regression gate.** `--json` prints the same data as a machine-readable
+report, and `--baseline` compares a build against a saved one:
+
+```bash
+batesian audit dist/out.exe --json > dist/out.baseline.json
+batesian audit dist/out.exe --baseline dist/out.baseline.json
+```
+
+The comparison fails (exit code `3`) when a sensitive literal or a suspicious
+import reappears, when a section's entropy grows by more than
+`--entropy-tolerance` (default `0.1` bits/byte), or when a new high-entropy
+section appears. Run it in CI on a freshly packed artifact to catch an evasion
+regression that still compiles. Every other failure exits `1`.
+
+### Build manifest
+
+Each build writes a provenance record next to the artifact, at
+`<stem>.manifest.json` (disable it with `build.output.manifest: false`):
+
+```json
+{
+  "manifest_schema": 1,
+  "artifact_sha256": "…",
+  "payload_sha256": "…",
+  "config_sha256": "…",
+  "nonce": "…",
+  "toolchain": { "rustc": "rustc 1.90.0 (…)", "target": "x86_64-pc-windows-msvc" },
+  "resolved_config": { "…": "the config after build-arg substitution" }
+}
+```
+
+It records the public nonce but never the payload key, so it is safe to archive
+alongside the artifact. `batesian build <config> --dry-run` resolves, verifies
+`build.payload.sha256` and validates the payload without encrypting, compiling
+or writing anything — a pre-flight check for CI or for a config review.
+
+### PE resources
+
+A bare Rust executable has no icon and no version info, which is a loud static
+tell. `build.output.resources` embeds the three resources a normal Windows
+binary carries, all generated in Rust (no `rc.exe`/`windres`, so the build stays
+cross-platform):
+
+- **`icon`** — a `.ico` file, split into `RT_ICON` images plus the
+  `RT_GROUP_ICON` directory the shell reads.
+- **`version_info`** — `VERSIONINFO` strings (`company`, `product`,
+  `description`, `copyright`, `original_filename`, `internal_name`,
+  `file_version`, `product_version`) as `RT_VERSION`. With `randomize: true`,
+  the unset fields are filled with a plausible generated identity (company,
+  product, description, copyright and versions), and explicit fields still win.
+- **`manifest`** — the Windows application manifest (`RT_MANIFEST`): the
+  requested UAC `level`, `ui_access` and DPI awareness.
+
+The packer resolves the new section's RVA, builds the resource directory and
+appends it as a `.rsrc` section to the already-compiled stub (`SizeOfImage` and
+the `RESOURCE` data directory are patched; the linker never sees it). See
+[`examples/configs/test-resources.yaml`](examples/configs/test-resources.yaml).
+
+### Signing
+
+`build.output.sign` signs the finished artifact with `signtool.exe` (Windows SDK;
+found in `PATH`, then `BATESIAN_SIGNTOOL`, then the Windows Kits directories, or
+set `signtool` explicitly). Signing runs last, so the signature covers the
+resources, and the manifest records the certificate and thumbprint.
+
+```yaml
+output:
+  sign:
+    mode: lab                       # none | lab | store | file
+    subject: "CN=Contoso Widget"     # certificate to use or create
+    timestamp_url: http://timestamp.digicert.com   # optional RFC 3161
+```
+
+- `mode: lab` builds a small certificate chain automatically: it creates (once)
+  a self-signed CA (`<subject> Root CA`) and a code-signing certificate signed by
+  it, in the current user's store. It does **not** change this machine's trust:
+  instead it exports the CA's public certificate next to the artifact as
+  `<stem>.ca.cer`, which you install in the lab's *Trusted Root Certification
+  Authorities*. If no `subject` is set and the metadata is randomized, the
+  generated company is used as the subject, so the certificate and the
+  `VERSIONINFO` agree. **It is for integrity and lab verification only** — a
+  lab-trusted identity gives no SmartScreen reputation.
+- `mode: store` uses a certificate already in the current user's store, matched
+  by `thumbprint` or `subject`.
+- `mode: file` uses a `.pfx`/`.p12`; the password comes from the environment
+  variable named by `password_env`, never from the YAML.
+
+See [`examples/configs/test-sign.yaml`](examples/configs/test-sign.yaml);
+[`examples/configs/test-fake.yaml`](examples/configs/test-fake.yaml) combines a
+randomized identity with an automatic lab signature.
+
+A signed build produces three files next to each other (all named after the
+artifact): `<stem>.exe`, `<stem>.manifest.json` and `<stem>.ca.cer`. The last one
+is the trust anchor to install on a lab machine; nothing is added to the build
+machine's trust stores.
 
 ## Repository layout
 
