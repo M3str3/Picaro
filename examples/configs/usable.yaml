@@ -1,0 +1,37 @@
+# Reflective loading: the payload is mapped and executed inside the packed
+# binary's own process (no suspended target, no executable image on disk).
+#
+#   cargo run -- build examples/configs/reflective-loading.yaml
+#   .\dist\test_packed_reflective.exe
+
+schema: 4
+name: usable-example
+
+build:
+  payload:
+    source: "$arg.0$"
+    crypto:
+      algo: xchacha20poly1305
+      key: random
+
+  stub:
+    syscalls:
+      mode: indirect
+      resolver: hells_gate
+    strings:
+      strategy: xor
+
+  output:
+    path: out.exe
+    arch: x64
+    strip: true
+    trim_paths: all
+    resources:
+      version_info:
+        randomize: true
+    sign:
+      mode: lab
+
+runtime:
+  - technique: patch_etw
+  - technique: reflective_loading
