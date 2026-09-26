@@ -133,6 +133,7 @@ order, followed by exactly one Execution technique.
 | `patch_etw` | preparation | T1562.006 | stable | Patches the ETW event-writing exports in the current process. |
 | `process_hollowing` | execution | T1055.012 | experimental | Runs the payload inside a suspended, legitimate process instead of on disk. |
 | `reflective_loading` | execution | T1620 | experimental | Maps the payload into the current process and runs its entry point. |
+| `sleep_obfuscation` | preparation | T1027 | experimental | Encrypts the image region during a timer-driven sleep so memory scans see ciphertext. |
 
 The registry is metadata-only. Inspect it, don't guess:
 

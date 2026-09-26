@@ -35,6 +35,7 @@ pub fn validate(config: &Config) -> Result<()> {
 
     validate_runtime(&config.runtime)?;
     validate_conflicts(&config.runtime)?;
+    validate_sleep_obfuscation(&config.runtime)?;
     validate_stub(&config.build.stub)?;
 
     Ok(())
@@ -46,6 +47,44 @@ pub fn validate(config: &Config) -> Result<()> {
 /// unknown `syscalls.mode` or `syscalls.resolver` is a clear error.
 fn validate_stub(stub: &StubConfig) -> Result<()> {
     SyscallsConfig::from_yaml(stub.syscalls.as_ref())?;
+    Ok(())
+}
+
+/// Validates the sleep-obfuscation parameters.
+///
+/// Only the ekko variant and the `[payload]` region list are implemented in
+/// this phase; the other values parse fine but are rejected here with a
+/// pointer to the missing phase.
+fn validate_sleep_obfuscation(runtime: &[RuntimeStep]) -> Result<()> {
+    for step in runtime {
+        let RuntimeStep::SleepObfuscation(params) = step else {
+            continue;
+        };
+
+        if params.variant != crate::techniques::sleep_obfuscation::Variant::Ekko {
+            return Err(PackerError::Validation(format!(
+                "sleep_obfuscation: variant '{}' is not implemented yet; phase 6 ships 'ekko' only",
+                params.variant.label()
+            )));
+        }
+
+        let only_payload = params.encrypt_regions.len() == 1
+            && params.encrypt_regions[0]
+                == crate::techniques::sleep_obfuscation::EncryptRegion::Payload;
+        if !only_payload {
+            return Err(PackerError::Validation(
+                "sleep_obfuscation: only encrypt_regions: [payload] is implemented in this phase; 'stack' and 'all' need a stack-safe ROP chain (future phase)".to_string(),
+            ));
+        }
+
+        if params.sleep_ms > u32::MAX as u64 {
+            return Err(PackerError::Validation(format!(
+                "sleep_obfuscation: sleep_ms {} exceeds the maximum of {}",
+                params.sleep_ms,
+                u32::MAX
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -242,6 +281,68 @@ runtime:
     fn accepts_single_execution() {
         let config = with_runtime(EXECUTION_YAML);
         validate(&config).expect("a single execution technique must be valid");
+    }
+
+    // --- sleep_obfuscation specifics ---
+
+    /// YAML fragment with a sleep_obfuscation + execution pipeline.
+    const SLEEP_YAML: &str = r#"
+runtime:
+  - technique: sleep_obfuscation
+    variant: ekko
+    sleep_ms: 5000
+    encrypt_regions: [payload]
+  - technique: reflective_loading
+"#;
+
+    #[test]
+    fn accepts_ekko_with_payload_regions() {
+        validate(&with_runtime(SLEEP_YAML)).expect("ekko + [payload] must be valid");
+    }
+
+    #[test]
+    fn accepts_sleep_obfuscation_defaults() {
+        let yaml = r#"
+runtime:
+  - technique: sleep_obfuscation
+  - technique: reflective_loading
+"#;
+        validate(&with_runtime(yaml)).expect("defaults must be valid");
+    }
+
+    #[test]
+    fn rejects_unimplemented_variants() {
+        for variant in ["foliage", "cronos"] {
+            let yaml = SLEEP_YAML.replace("variant: ekko", &format!("variant: {variant}"));
+            let err = validate(&with_runtime(&yaml)).expect_err("unimplemented variant must fail");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(variant) && msg.contains("not implemented"),
+                "unclear error: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unimplemented_region_lists() {
+        for regions in ["[payload, stack]", "all", "[stack]"] {
+            let yaml = SLEEP_YAML.replace(
+                "encrypt_regions: [payload]",
+                &format!("encrypt_regions: {regions}"),
+            );
+            let err = validate(&with_runtime(&yaml)).expect_err("unimplemented regions must fail");
+            assert!(
+                err.to_string().contains("encrypt_regions"),
+                "unclear error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_oversized_sleep() {
+        let yaml = SLEEP_YAML.replace("sleep_ms: 5000", "sleep_ms: 4294967296");
+        let err = validate(&with_runtime(&yaml)).expect_err("an oversized sleep must fail");
+        assert!(err.to_string().contains("sleep_ms"), "unclear error: {err}");
     }
 
     // --- stub block ---

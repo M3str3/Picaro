@@ -11,6 +11,7 @@ pub mod patch_amsi;
 pub mod patch_etw;
 pub mod process_hollowing;
 pub mod reflective_loading;
+pub mod sleep_obfuscation;
 
 use std::path::Path;
 
@@ -41,6 +42,9 @@ pub enum RuntimeStep {
     /// Reflective loading: map the payload into the current process and run
     /// its entry point.
     ReflectiveLoading(reflective_loading::Params),
+    /// Sleep obfuscation: encrypt the image region during a timer-driven
+    /// sleep (preparation).
+    SleepObfuscation(sleep_obfuscation::Params),
 }
 
 impl RuntimeStep {
@@ -56,6 +60,7 @@ impl RuntimeStep {
             RuntimeStep::PatchEtw(params) => params.render_fragment(strings),
             RuntimeStep::ProcessHollowing(params) => params.render_fragment(strings),
             RuntimeStep::ReflectiveLoading(params) => params.render_fragment(strings),
+            RuntimeStep::SleepObfuscation(params) => params.render_fragment(strings),
         }
     }
 
@@ -67,6 +72,7 @@ impl RuntimeStep {
             RuntimeStep::PatchEtw(_) => patch_etw::DEF.name,
             RuntimeStep::ProcessHollowing(_) => process_hollowing::DEF.name,
             RuntimeStep::ReflectiveLoading(_) => reflective_loading::DEF.name,
+            RuntimeStep::SleepObfuscation(_) => sleep_obfuscation::DEF.name,
         }
     }
 
@@ -78,6 +84,7 @@ impl RuntimeStep {
             RuntimeStep::PatchEtw(_) => Category::Preparation,
             RuntimeStep::ProcessHollowing(_) => Category::Execution,
             RuntimeStep::ReflectiveLoading(_) => Category::Execution,
+            RuntimeStep::SleepObfuscation(_) => Category::Preparation,
         }
     }
 }
@@ -187,6 +194,7 @@ pub fn all() -> &'static [TechniqueDef] {
         patch_amsi::DEF,
         anti_debug::DEF,
         patch_etw::DEF,
+        sleep_obfuscation::DEF,
     ]
 }
 
