@@ -141,7 +141,7 @@ away are not in the file:
 
 ## Measurements
 
-- See `docs/measurements/phase8_bouncer.md`: ~+28 KB and one import for a
+- See `docs/measurements.md`: ~+28 KB and one import for a
   host-name-only gate, ~+56 KB and 13 imports (two extra DLLs) for the full
   gate, `sensitive 0` in the audit, and the runtime block/allow result.
 

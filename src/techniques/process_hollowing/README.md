@@ -33,8 +33,9 @@ runtime:
 
 1. Create a legitimate process (`svchost.exe`) suspended with
    `CreateProcessA(..., CREATE_SUSPENDED)`.
-2. Read the suspended thread's context (`GetThreadContext`) to find the PEB
-   (`Rdx` on x64) and, from it, the image base (`PEB + 0x10`).
+2. Read the suspended thread's context to find the PEB (`Rdx` on x64) and, from
+   it, the image base (`PEB + 0x10`). The context calls go through the syscall
+   layer, so `Get`/`SetThreadContext` no longer appear in the stub's imports.
 3. **Let the target's loader initialize.** Patch the original entry point to an
    infinite loop (`jmp $`), resume the thread, wait until it parks in the loop
    (so the loader has mapped the process's default DLLs and populated
@@ -42,17 +43,21 @@ runtime:
    the patched bytes never need restoring.
 4. **Load the payload's imported DLLs in the target.** Each imported DLL name
    is written into the target and loaded there with a remote thread that calls
-   `LoadLibraryA`, so the target has every DLL's base (and TLS slot) mapped.
-   `LoadLibraryA` on an already-loaded DLL is a no-op.
-5. Unmap the legitimate image with `NtUnmapViewOfSection` (resolved dynamically
-   from `ntdll.dll`).
+   `LoadLibraryA` (`NtCreateThreadEx` through the syscall layer), so the target
+   has every DLL's base mapped. Loading an already-loaded DLL is a no-op.
+5. Unmap the legitimate image with `NtUnmapViewOfSection`.
 6. Allocate memory at the same base (`MEM_COMMIT | MEM_RESERVE`,
    `PAGE_EXECUTE_READWRITE`).
 7. Fix up base relocations if the preferred image base changed.
 8. Resolve the payload's import table and fill in its IAT (see below).
-9. Write the payload's headers and sections with `NtWriteVirtualMemory`.
-10. Redirect the thread to the payload entry point (`SetThreadContext` → `Rcx`).
-11. Resume the thread (`NtResumeThread`).
+9. Write the payload's headers and sections.
+10. **Provision the payload's TLS** (see below): a real TLS index allocated in
+    the target, the index published where the payload reads `_tls_index`, and a
+    per-thread copy of the `.tls` template pointed at by the main thread's TLS
+    slot.
+11. Redirect the thread to the payload entry point (`Rip` — and `Rcx`, the
+    register a payload entry-point ABI may expect).
+12. Resume the thread (`NtResumeThread`) and relay the target's exit code.
 
 ### Import resolution
 
@@ -73,14 +78,15 @@ target has that DLL mapped — which step 4 guarantees. API set names
 schema; `LoadLibraryA` therefore returns the contract host's module (with a
 family-based fallback for the CRT contracts).
 
-> **Known limitation (open).** The loader and imported DLLs are now provisioned
-> (steps 3–4), but the payload's **TLS directory is not**: the OS TLS slot a
-> module needs for `#[thread_local]`/CRT state is normally allocated by the
-> loader when the module is loaded, and neither hollowing nor reflective loading
-> creates one. A Rust payload that touches thread-local CRT state on entry can
-> still fast-fail with `STATUS_STACK_BUFFER_OVERRUN` (`0xC0000409`). Running the
-> payload's TLS callbacks and provisioning its TLS index/template is the
-> remaining follow-up; evidence in `docs/techniques/process_hollowing.md`.
+> **Known limitation (open).** The payload's **TLS callbacks** are not run yet.
+> A callback has to run on a thread, and a freshly created (never started)
+> thread has no TLS array in its TEB, so its slot cannot be provisioned the way
+> the main thread's is. The TLS *index*, the per-thread template copy and the
+> main thread's slot **are** provisioned (step 10), so a payload whose CRT reads
+> thread-local state now runs; a payload that needs its `DLL_PROCESS_ATTACH`
+> callback for something else still loses that init. Taking the callback thread
+> through a started state first (or hand-building its TLS array) is the
+> follow-up; evidence in `docs/techniques/process_hollowing.md`.
 
 ### Payload arguments
 
@@ -122,10 +128,14 @@ built its `argv` from it, so `GetCommandLineW` inside the payload returns it.
   `NtWriteVirtualMemory`, `NtReadVirtualMemory`, `NtResumeThread`,
   `NtProtectVirtualMemory`, `NtSuspendThread`) go through the syscall layer and
   never appear as imports or cleartext strings in `mode: indirect`.
+- **Static (diagnostics)**: every error message the fragment can print is
+  obfuscated as well — `MESSAGES` in `mod.rs` feeds `render_fragment`, which
+  rebuilds each one at runtime — so no diagnostic text, and no technique keyword
+  such as `loader`, reaches `.rdata`.
 
 ## Measurements
 
-- See `docs/measurements/crowdstrike.md`.
+- See `docs/measurements.md`.
 
 ## Implementation notes
 

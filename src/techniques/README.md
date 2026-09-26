@@ -127,9 +127,9 @@ correctly. An Execution technique that supports several payload formats gets the
 Copy the fixed template `src/techniques/_template/README.md` and fill in every
 section. All sections are required; `batesian techniques validate` checks them.
 
-## 7. Update `docs/measurements/`
+## 7. Update the measurements page
 
-Add a measurement file under `docs/measurements/` and link it from the README's
+Add a section to `docs/measurements.md` and link it from the README's
 "Measurements" section.
 
 ## 8. Run

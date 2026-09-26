@@ -5,6 +5,30 @@ The test payload (`test_payload.exe`) **prints** the fixed marker
 never blocks and its output can be captured from a terminal (or by an agent).
 The stub itself prints its per-build `STUB_MARKER_<hex>` to stderr.
 
+## Visible payload (`msgbox.exe`)
+
+`msgbox.exe` is the interactive counterpart. It calls `MessageBoxW` with "Hello
+world" and blocks until the dialog is dismissed, so it is the check to use when
+you want to *see* the payload run rather than read a marker: under process
+hollowing the dialog appears from `svchost.exe`, under reflective loading from
+the packed stub's own process.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File examples/payloads/build_msgbox.ps1
+```
+
+Its source (`msgbox.rs`) is a single `rustc` compile with no Cargo project, like
+the other payloads, and links `user32.lib` for `MessageBoxW`.
+
+Packing it needs no dedicated config: point `build.payload.source` at it (the
+default `format: pe` applies) and build as usual.
+
+```yaml
+build:
+  payload:
+    source: ./examples/payloads/msgbox.exe
+```
+
 ## Process hollowing
 
 ## 0. Requirements

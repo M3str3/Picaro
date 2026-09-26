@@ -60,9 +60,42 @@ fn render_fragment_substitutes_and_obfuscates_target() {
     assert!(!fragment.contains("b\"kernel32.dll"));
     assert!(!fragment.contains("b\"LoadLibraryA"));
 
+    // Neither do the error diagnostics: their text is rebuilt at runtime too,
+    // so no message (least of all a technique keyword) reaches the stub.
+    assert!(!fragment.contains("$MSG_"));
+    assert!(!fragment.contains("unmap failed"));
+    assert!(!fragment.contains("entry patch failed"));
+    assert!(!fragment.contains("timed out waiting for the target loader to initialize"));
+    assert!(!fragment.contains("the target could not allocate a TLS index"));
+
     // The fragment must carry the hollowing entry point and the runtime decoder.
     assert!(fragment.contains("fn run_stage_two"));
     assert!(fragment.contains("crate::dec_xor"));
+}
+
+/// Every diagnostic in the catalogue must be reconstructed at runtime, never
+/// stored as a literal. Scanning the code (comments stripped) catches a message
+/// that a future edit re-inlines in cleartext — the same failure the audit's
+/// `technique names` heuristic reports.
+#[test]
+fn render_fragment_obfuscates_every_diagnostic() {
+    let strings = StringsConfig {
+        strategy: StringStrategy::Xor,
+        key: Some([0x11u8; 32]),
+    };
+    let fragment = Params::default().render_fragment(&strings);
+    let code = crate::audit::strings::strip_comments(&fragment);
+
+    assert!(
+        !code.contains("$MSG_"),
+        "an unsubstituted message placeholder survived"
+    );
+    for (_, text) in super::MESSAGES {
+        assert!(
+            !code.contains(*text),
+            "diagnostic leaked in cleartext: {text:?}"
+        );
+    }
 }
 
 #[test]

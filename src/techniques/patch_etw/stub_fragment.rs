@@ -40,7 +40,9 @@ pub enum PatchEtwError {
 pub fn patch_etw() -> Result<bool, PatchEtwError> {
     patch_export(&$ETW_DLL_DEF$, &$ETW_FUNC_DEF$)?;
     if PATCH_FULL {
-        let _ = patch_export(&$ETW_DLL_DEF$, &$ETW_FULL_FUNC_DEF$);
+        if let Err(error) = patch_export(&$ETW_DLL_DEF$, &$ETW_FULL_FUNC_DEF$) {
+            crate::tech_dbg!("patch_etw", "optional full variant skipped: {error}");
+        }
     }
     // A Preparation always continues the pipeline; only the `bouncer` gate
     // decides to abort (see `techniques/README.md`).
@@ -90,6 +92,7 @@ fn patch_export(dll: &str, func: &str) -> Result<(), PatchEtwError> {
     if status < 0 {
         return Err(PatchEtwError::RestoreProtectionFailed);
     }
+    crate::tech_dbg!("patch_etw", "patched {dll}!{func} at {target:p}");
 
     Ok(())
 }

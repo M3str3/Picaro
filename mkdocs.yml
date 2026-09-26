@@ -1,0 +1,99 @@
+site_name: batesian
+site_description: Declarative PE packer for authorized red team research
+
+docs_dir: docs
+site_dir: site
+# `false` keeps every page at `<name>.html` (no per-page directories), so the
+# generated `site/index.html` and its relative links also work when opened
+# straight from disk. Search still needs the served site.
+use_directory_urls: false
+
+theme:
+  name: material
+  language: en
+  palette:
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: deep purple
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: deep purple
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+
+# Sidebar typography tweaks: quieter group headers and more space between groups.
+extra_css:
+  - stylesheets/extra.css
+
+# A deliberately small navigation: only what an operator needs to build, run and
+# understand an artifact. The per-technique pages pull the READMEs in with
+# `pymdownx.snippets`, so the Markdown stays the single source of truth.
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Configuration: configuration.md
+  - Examples: examples/index.md
+  - Techniques:
+      - Overview: techniques/index.md
+      - patch_amsi: techniques/ref/patch_amsi.md
+      - patch_etw: techniques/ref/patch_etw.md
+      - anti_debug: techniques/ref/anti_debug.md
+      - sleep_obfuscation: techniques/ref/sleep_obfuscation.md
+      - bouncer: techniques/ref/bouncer.md
+      - process_hollowing: techniques/ref/process_hollowing.md
+      - reflective_loading: techniques/ref/reflective_loading.md
+      - Syscall layer: techniques/indirect_syscalls.md
+      - Payload arguments: techniques/process_argument_spoofing.md
+      - String obfuscation: techniques/string_obfuscation.md
+      - Adding a technique: techniques/adding-a-technique.md
+  - Architecture:
+      - How it fits together: architecture.md
+      - Custom stubs: custom-stubs.md
+  - Reference:
+      - Measurements: measurements.md
+      - Process hollowing evidence: techniques/process_hollowing.md
+      - Migrations:
+          - v1 to v3: migration-v1-v3.md
+          - v2 to v3: migration-v2-v3.md
+          - v3 to v4: migration-v3-v4.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+  # Pulls the per-technique READMEs, the README config section and the examples
+  # README in, so the Markdown stays the single source of truth. Paths are
+  # relative to the repo root; `check_paths` fails the build if one is missing.
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
+
+plugins:
+  - search

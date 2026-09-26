@@ -323,6 +323,23 @@ pub fn scan(data: &[u8], imported: &BTreeSet<String>) -> StringFindings {
     }
 }
 
+/// The technique keywords ([`technique_re`]: `hollow`/`inject`/`loader`/
+/// `shellcode`) that `s` contains, lowercased and deduplicated.
+///
+/// Used by the report to annotate a `technique names` hit with *why* it matched:
+/// a run of printable bytes can glue several Rust string literals together (they
+/// are not NUL-separated), so the whole string is rarely the signal.
+pub fn technique_keywords(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for m in technique_re().find_iter(s) {
+        let kw = m.as_str().to_ascii_lowercase();
+        if !out.contains(&kw) {
+            out.push(kw);
+        }
+    }
+    out
+}
+
 /// Extracts printable ASCII runs of at least `min_len` bytes.
 fn extract_strings(data: &[u8], min_len: usize) -> Vec<String> {
     let mut out = Vec::new();
@@ -378,6 +395,13 @@ mod tests {
         let data = b"this is a completely clean and boring string with nothing in it";
         let f = scan(data, &BTreeSet::new());
         assert_eq!(f.total_flagged(), 0);
+    }
+
+    #[test]
+    fn reports_technique_keywords_once_each() {
+        let kws = technique_keywords("the target loader to initialize a Loader shellcode");
+        assert_eq!(kws, vec!["loader".to_string(), "shellcode".to_string()]);
+        assert!(technique_keywords("nothing to see here").is_empty());
     }
 
     #[test]

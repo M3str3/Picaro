@@ -179,6 +179,17 @@ pub struct StubConfig {
     /// packer defaults to `xor` + a random key (and warns).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strings: Option<YamlStringsConfig>,
+
+    /// Compile the stub as a debug artifact.
+    ///
+    /// The techniques print what they are doing on stderr
+    /// (`[+] [<technique>] <message>`) and the artifact is built without the
+    /// hardening: symbols and debug info are kept, the optimizer is off and the
+    /// source paths are left in place so a debugger can open the generated
+    /// stub. This is a laboratory tool: a debug artifact is markedly less
+    /// evasive and is never meant to be delivered. Defaults to `false`.
+    #[serde(default)]
+    pub debug: bool,
 }
 
 /// The binary format of the input payload.

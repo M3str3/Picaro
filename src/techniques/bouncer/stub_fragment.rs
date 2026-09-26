@@ -165,10 +165,16 @@ pub fn bouncer() -> Result<bool, BouncerError> {
     } else {
         passed > 0
     };
+    crate::tech_dbg!(
+        "bouncer",
+        "{passed}/{declared} check(s) passed (mode all: {MODE_ALL})"
+    );
 
     if accepted {
+        crate::tech_dbg!("bouncer", "host accepted");
         return Ok(true);
     }
+    crate::tech_dbg!("bouncer", "host rejected (exit on fail: {ON_FAIL_EXIT})");
 
     // Rejected. `exit` leaves an explicit signal; `silent` lets the template
     // exit with code 0 and no reason behind it.
@@ -231,7 +237,11 @@ fn computer_name() -> Result<String, BouncerError> {
     let mut buffer = [0u16; 256];
     let mut size = buffer.len() as u32;
     match unsafe { GetComputerNameW(PWSTR(buffer.as_mut_ptr()), &mut size) } {
-        Ok(()) => Ok(wide_to_string(&buffer)),
+        Ok(()) => {
+            let name = wide_to_string(&buffer);
+            crate::tech_dbg!("bouncer", "hostname '{name}'");
+            Ok(name)
+        }
         Err(error) => Err(BouncerError::ComputerNameFailed(error.code().0 as u32)),
     }
 }
@@ -241,7 +251,11 @@ fn user_name() -> Result<String, BouncerError> {
     let mut buffer = [0u16; 256];
     let mut size = buffer.len() as u32;
     match unsafe { GetUserNameW(PWSTR(buffer.as_mut_ptr()), &mut size) } {
-        Ok(()) => Ok(wide_to_string(&buffer)),
+        Ok(()) => {
+            let name = wide_to_string(&buffer);
+            crate::tech_dbg!("bouncer", "user '{name}'");
+            Ok(name)
+        }
         Err(error) => Err(BouncerError::UserNameFailed(error.code().0 as u32)),
     }
 }
@@ -269,7 +283,9 @@ fn locale_name() -> Result<String, BouncerError> {
     if written <= 0 {
         return Err(BouncerError::LocaleFailed(unsafe { GetLastError().0 }));
     }
-    Ok(wide_to_string(&buffer))
+    let locale = wide_to_string(&buffer);
+    crate::tech_dbg!("bouncer", "locale '{locale}'");
+    Ok(locale)
 }
 
 /// Collects every active keyboard layout as a 4-digit uppercase hex code.

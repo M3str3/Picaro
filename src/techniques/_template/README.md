@@ -41,7 +41,7 @@ runtime:
 
 ## Measurements
 
-- See `docs/measurements/<...>.md`.
+- See `docs/measurements.md`.
 
 ## Implementation notes
 

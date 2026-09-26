@@ -199,6 +199,7 @@ const ARGS_BLOCK: &str = r##"mod payload_args {
             line.push(' ');
             line.push_str(&quote(&arg));
         }
+        crate::tech_dbg!("payload_args", "command line: {line}");
         line
     }
 
@@ -265,6 +266,7 @@ const ARGS_BLOCK: &str = r##"mod payload_args {
         unsafe {
             redirect_cached_command_line(previous, previous_length, buffer.as_mut_ptr(), chars * 2);
         }
+        crate::tech_dbg!("payload_args", "PEB command line repointed at the payload args");
         Ok(())
     }
 

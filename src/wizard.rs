@@ -972,6 +972,8 @@ fn assemble(payload: &Path, answers: &Answers) -> Config {
                     // A literal key is an advanced setting; edit it in the YAML.
                     key: "random".to_string(),
                 }),
+                // Debug builds are a lab setting; edit it in the YAML.
+                debug: false,
             },
             output: OutputConfig {
                 path: PathBuf::from(&answers.output_path),

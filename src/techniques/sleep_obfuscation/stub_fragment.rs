@@ -331,6 +331,11 @@ pub fn sleep_obfuscation() -> Result<bool, SleepObfuscationError> {
     //    (start, length, original protection). The runs drive both the RC4
     //    chunking and the per-run protection restore.
     let runs = walk_image_runs(image_base, image_size)?;
+    crate::tech_dbg!(
+        "sleep_obfuscation",
+        "image 0x{image_base:x} ({image_size} bytes) across {} committed run(s)",
+        runs.len()
+    );
 
     // The image is flipped read-write by the first ROP step, *not* here:
     // PAGE_READWRITE is non-executable under DEP, so the flip must happen on a
@@ -394,6 +399,11 @@ pub fn sleep_obfuscation() -> Result<bool, SleepObfuscationError> {
             offset += n;
         }
     }
+    crate::tech_dbg!(
+        "sleep_obfuscation",
+        "encrypting {} chunk(s), then sleeping {SLEEP_MS} ms",
+        chunks.len()
+    );
 
     let encrypt_function = system_function_032 as usize as u64;
     let encrypt_contexts: Vec<AlignedContext> = chunks
@@ -543,6 +553,7 @@ pub fn sleep_obfuscation() -> Result<bool, SleepObfuscationError> {
             delete_timer_queue_ex(h_queue, -1);
         }
     }
+    crate::tech_dbg!("sleep_obfuscation", "sleep finished, image decrypted and restored");
 
     // A Preparation always continues the pipeline; only the `bouncer` gate
     // decides to abort (see `techniques/README.md`).

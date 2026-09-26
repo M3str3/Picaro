@@ -73,24 +73,18 @@ docker build -t batesian .
 docker run --rm -it -v "$PWD:/work" -w /work batesian build examples/configs/reflective-loading.yaml
 ```
 
-Or use a wrapper, which builds the image on first use and passes every
-argument through unchanged. Linux/macOS/WSL:
+Or use the wrapper, which builds the image on first use and passes every
+argument through unchanged. It is one standard-library-only Python script, the
+same on Linux, macOS and Windows:
 
 ```bash
-bash scripts/docker-batesian.sh build examples/configs/reflective-loading.yaml
-bash scripts/docker-batesian.sh audit dist/test_packed_reflective.exe
-bash scripts/docker-batesian.sh techniques list
+python scripts/batesian.py build examples/configs/reflective-loading.yaml
+python scripts/batesian.py audit dist/test_packed_reflective.exe
+python scripts/batesian.py techniques list
 ```
 
-Windows (PowerShell):
-
-```powershell
-.\scripts\docker-batesian.ps1 build examples\configs\reflective-loading.yaml
-.\scripts\docker-batesian.ps1 audit dist\test_packed_reflective.exe
-.\scripts\docker-batesian.ps1 techniques list
-```
-
-Pass `--build` first to either wrapper to force a rebuild of the image.
+Pass `--build` first to force a rebuild of the image, and set `BATESIAN_IMAGE`
+to use a different tag.
 
 On Windows, arguments are translated for the Linux container: relative paths
 (`.\examples\x.yaml`, `dist\y.exe`) become POSIX paths, an absolute path under
@@ -113,6 +107,7 @@ How it works:
 > The container only *builds* the packed Windows PE (it cross-compiles the stub
 > to `x86_64-pc-windows-gnu`). Run the resulting `.exe` on a Windows host.
 
+<!-- --8<-- [start:configuration] -->
 ## Configuration
 
 A build is one YAML document. Strict by design: unknown keys are an error, so
@@ -195,6 +190,8 @@ runtime:
 
 A referenced-but-missing argument is a clear error, not a silent empty string.
 
+<!-- --8<-- [end:configuration] -->
+<!-- --8<-- [start:interactive] -->
 ### Interactive build
 
 Rather than writing the YAML by hand, answer a few questions and let the packer
@@ -225,6 +222,7 @@ non-default `sleep_obfuscation` regions are one edit away in the written file.
 The fancy prompts require a real terminal; when stdin or stdout is redirected
 (e.g. a pipe or a script) the wizard falls back to plain line prompts.
 
+<!-- --8<-- [end:interactive] -->
 ## Techniques
 
 Techniques are split into two categories. **Preparation** techniques change the
@@ -287,7 +285,7 @@ written once and works under either mode. Each technique declares its `Nt*`
 requirements; the packer only resolves the union of the active pipeline's
 requirements. Details and measurements:
 [`docs/techniques/indirect_syscalls.md`](docs/techniques/indirect_syscalls.md),
-[`docs/measurements/phase6a_iat_reduction.md`](docs/measurements/phase6a_iat_reduction.md).
+[`docs/measurements.md`](docs/measurements.md).
 
 ### Custom stubs
 
@@ -318,7 +316,7 @@ batesian audit dist/test_packed.exe --focus imports,strings
 It reports PE headers, sections and their entropy, imports/exports, a strings
 scan (including a `Sensitive:` line for names that should never have survived),
 YARA matches and an optional offline Defender scan. Baselines for every phase
-live in [`docs/measurements/`](docs/measurements/).
+live in [`docs/measurements.md`](docs/measurements.md).
 
 **Regression gate.** `--json` prints the same data as a machine-readable
 report, and `--baseline` compares a build against a saved one:
@@ -441,11 +439,11 @@ src/
   ui.rs         terminal output: banner, palette, formatting helpers
 templates/stub/ Rust stub template with $placeholders$
 examples/       curated example configs, test payloads, sample custom stubs
-docs/           architecture, technique notes and measurement reports
+docs/           Markdown sources (Material for MkDocs; nav in mkdocs.yml)
+scripts/        Docker wrappers (batesian.py, docs.py)
 yara/           YARA rules (placeholder for now)
 tests/          CLI integration tests + fixtures (tests/configs/, tests/fixtures/)
 build/  dist/   (gitignored) intermediate artifacts and final binaries
-banner.txt      ASCII banner, compiled in by src/ui.rs
 ```
 
 ## Development
@@ -508,15 +506,19 @@ Planned:
   produces x64 today. Adding x86 needs a 32-bit stub variant and a
   per-architecture fragment for every technique — more work than the enum value
   suggests.
-- **Process hollowing does not yet run a full PE.** The payload's IAT is
-  resolved, but a `CREATE_SUSPENDED` target has not run its loader
-  (`PEB->Ldr == NULL`; only `ntdll` plus the main image are mapped), so the
-  payload's other imported DLLs are absent and its first import call faults.
-  Provisioning loader/TLS state before hand-off is the follow-up. Evidence:
+- **Process hollowing runs a full PE, but not its TLS callbacks.** The loader
+  state is now provisioned (imported DLLs, a real TLS index, the per-thread
+  `.tls` template, the main thread's TLS slot, and a `Rip` hand-off), and the
+  Rust test payload completes with exit `0`. A payload that needs its
+  `DLL_PROCESS_ATTACH` TLS callback still loses that init: a thread that has
+  never started has no TLS array to point at. Evidence:
   [`docs/techniques/process_hollowing.md`](docs/techniques/process_hollowing.md).
-- **Phase 6a migrates only the hollowing calls.** `Get`/`SetThreadContext`,
-  `WaitForSingleObject`, `GetExitCodeProcess` and the reflective-loading APIs
-  still import statically.
+- **The syscall layer carries the whole hollowing flow.** The eleven-argument
+  trampoline (`NtCreateThreadEx`) plus `NtWaitForSingleObject`,
+  `NtQueryInformationThread`, `NtSetContextThread` and `NtClose` moved
+  `CreateRemoteThread`, `WaitForSingleObject`, `GetExitCodeProcess`,
+  `Get`/`SetThreadContext` and `CloseHandle` out of the import table;
+  `reflective_loading` no longer creates a thread at all.
 - **Custom stubs do not obfuscate the key/nonce** when they reference
   `$PAYLOAD_KEY_DEF$` / `$PAYLOAD_NONCE_DEF$`; prefer reading the key at run
   time ([`examples/stubs/runtime-key.rs`](examples/stubs/runtime-key.rs)).
@@ -525,12 +527,16 @@ Planned:
 
 ## Documentation
 
+- **The book** — Material for MkDocs; the nav lives in `mkdocs.yml`. Preview
+  with `python scripts/docs.py`, which runs the official container (standard
+  library only, same on Linux/macOS/Windows); `python scripts/docs.py build`
+  writes the static site to `site/`.
 - [`docs/architecture.md`](docs/architecture.md) — how the pieces fit together
   and why.
 - [`docs/custom-stubs.md`](docs/custom-stubs.md) — the custom-stub contract.
 - [`docs/techniques/`](docs/techniques/) — per-technique deep dives with
   measured evidence.
-- [`docs/measurements/`](docs/measurements/) — phase-by-phase static and
+- [`docs/measurements.md`](docs/measurements.md) — phase-by-phase static and
   dynamic results.
 - [`src/techniques/README.md`](src/techniques/README.md) — adding a technique.
 

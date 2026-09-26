@@ -215,6 +215,8 @@ fn compiles_sleep_obfuscation_stub_to_pe() {
         build_args: std::collections::BTreeMap::new(),
         payload_args: Vec::new(),
         args_mode: crate::engine::args::ArgsMode::Join,
+        debug: false,
+        windows_subsystem: false,
     };
     let pipeline = vec![
         RuntimeStep::SleepObfuscation {

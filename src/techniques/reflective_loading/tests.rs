@@ -133,6 +133,8 @@ fn compiles_reflective_loading_stub_for_every_format() {
             build_args: std::collections::BTreeMap::new(),
             payload_args: Vec::new(),
             args_mode: crate::engine::args::ArgsMode::Join,
+            debug: false,
+            windows_subsystem: false,
         };
         let pipeline = vec![RuntimeStep::ReflectiveLoading { params: Params {} }];
         let stub_src = crate::engine::stub::render_main_rs(
@@ -143,8 +145,11 @@ fn compiles_reflective_loading_stub_for_every_format() {
             &crate::engine::syscalls::SyscallsConfig::default(),
         )
         .unwrap();
+        // The appended debug prelude uses `$` as Rust macro syntax, so the
+        // placeholder check runs over the template's own output.
+        let body = crate::engine::debug::strip_prelude(&stub_src);
         assert!(
-            !stub_src.contains('$'),
+            !body.contains('$'),
             "{name}: an unsubstituted placeholder reached the stub"
         );
 
@@ -201,6 +206,8 @@ fn compiles_reflective_loading_stub_to_pe() {
         build_args: std::collections::BTreeMap::new(),
         payload_args: Vec::new(),
         args_mode: crate::engine::args::ArgsMode::Join,
+        debug: false,
+        windows_subsystem: false,
     };
     let pipeline = vec![RuntimeStep::ReflectiveLoading { params: Params {} }];
     let strings = crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap();

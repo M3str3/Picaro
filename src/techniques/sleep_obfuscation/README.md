@@ -107,7 +107,7 @@ the timer-queue family, …) are resolved at runtime and obfuscated through
 
 ## Measurements
 
-- See `docs/measurements/phase6_sleep_obfuscation.md`. Static metrics barely
+- See `docs/measurements.md`. Static metrics barely
   move (the payload is already encrypted at rest in `.rdata`); the value is
   runtime: during the sleep the image region is ciphertext — verifiable with a
   debugger (`VirtualQuery` + memory dump inside the sleep window).

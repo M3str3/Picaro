@@ -49,8 +49,10 @@ pub fn validate(config: &Config) -> Result<()> {
 /// Non-fatal advisories produced by validation.
 ///
 /// These do not reject a config (unlike [`validate`]); the build prints them as
-/// warnings. Today there is one: a `bouncer` gate with no check declared is a
-/// no-op, which is almost certainly not what the author intended.
+/// warnings. Today they cover a `bouncer` gate with no check declared (a no-op,
+/// almost certainly not intended) and the debug build, whose whole point is to
+/// trade evasion for observability and whose artifact is therefore never for
+/// delivery.
 pub fn advisories(config: &Config) -> Vec<String> {
     let mut warnings = Vec::new();
     for step in &config.runtime {
@@ -62,6 +64,26 @@ pub fn advisories(config: &Config) -> Vec<String> {
                         .to_string(),
                 );
             }
+        }
+    }
+
+    if config.build.stub.debug {
+        warnings.push(
+            "build.stub.debug is enabled: the artifact prints technique traces and is built \
+             without symbol stripping, path trimming or optimization; it is a lab artifact and \
+             must not be delivered"
+                .to_string(),
+        );
+        if config
+            .runtime
+            .iter()
+            .any(|step| matches!(step, RuntimeStep::AntiDebug { .. }))
+        {
+            warnings.push(
+                "build.stub.debug is enabled but `anti_debug` is in the pipeline: it may abort \
+                 the stub under the very debugger you are using"
+                    .to_string(),
+            );
         }
     }
     warnings

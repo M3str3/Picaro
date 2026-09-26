@@ -76,7 +76,7 @@ a debugger.
 
 ## Measurements
 
-- See `docs/measurements/phase7_etw_anti_debug.md`.
+- See `docs/measurements.md`.
 
 ## Implementation notes
 

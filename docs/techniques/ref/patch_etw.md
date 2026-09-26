@@ -1,0 +1,1 @@
+--8<-- "src/techniques/patch_etw/README.md"

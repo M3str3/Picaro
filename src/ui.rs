@@ -29,9 +29,19 @@ pub const NAME: &str = "batesian";
 /// One-line description, reused by the CLI help and the banner subtitle.
 pub const TAGLINE: &str = "mimicry-based packer";
 
-/// The banner. `banner.txt` at the repo root is the single source of truth, so
-/// the art is edited (only) there.
-pub const BANNER: &str = include_str!("../banner.txt");
+/// The banner art, printed before every subcommand.
+///
+/// Kept as a literal rather than a data file: the art lives with the code that
+/// prints it, so there is no second copy to keep in sync. The leading blank line
+/// is deliberate — it separates the art from the shell prompt above it.
+pub const BANNER: &str = "
+  ██████╗  █████╗ ████████╗███████╗███████╗██╗ █████╗ ███╗  ██╗
+  ██╔══██╗██╔══██╗╚══██╔══╝██╔════╝██╔════╝██║██╔══██╗████╗ ██║
+  ██████╦╝███████║   ██║   █████╗  ███████╗██║███████║██╔██╗██║
+  ██╔══██╗██╔══██║   ██║   ██╔══╝  ╚════██║██║██╔══██║██║╚████║
+  ██████╦╝██║  ██║   ██║   ███████╗███████║██║██║  ██║██║ ╚███║
+  ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚══════╝╚══════╝╚═╝╚═╝  ╚═╝╚═╝  ╚═╝
+";
 
 /// Glyphs used across the CLI.
 ///
@@ -549,12 +559,16 @@ mod tests {
         assert_eq!(format_elapsed(Duration::from_millis(1500)), "1.50 s");
     }
 
-    /// The banner comes from `banner.txt` and is embedded at compile time.
+    /// The banner is a literal, with its deliberate leading blank line.
     #[test]
     fn banner_is_embedded() {
         assert!(
             BANNER.contains(glyph::BLOCK),
             "banner looks empty: {BANNER:?}"
+        );
+        assert!(
+            BANNER.starts_with('\n') && !BANNER.starts_with("\n\n"),
+            "banner must open with a single blank line: {BANNER:?}"
         );
         assert_eq!(Palette::plain().banner(), BANNER.trim_end());
     }

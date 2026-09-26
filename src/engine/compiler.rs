@@ -417,6 +417,10 @@ pub struct CompileOptions {
     pub strip: bool,
     /// How build-time paths embedded in the binary are rewritten.
     pub trim_paths: PathTrim,
+    /// Build the stub as a debug artifact (`build.stub.debug`): no symbols are
+    /// stripped, the debug info is kept, the optimization level drops to 0 and
+    /// path remapping is skipped, so a debugger can open the generated source.
+    pub debug: bool,
 }
 
 impl Default for CompileOptions {
@@ -425,6 +429,7 @@ impl Default for CompileOptions {
         Self {
             strip: true,
             trim_paths: PathTrim::All,
+            debug: false,
         }
     }
 }
@@ -466,12 +471,28 @@ fn push_remap(from: &Path, to: &str, flags: &mut Vec<String>) {
 /// Split out from [`compile_stub`] so the mapping from [`CompileOptions`] to
 /// `rustc` flags is unit-testable without invoking the compiler. `cargo_home`
 /// is only needed for [`PathTrim::All`], hence optional.
+///
+/// A debug build deliberately drops the hardening: `opt-level=0` keeps every
+/// line of the generated stub mapped to its instructions, `debuginfo=2` keeps
+/// line tables and variable names, `strip=none` keeps the symbols, and the path
+/// remapping is skipped so a debugger can resolve the source files. All of that
+/// is what makes the artifact debuggable, and all of it costs evasion — hence
+/// `build.stub.debug` is for the lab, never for delivery.
 fn hardening_flags(
     options: CompileOptions,
     manifest_dir: &Path,
     cargo_home: Option<&Path>,
 ) -> Vec<String> {
-    let mut flags = vec!["-C".to_string(), strip_flag(options.strip).to_string()];
+    let mut flags = Vec::new();
+    if options.debug {
+        flags.extend(["-C".to_string(), "opt-level=0".to_string()]);
+        flags.extend(["-C".to_string(), "debuginfo=2".to_string()]);
+        flags.extend(["-C".to_string(), strip_flag(false).to_string()]);
+        return flags;
+    }
+
+    flags.extend(["-O".to_string()]);
+    flags.extend(["-C".to_string(), strip_flag(options.strip).to_string()]);
     match options.trim_paths {
         PathTrim::None => {}
         PathTrim::Relative => push_remap(manifest_dir, REMAP_TO, &mut flags),
@@ -503,7 +524,6 @@ pub fn compile_stub(
     cmd.arg(stub_rs)
         .arg("--edition")
         .arg("2021")
-        .arg("-O")
         .args(hardening_flags(options, manifest_dir, home.as_deref()))
         .arg("-C")
         .arg("panic=abort")
@@ -656,6 +676,7 @@ dependencies = [
             CompileOptions {
                 strip: true,
                 trim_paths: PathTrim::None,
+                debug: false,
             },
             manifest,
             None,
@@ -666,6 +687,7 @@ dependencies = [
             CompileOptions {
                 strip: false,
                 trim_paths: PathTrim::None,
+                debug: false,
             },
             manifest,
             None,
@@ -680,6 +702,7 @@ dependencies = [
             CompileOptions {
                 strip: true,
                 trim_paths: PathTrim::None,
+                debug: false,
             },
             Path::new("/proj"),
             Some(Path::new("/home/dev")),
@@ -693,6 +716,7 @@ dependencies = [
             CompileOptions {
                 strip: true,
                 trim_paths: PathTrim::Relative,
+                debug: false,
             },
             Path::new("/proj"),
             Some(Path::new("/home/dev")),
@@ -706,6 +730,7 @@ dependencies = [
             CompileOptions {
                 strip: true,
                 trim_paths: PathTrim::All,
+                debug: false,
             },
             Path::new("/proj"),
             Some(Path::new("/home/dev/.cargo")),
@@ -719,11 +744,34 @@ dependencies = [
             CompileOptions {
                 strip: true,
                 trim_paths: PathTrim::All,
+                debug: false,
             },
             Path::new("/proj"),
             None,
         );
         assert_eq!(remaps(&flags), vec!["/proj=."]);
+    }
+
+    /// A debug build keeps the symbols, the debug info and the real source
+    /// paths, and drops the optimizer: that is the whole point of the mode.
+    #[test]
+    fn debug_flags_drop_the_hardening() {
+        let flags = hardening_flags(
+            CompileOptions {
+                strip: true,
+                trim_paths: PathTrim::All,
+                debug: true,
+            },
+            Path::new("/proj"),
+            Some(Path::new("/home/dev/.cargo")),
+        );
+        assert!(flags.contains(&"opt-level=0".to_string()));
+        assert!(flags.contains(&"debuginfo=2".to_string()));
+        assert!(flags.contains(&"strip=none".to_string()));
+        assert!(!flags.contains(&"strip=symbols".to_string()));
+        assert!(!flags.contains(&"-O".to_string()));
+        // Paths are kept so a debugger can open the generated stub.
+        assert!(remaps(&flags).is_empty(), "flags: {flags:?}");
     }
 
     /// Full packing flow with a 1 KB payload.
@@ -762,6 +810,8 @@ dependencies = [
             build_args: std::collections::BTreeMap::new(),
             payload_args: Vec::new(),
             args_mode: crate::engine::args::ArgsMode::Join,
+            debug: false,
+            windows_subsystem: false,
         };
         let pipeline = vec![crate::techniques::RuntimeStep::ProcessHollowing {
             params: crate::techniques::process_hollowing::Params {
@@ -852,6 +902,8 @@ dependencies = [
                 build_args: std::collections::BTreeMap::new(),
                 payload_args: Vec::new(),
                 args_mode: crate::engine::args::ArgsMode::Join,
+                debug: false,
+                windows_subsystem: false,
             };
             let pipeline = vec![crate::techniques::RuntimeStep::ProcessHollowing {
                 params: crate::techniques::process_hollowing::Params {
@@ -945,6 +997,8 @@ dependencies = [
                 build_args: std::collections::BTreeMap::new(),
                 payload_args: Vec::new(),
                 args_mode: crate::engine::args::ArgsMode::Join,
+                debug: false,
+                windows_subsystem: false,
             };
             let stub_src = crate::engine::stub::render_main_rs(
                 &template,
@@ -1011,6 +1065,8 @@ dependencies = [
             build_args: std::collections::BTreeMap::new(),
             payload_args: Vec::new(),
             args_mode: crate::engine::args::ArgsMode::Join,
+            debug: false,
+            windows_subsystem: false,
         };
         let strings = crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap();
         let rendered = crate::engine::stub::render_custom_stub(
@@ -1079,6 +1135,8 @@ dependencies = [
             build_args: std::collections::BTreeMap::new(),
             payload_args: Vec::new(),
             args_mode: crate::engine::args::ArgsMode::Join,
+            debug: false,
+            windows_subsystem: false,
         };
         let strings = crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap();
         let stub_src =

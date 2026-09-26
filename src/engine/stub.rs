@@ -23,6 +23,7 @@ use rand::RngCore;
 use regex::Regex;
 
 use super::args::{self, ArgsMode};
+use super::debug;
 use super::obfuscation::{byte_array_literal, StringsConfig};
 use super::syscalls::{self, SyscallsConfig, SyscallsMode};
 use super::{imports, BuildError, Result};
@@ -55,6 +56,15 @@ pub struct StubParams {
     /// How [`StubParams::payload_args`] combine with the packed binary's runtime
     /// args (`build.payload.args_mode`).
     pub args_mode: ArgsMode,
+    /// Whether the stub is built as a debug artifact (`build.stub.debug`). The
+    /// debug prelude is appended either way; this picks its variant (a real
+    /// trace macro vs. one that expands to nothing).
+    pub debug: bool,
+    /// Whether the artifact uses the `windows` subsystem
+    /// (`build.output.subsystem`). Only the debug prelude cares: a GUI process
+    /// has no console attached, so its stderr is discarded until one is
+    /// allocated.
+    pub windows_subsystem: bool,
 }
 
 /// The result of rendering a custom loader stub.
@@ -196,7 +206,16 @@ fn render_common(
     syscalls: &SyscallsConfig,
 ) -> Result<String> {
     let values = placeholder_values(template, params, pipeline, strings, syscalls);
-    substitute_template(template, &values)
+    let mut source = substitute_template(template, &values)?;
+    // The technique fragments embed `crate::tech_dbg!` calls, so the macro must
+    // exist in the generated stub. It is appended instead of being a template
+    // placeholder: a custom loader stub then needs to declare nothing, and the
+    // builtin template does not have to carry debug-only code.
+    source.push_str(debug::render_prelude(
+        params.debug,
+        params.windows_subsystem,
+    ));
+    Ok(source)
 }
 
 /// Builds the `$PLACEHOLDER$` → value map for a template.
@@ -429,6 +448,8 @@ $EXECUTION_BLOCK$
             build_args: BTreeMap::new(),
             payload_args: Vec::new(),
             args_mode: ArgsMode::Join,
+            debug: false,
+            windows_subsystem: false,
         }
     }
 
@@ -463,13 +484,49 @@ $EXECUTION_BLOCK$
         let out = render_main_rs(TEMPLATE, &params(), &[], &xor_config(), &default_syscalls())
             .expect("should render without error");
 
-        assert!(!out.contains('$'), "no placeholders should remain: {out}");
+        // The appended debug prelude carries `$` as Rust macro syntax, so the
+        // placeholder check runs over the template's own output.
+        let body = debug::strip_prelude(&out);
+        assert!(!body.contains('$'), "no placeholders should remain: {body}");
         assert!(out.contains(&"00".repeat(24)), "nonce not substituted");
         assert!(out.contains(&"11".repeat(32)), "key not substituted");
         assert!(out.contains("1234"), "plaintext_len not substituted");
         assert!(out.contains("payload.bin"), "payload_path not substituted");
         // Sensitive strings must not appear in cleartext.
         assert!(!out.contains("STUB_MARKER_deadbeef"));
+    }
+
+    #[test]
+    fn debug_prelude_is_disabled_by_default() {
+        let out = render_main_rs(TEMPLATE, &params(), &[], &xor_config(), &default_syscalls())
+            .expect("should render");
+        assert!(out.contains("macro_rules! tech_dbg"));
+        assert!(!out.contains("eprintln!"), "must not log when disabled");
+    }
+
+    #[test]
+    fn debug_prelude_logs_when_the_stub_is_debug() {
+        let mut p = params();
+        p.debug = true;
+        let out = render_main_rs(TEMPLATE, &p, &[], &xor_config(), &default_syscalls())
+            .expect("should render");
+        assert!(out.contains("eprintln!"));
+        assert!(out.contains("[+] [{}] {}"));
+    }
+
+    #[test]
+    fn debug_prelude_is_appended_to_a_custom_stub() {
+        let template = "fn main() {}";
+        let rendered = render_custom_stub(
+            template,
+            &custom_params(),
+            &[],
+            &xor_config(),
+            &default_syscalls(),
+        )
+        .expect("should render");
+        assert!(rendered.source.contains("macro_rules! tech_dbg"));
+        assert!(rendered.source.contains("#[macro_export]"));
     }
 
     #[test]
@@ -661,6 +718,8 @@ $EXECUTION_BLOCK$
             ]),
             payload_args: Vec::new(),
             args_mode: ArgsMode::Join,
+            debug: false,
+            windows_subsystem: false,
         }
     }
 
@@ -685,7 +744,8 @@ $EXECUTION_BLOCK$
             src.contains("let l = 7"),
             "payload len not substituted: {src}"
         );
-        assert!(!src.contains('$'), "no placeholders should remain: {src}");
+        let body = debug::strip_prelude(&src);
+        assert!(!body.contains('$'), "no placeholders should remain: {body}");
     }
 
     #[test]
@@ -709,7 +769,12 @@ $EXECUTION_BLOCK$
         )
         .expect("should render");
 
-        assert_eq!(rendered.source, template, "no placeholders to substitute");
+        // The stub source is untouched except for the appended debug prelude.
+        assert_eq!(
+            debug::strip_prelude(&rendered.source),
+            template.trim_end(),
+            "no placeholders to substitute"
+        );
         assert!(
             rendered
                 .warnings

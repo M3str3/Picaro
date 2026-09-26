@@ -130,7 +130,7 @@ at `argv[1]`.
 
 ## Measurements
 
-- TODO — pending a static/dynamic baseline (see `docs/measurements/`).
+- TODO — pending a static/dynamic baseline (see `docs/measurements.md`).
 
 ## Implementation notes
 

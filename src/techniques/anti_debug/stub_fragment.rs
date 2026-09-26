@@ -34,6 +34,10 @@ struct AlignedContext(CONTEXT);
 /// imports.
 pub fn anti_debug() -> Result<bool, AntiDebugError> {
     let detected = debugger_present();
+    crate::tech_dbg!(
+        "anti_debug",
+        "debugger detected: {detected} (abort on detect: {ABORT_ON_DETECT})"
+    );
     if detected && ABORT_ON_DETECT {
         return Err(AntiDebugError::DebuggerDetected);
     }
@@ -59,7 +63,9 @@ fn debug_port_set() -> bool {
         std::mem::size_of::<usize>() as u32,
         std::ptr::null_mut(),
     );
-    status >= 0 && port != 0
+    let set = status >= 0 && port != 0;
+    crate::tech_dbg!("anti_debug", "debug port: {set} (0x{port:x})");
+    set
 }
 
 /// Asks the kernel for the current process's debug object handle through
@@ -74,7 +80,9 @@ fn debug_object_set() -> bool {
         std::mem::size_of::<usize>() as u32,
         std::ptr::null_mut(),
     );
-    status >= 0 && handle != 0
+    let set = status >= 0 && handle != 0;
+    crate::tech_dbg!("anti_debug", "debug object handle: {set} (0x{handle:x})");
+    set
 }
 
 /// Reads the hardware debug registers (DR0–DR3) of the current thread through
@@ -90,5 +98,8 @@ fn hardware_breakpoint_set() -> bool {
     if status < 0 {
         return false;
     }
-    context.0.Dr0 != 0 || context.0.Dr1 != 0 || context.0.Dr2 != 0 || context.0.Dr3 != 0
+    let set =
+        context.0.Dr0 != 0 || context.0.Dr1 != 0 || context.0.Dr2 != 0 || context.0.Dr3 != 0;
+    crate::tech_dbg!("anti_debug", "hardware breakpoint registers: {set}");
+    set
 }

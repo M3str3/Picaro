@@ -62,9 +62,9 @@ examples/
 tests/
   configs/      CI / validation fixtures
   fixtures/     committed PE fixtures
+docs/           docs source (mkdocs.yml lives at the root)
 build/          (gitignored) intermediate artifacts
 dist/           (gitignored) final packed binaries
-banner.txt      ASCII banner, compiled in by src/ui.rs
 ```
 
 Each technique lives under `src/techniques/<name>/` (README + stub fragment +
@@ -106,10 +106,16 @@ relocations and before writing the image (failures abort before
 replaced by the shared resolver. The hollowing fragment now uses a 16-byte
 aligned `CONTEXT` for `Get/SetThreadContext` (x64 requirement).
 
-**Process hollowing still does not run a full PE — see Known limitations.**
-A `CREATE_SUSPENDED` target has not run its loader (`PEB->Ldr == NULL`; only
-`ntdll` + the main image mapped), so the payload's imported DLLs are absent.
-Measured evidence + proposed follow-up: `docs/techniques/process_hollowing.md`.
+**Process hollowing runs a full PE (TLS callbacks pending) — see Known
+limitations.** The loader state is reconstructed (imported DLLs, TLS index +
+per-thread template + main-thread slot, `Rip` hand-off) and the Rust test payload
+exits `0`. A relocation bug (DIR64/HIGHLOW swapped in the fragment) was the real
+blocker. Measured evidence + the remaining callback work:
+`docs/techniques/process_hollowing.md`. Every diagnostic the fragment emits is
+obfuscated (`MESSAGES` + `render_fragment`), so no error text — and no technique
+keyword such as `loader` — reaches `.rdata`. `reflective_loading`'s shellcode
+fragment and the other five techniques still carry cleartext (keyword-free)
+diagnostics through `thiserror`.
 
 **Phase 6: indirect syscalls done.** New `build.stub.syscalls` block
 (`mode: none|indirect`, `resolver: hells_gate|tartarus_gate|api_hash`; defaults
@@ -119,8 +125,10 @@ from the union of `TechniqueDef::syscalls` requirements. Technique fragments
 always call the `nt_*` helpers (`crate::nt_alloc_vm`, ...) — `mode: none` maps
 them to the Win32 APIs, `mode: indirect` resolves SSNs at runtime and invokes
 the kernel through the first `syscall; ret` gadget in ntdll's `.text` (a
-`global_asm!` trampoline, `nt_invoke`; signature + stack-shuffle documented in
-the generated code). Three resolvers:
+`global_asm!` trampoline, `nt_invoke`, with eleven argument slots). `syscall`
+pushes no return address, so the kernel reads arguments 5+ from exactly the slots
+the x64 ABI already put them in; the shim only sets `r10`/`eax`/`r11` and jumps
+to the gadget). Three resolvers:
 - **Hell's Gate (6a)** reads each SSN from the live Nt* stub prologue
   (`4C 8B D1 B8 ?? ?? ?? ??` via `GetProcAddress`); a hooked prologue is
   `PatternMismatch`.
@@ -137,33 +145,34 @@ works). All Nt*/DLL names and the Tartarus path go through `StringsConfig`.
 IAT after indirect: `VirtualAllocEx`/`WriteProcessMemory`/`ReadProcessMemory`/
 `ResumeThread`/`VirtualAlloc`/`VirtualProtect`/`IsDebuggerPresent`/
 `CheckRemoteDebuggerPresent`/`GetThreadContext` gone. Docs:
-`docs/techniques/indirect_syscalls.md`,
-`docs/measurements/phase6a_iat_reduction.md`.
+`docs/techniques/indirect_syscalls.md`, `docs/measurements.md`.
 
-**Techniques migrated to the `nt_*` helpers.** `process_hollowing` (6a/6b:
-`NtAllocateVirtualMemory`, `NtWriteVirtualMemory`, `NtReadVirtualMemory`,
+**Techniques migrated to the `nt_*` helpers.** `process_hollowing`
+(`NtAllocateVirtualMemory`, `NtWriteVirtualMemory`, `NtReadVirtualMemory`,
 `NtResumeThread`, `NtUnmapViewOfSection`, `NtProtectVirtualMemory`,
-`NtSuspendThread`), `reflective_loading` (`NtAllocateVirtualMemory`,
-`NtProtectVirtualMemory`), `patch_amsi`/`patch_etw` (`NtProtectVirtualMemory`)
-and `anti_debug` (`NtQueryInformationProcess`, `NtGetContextThread`). The
-syscall layer now has nine `nt_*` helpers (`nt_alloc_vm`, `nt_write_vm`,
-`nt_read_vm`, `nt_resume_thread`, `nt_unmap_view`, `nt_protect_vm`,
-`nt_suspend_thread`, `nt_query_info_process`, `nt_get_context_thread`).
-`CreateRemoteThread`/`CreateThread`/`GetModuleHandleA`/`GetProcAddress` stay
-Win32 (`NtCreateThreadEx` needs 11 args — more than the trampoline shuffles).
-Not done (by design): stack spoofing, unhooking (7).
+`NtSuspendThread`, `NtQueryInformationProcess`, `NtQueryInformationThread`,
+`NtGetContextThread`, `NtSetContextThread`, `NtCreateThreadEx`,
+`NtWaitForSingleObject`, `NtClose`), `reflective_loading`
+(`NtAllocateVirtualMemory`, `NtProtectVirtualMemory`), `patch_amsi`/`patch_etw`
+(`NtProtectVirtualMemory`) and `anti_debug` (`NtQueryInformationProcess`,
+`NtGetContextThread`). The trampoline carries eleven arguments, so
+`NtCreateThreadEx` (which replaced `CreateRemoteThread`) fits; `CreateProcessA`,
+`LoadLibraryA`/`GetProcAddress` and `TlsAlloc`/`TlsSetValue` stay Win32 (loader
+entry points, not syscalls the stub issues).
+Not done (by design): stack spoofing, unhooking (7), and the payload's TLS
+*callbacks* under hollowing (a never-started thread has no TLS array to point
+at).
 
 **Phase 5 complete.** Static measurement infrastructure:
 - `batesian audit <binary>` reports header, sections + entropy, imports/exports,
   strings, YARA (stub) and an optional offline Defender scan.
 - The process-hollowing binary's static baseline is documented in
-  `docs/measurements/` and `.memory.md`.
+  `docs/measurements.md` and `.memory.md`.
 
 **String obfuscation (done).** `build.stub.strings` (`strategy: xor|stack`,
 `key: random|literal:<hex>`) obfuscates every stub string literal through
 `src/engine/obfuscation.rs`. Replaces the old hardcoded XOR `0x5A`. Docs in
-`docs/techniques/string_obfuscation.md`, measurements in
-`docs/measurements/phase6_strings_{xor,stack}.md`.
+`docs/techniques/string_obfuscation.md`, measurements in `docs/measurements.md`.
 
 **Technique categories + `patch_amsi` (done).** Techniques are now Preparation
 vs Execution (`TechniqueDef.category`); a pipeline is `0..N` Preparation followed
@@ -188,9 +197,10 @@ a truecolor `Palette` with a soft violet brand accent, clear green/yellow/red
 status colors and a steel blue for targets (color auto-disabled when not a
 terminal, plus `NO_COLOR`/`--no-color`). Legibility rules: primary values use
 the terminal's default foreground (a fixed light gray vanishes on a light
-theme), and the secondary slate tone is bright enough to read on dark. The
-banner (`banner.txt`) is printed before every subcommand, followed by the dim
-tagline (`mimicry-based packer · vX.Y.Z`); `-q`/`--quiet` skips it. `build` and `audit` open with a
+`theme), and the secondary slate tone is bright enough to read on dark. The
+banner (the `BANNER` literal in `src/ui.rs`) is printed before every subcommand,
+followed by the dim tagline (`mimicry-based packer · vX.Y.Z`); `-q`/`--quiet`
+skips it. `build` and `audit` open with a
 `▸ batesian <cmd> · <target>` echo; `build` logs `✓` steps with compact
 path/size detail and a green result line, while `-v`/`--verbose` adds a
 resolved-config block plus per-step detail (template, marker, rustc path,
@@ -256,7 +266,7 @@ template exits `0` on `false`; `patch_amsi`/`patch_etw`/`anti_debug`/
 `x32dbg`, `sandbox`, `malware`, `analysis`). Every check literal, every
 analysis process name and every hypervisor vendor token goes through
 `StringsConfig`. Docs: `src/techniques/bouncer/README.md`,
-`docs/measurements/phase8_bouncer.md`; examples `tests/configs/bouncer.yaml` and
+`docs/measurements.md`; examples `tests/configs/bouncer.yaml` and
 `tests/configs/bouncer-miss.yaml`. Not done (by design): `on_fail: decoy` and
 checks outside the documented list.
 
@@ -336,16 +346,15 @@ where its CA is trusted; it gives no SmartScreen reputation.
   `CreateToolhelp32Snapshot`, `GetSystemInfo`, `GlobalMemoryStatusEx`) are the
   visible static signature; the check literals themselves stay obfuscated.
 
-- **Process hollowing does not run a full PE even with the IAT fixed.** The
-  payload's IAT is now resolved (`src/engine/imports.rs`), but a
-  `CREATE_SUSPENDED` target has not run its loader (`PEB->Ldr == NULL`; only
-  `ntdll` + the main image are mapped), so the payload's other imported DLLs
-  (`kernel32`, `user32`, …) are absent and the first import call jumps to
-  unmapped memory (`0xC0000005`). Letting the target's loader initialize the
-  swapped-in image fails (`0xC0000142`) even for a bare `jmp $` entry, and
-  manually mapped images never get an OS TLS slot (Rust payloads then abort
-  with `0xC0000409`). Provisioning loader/TLS state before hand-off is the
-  follow-up; evidence in `docs/techniques/process_hollowing.md`.
+- **Process hollowing runs a full PE, but not its TLS callbacks.** The IAT
+  (`src/engine/imports.rs`), the imported DLLs, the TLS index/block/slot and the
+  `Rip` hand-off are all provisioned, so a Rust payload completes (exit `0`).
+  What is still missing is running the payload's `DLL_PROCESS_ATTACH` TLS
+  callbacks: a callback needs a thread, and a never-started thread has no TLS
+  array in its TEB to point a slot at (writing one faults the target). Either
+  run them on the main thread (parked on a `jmp $` stub between calls) or build
+  the callback thread's TLS array by hand. Evidence in
+  `docs/techniques/process_hollowing.md`.
 - Custom stubs do not obfuscate the key/nonce by default. If the custom stub
   uses `$PAYLOAD_KEY_DEF$` / `$PAYLOAD_NONCE_DEF$`, the values land in `.rdata`.
   Use `$PAYLOAD_KEY_DEF_OBFUSCATED$` when available, or read the key at runtime
@@ -363,6 +372,9 @@ where its CA is trusted; it gives no SmartScreen reputation.
 At the **start** of a session:
 - Read this file.
 - Read `.memory.md` for the last session's state.
+- The docs are a Material for MkDocs site (`mkdocs.yml`, `docs_dir: docs`); the
+  nav lives in `mkdocs.yml`. Preview with `python scripts/docs.py` (runs the
+  official container; standard library only) or `mkdocs serve`.
 
 At the **end** of a session:
 - Update `.memory.md` with what was done, open questions, and next steps.

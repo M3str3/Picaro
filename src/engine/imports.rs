@@ -119,6 +119,7 @@ const IMPORTS_BLOCK: &str = r##"mod imports {
                 .to_string_lossy()
                 .into_owned();
             let module = load_module(image, name_off, &dll)?;
+            crate::tech_dbg!("imports", "loading '{dll}'");
 
             let mut i = 0u32;
             loop {
@@ -164,6 +165,7 @@ const IMPORTS_BLOCK: &str = r##"mod imports {
             desc += 20;
         }
 
+        crate::tech_dbg!("imports", "resolved {} import(s)", resolved.len());
         Ok(resolved)
     }
 

@@ -90,6 +90,12 @@ enum Commands {
         /// Resolve and validate the build without compiling or writing anything.
         #[arg(long)]
         dry_run: bool,
+
+        /// Build the stub as a debug artifact: the techniques log what they do
+        /// and the binary keeps symbols, debug info and source paths. Overrides
+        /// `build.stub.debug`. Laboratory use only.
+        #[arg(long)]
+        debug: bool,
     },
 
     /// Run a static audit of a PE and print a readable report.
@@ -208,6 +214,7 @@ fn run() -> Result<()> {
             config,
             args,
             dry_run: is_dry_run,
+            debug: debug_flag,
         } => match action {
             Some(BuildAction::Interactive {
                 payload,
@@ -226,7 +233,7 @@ fn run() -> Result<()> {
                     if is_dry_run {
                         dry_run(&config, &path, &ui)?;
                     } else {
-                        build(&config, &build_args, &path, &ui, cli.verbose)?;
+                        build(&config, &build_args, &path, &ui, cli.verbose, debug_flag)?;
                     }
                 }
             }
@@ -244,7 +251,14 @@ fn run() -> Result<()> {
                 if is_dry_run {
                     dry_run(&config, &config_path, &ui)?;
                 } else {
-                    build(&config, &build_args, &config_path, &ui, cli.verbose)?;
+                    build(
+                        &config,
+                        &build_args,
+                        &config_path,
+                        &ui,
+                        cli.verbose,
+                        debug_flag,
+                    )?;
                 }
             }
         },
@@ -325,18 +339,32 @@ fn validate_techniques(ui: &Palette) {
 /// Runs the full packing flow, logging each step as it succeeds.
 ///
 /// `verbose` adds a resolved-configuration block, per-step detail lines and
-/// timings; the compact form stays on one line per step.
+/// timings; the compact form stays on one line per step. `debug_override`
+/// forces the debug build on (`--debug`), on top of `build.stub.debug`.
 fn build(
     config: &config::Config,
     build_args: &BTreeMap<String, String>,
     config_path: &Path,
     ui: &Palette,
     verbose: bool,
+    debug_override: bool,
 ) -> Result<()> {
     let started = Instant::now();
+    let debug = config.build.stub.debug || debug_override;
 
     anstream::println!("{}", ui.command_line("build", config_path.display()));
     anstream::println!();
+
+    if debug {
+        anstream::eprintln!(
+            "  {} {}",
+            ui.bang(),
+            ui.warn(
+                "debug build: technique traces are enabled and the artifact is built without \
+                 hardening (symbols, debug info and source paths are kept). Lab use only."
+            )
+        );
+    }
 
     if verbose {
         print_config(config, config_path, ui);
@@ -489,6 +517,8 @@ fn build(
         build_args: build_args.clone(),
         payload_args: config.build.payload.args.clone().unwrap_or_default(),
         args_mode: config.build.payload.args_mode,
+        debug,
+        windows_subsystem: config.build.output.subsystem == Subsystem::Windows,
     };
 
     let stub_src = if is_custom {
@@ -524,6 +554,9 @@ fn build(
             params.payload_args.len(),
             config.build.payload.args_mode.label()
         ));
+    }
+    if debug {
+        stub_parts.push(ui.warn("debug"));
     }
     anstream::println!("{}", ui.done("stub", dotted(ui, &stub_parts)));
     if verbose {
@@ -565,6 +598,7 @@ fn build(
             TrimPaths::Relative => compiler::PathTrim::Relative,
             TrimPaths::All => compiler::PathTrim::All,
         },
+        debug,
     };
     compiler::compile_stub(&stub_path, &out, &deps, options)?;
     let compile_time = timer.elapsed();
@@ -899,6 +933,9 @@ fn print_config(config: &config::Config, config_path: &Path, ui: &Palette) {
         ui.field("subsystem", config.build.output.subsystem.label())
     );
     anstream::println!("{}", ui.field("stub", stub_label(config)));
+    if config.build.stub.debug {
+        anstream::println!("{}", ui.field("debug", ui.warn("yes")));
+    }
     if let Some(resources) = &config.build.output.resources {
         anstream::println!("{}", ui.field("resources", resources_label(resources)));
     }

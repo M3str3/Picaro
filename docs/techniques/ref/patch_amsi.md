@@ -1,0 +1,1 @@
+--8<-- "src/techniques/patch_amsi/README.md"

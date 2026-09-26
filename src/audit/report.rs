@@ -10,13 +10,14 @@
 //! without leaking escape codes into the latter. Everything that carries
 //! meaning is also encoded in structure and glyphs, never in color alone.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::ui::{glyph, Meta, Palette, Tone};
 
 use super::defender::DefenderResult;
 use super::pe_info::{ImportItem, PeAudit};
-use super::strings::StringFindings;
+use super::strings::{self, StringFindings};
 use super::yara::YaraResult;
 use super::SUSPICIOUS_IMPORTS;
 
@@ -32,6 +33,14 @@ const RULE_WIDTH: usize = 60;
 const STRING_KEY_WIDTH: usize = 18;
 /// The imports list wraps at this width so names stay in the report column.
 const IMPORTS_WRAP: usize = 78;
+/// Maximum length of a string-listing preview, in characters.
+///
+/// A run of printable bytes can glue several Rust string literals together (they
+/// are not NUL-separated) and grow to hundreds of characters; the preview keeps
+/// the report readable while the match is still recognizable.
+const STRING_PREVIEW_WIDTH: usize = 72;
+/// Most flagged-string labels listed on the summary line before `+N more`.
+const SUMMARY_LABELS_MAX: usize = 6;
 
 /// Section filter for `--focus`.
 pub struct Focus {
@@ -88,7 +97,7 @@ pub fn render(
         out.push_str(&render_exports(pe, ui));
     }
     if focus.enabled("strings") {
-        out.push_str(&render_strings(strings, ui));
+        out.push_str(&render_strings(pe, strings, ui));
     }
     if focus.enabled("yara") {
         out.push_str(&render_yara(yara, ui));
@@ -247,7 +256,7 @@ fn render_exports(pe: &PeAudit, ui: &Palette) -> String {
     out
 }
 
-fn render_strings(strings: &StringFindings, ui: &Palette) -> String {
+fn render_strings(pe: &PeAudit, strings: &StringFindings, ui: &Palette) -> String {
     let mut out = section(ui, "STRINGS", None);
 
     out.push_str(&string_row(ui, "paths (system32)", strings.paths.len()));
@@ -257,13 +266,24 @@ fn render_strings(strings: &StringFindings, ui: &Palette) -> String {
     out.push_str(&list_items(ui, &strings.apis));
 
     out.push_str(&string_row(ui, "technique names", strings.techniques.len()));
-    out.push_str(&list_items(ui, &strings.techniques));
+    for s in &strings.techniques {
+        out.push_str(&preview_line(ui, s, technique_note(s)));
+    }
 
     out.push_str(&string_row(ui, "urls / ips", strings.urls_ips.len()));
     out.push_str(&list_items(ui, &strings.urls_ips));
 
     out.push_str(&string_row(ui, "sensitive", strings.sensitive.len()));
-    out.push_str(&list_items(ui, &strings.sensitive));
+    let imported = imported_dll_names(pe);
+    for s in &strings.sensitive {
+        // A literal that is also a statically imported DLL name (e.g.
+        // `ntdll.dll`, shipped by the `windows` crate graph) is toolchain
+        // noise, not a stub leak; label it so the reader can tell.
+        let note = imported
+            .contains(&s.to_ascii_lowercase())
+            .then(|| "imported".to_string());
+        out.push_str(&preview_line(ui, s, note));
+    }
 
     let flagged = strings.total_flagged();
     let value = if flagged == 0 {
@@ -420,7 +440,7 @@ fn render_summary(
             ui,
             ui.bang(),
             ui.warn(format!("{string_flags} flagged strings")),
-            None,
+            Some(summarize_labels(&flagged_labels(strings))),
         ));
     }
 
@@ -479,6 +499,42 @@ fn render_summary(
     out
 }
 
+/// Short labels for every flagged string, in report order, for the summary.
+///
+/// A `technique names` hit contributes its keyword(s) rather than the whole
+/// (often glued-together) string, so the summary stays compact and answers
+/// *which* strings were flagged at a glance.
+fn flagged_labels(strings: &StringFindings) -> Vec<String> {
+    let mut labels: Vec<String> = Vec::new();
+    labels.extend(strings.paths.iter().map(|s| truncate_chars(s, 40)));
+    labels.extend(strings.apis.iter().cloned());
+    labels.extend(strings.techniques.iter().map(|s| {
+        let keywords = strings::technique_keywords(s);
+        if keywords.is_empty() {
+            truncate_chars(s, 40)
+        } else {
+            keywords.join("/")
+        }
+    }));
+    labels.extend(strings.urls_ips.iter().cloned());
+    labels.extend(strings.sensitive.iter().cloned());
+    labels
+}
+
+/// Joins up to [`SUMMARY_LABELS_MAX`] labels into a parenthesized one-liner,
+/// summarizing the rest as `+N more`.
+fn summarize_labels(labels: &[String]) -> String {
+    let mut shown: Vec<String> = labels
+        .iter()
+        .take(SUMMARY_LABELS_MAX)
+        .map(|l| truncate_chars(l, 32))
+        .collect();
+    if labels.len() > SUMMARY_LABELS_MAX {
+        shown.push(format!("+{} more", labels.len() - SUMMARY_LABELS_MAX));
+    }
+    format!("({})", shown.join(", "))
+}
+
 /// A `marker text` line, plus a dim trailing note when present.
 ///
 /// Used both for section status lines (`✓ no matches`) and for the summary
@@ -507,11 +563,37 @@ fn string_row(ui: &Palette, key: &str, value: usize) -> String {
     )
 }
 
-/// The found strings of one category, indented under their count.
+/// The found strings of one category, indented under their count, each
+/// truncated to [`STRING_PREVIEW_WIDTH`].
 fn list_items(ui: &Palette, items: &[String]) -> String {
     items
         .iter()
-        .map(|item| format!("  {}\n", ui.dim(item)))
+        .map(|item| preview_line(ui, item, None))
+        .collect()
+}
+
+/// One indented string entry: a truncated preview plus an optional dim note.
+fn preview_line(ui: &Palette, text: &str, note: Option<String>) -> String {
+    let mut line = format!("  {}", ui.dim(truncate_chars(text, STRING_PREVIEW_WIDTH)));
+    if let Some(note) = note {
+        line.push_str(&format!("  {}", ui.faint(format!("[{note}]"))));
+    }
+    line.push('\n');
+    line
+}
+
+/// Annotates a `technique names` hit with the keyword(s) that triggered it, so
+/// an incidental substring is distinguishable from a real name.
+fn technique_note(s: &str) -> Option<String> {
+    let keywords = strings::technique_keywords(s);
+    (!keywords.is_empty()).then(|| keywords.join(", "))
+}
+
+/// Lowercased names of the statically imported DLLs.
+fn imported_dll_names(pe: &PeAudit) -> BTreeSet<String> {
+    pe.imports
+        .iter()
+        .map(|d| d.name.to_ascii_lowercase())
         .collect()
 }
 
@@ -654,6 +736,58 @@ mod tests {
             &Focus::parse(focus),
             &Palette::plain(),
         )
+    }
+
+    /// Renders the sample PE with `findings` as its string scan.
+    fn render_with_strings(findings: &StringFindings) -> String {
+        let yara = YaraResult {
+            matches: vec![],
+            note: "ruleset empty",
+        };
+        render(
+            Path::new("test.exe"),
+            12345,
+            &sample_pe(),
+            findings,
+            &yara,
+            &DefenderResult::NotAvailable,
+            &Focus::parse(None),
+            &Palette::plain(),
+        )
+    }
+
+    /// The summary must name the flagged strings, not just count them, and the
+    /// list must explain *why* each matched.
+    #[test]
+    fn summary_names_the_flagged_strings() {
+        let findings = StringFindings {
+            apis: vec!["NtUnmapViewOfSection".to_string()],
+            techniques: vec!["the target loader to initialize".to_string()],
+            sensitive: vec!["kernel32.dll".to_string()],
+            ..StringFindings::default()
+        };
+
+        let out = render_with_strings(&findings);
+        assert!(out.contains("[loader]"), "missing keyword note: {out}");
+        assert!(out.contains("[imported]"), "missing import note: {out}");
+        assert!(
+            out.contains("NtUnmapViewOfSection, loader, kernel32.dll"),
+            "summary should list labels: {out}"
+        );
+    }
+
+    /// A glued run of concatenated Rust literals must not flood the report.
+    #[test]
+    fn long_string_previews_are_truncated() {
+        let long = format!("loader {}", "x".repeat(200));
+        let findings = StringFindings {
+            techniques: vec![long.clone()],
+            ..StringFindings::default()
+        };
+
+        let out = render_with_strings(&findings);
+        assert!(!out.contains(&long), "full string leaked: {out}");
+        assert!(out.contains('\u{2026}'), "no ellipsis: {out}");
     }
 
     #[test]

@@ -36,7 +36,6 @@ WORKDIR /usr/src/batesian
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY templates ./templates
-COPY banner.txt ./
 COPY yara ./yara
 COPY examples ./examples
 

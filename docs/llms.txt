@@ -1,0 +1,50 @@
+# batesian
+
+> batesian is a declarative PE packer for authorized red team research. It takes
+> a PE (or DLL / shellcode) and a YAML config and emits a packed PE with the
+> selected evasion techniques baked into a generated Rust stub.
+
+## Getting started
+
+- [Introduction](index.html): what batesian is and its authorized-use scope.
+- [Getting started](getting-started.html): requirements, a first config, and the build/run/measure commands.
+- [Configuration](configuration.html): every block and field, plus the interactive wizard.
+- [Examples](examples/index.html): the runnable configs, recipes and end-to-end tests.
+
+## Techniques
+
+- [Techniques overview](techniques/index.html): the Preparation/Execution model and the registry table.
+- [patch_amsi](techniques/ref/patch_amsi.html)
+- [patch_etw](techniques/ref/patch_etw.html)
+- [anti_debug](techniques/ref/anti_debug.html)
+- [sleep_obfuscation](techniques/ref/sleep_obfuscation.html)
+- [bouncer](techniques/ref/bouncer.html)
+- [process_hollowing](techniques/ref/process_hollowing.html)
+- [reflective_loading](techniques/ref/reflective_loading.html)
+- [Syscall layer](techniques/indirect_syscalls.html): none / Hell's Gate / Tartarus Gate / API hashing.
+- [Payload arguments](techniques/process_argument_spoofing.html): build.payload.args and PEB command-line patching.
+- [String obfuscation](techniques/string_obfuscation.html): build.stub.strings (xor / stack).
+- [Adding a technique](techniques/adding-a-technique.html): the four-file ritual.
+
+## Architecture
+
+- [How it fits together](architecture.html): the packer pipeline and repo layout.
+- [Custom stubs](custom-stubs.html): replacing the builtin loader template.
+
+## Reference
+
+- [Measurements](measurements.html): phase-by-phase static/dynamic results and the EDR report.
+- [Process hollowing evidence](techniques/process_hollowing.html): measured behaviour and remaining work.
+- [Migration: v1 to v3](migration-v1-v3.html)
+- [Migration: v2 to v3](migration-v2-v3.html)
+- [Migration: v3 to v4](migration-v3-v4.html)
+
+## Notes
+
+- The canonical sources are the Markdown files in docs/ plus
+  src/techniques/*/README.md, README.md and examples/README.md.
+- mkdocs.yml holds the navigation; the per-technique pages, the configuration
+  reference and the examples page are generated from those files via
+  pymdownx.snippets.
+- The site is built with Material for MkDocs. The links above are
+  site-root-relative paths in the generated site.

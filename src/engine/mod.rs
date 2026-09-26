@@ -4,6 +4,7 @@
 //! - `crypto`: payload encryption (XChaCha20-Poly1305).
 //! - `pe`: minimal PE parsing/validation.
 //! - `stub`: stub rendering from the template.
+//! - `debug`: the `tech_dbg!` trace macro appended to a debug stub.
 //! - `obfuscation`: string obfuscation for stub literals.
 //! - `compiler`: stub compilation with `rustc`.
 //! - `fetch`: in-memory HTTP(S) fetch of the input payload (URL input).
@@ -19,6 +20,7 @@
 pub mod args;
 pub mod compiler;
 pub mod crypto;
+pub mod debug;
 pub mod fetch;
 pub mod hash;
 pub mod identity;
