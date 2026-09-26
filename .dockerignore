@@ -1,0 +1,24 @@
+# Build context hygiene: keep the image context to what the build needs.
+# Everything listed here is either gitignored, huge, or irrelevant to compiling.
+
+.git
+.gitignore
+.memory.md
+
+# Host build artifacts (the image builds its own under /usr/src/batesian/target).
+target
+build
+dist
+
+# Reference material and notes; not compiled into the tool.
+code_examples
+docs
+
+# Local scratch artifacts (see .gitignore).
+*.pdb
+*.ilk
+*.exp
+hello.exe
+hello.hidden.exe
+hello.pdb
+mimi.yaml

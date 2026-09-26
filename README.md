@@ -59,6 +59,60 @@ cargo run -- techniques list
 and `--no-color` (or `NO_COLOR=1`) turns off color — it is disabled
 automatically when output is redirected.
 
+## Docker (no local toolchain)
+
+No Rust, MinGW-w64 or Windows target installed? The bundled image ships the
+whole toolchain (rustc, cargo, the `x86_64-pc-windows-gnu` target, the MinGW
+linker) plus the prebuilt workspace `.rlib` files, so one command is enough.
+
+```bash
+# One-time build (a few minutes the first time).
+docker build -t batesian .
+
+# Pack, mounting the current directory as /work: configs + payloads in, dist/ out.
+docker run --rm -it -v "$PWD:/work" -w /work batesian build examples/configs/test-reflective.yaml
+```
+
+Or use a wrapper, which builds the image on first use and passes every
+argument through unchanged. Linux/macOS/WSL:
+
+```bash
+bash scripts/docker-batesian.sh build examples/configs/test-reflective.yaml
+bash scripts/docker-batesian.sh audit dist/test_packed_reflective.exe
+bash scripts/docker-batesian.sh techniques list
+```
+
+Windows (PowerShell):
+
+```powershell
+.\scripts\docker-batesian.ps1 build examples\configs\test-reflective.yaml
+.\scripts\docker-batesian.ps1 audit dist\test_packed_reflective.exe
+.\scripts\docker-batesian.ps1 techniques list
+```
+
+Pass `--build` first to either wrapper to force a rebuild of the image.
+
+On Windows, arguments are translated for the Linux container: relative paths
+(`.\examples\x.yaml`, `dist\y.exe`) become POSIX paths, an absolute path under
+the current directory becomes `/work/...`, and an opaque `$arg.N$` value such as
+`C:\Windows\System32\svchost.exe` is left untouched (the stub resolves it at
+runtime on Windows). Paths *inside* the YAML (`source`, `output.path`) must use
+forward slashes, as the example configs do.
+
+How it works:
+
+- The repo is baked in at `/usr/src/batesian`; the packer reads its stub
+  template and `Cargo.lock` from there and links the stub against the
+  `.rlib`s under `/usr/src/batesian/target`.
+- Your working directory is mounted at `/work`. Run from the repo root (or any
+  directory holding your `config.yaml` and payload) and use paths relative to
+  it; outputs (`dist/…`) land on your host through the mount.
+- Subcommands and flags pass through unchanged (`build`, `audit`,
+  `techniques …`, plus `-q`/`-v`/`--no-color`).
+
+> The container only *builds* the packed Windows PE (it cross-compiles the stub
+> to `x86_64-pc-windows-gnu`). Run the resulting `.exe` on a Windows host.
+
 ## Configuration
 
 A build is one YAML document. Strict by design: unknown keys are an error, so
