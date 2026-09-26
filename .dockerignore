@@ -10,6 +10,9 @@ target
 build
 dist
 
+# Docs site output.
+site
+
 # Reference material and notes; not compiled into the tool.
 code_examples
 docs
