@@ -1,0 +1,28 @@
+# Example: `args_mode: override`.
+#
+#   powershell -ExecutionPolicy Bypass -File examples/payloads/build_args_payload.ps1
+#   cargo run -- build examples/configs/test-args-override.yaml
+#   .\dist\test_args_override.exe "runtime-c"   # payload sees: runtime-c
+#   .\dist\test_args_override.exe               # payload sees: yaml-a yaml-b
+
+schema: 4
+name: test-args-override
+
+build:
+  payload:
+    source: ./examples/payloads/test_args_payload.exe
+    args:
+      - "yaml-a"
+      - "yaml-b"
+    args_mode: override
+    crypto:
+      algo: xchacha20poly1305
+      key: random
+  output:
+    path: ./dist/test_args_override.exe
+    arch: x64
+    strip: true
+    trim_paths: all
+
+runtime:
+  - technique: reflective_loading

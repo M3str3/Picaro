@@ -1,0 +1,28 @@
+schema: 4
+name: test-bouncer-miss
+
+build:
+  payload:
+    source: ./examples/payloads/test_payload.exe
+    crypto:
+      algo: xchacha20poly1305
+      key: random
+  stub:
+    strings:
+      strategy: xor
+      key: random
+  output:
+    path: ./dist/test_bouncer_miss.exe
+    arch: x64
+    strip: true
+    trim_paths: all
+
+runtime:
+  # No host can ever be named this, so the gate always rejects the host and the
+  # payload never runs.
+  - technique: bouncer
+    params:
+      mode: all
+      on_fail: silent
+      hostname: "batesian-no-such-host-*"
+  - technique: reflective_loading

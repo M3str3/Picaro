@@ -1,0 +1,27 @@
+schema: 4
+name: test-bouncer
+
+build:
+  payload:
+    source: ./examples/payloads/test_payload.exe
+    crypto:
+      algo: xchacha20poly1305
+      key: random
+  stub:
+    strings:
+      strategy: xor
+      key: random
+  output:
+    path: ./dist/test_bouncer.exe
+    arch: x64
+    strip: true
+    trim_paths: all
+
+runtime:
+  # Always accepts the host (`*` matches any computer name), so the payload runs.
+  - technique: bouncer
+    params:
+      mode: all
+      on_fail: silent
+      hostname: "*"
+  - technique: reflective_loading

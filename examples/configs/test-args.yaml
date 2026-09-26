@@ -1,0 +1,30 @@
+# Example: fixed payload arguments (join mode, the default).
+#
+#   powershell -ExecutionPolicy Bypass -File examples/payloads/build_args_payload.ps1
+#   cargo run -- build examples/configs/test-args.yaml
+#   .\dist\test_args_join.exe "runtime-c" "runtime-d"
+#
+# The payload sees: <exe> yaml-a yaml-b runtime-c runtime-d
+# (token 0 is the executable name, not an argument).
+
+schema: 4
+name: test-args
+
+build:
+  payload:
+    source: ./examples/payloads/test_args_payload.exe
+    args:
+      - "yaml-a"
+      - "yaml-b"
+    args_mode: join
+    crypto:
+      algo: xchacha20poly1305
+      key: random
+  output:
+    path: ./dist/test_args_join.exe
+    arch: x64
+    strip: true
+    trim_paths: all
+
+runtime:
+  - technique: reflective_loading
