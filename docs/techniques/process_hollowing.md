@@ -71,20 +71,39 @@ is the case that cannot complete. The existing end-to-end tests therefore only
 assert that the stub does not fail through **its own** error path (exit code
 `1`); for hollowing they do not yet prove the payload runs to completion.
 
-## Proposed follow-up
+## Implemented follow-up (loader + DLLs)
 
-To make a full PE actually run in a hollowed target, the loader state has to be
-provisioned, not just the IAT:
+The first two steps of the plan below are now implemented in
+`src/techniques/process_hollowing/stub_fragment.rs`:
 
-1. Let the target's loader initialize first (patch the original entry to a
-   spin loop, resume, wait until the thread is parked, then suspend).
-2. Load each imported DLL **in the target** so its base and TLS slot exist
-   (e.g. `NtCreateThreadEx` calling `LoadLibraryA`, to stay off the static IAT).
-3. Only then hollow and hand off, and run the payload's TLS callbacks.
+1. **Let the target's loader initialize.** `run_stage_two` patches the original
+   entry point to `jmp $` (`EB FE`) after making the entry page writable
+   (`nt_protect_vm`), resumes the thread, polls `GetThreadContext` until `Rip`
+   reaches the spin loop (so the loader has finished and `PEB->Ldr` is
+   populated), then suspends the thread again (`nt_suspend_thread`).
+2. **Load each imported DLL in the target.** The fragment walks the payload's
+   import descriptors for DLL names and, for each, writes the name into the
+   target and runs `LoadLibraryA` there via a remote thread
+   (`CreateRemoteThread`), so the target has every DLL's base mapped before the
+   IAT is resolved and the image is written. `NtCreateThreadEx` was considered
+   (to stay off the static IAT) but takes eleven arguments — more than the
+   indirect-syscall trampoline currently shuffles — so `CreateRemoteThread` is
+   used for now.
 
-That is a larger change than the import-table fix and is deliberately out of
-scope here; this document records the evidence so the next session starts from
-facts instead of re-deriving them.
+Both steps add two syscall helpers to the layer: `NtProtectVirtualMemory`
+(`nt_protect_vm`) and `NtSuspendThread` (`nt_suspend_thread`).
+
+## Remaining work (TLS)
+
+Step 3 of the original plan is still open: the payload's **TLS directory** is
+not provisioned. The OS TLS slot a module needs for `#[thread_local]`/CRT state
+is allocated by the loader when the module is loaded, and neither hollowing nor
+reflective loading creates one, nor are the payload's TLS callbacks run in the
+target. A Rust payload that touches thread-local CRT state on entry can still
+fast-fail with `STATUS_STACK_BUFFER_OVERRUN` (`0xC0000409`). The follow-up is
+(1) run the payload's TLS callbacks with `DLL_PROCESS_ATTACH` on the main
+thread, and (2) allocate a TLS index (`TlsAlloc`) and copy the `.tls` template
+into the thread's TLS slots before handing off.
 
 ## References
 

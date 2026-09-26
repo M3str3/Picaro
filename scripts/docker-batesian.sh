@@ -3,7 +3,7 @@
 # against the current directory with every argument passed through unchanged.
 #
 # Usage:
-#   bash scripts/docker-batesian.sh build examples/configs/test-reflective.yaml
+#   bash scripts/docker-batesian.sh build examples/configs/reflective-loading.yaml
 #   bash scripts/docker-batesian.sh audit dist/test_packed_reflective.exe
 #   bash scripts/docker-batesian.sh techniques list
 #

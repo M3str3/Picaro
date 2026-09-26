@@ -18,7 +18,3 @@ docs
 *.pdb
 *.ilk
 *.exp
-hello.exe
-hello.hidden.exe
-hello.pdb
-mimi.yaml

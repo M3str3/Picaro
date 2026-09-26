@@ -208,6 +208,8 @@ fn compiles_sleep_obfuscation_stub_to_pe() {
         key: encrypted.key,
         ciphertext: encrypted.ciphertext.clone(),
         plaintext_len: encrypted.plaintext_len,
+        payload_format: crate::config::schema::PayloadFormat::Pe,
+        payload_export: None,
         stub_marker: crate::engine::stub::generate_stub_marker(),
         payload_path: "payload.bin".to_string(),
         build_args: std::collections::BTreeMap::new(),

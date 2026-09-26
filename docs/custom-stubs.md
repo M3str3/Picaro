@@ -104,7 +104,7 @@ A referenced-but-missing argument is an error:
 - `examples/stubs/runtime-key.rs` — reads the key from argv (`./out.exe
   <hex_key>`), so the key is never embedded. Intentionally left incomplete (the
   decryption body is yours to write).
-- `examples/configs/test-custom-stub.yaml` — end-to-end config for `minimal.rs`.
+- `examples/configs/custom-stub.yaml` — end-to-end config for `minimal.rs`.
 
 ## Limitations
 

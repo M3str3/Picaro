@@ -51,7 +51,10 @@ fn def_is_well_formed() {
     assert_eq!(DEF.attck, &["T1622"]);
     assert_eq!(DEF.category, Category::Preparation);
     assert!(DEF.conflicts.is_empty());
-    assert!(DEF.syscalls.is_empty());
+    assert_eq!(
+        DEF.syscalls,
+        &["NtQueryInformationProcess", "NtGetContextThread"]
+    );
     assert!(!DEF.stub_fragment.is_empty());
     assert!(!DEF.readme.is_empty());
 }

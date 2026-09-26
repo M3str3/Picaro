@@ -35,15 +35,24 @@ runtime:
    `CreateProcessA(..., CREATE_SUSPENDED)`.
 2. Read the suspended thread's context (`GetThreadContext`) to find the PEB
    (`Rdx` on x64) and, from it, the image base (`PEB + 0x10`).
-3. Unmap the legitimate image with `NtUnmapViewOfSection` (resolved dynamically
+3. **Let the target's loader initialize.** Patch the original entry point to an
+   infinite loop (`jmp $`), resume the thread, wait until it parks in the loop
+   (so the loader has mapped the process's default DLLs and populated
+   `PEB->Ldr`), then suspend it again. The original image is unmapped later, so
+   the patched bytes never need restoring.
+4. **Load the payload's imported DLLs in the target.** Each imported DLL name
+   is written into the target and loaded there with a remote thread that calls
+   `LoadLibraryA`, so the target has every DLL's base (and TLS slot) mapped.
+   `LoadLibraryA` on an already-loaded DLL is a no-op.
+5. Unmap the legitimate image with `NtUnmapViewOfSection` (resolved dynamically
    from `ntdll.dll`).
-4. Allocate memory at the same base with `VirtualAllocEx`
-   (`MEM_COMMIT | MEM_RESERVE`, `PAGE_EXECUTE_READWRITE`).
-5. Fix up base relocations if the preferred image base changed.
-6. Resolve the payload's import table and fill in its IAT (see below).
-7. Write the payload's headers and sections with `WriteProcessMemory`.
-8. Redirect the thread to the payload entry point (`SetThreadContext` → `Rcx`).
-9. Resume the thread (`ResumeThread`).
+6. Allocate memory at the same base (`MEM_COMMIT | MEM_RESERVE`,
+   `PAGE_EXECUTE_READWRITE`).
+7. Fix up base relocations if the preferred image base changed.
+8. Resolve the payload's import table and fill in its IAT (see below).
+9. Write the payload's headers and sections with `NtWriteVirtualMemory`.
+10. Redirect the thread to the payload entry point (`SetThreadContext` → `Rcx`).
+11. Resume the thread (`NtResumeThread`).
 
 ### Import resolution
 
@@ -59,20 +68,19 @@ half-filled IAT.
 The addresses are resolved in the packer stub's **current** process. Windows
 assigns system DLLs one base per session (ASLR for system DLLs is session-wide,
 not per-process), so a resolved address is valid in the target as long as the
-target has that DLL mapped. API set names (`api-ms-win-*`) are virtual and are
-resolved by the loader through the API set schema; `LoadLibraryA` therefore
-returns the contract host's module (with a family-based fallback for the CRT
-contracts).
+target has that DLL mapped — which step 4 guarantees. API set names
+(`api-ms-win-*`) are virtual and are resolved by the loader through the API set
+schema; `LoadLibraryA` therefore returns the contract host's module (with a
+family-based fallback for the CRT contracts).
 
-> **Known limitation (open).** A process created with `CREATE_SUSPENDED` has
-> **not run its loader yet** (`PEB->Ldr` is `NULL`; only `ntdll.dll` and the main
-> image are mapped). Resolving the IAT is necessary but not yet sufficient: the
-> payload's other imports (`kernel32.dll`, `user32.dll`, …) may be absent from
-> the target, in which case the first import call jumps to unmapped memory. The
-> Windows loader also refuses to initialize the swapped-in image (it exits with
-> `STATUS_DLL_INIT_FAILED`), so the target's own loader cannot be used to load
-> these DLLs either. See `docs/techniques/process_hollowing.md` for the measured
-> evidence and the proposed follow-up.
+> **Known limitation (open).** The loader and imported DLLs are now provisioned
+> (steps 3–4), but the payload's **TLS directory is not**: the OS TLS slot a
+> module needs for `#[thread_local]`/CRT state is normally allocated by the
+> loader when the module is loaded, and neither hollowing nor reflective loading
+> creates one. A Rust payload that touches thread-local CRT state on entry can
+> still fast-fail with `STATUS_STACK_BUFFER_OVERRUN` (`0xC0000409`). Running the
+> payload's TLS callbacks and provisioning its TLS index/template is the
+> remaining follow-up; evidence in `docs/techniques/process_hollowing.md`.
 
 ### Payload arguments
 
@@ -102,13 +110,18 @@ built its `argv` from it, so `GetCommandLineW` inside the payload returns it.
 - **Kernel callbacks** (`PsSetCreateProcessNotifyRoutine` / `ObRegisterCallbacks`)
   see the suspend → write → resume sequence and the `PAGE_EXECUTE_READWRITE`
   allocation.
-- **Userland hooks** on `VirtualAllocEx`/`WriteProcessMemory`/`ResumeThread`
-  (the very APIs the technique depends on).
+- **Userland hooks** on `VirtualAllocEx`/`WriteProcessMemory`/`ResumeThread`/
+  `CreateRemoteThread` (the very APIs the technique depends on in
+  `syscalls.mode: none`).
 - **ETW-TI** (`Microsoft-Windows-Threat-Intelligence`) reports the cross-process
   memory write to a signed process.
-- **Static**: the stub still statically imports `VirtualAllocEx` and
-  `WriteProcessMemory`, and keeps `NtUnmapViewOfSection` as a cleartext string
-  for `GetProcAddress` (this is what phase 5 measures).
+- **Static**: the stub still statically imports `CreateProcessA`,
+  `CreateRemoteThread`, `LoadLibraryA`, `GetProcAddress`, `GetThreadContext`,
+  `SetThreadContext`, `WaitForSingleObject`, `GetExitCodeProcess` and
+  `CloseHandle`. The Nt* calls (`NtUnmapViewOfSection`, `NtAllocateVirtualMemory`,
+  `NtWriteVirtualMemory`, `NtReadVirtualMemory`, `NtResumeThread`,
+  `NtProtectVirtualMemory`, `NtSuspendThread`) go through the syscall layer and
+  never appear as imports or cleartext strings in `mode: indirect`.
 
 ## Measurements
 
@@ -116,8 +129,10 @@ built its `argv` from it, so `GetCommandLineW` inside the payload returns it.
 
 ## Implementation notes
 
-- Current implementation allocates `PAGE_EXECUTE_READWRITE` (RWX) directly; a
-  later phase should switch to RW → write → RX via `VirtualProtectEx`.
+- The loader-init step (3) makes the entry page writable for the `jmp $` patch
+  and leaves it `PAGE_EXECUTE_READWRITE`; the page is unmapped moments later, so
+  the RWX window is tiny. The payload allocation itself is still
+  `PAGE_EXECUTE_READWRITE` (RWX); a later phase should switch to RW → write → RX.
 - The PEB's `ImageBaseAddress` is not rewritten, so payloads that read it to
   locate themselves may misbehave. The current test payload does not.
 - The IAT is patched in the local image buffer before it is written, so the
@@ -129,6 +144,11 @@ built its `argv` from it, so `GetCommandLineW` inside the payload returns it.
 - Import resolution is shared with reflective loading
   (`src/engine/imports.rs`); the fragment only supplies an RVA→file-offset
   mapper.
+- `CreateRemoteThread` (remote `LoadLibraryA`) and
+  `GetModuleHandleA`/`GetProcAddress` (to resolve its address) stay Win32
+  imports: `NtCreateThreadEx` takes eleven arguments, more stack arguments than
+  the indirect-syscall trampoline currently shuffles. Migrating them is a
+  follow-up.
 - The payload command line is shared with reflective loading
   (`src/engine/args.rs`, `$ARGS_BLOCK$`) and passed as `lpCommandLine`;
   `build_command_line` returns it with the target's file name as token 0.

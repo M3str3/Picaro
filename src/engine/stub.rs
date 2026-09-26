@@ -26,6 +26,7 @@ use super::args::{self, ArgsMode};
 use super::obfuscation::{byte_array_literal, StringsConfig};
 use super::syscalls::{self, SyscallsConfig, SyscallsMode};
 use super::{imports, BuildError, Result};
+use crate::config::schema::PayloadFormat;
 use crate::techniques::{Category, RuntimeStep};
 
 /// Values used to fill the template placeholders.
@@ -38,6 +39,11 @@ pub struct StubParams {
     pub ciphertext: Vec<u8>,
     /// Original payload size, for `$PLAINTEXT_LEN$` / `$PAYLOAD_LEN$`.
     pub plaintext_len: usize,
+    /// The payload's binary format (`build.payload.format`). The execution
+    /// technique renders a format-specific fragment from it.
+    pub payload_format: PayloadFormat,
+    /// Exported function to invoke for `format: dll` (`build.payload.export`).
+    pub payload_export: Option<String>,
     /// Per-build unique marker (e.g. `STUB_MARKER_<hex>`).
     pub stub_marker: String,
     /// Path to `payload.bin` for `include_bytes!` (relative to the stub).
@@ -204,7 +210,12 @@ fn placeholder_values(
     strings: &StringsConfig,
     syscalls: &SyscallsConfig,
 ) -> BTreeMap<String, String> {
-    let (preparation_blocks, execution_block) = render_blocks(pipeline, strings);
+    let (preparation_blocks, execution_block) = render_blocks(
+        pipeline,
+        strings,
+        params.payload_format,
+        params.payload_export.as_deref(),
+    );
     let stub_marker_def = strings
         .obfuscate(&params.stub_marker)
         .render_stub_expr("stub_marker");
@@ -258,13 +269,21 @@ fn placeholder_values(
 
 /// Renders the technique blocks: Preparation fragments (each wrapped in a
 /// module, plus a `run_preparations` dispatcher) and the Execution fragment.
-fn render_blocks(pipeline: &[RuntimeStep], strings: &StringsConfig) -> (String, String) {
+///
+/// The payload format and export reach the Execution technique so it can render
+/// the fragment that matches the input (a PE mapper, a shellcode runner, ...).
+fn render_blocks(
+    pipeline: &[RuntimeStep],
+    strings: &StringsConfig,
+    format: PayloadFormat,
+    export: Option<&str>,
+) -> (String, String) {
     let mut preparation_blocks = String::new();
     let mut preparation_calls = String::new();
     let mut execution_block = String::new();
 
     for step in pipeline {
-        let fragment = step.render_fragment(strings);
+        let fragment = step.render_fragment(strings, format, export);
         match step.category() {
             Category::Preparation => {
                 // Wrap each Preparation fragment in its own module so their
@@ -403,6 +422,8 @@ $EXECUTION_BLOCK$
             key: [0x11u8; 32],
             ciphertext: vec![],
             plaintext_len: 1234,
+            payload_format: PayloadFormat::Pe,
+            payload_export: None,
             stub_marker: "STUB_MARKER_deadbeef".to_string(),
             payload_path: "payload.bin".to_string(),
             build_args: BTreeMap::new(),
@@ -630,6 +651,8 @@ $EXECUTION_BLOCK$
             key: [0xCDu8; 32],
             ciphertext: vec![0x01, 0x02, 0x03],
             plaintext_len: 7,
+            payload_format: PayloadFormat::Pe,
+            payload_export: None,
             stub_marker: "STUB_MARKER_custom".to_string(),
             payload_path: "payload.bin".to_string(),
             build_args: BTreeMap::from([

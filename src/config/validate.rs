@@ -9,7 +9,7 @@ use crate::engine::syscalls::SyscallsConfig;
 use crate::error::{PackerError, Result};
 use crate::techniques::{category_of, Category, RuntimeStep};
 
-use super::schema::{Arch, Config, StubConfig};
+use super::schema::{Arch, Config, PayloadFormat, StubConfig};
 
 /// Checks the business invariants of a [`Config`].
 ///
@@ -35,6 +35,7 @@ pub fn validate(config: &Config) -> Result<()> {
     }
 
     validate_arch(config)?;
+    validate_payload_format(config)?;
     validate_payload_sha256(config)?;
     validate_sign(config)?;
     validate_runtime(&config.runtime)?;
@@ -74,6 +75,48 @@ pub fn advisories(config: &Config) -> Vec<String> {
 fn validate_stub(stub: &StubConfig) -> Result<()> {
     SyscallsConfig::from_yaml(stub.syscalls.as_ref())?;
     StringsConfig::from_yaml(stub.strings.as_ref())?;
+    Ok(())
+}
+
+/// Validates `build.payload.format` and its format-specific fields.
+///
+/// Two rules that `serde` cannot express: `export` only makes sense for a DLL,
+/// and `process_hollowing` can only run a PE executable today (it replaces a
+/// suspended process's image; a DLL has no process entry point to run and raw
+/// shellcode has no image at all). Shellcode and DLL payloads are run in-process
+/// by `reflective_loading`.
+fn validate_payload_format(config: &Config) -> Result<()> {
+    let payload = &config.build.payload;
+
+    if let Some(export) = &payload.export {
+        if payload.format != PayloadFormat::Dll {
+            return Err(PackerError::Validation(format!(
+                "'build.payload.export' only applies to 'format: dll' (this config declares \
+                 format: {})",
+                payload.format.label()
+            )));
+        }
+        if export.trim().is_empty() {
+            return Err(PackerError::Validation(
+                "'build.payload.export' must not be empty".to_string(),
+            ));
+        }
+    }
+
+    if payload.format != PayloadFormat::Pe {
+        let execution = config
+            .runtime
+            .iter()
+            .find(|step| category_of(step.name()) == Some(Category::Execution));
+        if execution.is_some_and(|step| step.name() == "process_hollowing") {
+            return Err(PackerError::Validation(format!(
+                "build.payload.format '{}' is not supported by process_hollowing yet: it only runs \
+                 'format: pe'. Use reflective_loading, which runs pe, dll and shellcode in-process.",
+                payload.format.label()
+            )));
+        }
+    }
+
     Ok(())
 }
 
@@ -388,6 +431,69 @@ runtime:
         validate(&config).expect("a single execution technique must be valid");
     }
 
+    // --- payload formats ---
+
+    /// Injects extra `build.payload` lines into [`NO_RUNTIME`], then appends a
+    /// runtime fragment.
+    fn with_payload(payload_lines: &str, runtime_yaml: &str) -> Config {
+        let yaml = NO_RUNTIME.replace(
+            "    source: ./payload.exe\n",
+            &format!("    source: ./payload.bin\n{payload_lines}"),
+        );
+        parse(&(yaml + runtime_yaml))
+    }
+
+    #[test]
+    fn accepts_shellcode_with_reflective_loading() {
+        let config = with_payload("    format: shellcode\n", EXECUTION_YAML);
+        validate(&config).expect("shellcode + reflective_loading must be valid");
+    }
+
+    #[test]
+    fn accepts_a_dll_with_an_export() {
+        let config = with_payload("    format: dll\n    export: Run\n", EXECUTION_YAML);
+        validate(&config).expect("dll + export + reflective_loading must be valid");
+    }
+
+    #[test]
+    fn rejects_shellcode_with_process_hollowing() {
+        let config = with_payload(
+            "    format: shellcode\n",
+            "runtime:\n  - technique: process_hollowing\n",
+        );
+        let err = validate(&config).expect_err("hollowing can only run a PE today");
+        let msg = err.to_string();
+        assert!(msg.contains("process_hollowing"), "msg: {msg}");
+        assert!(msg.contains("shellcode"), "msg: {msg}");
+        assert!(msg.contains("reflective_loading"), "msg: {msg}");
+    }
+
+    #[test]
+    fn rejects_a_dll_with_process_hollowing() {
+        let config = with_payload(
+            "    format: dll\n",
+            "runtime:\n  - technique: process_hollowing\n",
+        );
+        let err = validate(&config).expect_err("hollowing cannot run a DLL");
+        assert!(err.to_string().contains("process_hollowing"), "err: {err}");
+    }
+
+    #[test]
+    fn rejects_an_export_without_the_dll_format() {
+        let config = with_payload("    export: Run\n", EXECUTION_YAML);
+        let err = validate(&config).expect_err("export only applies to dll");
+        let msg = err.to_string();
+        assert!(msg.contains("build.payload.export"), "msg: {msg}");
+        assert!(msg.contains("format: dll"), "msg: {msg}");
+    }
+
+    #[test]
+    fn rejects_an_empty_dll_export() {
+        let config = with_payload("    format: dll\n    export: \"   \"\n", EXECUTION_YAML);
+        let err = validate(&config).expect_err("an empty export must fail");
+        assert!(err.to_string().contains("export"), "err: {err}");
+    }
+
     // --- sleep_obfuscation specifics ---
 
     /// YAML fragment with a sleep_obfuscation + execution pipeline.
@@ -531,10 +637,28 @@ runtime:
     }
 
     #[test]
+    fn accepts_tartarus_gate_resolver() {
+        let yaml = VALID.replace(
+            "  output:\n",
+            "  stub:\n    syscalls:\n      mode: indirect\n      resolver: tartarus_gate\n  output:\n",
+        );
+        validate(&parse(&yaml)).expect("tartarus_gate must be valid");
+    }
+
+    #[test]
+    fn accepts_api_hash_resolver() {
+        let yaml = VALID.replace(
+            "  output:\n",
+            "  stub:\n    syscalls:\n      mode: indirect\n      resolver: api_hash\n  output:\n",
+        );
+        validate(&parse(&yaml)).expect("api_hash must be valid");
+    }
+
+    #[test]
     fn rejects_unknown_syscalls_resolver() {
         let yaml = VALID.replace(
             "  output:\n",
-            "  stub:\n    syscalls:\n      resolver: tartarus_gate\n  output:\n",
+            "  stub:\n    syscalls:\n      resolver: halos_gate\n  output:\n",
         );
         let err = validate(&parse(&yaml)).expect_err("an unknown resolver must fail");
         assert!(

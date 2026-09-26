@@ -22,7 +22,7 @@ powershell -ExecutionPolicy Bypass -File examples/payloads/build_test_payload.ps
 ## 2. Pack
 
 ```powershell
-cargo run -- build examples/configs/test-hollowing.yaml
+cargo run -- build examples/configs/process-hollowing.yaml
 ```
 
 This produces `dist/test_packed.exe` (and leaves intermediate artifacts in
@@ -77,7 +77,7 @@ strings dist/test_packed.exe | grep -i svchost        # should print nothing
 Loads the payload into the current process (no external target).
 
 ```powershell
-cargo run -- build examples/configs/test-reflective.yaml
+cargo run -- build examples/configs/reflective-loading.yaml
 .\dist\test_packed_reflective.exe
 ```
 
@@ -114,7 +114,7 @@ It prints its `argv` between `ARGS_BEGIN`/`ARGS_END` (and the raw
 ### 2. Pack with `join` and run it with extra args
 
 ```powershell
-cargo run -- build examples/configs/test-args.yaml
+cargo run -- build examples/configs/args.yaml
 .\dist\test_args_join.exe "runtime-c" "runtime-d"
 ```
 
@@ -134,10 +134,22 @@ Running it with no arguments yields just `yaml-a` and `yaml-b`.
 
 ### 3. `args_mode: override`
 
+`override` drops the YAML args whenever the packed binary is given any runtime
+argument; with no runtime argument the YAML args still apply. Set it in your own
+config:
+
+```yaml
+build:
+  payload:
+    args: ["yaml-a", "yaml-b"]
+    args_mode: override
+```
+
+Packing that config produces an exe that behaves like this:
+
 ```powershell
-cargo run -- build examples/configs/test-args-override.yaml
-.\dist\test_args_override.exe "runtime-c"   # payload sees only runtime-c
-.\dist\test_args_override.exe               # payload sees yaml-a, yaml-b
+.\dist\my_payload.exe "runtime-c"   # payload sees only runtime-c
+.\dist\my_payload.exe               # payload sees yaml-a, yaml-b
 ```
 
 ### 4. Mimikatz (equivalent of packing mimikatz.exe with args)

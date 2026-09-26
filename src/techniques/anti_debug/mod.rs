@@ -54,9 +54,11 @@ pub const DEF: TechniqueDef = TechniqueDef {
     readme: include_str!("README.md"),
     stub_fragment: include_str!("stub_fragment.rs"),
     params_example: "technique: anti_debug\nparams:\n  action: abort\n",
-    // The checks use IsDebuggerPresent/CheckRemoteDebuggerPresent/GetThreadContext
-    // directly; routing them through NtQueryInformationProcess is a later phase.
-    syscalls: &[],
+    // The debug-port / debug-object checks use NtQueryInformationProcess and the
+    // hardware-breakpoint check uses NtGetContextThread, so `mode: indirect`
+    // removes the IsDebuggerPresent/CheckRemoteDebuggerPresent/GetThreadContext
+    // imports.
+    syscalls: &["NtQueryInformationProcess", "NtGetContextThread"],
     resolves_imports: false,
 };
 

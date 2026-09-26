@@ -1,0 +1,31 @@
+# Shellcode payload: `format: shellcode` treats the input as raw bytes, so
+# `reflective_loading` copies the decrypted blob into an executable allocation
+# and runs it on a thread (it does not map a PE image).
+#
+# `demo_shellcode.bin` is 6 hand-written x64 bytes (`mov eax, 42; ret`), so the
+# packed binary exits with 42.
+#
+#   cargo run -- build examples/configs/shellcode.yaml
+#   .\dist\test_shellcode.exe ; echo $LASTEXITCODE
+#
+# `build.payload.args` is delivered through the PEB command line, exactly as for
+# a PE payload, so shellcode that reads `GetCommandLineW` sees it.
+
+schema: 4
+name: shellcode
+
+build:
+  payload:
+    source: ./examples/payloads/demo_shellcode.bin
+    format: shellcode
+    crypto:
+      algo: xchacha20poly1305
+      key: random
+  output:
+    path: ./dist/test_shellcode.exe
+    arch: x64
+    strip: true
+    trim_paths: all
+
+runtime:
+  - technique: reflective_loading

@@ -57,8 +57,11 @@ src/
 templates/
   stub/         Rust stub template with $placeholders$
 examples/
-  configs/      example YAMLs
+  configs/      curated example YAMLs
   payloads/     test payloads for end-to-end verification
+tests/
+  configs/      CI / validation fixtures
+  fixtures/     committed PE fixtures
 build/          (gitignored) intermediate artifacts
 dist/           (gitignored) final packed binaries
 banner.txt      ASCII banner, compiled in by src/ui.rs
@@ -108,25 +111,47 @@ A `CREATE_SUSPENDED` target has not run its loader (`PEB->Ldr == NULL`; only
 `ntdll` + the main image mapped), so the payload's imported DLLs are absent.
 Measured evidence + proposed follow-up: `docs/techniques/process_hollowing.md`.
 
-**Phase 6a: indirect syscalls (Hell's Gate) done.** New `build.stub.syscalls`
-block (`mode: none|indirect`, `resolver: hells_gate`; defaults
-`none`/`hells_gate`).
-It is a *loader* config, not a pipeline technique. The stub template gains
-`$SYSCALLS_BLOCK$`, rendered by `src/engine/syscalls.rs` from the union of
-`TechniqueDef::syscalls` requirements (only `process_hollowing` opts in for
-now: `NtAllocateVirtualMemory`, `NtWriteVirtualMemory`, `NtReadVirtualMemory`,
-`NtResumeThread`, `NtUnmapViewOfSection`). Technique fragments always call the
-`nt_*` helpers (`crate::nt_alloc_vm`, ...) — `mode: none` maps them to the
-Win32 APIs, `mode: indirect` resolves SSNs at runtime (prologue
-`4C 8B D1 B8 ?? ?? ?? ??` via `GetProcAddress`) and invokes the kernel through
-the first `syscall; ret` gadget in ntdll's `.text` (a `global_asm!` trampoline,
-`nt_invoke`; signature + stack-shuffle documented in the generated code).
+**Phase 6: indirect syscalls done.** New `build.stub.syscalls` block
+(`mode: none|indirect`, `resolver: hells_gate|tartarus_gate|api_hash`; defaults
+`none`/`hells_gate`). It is a *loader* config, not a pipeline technique. The
+stub template gains `$SYSCALLS_BLOCK$`, rendered by `src/engine/syscalls.rs`
+from the union of `TechniqueDef::syscalls` requirements. Technique fragments
+always call the `nt_*` helpers (`crate::nt_alloc_vm`, ...) — `mode: none` maps
+them to the Win32 APIs, `mode: indirect` resolves SSNs at runtime and invokes
+the kernel through the first `syscall; ret` gadget in ntdll's `.text` (a
+`global_asm!` trampoline, `nt_invoke`; signature + stack-shuffle documented in
+the generated code). Three resolvers:
+- **Hell's Gate (6a)** reads each SSN from the live Nt* stub prologue
+  (`4C 8B D1 B8 ?? ?? ?? ??` via `GetProcAddress`); a hooked prologue is
+  `PatternMismatch`.
+- **Tartarus Gate (6b)** reads each SSN from a clean copy of ntdll read from
+  disk (`std::fs::read` + a file-export walk + RVA→file-offset), so hooks in the
+  live export stubs do not hide the SSN; the gadget still comes from live ntdll.
+- **API hashing (6c)** walks the same clean copy but matches each export by a
+  precomputed FNV-1a 64-bit hash of its name (`engine::syscalls::api_hash`,
+  mirrored in the stub), so neither `GetProcAddress` nor any Nt* name string is
+  needed; the PE-file helpers are shared with Tartarus via `$FILE_PE_HELPERS$`.
+
 Verified on `x86_64-pc-windows-msvc` (rustc 1.90, `-C target-feature=+crt-static`
-works). All Nt*/DLL names go through `StringsConfig`. IAT after indirect:
-`VirtualAllocEx`/`WriteProcessMemory`/`ReadProcessMemory`/`ResumeThread` gone,
-`NtUnmapViewOfSection` string gone. Docs: `docs/techniques/indirect_syscalls.md`,
-`docs/measurements/phase6a_iat_reduction.md`. Not done (by design): Tartarus
-Gate (6b), reflective_loading/patch_amsi migration, stack spoofing, unhooking (7).
+works). All Nt*/DLL names and the Tartarus path go through `StringsConfig`.
+IAT after indirect: `VirtualAllocEx`/`WriteProcessMemory`/`ReadProcessMemory`/
+`ResumeThread`/`VirtualAlloc`/`VirtualProtect`/`IsDebuggerPresent`/
+`CheckRemoteDebuggerPresent`/`GetThreadContext` gone. Docs:
+`docs/techniques/indirect_syscalls.md`,
+`docs/measurements/phase6a_iat_reduction.md`.
+
+**Techniques migrated to the `nt_*` helpers.** `process_hollowing` (6a/6b:
+`NtAllocateVirtualMemory`, `NtWriteVirtualMemory`, `NtReadVirtualMemory`,
+`NtResumeThread`, `NtUnmapViewOfSection`, `NtProtectVirtualMemory`,
+`NtSuspendThread`), `reflective_loading` (`NtAllocateVirtualMemory`,
+`NtProtectVirtualMemory`), `patch_amsi`/`patch_etw` (`NtProtectVirtualMemory`)
+and `anti_debug` (`NtQueryInformationProcess`, `NtGetContextThread`). The
+syscall layer now has nine `nt_*` helpers (`nt_alloc_vm`, `nt_write_vm`,
+`nt_read_vm`, `nt_resume_thread`, `nt_unmap_view`, `nt_protect_vm`,
+`nt_suspend_thread`, `nt_query_info_process`, `nt_get_context_thread`).
+`CreateRemoteThread`/`CreateThread`/`GetModuleHandleA`/`GetProcAddress` stay
+Win32 (`NtCreateThreadEx` needs 11 args — more than the trampoline shuffles).
+Not done (by design): stack spoofing, unhooking (7).
 
 **Phase 5 complete.** Static measurement infrastructure:
 - `batesian audit <binary>` reports header, sections + entropy, imports/exports,
@@ -173,7 +198,7 @@ timings); `audit` renders the redesigned report (metadata bar, entropy gauges,
 uppercase headings, colored `LOW/MEDIUM/HIGH RISK`); `techniques list` is a
 colored table.
 
-**Phase 6 planned.** Indirect syscalls.
+**Phase 6 done.** Indirect syscalls (see the “Phase 6” entry above).
 
 **Custom loader stubs (done).** A YAML `build.stub.path` replaces the builtin
 stub with a user `.rs` template rendered through the same substitution engine
@@ -189,6 +214,27 @@ args are the positional args plus optional `name=value` pairs (no separate
 `--arg` flag). `$X$` is invalid Rust, so `rustfmt` cannot rewrite it; never go
 back to `{{X}}` (valid Rust — `rustfmt` reformats it into nested blocks and
 silently breaks substitution). See `.memory.md` for the rolling state.
+
+**Payload formats (done).** `build.payload.format: pe|shellcode|dll` (default
+`pe`) plus an optional `build.payload.export` (a DLL's exported entry point;
+rejected unless `format: dll`). `src/engine/pe.rs` gained the file-header
+`characteristics` and `is_dll()`; `src/main.rs` validates the input per format
+(`pe`/`dll` must be the matching x64 PE image, `shellcode` only non-empty) in
+`inspect_payload`, shared by `build` and `--dry-run`. The format and export
+reach the Execution fragment through `RuntimeStep::render_fragment(strings,
+format, export)` → `Params::render_fragment_for`; `reflective_loading` ships two
+fragments (`stub_fragment.rs` PE mapper, `stub_fragment_shellcode.rs` runner)
+and, for a DLL export, calls `DllMain(DLL_PROCESS_ATTACH)` before invoking the
+export with no arguments (both `SHELLCODE_FRAGMENT` and the placeholder
+substitution are tested). `process_hollowing` only runs `pe`;
+`config::validate` rejects the other formats with a pointer to
+`reflective_loading`. DLL/shellcode payloads run in-process, so
+`patch_command_line()` still delivers `build.payload.args` through the PEB.
+Examples: `examples/configs/shellcode.yaml` (+ `examples/payloads/demo_shellcode.bin`,
+`mov eax, 42; ret`). Verified end to end on Windows (shellcode exits 42; a Rust
+cdylib export ran and wrote its file). The `dll` format ships no example (the old
+`test-dll.yaml` pointed at a payload that was never committed). Wizard/`--dry-run`
+do not prompt for the format yet (edit the YAML).
 
 **Phase 8: `bouncer` environment gate (done).** New
 `src/techniques/bouncer/` Preparation technique (T1497.001, T1614.001,
@@ -210,9 +256,9 @@ template exits `0` on `false`; `patch_amsi`/`patch_etw`/`anti_debug`/
 `x32dbg`, `sandbox`, `malware`, `analysis`). Every check literal, every
 analysis process name and every hypervisor vendor token goes through
 `StringsConfig`. Docs: `src/techniques/bouncer/README.md`,
-`docs/measurements/phase8_bouncer.md`; examples
-`examples/configs/test-bouncer{,-miss,-full}.yaml`. Not done (by design):
-`on_fail: decoy` and checks outside the documented list.
+`docs/measurements/phase8_bouncer.md`; examples `tests/configs/bouncer.yaml` and
+`tests/configs/bouncer-miss.yaml`. Not done (by design): `on_fail: decoy` and
+checks outside the documented list.
 
 **Interactive build (done).** `batesian build interactive <payload>`
 (`src/wizard.rs`) asks the questions a schema-4 YAML encodes — name/args, the
@@ -248,7 +294,7 @@ offsets are section-relative, but `IMAGE_RESOURCE_DATA_ENTRY.OffsetToData` is an
 image RVA — that is why `embed()` resolves the RVA before building the blob.
 Verified against `FindResource`/`LoadResource` and `version.dll`
 (`GetFileVersionInfo`/`VerQueryValue`) on Windows. Example:
-`examples/configs/test-resources.yaml`, asset `examples/assets/sample.ico`.
+`tests/configs/resources.yaml`, asset `examples/assets/sample.ico`.
 Note the name clash: `build.output.manifest` (bool) is the provenance JSON;
 `build.output.manifest` is **not** the embedded manifest — that is
 `build.output.resources.manifest`.
@@ -272,8 +318,8 @@ ca_file}` and the resolved `version_info`. `build.output.subsystem`
 (`console`|`windows`) prepends `#![windows_subsystem = "windows"]` to the
 rendered stub (skipped if the stub sets its own). A lab signature verifies only
 where its CA is trusted; it gives no SmartScreen reputation.
-`.pfx`/`.p12`/`.pem`/`.key` are gitignored. Examples:
-`examples/configs/test-sign.yaml`, `test-fake.yaml`.
+`.pfx`/`.p12`/`.pem`/`.key` are gitignored. Example:
+`examples/configs/mimikatz.yaml` (randomized identity + lab signature).
 
 ## Known limitations
 
@@ -304,9 +350,11 @@ where its CA is trusted; it gives no SmartScreen reputation.
   uses `$PAYLOAD_KEY_DEF$` / `$PAYLOAD_NONCE_DEF$`, the values land in `.rdata`.
   Use `$PAYLOAD_KEY_DEF_OBFUSCATED$` when available, or read the key at runtime
   (see `examples/stubs/runtime-key.rs`).
-- Phase 6a only migrates the hollowing calls. `GetThreadContext`/
-  `SetThreadContext`/`WaitForSingleObject`/`GetExitCodeProcess` and the
-  reflective-loading APIs still import statically.
+- `GetThreadContext`/`SetThreadContext` (process hollowing's loader hand-off),
+  `WaitForSingleObject`/`GetExitCodeProcess` (reflective loading) and
+  `CreateRemoteThread`/`CreateThread` still import statically: `NtCreateThreadEx`
+  takes eleven arguments, more stack arguments than the indirect trampoline
+  currently shuffles.
 - Windows Defender flags the packed artifacts (unavoidable); the dev machine
   had it disabled during the 6a runtime tests.
 

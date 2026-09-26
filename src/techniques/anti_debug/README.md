@@ -36,12 +36,13 @@ runtime:
 Three independent signals are combined; a positive result from any of them is a
 detection:
 
-1. **PEB `BeingDebugged`** — `IsDebuggerPresent()` reads `PEB->BeingDebugged`,
-   the flag the OS sets when a debugger attaches.
-2. **Kernel debug port** — `CheckRemoteDebuggerPresent(GetCurrentProcess(), …)`
-   queries `ProcessDebugPort`, which is also set for a debugger attached at
-   creation time (e.g. `CreateProcess` with `DEBUG_PROCESS`).
-3. **Hardware breakpoints** — `GetThreadContext` with
+1. **Kernel debug port** — `NtQueryInformationProcess(ProcessDebugPort)` returns
+   the debug port the OS assigns when a debugger attaches (the check
+   `CheckRemoteDebuggerPresent` wraps).
+2. **Debug object handle** — `NtQueryInformationProcess(ProcessDebugObjectHandle)`
+   returns a non-null handle when the process is being debugged (the native
+   analog of the PEB `BeingDebugged` flag).
+3. **Hardware breakpoints** — `NtGetContextThread` with
    `CONTEXT_DEBUG_REGISTERS_AMD64` reads DR0–DR3 of the current thread; a
    non-zero register means a debugger set a hardware breakpoint (typical for
    single-step / watchpoint based reversing).
@@ -65,12 +66,10 @@ a debugger.
 - A defensive analyst simply disabling the debugger sees the stub run normally;
   the technique is bypassable by patching out the checks. It raises cost, it does
   not prevent analysis.
-- The imports it pulls in (`IsDebuggerPresent`, `CheckRemoteDebuggerPresent`,
-  `GetThreadContext`) are classic anti-analysis indicators and are visible to any
-  static scanner in the import table. Note that `IsDebuggerPresent` is already
-  imported by the Rust standard library in the baseline stub, and the current
-  `batesian audit` heuristic does not classify debugger APIs as suspicious, so
-  they do not raise the tool's own risk summary.
+- The checks go through the syscall layer's `nt_query_info_process` /
+  `nt_get_context_thread`, so with `mode: indirect` the classic anti-analysis
+  imports (`IsDebuggerPresent`, `CheckRemoteDebuggerPresent`, `GetThreadContext`)
+  do not appear in the import table.
 - A detection with `action: abort` surfaces as a stub error before the payload
   runs (the error path prints the message to stderr and exits non-zero), which is
   itself an observable signal.
@@ -85,12 +84,12 @@ a debugger.
 - The `windows` `CONTEXT` binding only guarantees 8-byte alignment, so the
   fragment wraps it in a `#[repr(align(16))]` struct, as x64 `GetThreadContext`
   requires. This mirrors the process-hollowing fragment.
-- No string literals: every check is a direct import, so nothing needs to go
-  through `StringsConfig`. That trade-off (no literals, but three tell-tale
-  imports) is the main OPSEC cost of this technique.
-- Resolving the checks dynamically (PEB walk / `GetProcAddress` with obfuscated
-  names) or through `NtQueryInformationProcess` in the syscall layer is a later
-  migration, exactly like the pending `patch_amsi` migration.
+- No string literals: every check is a direct `nt_*` call, so nothing needs to
+  go through `StringsConfig`. The `ProcessDebugPort` / `ProcessDebugObjectHandle`
+  information-class values are compile-time constants, not runtime strings.
+- The checks resolve through the syscall layer (`NtQueryInformationProcess` for
+  the debug-port / debug-object checks, `NtGetContextThread` for the hardware
+  breakpoints), mirroring the `patch_amsi`/`patch_etw` migration.
 - `action: continue` still runs all checks (so the code path stays identical);
   it only changes whether a detection is turned into an error. A future
   parameter could add a delay action to defeat automated sandboxes.

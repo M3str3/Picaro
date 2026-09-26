@@ -48,12 +48,25 @@ copied files.
 - Implement `Params::render_fragment` — substitute the technique's
   `$PLACEHOLDER$` values into `DEF.stub_fragment`.
 
+An **Execution** technique also gets the payload's binary format
+(`build.payload.format`) and export (`build.payload.export`) through
+`RuntimeStep::render_fragment`. A technique that runs more than one payload
+format exposes `Params::render_fragment_for(&self, strings, format, export)` and
+picks the fragment or substitutes the format-specific values there (see
+`reflective_loading`, which ships a PE mapper and a shellcode runner); one that
+only runs a PE may delegate to `render_fragment`, since `config::validate`
+rejects the other formats first.
+
 ## 3. Fill in `stub_fragment.rs`
 
 Write the Rust snippet injected into the generated stub. It must be
 self-contained: its own `use` statements plus the functions/constants the
 technique needs. Use `$PLACEHOLDER$` for any per-build value and substitute it
 in `render_fragment`.
+
+**No string literals.** Every string that reaches the generated stub must be
+built through `StringsConfig::obfuscate` (the `TODO`/`docs` convention; the
+`no_sensitive_literals_in_generated_stubs` test enforces it).
 
 **Kernel-facing calls go through the syscall layer, never the Win32 APIs
  directly.** List the technique's Nt* requirements in `TechniqueDef::syscalls`
@@ -98,7 +111,8 @@ In `src/techniques/mod.rs`:
 
 Also add match arms to `RuntimeStep::render_fragment`, `RuntimeStep::name`
 and `RuntimeStep::category` so the stub renderer and validation dispatch
-correctly.
+correctly. An Execution technique that supports several payload formats gets the
+`format`/`export` arguments in `render_fragment` (see step 2).
 
 ## 5. Write tests
 

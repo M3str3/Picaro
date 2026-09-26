@@ -35,7 +35,7 @@ runtime:
 
 1. Load `ntdll.dll` (`LoadLibraryA`, a no-op if already loaded).
 2. Resolve `EtwEventWrite` with `GetProcAddress`.
-3. Make the first three bytes writable (`VirtualProtect` →
+3. Make the first three bytes writable (`nt_protect_vm` →
    `PAGE_EXECUTE_READWRITE`).
 4. Write `xor eax, eax; ret` (`33 C0 C3`): return `STATUS_SUCCESS` (0) without
    writing an event.
@@ -83,8 +83,9 @@ preparation returns a clear error and the pipeline fails with a useful message.
   is no concurrent reader of the bytes being rewritten.
 - The DLL and function names go through `StringsConfig`
   (`Params::render_fragment`), so `ntdll.dll`, `EtwEventWrite` and
-  `EtwEventWriteFull` never appear in cleartext in `.rdata`. Patching via
-  `NtProtectVirtualMemory` through the syscall layer is a later migration.
+  `EtwEventWriteFull` never appear in cleartext in `.rdata`. The page
+  protection change goes through the syscall layer's `nt_protect_vm`, so
+  `mode: indirect` removes the `VirtualProtect` import.
 - The function names are resolved dynamically through `GetProcAddress`, so
   they never reach the import table. `ntdll.dll` may still appear in the binary
   through the `windows` crate graph; the audit blanks import-table name strings,

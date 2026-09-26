@@ -47,9 +47,9 @@ pub const DEF: TechniqueDef = TechniqueDef {
     readme: include_str!("README.md"),
     stub_fragment: include_str!("stub_fragment.rs"),
     params_example: "technique: patch_etw\nparams:\n  full: true\n",
-    // patch_etw still uses LoadLibraryA/GetProcAddress/VirtualProtect directly;
-    // it will migrate to the Nt* helpers in a later phase.
-    syscalls: &[],
+    // The page protection changes go through the syscall layer, so
+    // `mode: indirect` removes the `VirtualProtect` import.
+    syscalls: &["NtProtectVirtualMemory"],
     resolves_imports: false,
 };
 

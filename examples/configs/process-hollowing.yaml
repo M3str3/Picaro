@@ -1,5 +1,11 @@
+# Process hollowing: the payload runs inside a freshly created, suspended
+# `svchost.exe` instead of the packed binary's own process.
+#
+#   cargo run -- build examples/configs/process-hollowing.yaml
+#   .\dist\test_packed.exe
+
 schema: 4
-name: test-syscalls
+name: process-hollowing
 
 build:
   payload:
@@ -8,14 +14,11 @@ build:
       algo: xchacha20poly1305
       key: random
   stub:
-    syscalls:
-      mode: indirect
-      resolver: hells_gate
     strings:
       strategy: xor
       key: random
   output:
-    path: ./dist/test_syscalls.exe
+    path: ./dist/test_packed.exe
     arch: x64
     strip: true
     trim_paths: all

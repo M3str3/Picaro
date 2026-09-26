@@ -1,0 +1,28 @@
+# Custom loader stub: `build.stub.path` replaces the builtin stub with a
+# user-supplied Rust template rendered through the same `$X$` substitution.
+#
+#   batesian build examples/configs/custom-stub.yaml
+#
+# `examples/stubs/minimal.rs` ignores the technique blocks, so the packer emits
+# a warning (not an error) and produces a stub that only prints the payload
+# size.
+
+schema: 4
+name: custom-stub
+
+build:
+  payload:
+    source: ./examples/payloads/test_payload.exe
+    crypto:
+      algo: xchacha20poly1305
+      key: random
+  stub:
+    path: ./examples/stubs/minimal.rs
+  output:
+    path: ./dist/test_custom_stub.exe
+    arch: x64
+    strip: true
+    trim_paths: all
+
+runtime:
+  - technique: reflective_loading

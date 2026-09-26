@@ -1,14 +1,18 @@
-# Example: fixed payload arguments (join mode, the default).
+# Payload runtime arguments in `join` mode (the default): the YAML `args` come
+# first, then whatever arguments the packed binary is invoked with.
 #
 #   powershell -ExecutionPolicy Bypass -File examples/payloads/build_args_payload.ps1
-#   cargo run -- build examples/configs/test-args.yaml
+#   cargo run -- build examples/configs/args.yaml
 #   .\dist\test_args_join.exe "runtime-c" "runtime-d"
 #
 # The payload sees: <exe> yaml-a yaml-b runtime-c runtime-d
 # (token 0 is the executable name, not an argument).
+#
+# `args_mode: override` instead makes the runtime args replace the YAML args
+# entirely (with no runtime argument, the YAML args still apply).
 
 schema: 4
-name: test-args
+name: args
 
 build:
   payload:

@@ -22,6 +22,8 @@ use crate::engine::obfuscation::StringsConfig;
 use crate::error::{PackerError, Result};
 use crate::ui::{glyph, Palette};
 
+use crate::config::schema::PayloadFormat;
+
 /// One step of the `runtime` list in the YAML config.
 ///
 /// Internally-tagged enum: the step names the technique with `technique: <name>`
@@ -94,16 +96,27 @@ impl RuntimeStep {
     /// Renders the technique's stub fragment for this step's parameters.
     ///
     /// `strings` is the active string-obfuscation configuration, used to
-    /// obfuscate any per-build string literal (e.g. the hollowing target). The
-    /// result is injected verbatim into the generated stub (see `engine::stub`).
-    pub fn render_fragment(&self, strings: &StringsConfig) -> String {
+    /// obfuscate any per-build string literal (e.g. the hollowing target).
+    /// `format` and `export` describe the payload (`build.payload.format` and
+    /// `build.payload.export`): only Execution techniques care, since a
+    /// Preparation always modifies the current process whatever the payload is.
+    /// The result is injected verbatim into the generated stub (see
+    /// `engine::stub`).
+    pub fn render_fragment(
+        &self,
+        strings: &StringsConfig,
+        format: PayloadFormat,
+        export: Option<&str>,
+    ) -> String {
         match self {
             RuntimeStep::AntiDebug { params } => params.render_fragment(strings),
             RuntimeStep::Bouncer { params } => params.render_fragment(strings),
             RuntimeStep::PatchAmsi { params } => params.render_fragment(strings),
             RuntimeStep::PatchEtw { params } => params.render_fragment(strings),
-            RuntimeStep::ProcessHollowing { params } => params.render_fragment(strings),
-            RuntimeStep::ReflectiveLoading { params } => params.render_fragment(strings),
+            RuntimeStep::ProcessHollowing { params } => params.render_fragment_for(strings, format),
+            RuntimeStep::ReflectiveLoading { params } => {
+                params.render_fragment_for(strings, format, export)
+            }
             RuntimeStep::SleepObfuscation { params } => params.render_fragment(strings),
         }
     }

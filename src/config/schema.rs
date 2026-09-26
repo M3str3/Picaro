@@ -109,11 +109,28 @@ pub struct BuildConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PayloadConfig {
-    /// The input PE: a local path or a URL (the packer detects the scheme).
+    /// The input payload: a local path or a URL (the packer detects the scheme).
     ///
     /// Supports `http://`, `https://` and `file://` sources; anything else is a
     /// local path. `ftp://` is recognized but not implemented.
     pub source: String,
+
+    /// The input's binary format (default: `pe`).
+    ///
+    /// `pe` is an executable image, `dll` a library image and `shellcode` a raw
+    /// code blob with no headers. The format decides how the packer validates the
+    /// input and how the execution technique runs it.
+    #[serde(default)]
+    pub format: PayloadFormat,
+
+    /// Exported function to invoke for `format: dll` (e.g. `Run`).
+    ///
+    /// Optional: without it the payload's entry point runs (`DllMain` with
+    /// `DLL_PROCESS_ATTACH`), which only initializes the library. An export is
+    /// the usual way to give a DLL payload real work to do. Rejected unless
+    /// `format` is `dll`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export: Option<String>,
 
     /// Fixed arguments passed to the payload at runtime, in order.
     ///
@@ -162,6 +179,35 @@ pub struct StubConfig {
     /// packer defaults to `xor` + a random key (and warns).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strings: Option<YamlStringsConfig>,
+}
+
+/// The binary format of the input payload.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PayloadFormat {
+    /// A PE executable image (PE32+). The default.
+    #[default]
+    Pe,
+    /// Raw shellcode: a position-independent code blob with no PE headers.
+    Shellcode,
+    /// A PE library image (a DLL).
+    Dll,
+}
+
+impl PayloadFormat {
+    /// Lowercase label used in build output and error messages.
+    pub fn label(self) -> &'static str {
+        match self {
+            PayloadFormat::Pe => "pe",
+            PayloadFormat::Shellcode => "shellcode",
+            PayloadFormat::Dll => "dll",
+        }
+    }
+
+    /// Whether the format carries PE headers (so the packer parses it as a PE).
+    pub fn is_pe_image(self) -> bool {
+        matches!(self, PayloadFormat::Pe | PayloadFormat::Dll)
+    }
 }
 
 /// Cryptographic configuration of the payload.
@@ -766,6 +812,48 @@ runtime:
         assert!(
             serde_yml::from_str::<Config>(&yaml).is_err(),
             "an unknown args_mode should fail"
+        );
+    }
+
+    #[test]
+    fn payload_format_defaults_to_pe() {
+        let config: Config = serde_yml::from_str(VALID_YAML).expect("valid YAML should parse");
+        assert_eq!(config.build.payload.format, PayloadFormat::Pe);
+        assert_eq!(config.build.payload.export, None);
+    }
+
+    #[test]
+    fn parses_shellcode_format() {
+        let yaml = VALID_YAML.replace(
+            "    source: ./mimikatz.exe\n",
+            "    source: ./beacon.bin\n    format: shellcode\n",
+        );
+        let config: Config = serde_yml::from_str(&yaml).expect("shellcode format should parse");
+        assert_eq!(config.build.payload.format, PayloadFormat::Shellcode);
+        assert!(!config.build.payload.format.is_pe_image());
+    }
+
+    #[test]
+    fn parses_dll_format_with_export() {
+        let yaml = VALID_YAML.replace(
+            "    source: ./mimikatz.exe\n",
+            "    source: ./payload.dll\n    format: dll\n    export: Run\n",
+        );
+        let config: Config = serde_yml::from_str(&yaml).expect("dll format should parse");
+        assert_eq!(config.build.payload.format, PayloadFormat::Dll);
+        assert_eq!(config.build.payload.export.as_deref(), Some("Run"));
+        assert!(config.build.payload.format.is_pe_image());
+    }
+
+    #[test]
+    fn rejects_unknown_payload_format() {
+        let yaml = VALID_YAML.replace(
+            "    source: ./mimikatz.exe\n",
+            "    source: ./beacon.bin\n    format: vbs\n",
+        );
+        assert!(
+            serde_yml::from_str::<Config>(&yaml).is_err(),
+            "an unknown payload format should fail"
         );
     }
 

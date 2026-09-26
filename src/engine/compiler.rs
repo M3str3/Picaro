@@ -566,6 +566,8 @@ fn verify_pe_magic(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    use crate::config::schema::PayloadFormat;
+
     #[test]
     fn find_executable_in_empty_path_is_none() {
         assert!(find_executable_in_path(OsStr::new(""), RUSTC_NAMES).is_none());
@@ -753,6 +755,8 @@ dependencies = [
             key: encrypted.key,
             ciphertext: encrypted.ciphertext.clone(),
             plaintext_len: encrypted.plaintext_len,
+            payload_format: PayloadFormat::Pe,
+            payload_export: None,
             stub_marker: crate::engine::stub::generate_stub_marker(),
             payload_path: "payload.bin".to_string(),
             build_args: std::collections::BTreeMap::new(),
@@ -841,6 +845,8 @@ dependencies = [
                 key: encrypted.key,
                 ciphertext: encrypted.ciphertext.clone(),
                 plaintext_len: encrypted.plaintext_len,
+                payload_format: PayloadFormat::Pe,
+                payload_export: None,
                 stub_marker: marker.clone(),
                 payload_path: "payload.bin".to_string(),
                 build_args: std::collections::BTreeMap::new(),
@@ -932,6 +938,8 @@ dependencies = [
                 key: encrypted.key,
                 ciphertext: encrypted.ciphertext.clone(),
                 plaintext_len: encrypted.plaintext_len,
+                payload_format: PayloadFormat::Pe,
+                payload_export: None,
                 stub_marker: crate::engine::stub::generate_stub_marker(),
                 payload_path: "payload.bin".to_string(),
                 build_args: std::collections::BTreeMap::new(),
@@ -996,6 +1004,8 @@ dependencies = [
             key: [0u8; 32],
             ciphertext: vec![0xAA, 0xBB, 0xCC, 0xDD],
             plaintext_len: 4,
+            payload_format: PayloadFormat::Pe,
+            payload_export: None,
             stub_marker: crate::engine::stub::generate_stub_marker(),
             payload_path: "payload.bin".to_string(),
             build_args: std::collections::BTreeMap::new(),
@@ -1062,6 +1072,8 @@ dependencies = [
             key: encrypted.key,
             ciphertext: encrypted.ciphertext.clone(),
             plaintext_len: encrypted.plaintext_len,
+            payload_format: PayloadFormat::Pe,
+            payload_export: None,
             stub_marker: crate::engine::stub::generate_stub_marker(),
             payload_path: "payload.bin".to_string(),
             build_args: std::collections::BTreeMap::new(),
@@ -1169,6 +1181,91 @@ dependencies = [
                     );
                 }
             }
+        }
+
+        let _ = std::fs::remove_dir_all(&build_dir);
+    }
+
+    /// Builds the hollowing stub with `resolver: tartarus_gate` and asserts it
+    /// compiles to a PE and leaks no NT names in cleartext. Marked `#[ignore]`
+    /// because it compiles a stub.
+    #[test]
+    #[ignore = "requires rustc and the compiled dependencies"]
+    fn tartarus_gate_stub_compiles_to_pe() {
+        let build_dir =
+            std::env::temp_dir().join(format!("batesian_tartarus_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&build_dir);
+        std::fs::create_dir_all(&build_dir).unwrap();
+
+        let plaintext: Vec<u8> = (0..1024u32).map(|i| (i % 251) as u8).collect();
+        let syscalls = crate::engine::syscalls::SyscallsConfig {
+            mode: crate::engine::syscalls::SyscallsMode::Indirect,
+            resolver: crate::engine::syscalls::Resolver::TartarusGate,
+        };
+        let out = build_hollowing_exe(&build_dir, "tartarus", &syscalls, &plaintext);
+
+        let binary = std::fs::read(&out).unwrap();
+        assert_eq!(
+            &binary[..2],
+            b"MZ",
+            "the tartarus stub must compile to a PE"
+        );
+        for nt in [
+            "NtAllocateVirtualMemory",
+            "NtWriteVirtualMemory",
+            "NtReadVirtualMemory",
+            "NtResumeThread",
+            "NtUnmapViewOfSection",
+            "NtProtectVirtualMemory",
+            "NtSuspendThread",
+        ] {
+            assert!(
+                !binary.windows(nt.len()).any(|w| w == nt.as_bytes()),
+                "tartarus mode leaked cleartext {nt}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&build_dir);
+    }
+
+    /// Builds the hollowing stub with `resolver: api_hash` and asserts it
+    /// compiles to a PE, leaks no NT names in cleartext, and emits no
+    /// `GetProcAddress`-based resolution. Marked `#[ignore]` because it
+    /// compiles a stub.
+    #[test]
+    #[ignore = "requires rustc and the compiled dependencies"]
+    fn api_hash_stub_compiles_to_pe() {
+        let build_dir =
+            std::env::temp_dir().join(format!("batesian_api_hash_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&build_dir);
+        std::fs::create_dir_all(&build_dir).unwrap();
+
+        let plaintext: Vec<u8> = (0..1024u32).map(|i| (i % 251) as u8).collect();
+        let syscalls = crate::engine::syscalls::SyscallsConfig {
+            mode: crate::engine::syscalls::SyscallsMode::Indirect,
+            resolver: crate::engine::syscalls::Resolver::ApiHash,
+        };
+        let out = build_hollowing_exe(&build_dir, "api_hash", &syscalls, &plaintext);
+
+        let binary = std::fs::read(&out).unwrap();
+        assert_eq!(
+            &binary[..2],
+            b"MZ",
+            "the api_hash stub must compile to a PE"
+        );
+        for nt in [
+            "NtAllocateVirtualMemory",
+            "NtWriteVirtualMemory",
+            "NtReadVirtualMemory",
+            "NtResumeThread",
+            "NtUnmapViewOfSection",
+            "NtProtectVirtualMemory",
+            "NtSuspendThread",
+        ] {
+            assert!(
+                !binary.windows(nt.len()).any(|w| w == nt.as_bytes()),
+                "api_hash mode leaked cleartext {nt}"
+            );
         }
 
         let _ = std::fs::remove_dir_all(&build_dir);

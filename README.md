@@ -42,7 +42,7 @@ Requirements:
 
 ```bash
 # Pack the bundled test payload: hollow it into a suspended svchost.exe.
-cargo run -- build examples/configs/test-hollowing.yaml
+cargo run -- build examples/configs/process-hollowing.yaml
 
 # The artifact lands where the config says (here, dist/test_packed.exe).
 ./dist/test_packed.exe
@@ -70,14 +70,14 @@ linker) plus the prebuilt workspace `.rlib` files, so one command is enough.
 docker build -t batesian .
 
 # Pack, mounting the current directory as /work: configs + payloads in, dist/ out.
-docker run --rm -it -v "$PWD:/work" -w /work batesian build examples/configs/test-reflective.yaml
+docker run --rm -it -v "$PWD:/work" -w /work batesian build examples/configs/reflective-loading.yaml
 ```
 
 Or use a wrapper, which builds the image on first use and passes every
 argument through unchanged. Linux/macOS/WSL:
 
 ```bash
-bash scripts/docker-batesian.sh build examples/configs/test-reflective.yaml
+bash scripts/docker-batesian.sh build examples/configs/reflective-loading.yaml
 bash scripts/docker-batesian.sh audit dist/test_packed_reflective.exe
 bash scripts/docker-batesian.sh techniques list
 ```
@@ -85,7 +85,7 @@ bash scripts/docker-batesian.sh techniques list
 Windows (PowerShell):
 
 ```powershell
-.\scripts\docker-batesian.ps1 build examples\configs\test-reflective.yaml
+.\scripts\docker-batesian.ps1 build examples\configs\reflective-loading.yaml
 .\scripts\docker-batesian.ps1 audit dist\test_packed_reflective.exe
 .\scripts\docker-batesian.ps1 techniques list
 ```
@@ -125,6 +125,7 @@ name: mimikatz-basic
 build:
   payload:
     source: ./payload.exe # a local path, or an http(s):// URL (fetched in memory)
+    format: pe            # pe | shellcode | dll
     sha256: null          # optional: pin the input's SHA-256 (64 hex chars)
     crypto:
       algo: xchacha20poly1305
@@ -133,7 +134,7 @@ build:
     path: null            # null = builtin stub; or a path to a custom .rs
     syscalls:
       mode: indirect      # none | indirect
-      resolver: hells_gate
+      resolver: hells_gate  # hells_gate | tartarus_gate | api_hash
     strings:
       strategy: xor       # xor | stack
       key: random         # random | literal:<64 hex chars>
@@ -164,7 +165,9 @@ runtime:                  # 0..N preparation, then exactly one execution
 
 | Block | What it decides |
 | --- | --- |
-| `build.payload.source` | The PE to pack: a local path or an `http(s)://` URL (fetched in memory, never written to disk). |
+| `build.payload.source` | The input to pack: a local path, or an `http(s)://` or `file://` URL (`http(s)` is fetched in memory, never written to disk). |
+| `build.payload.format` | `pe` (default), `dll` or `shellcode`. Decides how the input is validated and how the Execution technique runs it. |
+| `build.payload.export` | For `format: dll`, the exported function to call (e.g. `Run`). Without it only `DllMain(DLL_PROCESS_ATTACH)` runs. |
 | `build.payload.sha256` | Optional SHA-256 of the input. A mismatch aborts before anything is encrypted, so a URL (or a swapped file) cannot silently change what gets packed. |
 | `build.payload.crypto` | Payload encryption. XChaCha20-Poly1305, 24-byte nonce, fresh random key per build. |
 | `build.stub.strings` | How every runtime literal in the stub is obfuscated (`xor` or `stack`). Defaults to `xor` + random key, with a warning. |
@@ -232,6 +235,7 @@ order, followed by exactly one Execution technique.
 | YAML key | Category | ATT&CK | Stability | What it does |
 | --- | --- | --- | --- | --- |
 | `anti_debug` | preparation | T1622 | stable | Detects a debugger and, by default, aborts before the payload runs. |
+| `bouncer` | preparation | T1497.001, T1614.001 | experimental | Gates the payload on host checks (hostname, locale, uptime, RAM, VM/sandbox); aborts the pipeline when they fail. |
 | `patch_amsi` | preparation | T1562.001 | stable | Patches `AmsiScanBuffer` in the current process. |
 | `patch_etw` | preparation | T1562.006 | stable | Patches the ETW event-writing exports in the current process. |
 | `process_hollowing` | execution | T1055.012 | experimental | Runs the payload inside a suspended, legitimate process instead of on disk. |
@@ -371,8 +375,21 @@ cross-platform):
 
 The packer resolves the new section's RVA, builds the resource directory and
 appends it as a `.rsrc` section to the already-compiled stub (`SizeOfImage` and
-the `RESOURCE` data directory are patched; the linker never sees it). See
-[`examples/configs/test-resources.yaml`](examples/configs/test-resources.yaml).
+the `RESOURCE` data directory are patched; the linker never sees it):
+
+```yaml
+build:
+  output:
+    resources:
+      icon: ./examples/assets/sample.ico
+      version_info:
+        company: "Contoso Ltd"
+        product: "Widget"
+        file_version: "2.5.1.0"
+      manifest:
+        level: as_invoker
+        dpi_aware: true
+```
 
 ### Signing
 
@@ -403,9 +420,9 @@ output:
 - `mode: file` uses a `.pfx`/`.p12`; the password comes from the environment
   variable named by `password_env`, never from the YAML.
 
-See [`examples/configs/test-sign.yaml`](examples/configs/test-sign.yaml);
-[`examples/configs/test-fake.yaml`](examples/configs/test-fake.yaml) combines a
-randomized identity with an automatic lab signature.
+See [`examples/configs/mimikatz.yaml`](examples/configs/mimikatz.yaml) — a
+complete example that combines a randomized identity with an automatic lab
+signature.
 
 A signed build produces three files next to each other (all named after the
 artifact): `<stem>.exe`, `<stem>.manifest.json` and `<stem>.ca.cer`. The last one
@@ -423,10 +440,10 @@ src/
   error.rs      top-level error types
   ui.rs         terminal output: banner, palette, formatting helpers
 templates/stub/ Rust stub template with $placeholders$
-examples/       example configs, test payloads, sample custom stubs
+examples/       curated example configs, test payloads, sample custom stubs
 docs/           architecture, technique notes and measurement reports
 yara/           YARA rules (placeholder for now)
-tests/          CLI integration tests
+tests/          CLI integration tests + fixtures (tests/configs/, tests/fixtures/)
 build/  dist/   (gitignored) intermediate artifacts and final binaries
 banner.txt      ASCII banner, compiled in by src/ui.rs
 ```
@@ -462,8 +479,27 @@ user-facing output goes through `src/ui.rs`. The full list is in
 | 3 | done | Rust stub generation + `rustc` compilation |
 | 4 | done | Process hollowing (in-memory execution) |
 | 5 | done | Static measurement infrastructure (`audit`) |
-| 6 | in progress | Indirect syscalls (6a done: Hell's Gate; 6b: Tartarus Gate) |
+| 6 | done | Indirect syscalls (Hell's Gate + Tartarus Gate) |
 | 7 | done | AMSI patching (`patch_amsi`), technique categories |
+| 8 | done | Environment gate (`bouncer`) |
+| — | done | Payload formats (`pe`/`shellcode`/`dll`), interactive wizard, custom stubs |
+| — | done | PE resources (icon, version info, manifest) and `signtool` signing |
+
+Planned:
+
+- `early_bird` (APC injection, T1055.012) — sidesteps the uninitialized-loader
+  problem of process hollowing entirely.
+- `process_doppelganging` / transacted hollowing (T1055.013), `module_stomping`
+  (T1055) and `ppid_spoofing` (T1134.004).
+- `unhook_ntdll` (Preparation) and stack spoofing, which closes the gap the
+  syscall notes acknowledge.
+- Fuzz `src/engine/pe.rs` and the config parser (both take untrusted input).
+- `cargo deny` / `cargo audit` in CI.
+- Reproducible builds: a deterministic key or `--seed` (today the random key
+  blocks bit-for-bit reproducibility).
+- Close the remaining wizard gaps (`strings.key`, `build.stub.path`,
+  `args_mode: override`, non-default `sleep_obfuscation` regions) and add
+  `batesian config validate <file>`.
 
 ## Known limitations
 
@@ -500,5 +536,5 @@ user-facing output goes through `src/ui.rs`. The full list is in
 
 ## License
 
-MIT. See [`Cargo.toml`](Cargo.toml). Provided as-is, with no warranty, for
+MIT — see [`LICENSE`](LICENSE). Provided as-is, with no warranty, for
 authorized use only.

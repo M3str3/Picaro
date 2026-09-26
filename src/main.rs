@@ -22,7 +22,9 @@ use std::time::Instant;
 
 use clap::{CommandFactory, Parser, Subcommand};
 
-use config::schema::{Arch, CryptoAlgorithm, KeySource, PayloadConfig, Subsystem, TrimPaths};
+use config::schema::{
+    Arch, CryptoAlgorithm, KeySource, PayloadConfig, PayloadFormat, Subsystem, TrimPaths,
+};
 use engine::{compiler, crypto, obfuscation, pe, stub, syscalls};
 use error::Result;
 use techniques::RuntimeStep;
@@ -340,37 +342,29 @@ fn build(
         print_config(config, config_path, ui);
     }
 
-    // 1. Read the input payload and validate that it is an x64 PE (fail early).
+    // 1. Read the input payload and validate it against its declared format
+    //    (fail early, before encrypting or compiling).
     let timer = Instant::now();
     let plaintext = load_source(&config.build.payload.source)?;
     verify_payload_hash(&plaintext, config.build.payload.sha256.as_deref())?;
-    let pe_info = pe::parse(&plaintext)?;
-    if !pe::is_x64(pe_info.machine) {
-        return Err(error::PackerError::Validation(format!(
-            "input payload is not an x64 PE (machine 0x{:04x})",
-            pe_info.machine
-        )));
-    }
+    let summary = inspect_payload(config.build.payload.format, &plaintext)?;
     let read_time = timer.elapsed();
-    anstream::println!(
-        "{}",
-        ui.done(
-            "read",
-            dotted(
-                ui,
-                &[
-                    ui.target(describe_source(&config.build.payload.source)),
-                    ui.dim("x64 PE"),
-                    human_size(plaintext.len()),
-                ]
-            )
-        )
-    );
+    let mut read_parts = vec![
+        ui.target(describe_source(&config.build.payload.source)),
+        ui.dim(summary.label),
+        human_size(plaintext.len()),
+    ];
+    if let Some(export) = &config.build.payload.export {
+        read_parts.push(ui.dim(format!("export {export}")));
+    }
+    anstream::println!("{}", ui.done("read", dotted(ui, &read_parts)));
     if verbose {
-        anstream::println!(
-            "{}",
-            ui.detail("machine", ui.dim(format!("0x{:04x}", pe_info.machine)))
-        );
+        if let Some(info) = &summary.pe {
+            anstream::println!(
+                "{}",
+                ui.detail("machine", ui.dim(format!("0x{:04x}", info.machine)))
+            );
+        }
         anstream::println!(
             "{}",
             ui.detail("sha256", ui.dim(engine::hash::sha256_hex(&plaintext)))
@@ -488,6 +482,8 @@ fn build(
         key: encrypted.key,
         ciphertext: encrypted.ciphertext.clone(),
         plaintext_len: encrypted.plaintext_len,
+        payload_format: config.build.payload.format,
+        payload_export: config.build.payload.export.clone(),
         stub_marker: stub_marker.clone(),
         payload_path: "payload.bin".to_string(),
         build_args: build_args.clone(),
@@ -515,6 +511,11 @@ fn build(
         pipeline_chain(ui, &config.runtime),
         format!("{} {}", ui.dim("strings"), strings.strategy.label()),
         format!("{} {}", ui.dim("syscalls"), syscalls.mode.label()),
+        format!(
+            "{} {}",
+            ui.dim("format"),
+            config.build.payload.format.label()
+        ),
     ];
     if !params.payload_args.is_empty() {
         stub_parts.push(format!(
@@ -719,19 +720,16 @@ fn dry_run(config: &config::Config, config_path: &Path, ui: &Palette) -> Result<
 
     let payload = load_source(&config.build.payload.source)?;
     verify_payload_hash(&payload, config.build.payload.sha256.as_deref())?;
-    let pe_info = pe::parse(&payload)?;
-    if !pe::is_x64(pe_info.machine) {
-        return Err(error::PackerError::Validation(format!(
-            "input payload is not an x64 PE (machine 0x{:04x})",
-            pe_info.machine
-        )));
-    }
+    let summary = inspect_payload(config.build.payload.format, &payload)?;
 
     let mut parts = vec![
         ui.target(describe_source(&config.build.payload.source)),
-        ui.dim("x64 PE"),
+        ui.dim(summary.label),
         human_size(payload.len()),
     ];
+    if let Some(export) = &config.build.payload.export {
+        parts.push(ui.dim(format!("export {export}")));
+    }
     if config.build.output.subsystem == Subsystem::Windows {
         parts.push(ui.dim("windows subsystem"));
     }
@@ -777,6 +775,66 @@ fn dry_run(config: &config::Config, config_path: &Path, ui: &Palette) -> Result<
         ui.warn("dry run: nothing was encrypted, compiled or written")
     );
     Ok(())
+}
+
+/// The input payload after format-specific validation.
+struct PayloadSummary {
+    /// Human label for the build log (`x64 PE`, `x64 DLL`, `shellcode`).
+    label: &'static str,
+    /// Parsed PE info for the PE-backed formats; `None` for shellcode.
+    pe: Option<pe::PeInfo>,
+}
+
+/// Parses and validates the payload according to `build.payload.format`.
+///
+/// `pe`/`dll` must be a well-formed x64 PE image of the matching kind;
+/// `shellcode` has no headers to check, only that it is not empty. The checks
+/// run at build time so a mismatched config fails before anything is encrypted
+/// or compiled.
+fn inspect_payload(format: PayloadFormat, data: &[u8]) -> Result<PayloadSummary> {
+    match format {
+        PayloadFormat::Shellcode => {
+            if data.is_empty() {
+                return Err(error::PackerError::Validation(
+                    "the shellcode payload is empty".to_string(),
+                ));
+            }
+            Ok(PayloadSummary {
+                label: "shellcode",
+                pe: None,
+            })
+        }
+        PayloadFormat::Pe | PayloadFormat::Dll => {
+            let info = pe::parse(data)?;
+            if !pe::is_x64(info.machine) {
+                return Err(error::PackerError::Validation(format!(
+                    "input payload is not an x64 PE (machine 0x{:04x})",
+                    info.machine
+                )));
+            }
+            let is_dll = pe::is_dll(info.characteristics);
+            match format {
+                PayloadFormat::Dll if !is_dll => {
+                    return Err(error::PackerError::Validation(
+                        "build.payload.format is 'dll' but the payload is an executable \
+                         (IMAGE_FILE_DLL is not set)"
+                            .to_string(),
+                    ));
+                }
+                PayloadFormat::Pe if is_dll => {
+                    return Err(error::PackerError::Validation(
+                        "build.payload.format is 'pe' but the payload is a DLL; use 'format: dll'"
+                            .to_string(),
+                    ));
+                }
+                _ => {}
+            }
+            Ok(PayloadSummary {
+                label: if is_dll { "x64 DLL" } else { "x64 PE" },
+                pe: Some(info),
+            })
+        }
+    }
 }
 
 /// Fails when the payload does not match `build.payload.sha256`.

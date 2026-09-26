@@ -1,14 +1,11 @@
+# Local scratch: reference material kept out of the project.
 code_examples/
+/payload_decrypted.bin
 
-# Local scratch configs (not part of the project).
-/mimi.yaml
-/mimi copy.yaml
-
+# Host build output.
 /target
 /build
 /dist
-/payload_decrypted.bin
-/mimikatz.exe
 
 # Debug symbols and linker side artifacts (MSVC + MinGW).
 *.pdb

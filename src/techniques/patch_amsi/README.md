@@ -30,7 +30,7 @@ runtime:
 
 1. Load `amsi.dll` (`LoadLibraryA`, a no-op if already loaded).
 2. Resolve `AmsiScanBuffer` with `GetProcAddress`.
-3. Make the first three bytes of `AmsiScanBuffer` writable (`VirtualProtect` →
+3. Make the first three bytes of `AmsiScanBuffer` writable (`nt_protect_vm` →
    `PAGE_EXECUTE_READWRITE`).
 4. Write `sub eax, eax; ret` (`29 C0 C3`): zero EAX (S_OK) and return.
 5. Restore the original page protection.
@@ -44,7 +44,8 @@ returns a clear error and the pipeline fails with a useful message.
 
 ## What detects it
 
-- Hooks on `VirtualProtect` targeting `PAGE_EXECUTE_READWRITE` over `amsi.dll`.
+- Hooks on `NtProtectVirtualMemory` targeting `PAGE_EXECUTE_READWRITE` over
+  `amsi.dll`.
 - ETW-TI (`Microsoft-Windows-Threat-Intelligence`) on suspicious memory writes.
 - Memory scanning / YARA looking for the `29 C0 C3` (or `B8 57 00 07 80 C3`)
   patch at the start of `AmsiScanBuffer`. Signatures vary per EDR.
@@ -64,7 +65,9 @@ returns a clear error and the pipeline fails with a useful message.
   will require a parameter on the corresponding execution technique.
 - `amsi.dll` and `AmsiScanBuffer` are reconstructed at runtime through
   `StringsConfig` (`render_fragment`), so they never appear in cleartext in
-  `.rdata`. Resolving AMSI via indirect syscalls is a separate, later concern.
+  `.rdata`. The page protection change goes through the syscall layer's
+  `nt_protect_vm`, so `mode: indirect` removes the `VirtualProtect` import;
+  `LoadLibraryA`/`GetProcAddress` stay Win32 (as in every technique).
 
 ## References
 

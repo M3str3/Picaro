@@ -26,9 +26,10 @@ pub const DEF: TechniqueDef = TechniqueDef {
     readme: include_str!("README.md"),
     stub_fragment: include_str!("stub_fragment.rs"),
     params_example: "technique: patch_amsi\n",
-    // patch_amsi still uses VirtualProtect/GetProcAddress directly; it will
-    // migrate to NtProtectVirtualMemory in a later phase.
-    syscalls: &[],
+    // The page protection changes go through the syscall layer, so
+    // `mode: indirect` removes the `VirtualProtect` import. Resolution
+    // (`LoadLibraryA`/`GetProcAddress`) stays Win32, as in every technique.
+    syscalls: &["NtProtectVirtualMemory"],
     resolves_imports: false,
 };
 

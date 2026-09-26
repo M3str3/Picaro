@@ -3,7 +3,7 @@
 # directory, passing every argument through unchanged.
 #
 # Usage:
-#   .\scripts\docker-batesian.ps1 build .\examples\configs\test-reflective.yaml
+#   .\scripts\docker-batesian.ps1 build .\examples\configs\reflective-loading.yaml
 #   .\scripts\docker-batesian.ps1 audit .\dist\test_packed_reflective.exe
 #   .\scripts\docker-batesian.ps1 techniques list
 #   .\scripts\docker-batesian.ps1 --build build ...

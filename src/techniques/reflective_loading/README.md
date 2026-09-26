@@ -15,14 +15,41 @@ applies base relocations, fixes section memory protections, runs TLS callbacks
 and then executes the payload's entry point in a separate thread. No external
 target process is required.
 
+For a `format: shellcode` payload there is no image to map: the decrypted bytes
+are copied into an executable allocation and run on a thread instead (see
+“Payload formats” below).
+
 ## YAML parameters
 
-None. Payload arguments are not per-technique: they come from
-`build.payload.args` / `build.payload.args_mode` (see below).
+None. The payload format and, for a DLL, its exported entry point come from
+`build.payload` (`format`, `export`), and the command-line arguments from
+`build.payload.args` / `build.payload.args_mode`.
 
 ## YAML example
 
 ```yaml
+# A PE payload (default).
+runtime:
+  - technique: reflective_loading
+```
+
+```yaml
+# A shellcode payload.
+build:
+  payload:
+    source: ./beacon.bin
+    format: shellcode
+runtime:
+  - technique: reflective_loading
+```
+
+```yaml
+# A DLL payload with an exported entry point.
+build:
+  payload:
+    source: ./payload.dll
+    format: dll
+    export: Run
 runtime:
   - technique: reflective_loading
 ```
@@ -31,15 +58,35 @@ runtime:
 
 1. Validate the image (MZ and PE signatures, x64 magic).
 2. Allocate memory at the preferred image base (fall back to any address if it
-   is taken).
+   is taken) through `nt_alloc_vm`.
 3. Copy the PE headers and each section's raw data into the allocation.
 4. Resolve imports (`LoadLibraryA` + `GetProcAddress`), patching the import
    address table.
 5. Apply base relocations if the image did not land at its preferred base.
-6. Set each section's final memory protection (`VirtualProtect`).
+6. Set each section's final memory protection (`nt_protect_vm`).
 7. Run TLS callbacks, if present.
 8. Run the entry point (`DllMain` for a DLL, `mainCRTStartup`-style for an EXE)
    on a new thread and return its exit code.
+
+With `build.payload.export` (DLLs only), step 8 changes: the entry point is
+called once with `DLL_PROCESS_ATTACH` — the loader step a mapped DLL needs so
+its CRT and global constructors initialize — and then the named export is called
+with no arguments instead of running the entry point on a thread. The process
+exits 0 once the export returns.
+
+## Payload formats
+
+The technique renders a different fragment per `build.payload.format`:
+
+- `pe` and `dll` map the image as above; the `is_dll` flag is read from the
+  file-header characteristics.
+- `shellcode` uses a runner fragment: there is no image, so the decrypted bytes
+  are copied into a `PAGE_EXECUTE_READWRITE` allocation (`nt_alloc_vm`) and run
+  on a thread whose entry is a `fn() -> u32`. The region is intentionally leaked,
+  since the shellcode may have spawned work that outlives the wait.
+
+`process_hollowing` cannot run these two formats; `config::validate` requires
+`reflective_loading` for them.
 
 ### Payload arguments
 
@@ -71,7 +118,9 @@ at `argv[1]`.
 ## What detects it
 
 - **Userland hooks** on `VirtualAlloc`/`VirtualProtect` when a `PAGE_EXECUTE_*`
-  region is created (RWX or RX transitions).
+  region is created (RWX or RX transitions). These go through the syscall layer's
+  `nt_alloc_vm`/`nt_protect_vm`, so `mode: indirect` bypasses the hooks and
+  removes the Win32 imports.
 - **ETW-TI** (`Microsoft-Windows-Threat-Intelligence`) for suspicious memory
   allocations.
 - **Kernel callbacks** that flag executable private memory.
@@ -91,6 +140,10 @@ at `argv[1]`.
 - Payload arguments are rewritten into the PEB and `kernelbase`'s cached
   command-line pointer before the payload runs, so the payload's `argv` is what
   the operator configured (`build.payload.args` + runtime args).
+- Allocation and page protection go through the syscall layer
+  (`nt_alloc_vm`/`nt_protect_vm`); `CreateThread` stays Win32 because
+  `NtCreateThreadEx` takes eleven arguments, more stack arguments than the
+  indirect-syscall trampoline currently shuffles.
 
 ## References
 

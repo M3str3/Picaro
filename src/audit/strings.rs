@@ -34,6 +34,10 @@ pub const SENSITIVE_LITERALS: &[&str] = &[
     "NtWriteVirtualMemory",
     "NtReadVirtualMemory",
     "NtResumeThread",
+    "NtProtectVirtualMemory",
+    "NtSuspendThread",
+    "NtQueryInformationProcess",
+    "NtGetContextThread",
     // Sleep obfuscation (ekko): resolved dynamically, must stay obfuscated.
     "SystemFunction032",
     "RtlCaptureContext",

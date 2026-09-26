@@ -9,6 +9,9 @@
 /// PE machine type for x86-64 (PE32+).
 pub const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
 
+/// `IMAGE_FILE_DLL`: the file header flag that marks a library image.
+pub const IMAGE_FILE_DLL: u16 = 0x2000;
+
 /// DOS header `MZ` signature.
 const IMAGE_DOS_SIGNATURE: u16 = 0x5A4D;
 
@@ -30,6 +33,8 @@ pub struct SectionInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeInfo {
     pub machine: u16,
+    /// `FileHeader.Characteristics` (e.g. `IMAGE_FILE_DLL`).
+    pub characteristics: u16,
     pub image_base: u64,
     pub size_of_image: u32,
     pub size_of_headers: u32,
@@ -59,6 +64,11 @@ pub fn is_x64(machine: u16) -> bool {
     machine == IMAGE_FILE_MACHINE_AMD64
 }
 
+/// Returns true if the file-header `characteristics` mark a DLL.
+pub fn is_dll(characteristics: u16) -> bool {
+    characteristics & IMAGE_FILE_DLL != 0
+}
+
 /// Parses the minimal PE information needed for hollowing.
 pub fn parse(data: &[u8]) -> Result<PeInfo, PeError> {
     // DOS header.
@@ -78,6 +88,7 @@ pub fn parse(data: &[u8]) -> Result<PeInfo, PeError> {
     // File header.
     let machine = read_u16(data, e_lfanew + 4)?;
     let num_sections = read_u16(data, e_lfanew + 6)? as usize;
+    let characteristics = read_u16(data, e_lfanew + 22)?;
     let size_of_optional_header = read_u16(data, e_lfanew + 20)? as usize;
 
     // Optional header (starts right after the file header).
@@ -107,6 +118,7 @@ pub fn parse(data: &[u8]) -> Result<PeInfo, PeError> {
 
     Ok(PeInfo {
         machine,
+        characteristics,
         image_base,
         size_of_image,
         size_of_headers,
@@ -165,6 +177,10 @@ mod tests {
         b
     }
 
+    /// The `Characteristics` field lives 22 bytes past the NT signature in a
+    /// PE32+ image (FileHeader starts after `PE\0\0`, Characteristics at +18).
+    const CHARACTERISTICS_OFFSET: usize = 64 + 4 + 18;
+
     #[test]
     fn parses_minimal_pe64() {
         let pe = parse(&minimal_pe(IMAGE_FILE_MACHINE_AMD64)).expect("valid PE");
@@ -175,6 +191,23 @@ mod tests {
         assert_eq!(pe.entry_point_rva, 0x1000);
         assert_eq!(pe.sections.len(), 1);
         assert_eq!(pe.sections[0].virtual_address, 0x1000);
+    }
+
+    #[test]
+    fn an_executable_is_not_a_dll() {
+        let pe = parse(&minimal_pe(IMAGE_FILE_MACHINE_AMD64)).expect("valid PE");
+        assert_eq!(pe.characteristics, 0);
+        assert!(!is_dll(pe.characteristics));
+    }
+
+    #[test]
+    fn a_library_image_is_a_dll() {
+        let mut b = minimal_pe(IMAGE_FILE_MACHINE_AMD64);
+        b[CHARACTERISTICS_OFFSET..CHARACTERISTICS_OFFSET + 2]
+            .copy_from_slice(&IMAGE_FILE_DLL.to_le_bytes());
+        let pe = parse(&b).expect("valid PE");
+        assert_eq!(pe.characteristics, IMAGE_FILE_DLL);
+        assert!(is_dll(pe.characteristics));
     }
 
     #[test]

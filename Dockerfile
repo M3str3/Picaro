@@ -51,7 +51,7 @@ RUN cargo build --target x86_64-pc-windows-gnu --release
 
 # Smoke test: pack a payload end-to-end to prove the cross toolchain is wired
 # correctly. Fails the image build if anything is misconfigured.
-RUN ./target/release/batesian --quiet build examples/configs/test-reflective.yaml \
+RUN ./target/release/batesian --quiet build examples/configs/reflective-loading.yaml \
     && test -s dist/test_packed_reflective.exe
 
 # The user mounts a directory with configs/payloads here; outputs land back on

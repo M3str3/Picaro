@@ -26,7 +26,7 @@ use inquire::{Confirm, MultiSelect, Select, Text};
 
 use crate::config::schema::{
     Arch, BuildConfig, Config, CryptoAlgorithm, CryptoConfig, KeySource, OutputConfig,
-    PayloadConfig, StubConfig, Subsystem, TrimPaths, SUPPORTED_SCHEMA,
+    PayloadConfig, PayloadFormat, StubConfig, Subsystem, TrimPaths, SUPPORTED_SCHEMA,
 };
 use crate::config::validate;
 use crate::engine::args::ArgsMode;
@@ -947,6 +947,9 @@ fn assemble(payload: &Path, answers: &Answers) -> Config {
         build: BuildConfig {
             payload: PayloadConfig {
                 source: payload.display().to_string(),
+                // Payload formats are an advanced setting; edit them in the YAML.
+                format: PayloadFormat::Pe,
+                export: None,
                 args: (!answers.payload_args.is_empty()).then(|| answers.payload_args.clone()),
                 args_mode: ArgsMode::Join,
                 crypto: CryptoConfig {
@@ -1201,7 +1204,11 @@ mod tests {
             "got {:?}",
             config.runtime[0]
         );
-        assert!(config.build.stub.syscalls.is_none());
+        // The execution technique (reflective_loading) uses the syscall layer,
+        // so the syscalls question defaults to `indirect`.
+        let syscalls = config.build.stub.syscalls.expect("indirect syscalls");
+        assert_eq!(syscalls.mode, "indirect");
+        assert_eq!(syscalls.resolver, "hells_gate");
         assert!(config.build.stub.strings.is_some());
     }
 

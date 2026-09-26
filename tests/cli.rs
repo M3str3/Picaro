@@ -50,7 +50,7 @@ fn techniques_show_prints_readme() {
 fn build_with_amsi_patch_produces_pe() {
     let _guard = BUILD_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_batesian"))
-        .args(["build", "examples/configs/test-amsi-patch.yaml"])
+        .args(["build", "tests/configs/amsi-patch.yaml"])
         .output()
         .expect("run batesian build");
     assert!(
@@ -70,7 +70,7 @@ fn build_with_amsi_patch_produces_pe() {
 #[ignore = "requires rustc and the compiled dependencies"]
 fn build_with_invalid_order_fails() {
     let output = Command::new(env!("CARGO_BIN_EXE_batesian"))
-        .args(["build", "examples/configs/test-invalid-order.yaml"])
+        .args(["build", "tests/configs/invalid-order.yaml"])
         .output()
         .expect("run batesian build");
     assert!(!output.status.success(), "invalid order must fail");
@@ -124,7 +124,7 @@ fn quiet_flag_hides_the_banner() {
 fn build_with_bouncer_produces_pe() {
     let _guard = BUILD_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_batesian"))
-        .args(["build", "examples/configs/test-bouncer.yaml"])
+        .args(["build", "tests/configs/bouncer.yaml"])
         .output()
         .expect("run batesian build");
     assert!(
@@ -169,7 +169,7 @@ fn bouncer_gate_blocks_and_allows_on_windows() {
     const MARKER: &str = "PAYLOAD_MARKER_7f3a9c2e";
 
     let miss = run(
-        "examples/configs/test-bouncer-miss.yaml",
+        "tests/configs/bouncer-miss.yaml",
         "dist/test_bouncer_miss.exe",
     );
     assert!(
@@ -177,10 +177,7 @@ fn bouncer_gate_blocks_and_allows_on_windows() {
         "the payload ran even though the host name did not match: {miss}"
     );
 
-    let hit = run(
-        "examples/configs/test-bouncer.yaml",
-        "dist/test_bouncer.exe",
-    );
+    let hit = run("tests/configs/bouncer.yaml", "dist/test_bouncer.exe");
     assert!(
         hit.contains(MARKER),
         "the payload did not run on a matching host: {hit}"
@@ -194,7 +191,7 @@ fn bouncer_gate_blocks_and_allows_on_windows() {
 fn build_with_custom_stub_produces_pe() {
     let _guard = BUILD_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_batesian"))
-        .args(["build", "examples/configs/test-custom-stub.yaml"])
+        .args(["build", "examples/configs/custom-stub.yaml"])
         .output()
         .expect("run batesian build");
     assert!(
@@ -572,7 +569,7 @@ fn build_dry_run_validates_resources() {
     let output = batesian(&[
         "--quiet".as_ref(),
         "build".as_ref(),
-        "examples/configs/test-resources.yaml".as_ref(),
+        "tests/configs/resources.yaml".as_ref(),
         "--dry-run".as_ref(),
     ]);
     assert!(
@@ -594,10 +591,7 @@ fn build_dry_run_validates_resources() {
 #[ignore = "requires rustc and the compiled dependencies"]
 fn build_with_resources_embeds_a_resource_section() {
     let _guard = BUILD_LOCK.lock().unwrap();
-    let build = batesian(&[
-        "build".as_ref(),
-        "examples/configs/test-resources.yaml".as_ref(),
-    ]);
+    let build = batesian(&["build".as_ref(), "tests/configs/resources.yaml".as_ref()]);
     assert!(
         build.status.success(),
         "build failed: {}",
