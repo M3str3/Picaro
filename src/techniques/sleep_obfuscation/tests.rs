@@ -10,34 +10,40 @@ fn parses_params_with_defaults() {
         serde_yml::from_str("technique: sleep_obfuscation\n").expect("should parse");
     assert_eq!(
         step,
-        RuntimeStep::SleepObfuscation(Params {
-            variant: Variant::Ekko,
-            sleep_ms: 5000,
-            encrypt_regions: vec![EncryptRegion::Payload],
-        })
+        RuntimeStep::SleepObfuscation {
+            params: Params {
+                variant: Variant::Ekko,
+                sleep_ms: 5000,
+                encrypt_regions: vec![EncryptRegion::Payload],
+            }
+        }
     );
 }
 
 #[test]
 fn parses_explicit_params() {
     let step: RuntimeStep = serde_yml::from_str(
-        "technique: sleep_obfuscation\nvariant: cronos\nsleep_ms: 1234\nencrypt_regions: [payload, stack]\n",
+        "technique: sleep_obfuscation\nparams:\n  variant: cronos\n  sleep_ms: 1234\n  encrypt_regions: [payload, stack]\n",
     )
     .expect("should parse");
     assert_eq!(
         step,
-        RuntimeStep::SleepObfuscation(Params {
-            variant: Variant::Cronos,
-            sleep_ms: 1234,
-            encrypt_regions: vec![EncryptRegion::Payload, EncryptRegion::Stack],
-        })
+        RuntimeStep::SleepObfuscation {
+            params: Params {
+                variant: Variant::Cronos,
+                sleep_ms: 1234,
+                encrypt_regions: vec![EncryptRegion::Payload, EncryptRegion::Stack],
+            }
+        }
     );
 }
 
 #[test]
 fn rejects_unknown_variant() {
-    let err = serde_yml::from_str::<RuntimeStep>("technique: sleep_obfuscation\nvariant: banana\n")
-        .expect_err("an unknown variant must fail");
+    let err = serde_yml::from_str::<RuntimeStep>(
+        "technique: sleep_obfuscation\nparams:\n  variant: banana\n",
+    )
+    .expect_err("an unknown variant must fail");
     let msg = err.to_string();
     assert!(msg.contains("banana"), "unclear error: {msg}");
 }
@@ -45,7 +51,7 @@ fn rejects_unknown_variant() {
 #[test]
 fn rejects_unknown_encrypt_region() {
     let err = serde_yml::from_str::<RuntimeStep>(
-        "technique: sleep_obfuscation\nencrypt_regions: [banana]\n",
+        "technique: sleep_obfuscation\nparams:\n  encrypt_regions: [banana]\n",
     )
     .expect_err("an unknown region must fail");
     let msg = err.to_string();
@@ -54,16 +60,19 @@ fn rejects_unknown_encrypt_region() {
 
 #[test]
 fn parses_bare_all_region_scalar() {
-    let step: RuntimeStep =
-        serde_yml::from_str("technique: sleep_obfuscation\nencrypt_regions: all\n")
-            .expect("the bare 'all' scalar should parse");
+    let step: RuntimeStep = serde_yml::from_str(
+        "technique: sleep_obfuscation\nparams:\n  encrypt_regions: all\n",
+    )
+    .expect("the bare 'all' scalar should parse");
     assert_eq!(
         step,
-        RuntimeStep::SleepObfuscation(Params {
-            variant: Variant::Ekko,
-            sleep_ms: 5000,
-            encrypt_regions: vec![EncryptRegion::All],
-        })
+        RuntimeStep::SleepObfuscation {
+            params: Params {
+                variant: Variant::Ekko,
+                sleep_ms: 5000,
+                encrypt_regions: vec![EncryptRegion::All],
+            }
+        }
     );
 }
 
@@ -203,14 +212,20 @@ fn compiles_sleep_obfuscation_stub_to_pe() {
         stub_marker: crate::engine::stub::generate_stub_marker(),
         payload_path: "payload.bin".to_string(),
         build_args: std::collections::BTreeMap::new(),
+        payload_args: Vec::new(),
+        args_mode: crate::engine::args::ArgsMode::Join,
     };
     let pipeline = vec![
-        RuntimeStep::SleepObfuscation(Params {
-            variant: Variant::Ekko,
-            sleep_ms: 5000,
-            encrypt_regions: vec![EncryptRegion::Payload],
-        }),
-        RuntimeStep::ReflectiveLoading(crate::techniques::reflective_loading::Params {}),
+        RuntimeStep::SleepObfuscation {
+            params: Params {
+                variant: Variant::Ekko,
+                sleep_ms: 5000,
+                encrypt_regions: vec![EncryptRegion::Payload],
+            },
+        },
+        RuntimeStep::ReflectiveLoading {
+            params: crate::techniques::reflective_loading::Params {},
+        },
     ];
     let strings = StringsConfig::from_yaml(None).unwrap();
     let stub_src = crate::engine::stub::render_main_rs(

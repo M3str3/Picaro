@@ -33,6 +33,15 @@ pub fn default_action() -> Action {
     Action::Abort
 }
 
+impl Default for Params {
+    /// Defaults to aborting on detection (see [`default_action`]).
+    fn default() -> Self {
+        Self {
+            action: default_action(),
+        }
+    }
+}
+
 /// Static metadata for the anti-debug preparation.
 pub const DEF: TechniqueDef = TechniqueDef {
     name: "anti_debug",
@@ -44,7 +53,7 @@ pub const DEF: TechniqueDef = TechniqueDef {
     doc_path: "src/techniques/anti_debug/README.md",
     readme: include_str!("README.md"),
     stub_fragment: include_str!("stub_fragment.rs"),
-    params_example: "technique: anti_debug\naction: abort\n",
+    params_example: "technique: anti_debug\nparams:\n  action: abort\n",
     // The checks use IsDebuggerPresent/CheckRemoteDebuggerPresent/GetThreadContext
     // directly; routing them through NtQueryInformationProcess is a later phase.
     syscalls: &[],

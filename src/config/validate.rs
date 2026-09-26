@@ -4,11 +4,12 @@
 //! business rules that cannot be expressed naturally with `serde`: empty
 //! values, invalid combinations, supported architectures, etc.
 
+use crate::engine::obfuscation::StringsConfig;
 use crate::engine::syscalls::SyscallsConfig;
 use crate::error::{PackerError, Result};
 use crate::techniques::{category_of, Category, RuntimeStep};
 
-use super::schema::{Config, StubConfig};
+use super::schema::{Arch, Config, StubConfig};
 
 /// Checks the business invariants of a [`Config`].
 ///
@@ -33,6 +34,7 @@ pub fn validate(config: &Config) -> Result<()> {
         ));
     }
 
+    validate_arch(config)?;
     validate_runtime(&config.runtime)?;
     validate_conflicts(&config.runtime)?;
     validate_sleep_obfuscation(&config.runtime)?;
@@ -41,12 +43,54 @@ pub fn validate(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Validates the stub's syscall layer.
+/// Non-fatal advisories produced by validation.
 ///
-/// `build.stub` itself may be empty (builtin stub, default syscall mode); an
-/// unknown `syscalls.mode` or `syscalls.resolver` is a clear error.
+/// These do not reject a config (unlike [`validate`]); the build prints them as
+/// warnings. Today there is one: a `bouncer` gate with no check declared is a
+/// no-op, which is almost certainly not what the author intended.
+pub fn advisories(config: &Config) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for step in &config.runtime {
+        if let RuntimeStep::Bouncer { params } = step {
+            if params.is_noop() {
+                warnings.push(
+                    "bouncer: no check field is declared, so the technique is a no-op and will \
+                     never abort the pipeline"
+                        .to_string(),
+                );
+            }
+        }
+    }
+    warnings
+}
+
+/// Validates the stub's syscall layer and string obfuscation.
+///
+/// `build.stub` itself may be empty (builtin stub, default syscall mode,
+/// default obfuscation); an unknown `syscalls.mode`/`syscalls.resolver` or
+/// `strings.strategy` is a clear error.
 fn validate_stub(stub: &StubConfig) -> Result<()> {
     SyscallsConfig::from_yaml(stub.syscalls.as_ref())?;
+    StringsConfig::from_yaml(stub.strings.as_ref())?;
+    Ok(())
+}
+
+/// Rejects an architecture the stub toolchain cannot produce yet.
+///
+/// `x86` is a recognized value (the enum documents it for completeness), but the
+/// stub is only generated for x64. Accepting it would silently emit an x64
+/// binary from a config that asked for x86, so it fails loudly instead.
+/// Integrating x86 is more work than the enum value suggests: a second target, a
+/// 32-bit stub variant, and a per-architecture fragment for every technique.
+fn validate_arch(config: &Config) -> Result<()> {
+    if config.build.output.arch == Arch::X86 {
+        return Err(PackerError::Validation(
+            "build.output.arch: 'x86' is not integrated yet; the stub toolchain only targets \
+             x86_64 today. Adding x86 means a 32-bit stub variant plus a per-architecture fragment \
+             for every technique, so it is more work than the enum value suggests. Use 'x64'."
+                .to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -57,7 +101,7 @@ fn validate_stub(stub: &StubConfig) -> Result<()> {
 /// pointer to the missing phase.
 fn validate_sleep_obfuscation(runtime: &[RuntimeStep]) -> Result<()> {
     for step in runtime {
-        let RuntimeStep::SleepObfuscation(params) = step else {
+        let RuntimeStep::SleepObfuscation { params } = step else {
             continue;
         };
 
@@ -158,7 +202,7 @@ mod tests {
 
     /// A full valid config without a runtime (runtime tests append their own).
     const NO_RUNTIME: &str = r#"
-schema: 2
+schema: 4
 name: pipeline-test
 build:
   payload:
@@ -176,7 +220,7 @@ build:
     /// A full valid config with a single Execution technique, used by the
     /// source/output regression tests.
     const VALID: &str = r#"
-schema: 2
+schema: 4
 name: source-test
 build:
   payload:
@@ -289,9 +333,10 @@ runtime:
     const SLEEP_YAML: &str = r#"
 runtime:
   - technique: sleep_obfuscation
-    variant: ekko
-    sleep_ms: 5000
-    encrypt_regions: [payload]
+    params:
+      variant: ekko
+      sleep_ms: 5000
+      encrypt_regions: [payload]
   - technique: reflective_loading
 "#;
 
@@ -343,6 +388,55 @@ runtime:
         let yaml = SLEEP_YAML.replace("sleep_ms: 5000", "sleep_ms: 4294967296");
         let err = validate(&with_runtime(&yaml)).expect_err("an oversized sleep must fail");
         assert!(err.to_string().contains("sleep_ms"), "unclear error: {err}");
+    }
+
+    #[test]
+    fn accepts_a_bouncer_as_the_first_preparation() {
+        let yaml = r#"
+runtime:
+  - technique: bouncer
+    params:
+      hostname: "WORKSTATION-*"
+  - technique: reflective_loading
+"#;
+        validate(&with_runtime(yaml)).expect("bouncer first must be valid");
+    }
+
+    // --- bouncer advisories ---
+
+    #[test]
+    fn advises_on_a_noop_bouncer() {
+        let config = with_runtime(
+            r#"
+runtime:
+  - technique: bouncer
+  - technique: reflective_loading
+"#,
+        );
+        validate(&config).expect("a no-op bouncer is valid, only advised against");
+        let warnings = advisories(&config);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("bouncer"), "unclear: {warnings:?}");
+        assert!(warnings[0].contains("no-op"), "unclear: {warnings:?}");
+    }
+
+    #[test]
+    fn no_advisory_when_bouncer_declares_a_check() {
+        let config = with_runtime(
+            r#"
+runtime:
+  - technique: bouncer
+    params:
+      hostname: "WORKSTATION-*"
+  - technique: reflective_loading
+"#,
+        );
+        assert!(advisories(&config).is_empty());
+    }
+
+    #[test]
+    fn no_advisory_without_a_bouncer() {
+        assert!(advisories(&with_runtime(EXECUTION_YAML)).is_empty());
     }
 
     // --- stub block ---
@@ -414,5 +508,20 @@ runtime:
         let yaml = VALID.replace("    path: ./dist/out.exe\n", "    path: \"\"\n");
         let err = validate(&parse(&yaml)).expect_err("an empty output path must fail");
         assert!(err.to_string().contains("build.output.path"), "err: {err}");
+    }
+
+    #[test]
+    fn accepts_x64() {
+        validate(&parse(VALID)).expect("x64 must be valid");
+    }
+
+    #[test]
+    fn rejects_x86_until_it_is_integrated() {
+        let yaml = VALID.replace("    arch: x64\n", "    arch: x86\n");
+        let err = validate(&parse(&yaml)).expect_err("x86 must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("build.output.arch"), "unclear error: {msg}");
+        assert!(msg.contains("x86"), "unclear error: {msg}");
+        assert!(msg.contains("not integrated"), "unclear error: {msg}");
     }
 }

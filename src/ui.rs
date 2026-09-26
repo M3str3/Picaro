@@ -46,6 +46,8 @@ pub mod glyph {
     pub const WARN: &str = "!";
     /// A step bullet, and the prompt of the command echo line.
     pub const BULLET: &str = "▸";
+    /// The marker of an interactive question.
+    pub const ASK: &str = "?";
     /// Separator between pipeline steps.
     pub const ARROW: &str = "→";
     /// An inline separator between related values.
@@ -249,6 +251,31 @@ impl Palette {
     /// The faint prompt of the command echo line.
     pub fn prompt(self) -> String {
         self.faint(glyph::BULLET)
+    }
+
+    /// An interactive question: `  ? label` (no trailing colon/newline).
+    ///
+    /// The wizard appends the accepted values and reads the answer, so the
+    /// question itself stays a pure formatting concern here.
+    pub fn question(self, label: impl Display) -> String {
+        format!("  {} {}", self.brand(glyph::ASK), label)
+    }
+
+    /// A numbered menu entry: `      1. name  description`.
+    ///
+    /// `description` is dimmed and omitted when empty; the name stays bold so
+    /// the choices stand out from the question printed above them.
+    pub fn menu(self, index: usize, name: &str, description: &str) -> String {
+        if description.is_empty() {
+            format!("      {} {}", self.dim(format!("{index}.")), self.bold(name))
+        } else {
+            format!(
+                "      {} {}  {}",
+                self.dim(format!("{index}.")),
+                self.bold(name),
+                self.dim(description)
+            )
+        }
     }
 
     /// A horizontal rule of `width` cells.
@@ -558,5 +585,22 @@ mod tests {
         assert!(bar.contains("12 bytes"), "values missing: {bar:?}");
         assert!(bar.contains("x64"), "values missing: {bar:?}");
         assert!(!bar.contains('\u{1b}'), "escapes leaked: {bar:?}");
+    }
+
+    /// A question carries its mark and label and nothing else.
+    #[test]
+    fn question_marks_the_label() {
+        assert_eq!(
+            Palette::plain().question("name"),
+            format!("  {} name", glyph::ASK)
+        );
+    }
+
+    /// Menu entries indent, number and separate the name from its description.
+    #[test]
+    fn menu_numbers_name_and_description() {
+        let ui = Palette::plain();
+        assert_eq!(ui.menu(2, "stack", "decoder-free"), "      2. stack  decoder-free");
+        assert_eq!(ui.menu(1, "xor", ""), "      1. xor");
     }
 }

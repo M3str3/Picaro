@@ -34,6 +34,10 @@ build:
   a `fn main()`. The file is a template: `$PLACEHOLDER$` tokens are substituted
   before compilation.
 
+The same block also carries the syscall layer (`build.stub.syscalls`) and the
+string obfuscation applied to the stub's literals (`build.stub.strings`); both
+apply to custom stubs as well.
+
 The packer compiles it with the same dependency set as the builtin stub
 (`chacha20poly1305`, `hex`, `windows`). Importing anything else fails with a
 plain `rustc` "crate not found" error, which is surfaced verbatim.
@@ -86,7 +90,8 @@ batesian build config.yaml "C:\\Windows\\System32\\svchost.exe"
 # config.yaml
 runtime:
   - technique: process_hollowing
-    target: "$arg.0$"
+    params:
+      target: "$arg.0$"
 ```
 
 A referenced-but-missing argument is an error:

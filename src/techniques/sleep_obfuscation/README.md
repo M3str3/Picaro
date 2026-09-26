@@ -34,9 +34,10 @@ rejected with a "not implemented yet" error; they arrive in later phases.
 ```yaml
 runtime:
   - technique: sleep_obfuscation
-    variant: ekko
-    sleep_ms: 5000
-    encrypt_regions: [payload]
+    params:
+      variant: ekko
+      sleep_ms: 5000
+      encrypt_regions: [payload]
 ```
 
 ## How it works

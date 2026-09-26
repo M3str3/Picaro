@@ -28,12 +28,14 @@ struct AlignedContext(CONTEXT);
 /// Several independent signals are combined. A check that cannot be *read*
 /// (rather than a positive hit) is treated as "not detected", so an unavailable
 /// check never aborts the pipeline by itself.
-pub fn anti_debug() -> Result<(), AntiDebugError> {
+pub fn anti_debug() -> Result<bool, AntiDebugError> {
     let detected = debugger_present();
     if detected && ABORT_ON_DETECT {
         return Err(AntiDebugError::DebuggerDetected);
     }
-    Ok(())
+    // A Preparation always continues the pipeline when it does not error; only
+    // the `bouncer` gate decides to abort (see `techniques/README.md`).
+    Ok(true)
 }
 
 /// Runs every check and ORs the results.

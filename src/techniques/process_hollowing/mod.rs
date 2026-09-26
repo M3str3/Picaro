@@ -23,6 +23,15 @@ pub fn default_target() -> String {
     r"C:\Windows\System32\svchost.exe".to_string()
 }
 
+impl Default for Params {
+    /// Defaults to hollowing `svchost.exe` (see [`default_target`]).
+    fn default() -> Self {
+        Self {
+            target: default_target(),
+        }
+    }
+}
+
 /// Static metadata for process hollowing.
 pub const DEF: TechniqueDef = TechniqueDef {
     name: "process_hollowing",
@@ -34,7 +43,8 @@ pub const DEF: TechniqueDef = TechniqueDef {
     doc_path: "src/techniques/process_hollowing/README.md",
     stub_fragment: include_str!("stub_fragment.rs"),
     params_example: r#"technique: process_hollowing
-target: "C:\\Windows\\System32\\svchost.exe""#,
+params:
+  target: "C:\\Windows\\System32\\svchost.exe""#,
     readme: include_str!("README.md"),
     syscalls: &[
         "NtAllocateVirtualMemory",

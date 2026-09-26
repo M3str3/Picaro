@@ -3,7 +3,7 @@
 A packer-level feature (not a pipeline technique): it obfuscates every
 sensitive string literal that the packer embeds into the generated stub, and
 emits code that rebuilds the string at runtime. The strategy and key are
-configurable in `build.strings`.
+configurable in `build.stub.strings`.
 
 ## What it does
 
@@ -23,9 +23,10 @@ obfuscation flows through `src/engine/obfuscation.rs`.
 
 ```yaml
 build:
-  strings:            # optional; omitted => xor + random key (with a warning)
-    strategy: xor     # xor | stack
-    key: random       # random | literal:<hex>   (xor only; ignored by stack)
+  stub:
+    strings:          # optional; omitted => xor + random key (with a warning)
+      strategy: xor   # xor | stack
+      key: random     # random | literal:<hex>   (xor only; ignored by stack)
 ```
 
 - `strategy` — `xor` (default) or `stack`.
@@ -43,9 +44,10 @@ build:
     crypto:
       algo: xchacha20poly1305
       key: random
-  strings:
-    strategy: xor
-    key: random
+  stub:
+    strings:
+      strategy: xor
+      key: random
 ```
 
 ## Strategies

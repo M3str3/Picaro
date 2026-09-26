@@ -7,6 +7,7 @@
 //! `src/techniques/README.md`.
 
 pub mod anti_debug;
+pub mod bouncer;
 pub mod patch_amsi;
 pub mod patch_etw;
 pub mod process_hollowing;
@@ -23,28 +24,70 @@ use crate::ui::{glyph, Palette};
 
 /// One step of the `runtime` list in the YAML config.
 ///
-/// Internally-tagged enum: each technique carries its own parameters as extra
-/// keys in the same YAML object (`technique: <name>` + the technique's fields).
+/// Internally-tagged enum: the step names the technique with `technique: <name>`
+/// and carries the technique's parameters under a nested `params:` mapping. The
+/// nested mapping keeps the technique key and its parameters in separate
+/// namespaces, so adding a parameter can never collide with the tag:
+///
+/// ```yaml
+/// runtime:
+///   - technique: process_hollowing
+///     params:
+///       target: "C:\\Windows\\System32\\svchost.exe"
+/// ```
+///
+/// `params` is optional: a technique whose parameters all have defaults (e.g.
+/// `reflective_loading`) may omit it entirely.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "technique", rename_all = "snake_case")]
 pub enum RuntimeStep {
     /// Detect a debugger in the current process, aborting by default
     /// (preparation).
-    AntiDebug(anti_debug::Params),
+    AntiDebug {
+        /// Technique parameters (`action`).
+        #[serde(default)]
+        params: anti_debug::Params,
+    },
+    /// Gate the pipeline on the host environment (preparation).
+    Bouncer {
+        /// Technique parameters (the declared checks).
+        #[serde(default)]
+        params: bouncer::Params,
+    },
     /// Patch AmsiScanBuffer in the current process (preparation).
-    PatchAmsi(patch_amsi::Params),
+    PatchAmsi {
+        /// Technique parameters (none).
+        #[serde(default)]
+        params: patch_amsi::Params,
+    },
     /// Patch the ETW event-writing exports in the current process
     /// (preparation).
-    PatchEtw(patch_etw::Params),
+    PatchEtw {
+        /// Technique parameters (`full`).
+        #[serde(default)]
+        params: patch_etw::Params,
+    },
     /// Process hollowing: run the payload inside a suspended, legitimate
     /// process instead of on disk.
-    ProcessHollowing(process_hollowing::Params),
+    ProcessHollowing {
+        /// Technique parameters (`target`).
+        #[serde(default)]
+        params: process_hollowing::Params,
+    },
     /// Reflective loading: map the payload into the current process and run
     /// its entry point.
-    ReflectiveLoading(reflective_loading::Params),
+    ReflectiveLoading {
+        /// Technique parameters (none).
+        #[serde(default)]
+        params: reflective_loading::Params,
+    },
     /// Sleep obfuscation: encrypt the image region during a timer-driven
     /// sleep (preparation).
-    SleepObfuscation(sleep_obfuscation::Params),
+    SleepObfuscation {
+        /// Technique parameters (`variant`, `sleep_ms`, `encrypt_regions`).
+        #[serde(default)]
+        params: sleep_obfuscation::Params,
+    },
 }
 
 impl RuntimeStep {
@@ -55,36 +98,42 @@ impl RuntimeStep {
     /// result is injected verbatim into the generated stub (see `engine::stub`).
     pub fn render_fragment(&self, strings: &StringsConfig) -> String {
         match self {
-            RuntimeStep::AntiDebug(params) => params.render_fragment(strings),
-            RuntimeStep::PatchAmsi(params) => params.render_fragment(strings),
-            RuntimeStep::PatchEtw(params) => params.render_fragment(strings),
-            RuntimeStep::ProcessHollowing(params) => params.render_fragment(strings),
-            RuntimeStep::ReflectiveLoading(params) => params.render_fragment(strings),
-            RuntimeStep::SleepObfuscation(params) => params.render_fragment(strings),
+            RuntimeStep::AntiDebug { params } => params.render_fragment(strings),
+            RuntimeStep::Bouncer { params } => params.render_fragment(strings),
+            RuntimeStep::PatchAmsi { params } => params.render_fragment(strings),
+            RuntimeStep::PatchEtw { params } => params.render_fragment(strings),
+            RuntimeStep::ProcessHollowing { params } => params.render_fragment(strings),
+            RuntimeStep::ReflectiveLoading { params } => params.render_fragment(strings),
+            RuntimeStep::SleepObfuscation { params } => params.render_fragment(strings),
         }
     }
 
     /// The technique's YAML key (used by semantic validation).
     pub fn name(&self) -> &'static str {
         match self {
-            RuntimeStep::AntiDebug(_) => anti_debug::DEF.name,
-            RuntimeStep::PatchAmsi(_) => patch_amsi::DEF.name,
-            RuntimeStep::PatchEtw(_) => patch_etw::DEF.name,
-            RuntimeStep::ProcessHollowing(_) => process_hollowing::DEF.name,
-            RuntimeStep::ReflectiveLoading(_) => reflective_loading::DEF.name,
-            RuntimeStep::SleepObfuscation(_) => sleep_obfuscation::DEF.name,
+            RuntimeStep::AntiDebug { .. } => anti_debug::DEF.name,
+            RuntimeStep::Bouncer { .. } => bouncer::DEF.name,
+            RuntimeStep::PatchAmsi { .. } => patch_amsi::DEF.name,
+            RuntimeStep::PatchEtw { .. } => patch_etw::DEF.name,
+            RuntimeStep::ProcessHollowing { .. } => process_hollowing::DEF.name,
+            RuntimeStep::ReflectiveLoading { .. } => reflective_loading::DEF.name,
+            RuntimeStep::SleepObfuscation { .. } => sleep_obfuscation::DEF.name,
         }
     }
 
     /// The technique's [`Category`] (Preparation vs Execution).
+    ///
+    /// Read from the technique's [`TechniqueDef`] so the registry stays the
+    /// single source of truth: a technique cannot disagree with itself.
     pub fn category(&self) -> Category {
         match self {
-            RuntimeStep::AntiDebug(_) => Category::Preparation,
-            RuntimeStep::PatchAmsi(_) => Category::Preparation,
-            RuntimeStep::PatchEtw(_) => Category::Preparation,
-            RuntimeStep::ProcessHollowing(_) => Category::Execution,
-            RuntimeStep::ReflectiveLoading(_) => Category::Execution,
-            RuntimeStep::SleepObfuscation(_) => Category::Preparation,
+            RuntimeStep::AntiDebug { .. } => anti_debug::DEF.category,
+            RuntimeStep::Bouncer { .. } => bouncer::DEF.category,
+            RuntimeStep::PatchAmsi { .. } => patch_amsi::DEF.category,
+            RuntimeStep::PatchEtw { .. } => patch_etw::DEF.category,
+            RuntimeStep::ProcessHollowing { .. } => process_hollowing::DEF.category,
+            RuntimeStep::ReflectiveLoading { .. } => reflective_loading::DEF.category,
+            RuntimeStep::SleepObfuscation { .. } => sleep_obfuscation::DEF.category,
         }
     }
 }
@@ -195,6 +244,7 @@ pub fn all() -> &'static [TechniqueDef] {
         anti_debug::DEF,
         patch_etw::DEF,
         sleep_obfuscation::DEF,
+        bouncer::DEF,
     ]
 }
 
@@ -234,7 +284,7 @@ pub fn list(ui: &Palette) -> String {
         ui.dim(format!("{:<18}", "TECHNIQUE")),
         ui.dim(format!("{:<12}", "CATEGORY")),
         ui.dim(format!("{:<12}", "STABILITY")),
-        ui.dim(format!("{:<16}", "ATT&CK")),
+        ui.dim(format!("{:<20}", "ATT&CK")),
         ui.dim("SUMMARY"),
     ));
     // Grouped by category, then maturity, then name: the listing reads as a
@@ -244,12 +294,12 @@ pub fn list(ui: &Palette) -> String {
     defs.sort_by_key(|def| (def.category, def.stability, def.name));
     for def in defs {
         out.push_str(&format!(
-            "{} {:<12} {} {:<16} {}\n",
+            "{} {:<12} {} {:<20} {}\n",
             ui.bold(format!("{:<18}", def.name)),
             def.category.label(),
             stability_label(def, ui),
             def.attck.join(", "),
-            truncate(short_description(def.readme), 70),
+            truncate(summary(def), 70),
         ));
     }
 
@@ -365,6 +415,14 @@ fn tests_path(def: &TechniqueDef) -> std::path::PathBuf {
         .join("techniques")
         .join(def.name)
         .join("tests.rs")
+}
+
+/// The technique's one-line summary, taken from its README.
+///
+/// Shared by `techniques list` and the interactive `build` wizard so both show
+/// the same wording.
+pub fn summary(def: &TechniqueDef) -> &str {
+    short_description(def.readme)
 }
 
 /// Extracts the one-line summary of a technique README (the first non-empty

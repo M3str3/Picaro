@@ -859,15 +859,17 @@ mod tests {
     }
 
     fn hollowing_pipeline() -> Vec<RuntimeStep> {
-        vec![RuntimeStep::ProcessHollowing(Params {
-            target: r"C:\Windows\System32\svchost.exe".to_string(),
-        })]
+        vec![RuntimeStep::ProcessHollowing {
+            params: Params {
+                target: r"C:\Windows\System32\svchost.exe".to_string(),
+            },
+        }]
     }
 
     fn reflective_pipeline() -> Vec<RuntimeStep> {
-        vec![RuntimeStep::ReflectiveLoading(
-            crate::techniques::reflective_loading::Params {},
-        )]
+        vec![RuntimeStep::ReflectiveLoading {
+            params: crate::techniques::reflective_loading::Params {},
+        }]
     }
 
     fn indirect() -> SyscallsConfig {

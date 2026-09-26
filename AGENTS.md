@@ -71,17 +71,26 @@ tests). The registry (`src/techniques/mod.rs`) is metadata-only; inspect it with
 
 ## Current state
 
-**YAML schema 2 (done).** The config document is now schema 2; a document that
-declares `schema: 1` is rejected at parse time with a migration hint (full
-mapping in `docs/migration-v1-v2.md`). `build` groups `payload` (`source` +
-`crypto`), `strings`, `stub` (`path`/`syscalls`) and `output`; the technique
-list is `runtime`. Build args move from `$build.N$` to `$arg.N$` (`$arg.0$`,
-`$arg.1$`, or a named `$arg.foo$` from a `foo=value` CLI arg); the stub still
-accesses already-resolved args as `$ARG_<key>$`. The old
-`InputConfig`/`LoaderConfig` are gone (`src/config/schema.rs`); `PipelineStep`
-is renamed `RuntimeStep` (`src/techniques/mod.rs`). `build.payload.source` is a
-single string: `http(s)://` is fetched in memory, `file://` is read from disk,
-`ftp://` is rejected, anything else is a local path.
+**YAML schema 4 (done).** The config document is schema 4; a document that
+declares `schema: 3` (or the retired `schema: 1`/`schema: 2`) is rejected at
+parse time with a migration hint (mappings in `docs/migration-v1-v3.md`,
+`docs/migration-v2-v3.md` and `docs/migration-v3-v4.md`). A `runtime` entry is
+`technique: <name>` plus an optional nested `params:` mapping (schema 3 kept the
+parameters next to `technique:`); a technique with no parameters omits
+`params:`. Unknown keys inside a runtime entry are ignored by serde, so a
+half-migrated flat entry silently falls back to the technique's defaults
+(`process_hollowing` then hollows `svchost.exe`). `build` has exactly three
+blocks: `payload` (`source` + `crypto`), `stub` (`path`/`syscalls`/`strings`)
+and `output`; `build.output.arch` is `x64` only (`x86` is recognized but
+rejected in validation as not integrated yet). String obfuscation lives at
+`build.stub.strings` (it only ever affected stub literals). Build args move from
+`$build.N$` to `$arg.N$` (`$arg.0$`, `$arg.1$`, or a named `$arg.foo$` from a
+`foo=value` CLI arg); the stub still accesses already-resolved args as
+`$ARG_<key>$`. The old `InputConfig`/`LoaderConfig` are gone
+(`src/config/schema.rs`); `PipelineStep` is renamed `RuntimeStep`
+(`src/techniques/mod.rs`). `build.payload.source` is a single string:
+`http(s)://` is fetched in memory, `file://` is read from disk, `ftp://` is
+rejected, anything else is a local path.
 
 **Payload import resolution (done).** New `src/engine/imports.rs` renders
 `$IMPORTS_BLOCK$`: one `resolve_imports(image, import_rva, import_size,
@@ -125,7 +134,7 @@ Gate (6b), reflective_loading/patch_amsi migration, stack spoofing, unhooking (7
 - The process-hollowing binary's static baseline is documented in
   `docs/measurements/` and `.memory.md`.
 
-**String obfuscation (done).** `build.strings` (`strategy: xor|stack`,
+**String obfuscation (done).** `build.stub.strings` (`strategy: xor|stack`,
 `key: random|literal:<hex>`) obfuscates every stub string literal through
 `src/engine/obfuscation.rs`. Replaces the old hardcoded XOR `0x5A`. Docs in
 `docs/techniques/string_obfuscation.md`, measurements in
@@ -168,7 +177,8 @@ colored table.
 
 **Custom loader stubs (done).** A YAML `build.stub.path` replaces the builtin
 stub with a user `.rs` template rendered through the same substitution engine
-(see `docs/custom-stubs.md`); `build.stub` may be set for `syscalls` alone.
+(see `docs/custom-stubs.md`); `build.stub` may be set for `syscalls`/`strings`
+alone.
 Placeholders use the `$X$` delimiter (`$PAYLOAD_BYTES$`, `$PAYLOAD_LEN$`,
 `$PAYLOAD_NONCE_DEF$`, `$PAYLOAD_KEY_DEF$` (embedded only when referenced),
 `$PREPARATION_BLOCKS$`, `$SYSCALLS_BLOCK$`, `$EXECUTION_BLOCK$`, `$ARG_<key>$`;
@@ -180,7 +190,61 @@ args are the positional args plus optional `name=value` pairs (no separate
 back to `{{X}}` (valid Rust — `rustfmt` reformats it into nested blocks and
 silently breaks substitution). See `.memory.md` for the rolling state.
 
+**Phase 8: `bouncer` environment gate (done).** New
+`src/techniques/bouncer/` Preparation technique (T1497.001, T1614.001,
+Experimental): it checks the current host and aborts the pipeline before the
+payload runs when the declared requirements are not met. All fields are
+optional and each activates one check — `hostname`/`username`/`domain`
+(case-insensitive globs), `language` (BCP-47), `keyboard` (4-digit layout
+codes), `not_in_vm` (CPUID hypervisor leaves), `not_in_sandbox` (aggregate
+heuristic, threshold 3), `min_uptime_min`, `min_ram_mb`; `mode: all|any`
+combines them and `on_fail: silent|exit` picks the rejection behaviour. No
+field declared is a no-op (surfaced by `config::validate::advisories` and
+printed as a build warning). **Preparation contract change:** a preparation now
+returns `Result<bool, E>` — `Ok(true)` continues, `Ok(false)` aborts — so
+the generated `run_preparations` returns `Result<bool, String>` and the builtin
+template exits `0` on `false`; `patch_amsi`/`patch_etw`/`anti_debug`/
+`sleep_obfuscation` return `Ok(true)`, and `on_fail: exit` calls
+`std::process::exit(1)` from the fragment. New `SENSITIVE_LITERALS`
+(`vboxservice`, `vmwaretray`, `vmtoolsd`, `wireshark`, `procmon`, `x64dbg`,
+`x32dbg`, `sandbox`, `malware`, `analysis`). Every check literal, every
+analysis process name and every hypervisor vendor token goes through
+`StringsConfig`. Docs: `src/techniques/bouncer/README.md`,
+`docs/measurements/phase8_bouncer.md`; examples
+`examples/configs/test-bouncer{,-miss,-full}.yaml`. Not done (by design):
+`on_fail: decoy` and checks outside the documented list.
+
+**Interactive build (done).** `batesian build interactive <payload>`
+(`src/wizard.rs`) asks the questions a schema-4 YAML encodes — name/args, the
+execution technique, preparation techniques plus their parameters, the stub
+(`strings`/`syscalls`) and the output — assembles a `Config`, prints it and
+writes it, then hands the file to the normal build, so the written YAML is the
+source of truth and `batesian build <file>` reproduces the artifact.
+`--config-out` sets the path (default `dist/<name>.yaml`). `build` gained an
+optional `interactive` subcommand (`subcommand_precedence_over_arg`), so `CONFIG`
+is now optional and validated in `run`. A technique the wizard has no prompts for
+falls back to parsing its `params_example`, so a newly registered technique still
+works before its questions exist. Prompts are `Prompter<R: BufRead, W: Write>`,
+which keeps the whole session testable; output uses `ui::Palette`
+(`question`/`menu`/`glyph::ASK` were added) and `techniques::summary` is now
+public so the wizard and `techniques list` share wording. Not prompted yet:
+`strings.key`, `build.stub.path`, `args_mode: override`, non-default
+`sleep_obfuscation` regions.
+
 ## Known limitations
+
+- **`x86` is parsed but rejected.** `Arch::X86` exists so the enum is complete,
+  but `config::validate` rejects it: the stub toolchain only produces x64, and
+  adding x86 means a 32-bit stub variant plus a per-architecture fragment for
+  every technique.
+
+- **`bouncer` is a fragile gate by construction.** `not_in_sandbox` combines
+  five indicators and rejects at a score of 3, deliberately preferring false
+  negatives (the payload runs where it should not) over false positives (it does
+  not run on the target). The full gate's added imports (`GetComputerName*`,
+  `GetUserNameW`, `GetUserDefaultLocaleName`, `GetKeyboardLayout*`,
+  `CreateToolhelp32Snapshot`, `GetSystemInfo`, `GlobalMemoryStatusEx`) are the
+  visible static signature; the check literals themselves stay obfuscated.
 
 - **Process hollowing does not run a full PE even with the IAT fixed.** The
   payload's IAT is now resolved (`src/engine/imports.rs`), but a

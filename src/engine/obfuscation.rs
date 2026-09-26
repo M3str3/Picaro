@@ -6,7 +6,7 @@
 //! turns each one into a fragment of Rust code that rebuilds the string at
 //! runtime instead of storing it in cleartext.
 //!
-//! Two strategies, selected per build in `build.strings`:
+//! Two strategies, selected per build in `build.stub.strings`:
 //!
 //! - [`StringStrategy::Xor`]: the plaintext is XORed with a 32-byte key at pack
 //!   time and decoded by a small runtime loop. Fast, good evasion ratio, and
@@ -43,7 +43,7 @@ impl StringStrategy {
     }
 }
 
-/// Raw `build.strings` YAML block, before semantic validation.
+/// Raw `build.stub.strings` YAML block, before semantic validation.
 ///
 /// `strategy` and `key` are kept as plain strings here so that
 /// [`StringsConfig::from_yaml`] can report clear errors for invalid values

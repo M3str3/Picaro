@@ -1,7 +1,7 @@
 //! `config` module: loading, parsing and validation of the YAML.
 //!
 //! Responsibilities:
-//! - `schema`: `serde` structs modeling the YAML document (schema 2).
+//! - `schema`: `serde` structs modeling the YAML document (schema 3).
 //! - `validate`: semantic validation after parsing.
 //! - `build_args`: `$arg.N$` placeholder substitution from CLI args.
 //! - `load_config`: single entry point that reads a file, resolves build
@@ -69,9 +69,9 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    /// A valid schema-2 YAML whose `process_hollowing.target` is a `$arg.0$` token.
+    /// A valid schema-3 YAML whose `process_hollowing.target` is a `$arg.0$` token.
     const ARGS_YAML: &str = r#"
-schema: 2
+schema: 4
 name: args-test
 build:
   payload:
@@ -86,7 +86,8 @@ build:
     trim_paths: all
 runtime:
   - technique: process_hollowing
-    target: "$arg.0$"
+    params:
+      target: "$arg.0$"
 "#;
 
     fn write_temp(name: &str, contents: &str) -> PathBuf {
@@ -105,7 +106,7 @@ runtime:
         let config = load_config(&path, &args).expect("load with build args");
 
         match &config.runtime[0] {
-            crate::techniques::RuntimeStep::ProcessHollowing(params) => {
+            crate::techniques::RuntimeStep::ProcessHollowing { params } => {
                 assert_eq!(params.target, r"C:\Windows\System32\notepad.exe");
             }
             other => panic!("expected process_hollowing, got {other:?}"),
@@ -121,7 +122,7 @@ runtime:
         let config = load_config(&path, &args).expect("load with a named build arg");
 
         match &config.runtime[0] {
-            crate::techniques::RuntimeStep::ProcessHollowing(params) => {
+            crate::techniques::RuntimeStep::ProcessHollowing { params } => {
                 assert_eq!(params.target, r"C:\Windows\System32\notepad.exe");
             }
             other => panic!("expected process_hollowing, got {other:?}"),

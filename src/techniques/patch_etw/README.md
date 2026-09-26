@@ -27,7 +27,8 @@ content before it runs, ETW is the telemetry channel that reports what ran.
 ```yaml
 runtime:
   - technique: patch_etw
-    full: true
+    params:
+      full: true
 ```
 
 ## How it works

@@ -1,4 +1,4 @@
-schema: 2
+schema: 4
 name: test-sleep
 
 build:
@@ -7,9 +7,10 @@ build:
     crypto:
       algo: xchacha20poly1305
       key: random
-  strings:
-    strategy: xor
-    key: random
+  stub:
+    strings:
+      strategy: xor
+      key: random
   output:
     path: ./dist/test_sleep.exe
     arch: x64
@@ -18,7 +19,8 @@ build:
 
 runtime:
   - technique: sleep_obfuscation
-    variant: ekko
-    sleep_ms: 5000
-    encrypt_regions: [payload]
+    params:
+      variant: ekko
+      sleep_ms: 5000
+      encrypt_regions: [payload]
   - technique: reflective_loading

@@ -7,7 +7,9 @@
 //! - `obfuscation`: string obfuscation for stub literals.
 //! - `compiler`: stub compilation with `rustc`.
 //! - `fetch`: in-memory HTTP(S) fetch of the input payload (URL input).
+//! - `args`: payload command-line construction and argument spoofing.
 
+pub mod args;
 pub mod compiler;
 pub mod crypto;
 pub mod fetch;

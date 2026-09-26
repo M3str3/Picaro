@@ -5,7 +5,7 @@
 # `examples/stubs/minimal.rs` ignores the technique blocks, so the packer
 # emits a warning (not an error) and produces a stub that only prints the
 # payload size.
-schema: 2
+schema: 4
 name: test-custom-stub
 
 build:

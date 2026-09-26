@@ -22,7 +22,8 @@
 ```yaml
 runtime:
   - technique: <technique_key>
-    <param>: <value>
+    params:
+      <param>: <value>
 ```
 
 ## How it works

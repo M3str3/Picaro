@@ -26,6 +26,15 @@ pub fn default_full() -> bool {
     true
 }
 
+impl Default for Params {
+    /// Defaults to also patching `EtwEventWriteFull` (see [`default_full`]).
+    fn default() -> Self {
+        Self {
+            full: default_full(),
+        }
+    }
+}
+
 /// Static metadata for the ETW patch.
 pub const DEF: TechniqueDef = TechniqueDef {
     name: "patch_etw",
@@ -37,7 +46,7 @@ pub const DEF: TechniqueDef = TechniqueDef {
     doc_path: "src/techniques/patch_etw/README.md",
     readme: include_str!("README.md"),
     stub_fragment: include_str!("stub_fragment.rs"),
-    params_example: "technique: patch_etw\nfull: true\n",
+    params_example: "technique: patch_etw\nparams:\n  full: true\n",
     // patch_etw still uses LoadLibraryA/GetProcAddress/VirtualProtect directly;
     // it will migrate to the Nt* helpers in a later phase.
     syscalls: &[],

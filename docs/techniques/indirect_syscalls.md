@@ -39,7 +39,8 @@ build:
       resolver: hells_gate
 runtime:
   - technique: process_hollowing
-    target: "C:\\Windows\\System32\\svchost.exe"
+    params:
+      target: "C:\\Windows\\System32\\svchost.exe"
 ```
 
 ## How it works

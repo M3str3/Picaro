@@ -31,8 +31,20 @@ copied files.
 
 - Define `Params` — the technique's YAML parameters. Use `#[serde(default =
   "default_...")]` for optional fields.
+- Implement `Default for Params` (or derive it). A runtime entry's `params:`
+  mapping is optional, so `RuntimeStep` relies on `Params: Default` to fill in a
+  technique whose parameters were omitted.
 - Fill in `DEF` — the `TechniqueDef` metadata (name, ATT&CK, stability,
-  category, …).
+  category, …). `params_example` is a YAML snippet that must parse as a
+  `RuntimeStep`; write the parameters under a nested `params:` mapping, exactly
+  as they appear in a config:
+
+  ```yaml
+  technique: my_technique
+  params:
+    some_field: value
+  ```
+
 - Implement `Params::render_fragment` — substitute the technique's
   `$PLACEHOLDER$` values into `DEF.stub_fragment`.
 
@@ -52,12 +64,29 @@ in `render_fragment`.
  the fragment must not care which mode is active. See
  `docs/techniques/indirect_syscalls.md`.
 
-A Preparation fragment must expose a `pub fn <name>() -> Result<(), E>` entry
+A Preparation fragment must expose a `pub fn <name>() -> Result<bool, E>` entry
 point (where `<name>` is the technique key); the stub wraps each Preparation
 fragment in its own module and calls that entry point from the generated
-`run_preparations` dispatcher. An Execution fragment must expose
+`run_preparations` dispatcher. `Ok(true)` continues the pipeline; `Ok(false)`
+aborts it, so the payload never runs. An Execution fragment must expose
 `execute_payload(&mut [u8]) -> Result<i32, String>` (the stub calls it
 unqualified).
+
+### Preparation contract: `Ok(true)` continues, `Ok(false)` aborts
+
+The generated `run_preparations` runs every Preparation in YAML order and
+returns `Result<bool, String>`:
+
+- `Ok(true)` — every preparation accepted the host; the stub goes on to run the
+  Execution technique.
+- `Ok(false)` — a preparation declined the host; `run_preparations` stops and
+the stub exits without touching the payload (the builtin template exits `0`).
+- `Err(_)` — a preparation failed while doing its work (not a policy decision);
+the stub reports the error and exits `1`.
+
+Most preparations always return `Ok(true)` (e.g. `patch_amsi`, `patch_etw`).
+The `bouncer` gate is the one that returns `Ok(false)`, or, when configured with
+`on_fail: exit`, exits the process with code `1` itself.
 
 ## 4. Register the technique
 
@@ -103,7 +132,7 @@ cargo run -- techniques validate
 `cargo test -- --ignored` includes
 `engine::compiler::tests::no_sensitive_literals_in_generated_stubs`: it compiles
 a stub for every registered technique and fails if any sensitive literal
-(`AmsiScanBuffer`, `amsi.dll`, `ntdll.dll`, …) leaks in cleartext. A literal
+(`AmsiScanBuffer`, `amsi.dll`, `ntdll.dll`, ...) leaks in cleartext. A literal
 counts as a leak only when it appears both in the compiled stub and in the
 generated stub source (comments stripped): names the toolchain embeds
 regardless of our code (the import table, `windows-result`'s `ntdll.dll`) are

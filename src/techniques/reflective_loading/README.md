@@ -17,7 +17,8 @@ target process is required.
 
 ## YAML parameters
 
-None. (Payload arguments are not supported yet and are left for a later phase.)
+None. Payload arguments are not per-technique: they come from
+`build.payload.args` / `build.payload.args_mode` (see below).
 
 ## YAML example
 
@@ -39,6 +40,27 @@ runtime:
 7. Run TLS callbacks, if present.
 8. Run the entry point (`DllMain` for a DLL, `mainCRTStartup`-style for an EXE)
    on a new thread and return its exit code.
+
+### Payload arguments
+
+Before mapping, `execute_payload` calls `patch_command_line()` (shared, in
+`src/engine/args.rs`, rendered as `$ARGS_BLOCK$`). The payload runs in *this*
+process, so the stub's own command line has to be replaced with
+`<exe> <yaml args> <runtime args>` (combined by `build.payload.args_mode`).
+
+Two places are updated (see `docs/techniques/process_argument_spoofing.md`):
+
+1. `PEB->ProcessParameters->CommandLine` (the `UNICODE_STRING` PEB-reading tools
+   see), repointed at a new leaked UTF-16 buffer; and
+2. the pointer `kernelbase` caches at process start and returns from
+   `GetCommandLineW` — measured on Windows 11, patching only the PEB does **not**
+   change what the payload's CRT reads. The cache is found by scanning
+   `kernelbase` for the original buffer pointer, so no version-specific offset is
+   hardcoded.
+
+The line's token 0 is the executable name (the stub's own path), never an
+argument, so the payload's `argv[0]` is the stub exe and the payload args start
+at `argv[1]`.
 
 ## What it evades
 
@@ -66,8 +88,9 @@ runtime:
 - The entry point runs on a separate thread so the stub can wait for it and
   capture its exit code. If the payload calls `ExitProcess`, it terminates the
   whole stub process (and its thread).
-- Payload arguments are not yet passed (`__args` does not exist); this is a
-  later phase.
+- Payload arguments are rewritten into the PEB and `kernelbase`'s cached
+  command-line pointer before the payload runs, so the payload's `argv` is what
+  the operator configured (`build.payload.args` + runtime args).
 
 ## References
 

@@ -1,4 +1,4 @@
-//! `serde` structs modeling the YAML configuration document (schema 2).
+//! `serde` structs modeling the YAML configuration document (schema 3).
 //!
 //! Each struct maps to a block of the YAML (see `examples/configs/`).
 //! The design aims to be:
@@ -8,33 +8,61 @@
 //! - **Extensible**: the enums centralize the valid options, so adding a new
 //!   technique or algorithm is a localized change.
 //!
-//! Schema 2 groups everything the build needs under `build` and keeps the
-//! execution-time technique list under `runtime`. See
-//! `docs/migration-v1-v2.md` for the schema-1 → schema-2 mapping.
+//! Schema 3 groups everything the build needs under `build` (`payload`,
+//! `stub`, `output`) and keeps the execution-time technique list under
+//! `runtime`. Stub-level string obfuscation lives under `build.stub.strings`.
+//! See `docs/migration-v1-v3.md` (schema 1 → current) and
+//! `docs/migration-v2-v3.md` (schema 2 → 3).
 
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::engine::args::ArgsMode;
 use crate::engine::obfuscation::YamlStringsConfig;
 use crate::engine::syscalls::YamlSyscallsConfig;
 use crate::techniques::RuntimeStep;
 
 /// The only schema version we accept.
-pub const SUPPORTED_SCHEMA: u32 = 2;
+pub const SUPPORTED_SCHEMA: u32 = 4;
 
 /// Migration hint shown when a config still declares `schema: 1`.
 const SCHEMA_1_MIGRATION: &str = "\
 schema 1 is no longer supported.
 Migration:
   input.path      → build.payload.source
-  payload.*       → build.payload.*, build.strings
+  payload.*       → build.payload.*
+  payload.strings → build.stub.strings
   loader.path     → build.stub.path
   loader.syscalls → build.stub.syscalls
   output.*        → build.output.*
   pipeline        → runtime
+  pipeline params → runtime[].params (nested)
   $build.N$       → $arg.N$
-See docs/migration-v1-v2.md for details.";
+See docs/migration-v1-v3.md, then docs/migration-v3-v4.md for details.";
+
+/// Migration hint shown when a config still declares `schema: 2`.
+const SCHEMA_2_MIGRATION: &str = "\
+schema 2 is no longer supported.
+Migration:
+  build.strings → build.stub.strings
+  runtime entries now nest parameters under `params:` (schema 3 → 4)
+See docs/migration-v2-v3.md (then docs/migration-v3-v4.md) for details.";
+
+/// Migration hint shown when a config still declares `schema: 3`.
+const SCHEMA_3_MIGRATION: &str = "\
+schema 3 is no longer supported.
+Migration: a runtime entry now nests the technique's parameters under a
+`params:` mapping instead of putting them next to `technique:`.
+  before (schema 3):
+    - technique: process_hollowing
+      target: \"C:\\\\Windows\\\\System32\\\\svchost.exe\"
+  after (schema 4):
+    - technique: process_hollowing
+      params:
+        target: \"C:\\\\Windows\\\\System32\\\\svchost.exe\"
+A technique with no parameters omits `params:` entirely.
+See docs/migration-v3-v4.md for details.";
 
 /// Root document of the YAML.
 ///
@@ -43,14 +71,14 @@ See docs/migration-v1-v2.md for details.";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// Schema version. Only `2` is accepted; it is validated on deserialize.
+    /// Schema version. Only `3` is accepted; it is validated on deserialize.
     #[serde(deserialize_with = "deserialize_schema_version")]
     pub schema: u32,
 
     /// Descriptive build name (identifies the generated artifact).
     pub name: String,
 
-    /// Build block: payload, strings, stub and output.
+    /// Build block: payload, stub and output.
     pub build: BuildConfig,
 
     /// Execution techniques the stub applies, in order.
@@ -68,15 +96,8 @@ pub struct BuildConfig {
     /// Payload block: where the input PE comes from and how it is encrypted.
     pub payload: PayloadConfig,
 
-    /// Optional string-obfuscation configuration.
-    ///
-    /// Applies to every stub literal (template, technique fragments and anything
-    /// else the packer emits), independent of the techniques. When absent, the
-    /// packer defaults to `xor` + a random key (and warns).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub strings: Option<YamlStringsConfig>,
-
-    /// Stub configuration: builtin or custom, plus the syscall layer.
+    /// Stub configuration: builtin or custom, the syscall layer and the
+    /// string obfuscation applied to the stub's literals.
     #[serde(default)]
     pub stub: StubConfig,
 
@@ -94,6 +115,17 @@ pub struct PayloadConfig {
     /// local path. `ftp://` is recognized but not implemented.
     pub source: String,
 
+    /// Fixed arguments passed to the payload at runtime, in order.
+    ///
+    /// Optional: without them the stub forwards only the args the operator
+    /// passes to the packed binary itself (see `args_mode`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+
+    /// How `args` combine with the runtime args (default: `join`).
+    #[serde(default)]
+    pub args_mode: ArgsMode,
+
     /// Sub-block with the cryptographic configuration.
     pub crypto: CryptoConfig,
 }
@@ -101,8 +133,9 @@ pub struct PayloadConfig {
 /// `stub` block: the stub configuration.
 ///
 /// `path` selects a custom stub template; `syscalls` configures how the stub
-/// talks to the kernel. Both are optional: without them the builtin stub with
-/// the default syscall mode is used.
+/// talks to the kernel; `strings` configures the obfuscation applied to the
+/// stub's literals. All are optional: without them the builtin stub, the
+/// default syscall mode, and `xor` + a random key are used.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StubConfig {
@@ -113,6 +146,14 @@ pub struct StubConfig {
     /// Syscall-layer configuration (how the stub invokes the kernel).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub syscalls: Option<YamlSyscallsConfig>,
+
+    /// Optional string-obfuscation configuration.
+    ///
+    /// Applies to every stub literal (template, technique fragments and anything
+    /// else the packer emits), independent of the techniques. When absent, the
+    /// packer defaults to `xor` + a random key (and warns).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strings: Option<YamlStringsConfig>,
 }
 
 /// Cryptographic configuration of the payload.
@@ -196,6 +237,8 @@ where
     match version {
         SUPPORTED_SCHEMA => Ok(version),
         1 => Err(serde::de::Error::custom(SCHEMA_1_MIGRATION)),
+        2 => Err(serde::de::Error::custom(SCHEMA_2_MIGRATION)),
+        3 => Err(serde::de::Error::custom(SCHEMA_3_MIGRATION)),
         other => Err(serde::de::Error::custom(format!(
             "unsupported schema version: {other} (only {SUPPORTED_SCHEMA} is accepted)"
         ))),
@@ -210,7 +253,7 @@ mod tests {
 
     /// Minimal valid YAML used as a base in all tests.
     const VALID_YAML: &str = r#"
-schema: 2
+schema: 4
 name: mimikatz-basic
 
 build:
@@ -228,7 +271,8 @@ build:
 
 runtime:
   - technique: process_hollowing
-    target: "C:\\Windows\\System32\\svchost.exe"
+    params:
+      target: "C:\\Windows\\System32\\svchost.exe"
 "#;
 
     #[test]
@@ -236,7 +280,7 @@ runtime:
         let config: Config =
             serde_yml::from_str(VALID_YAML).expect("the example YAML should parse");
 
-        assert_eq!(config.schema, 2);
+        assert_eq!(config.schema, 4);
         assert_eq!(config.name, "mimikatz-basic");
         assert_eq!(config.build.payload.source, "./mimikatz.exe");
         assert_eq!(
@@ -246,11 +290,14 @@ runtime:
         assert_eq!(config.build.payload.crypto.key, KeySource::Random);
         assert_eq!(config.build.stub.path, None);
         assert_eq!(config.build.stub.syscalls, None);
+        assert_eq!(config.build.stub.strings, None);
         assert_eq!(
             config.runtime,
-            vec![RuntimeStep::ProcessHollowing(Params {
-                target: r"C:\Windows\System32\svchost.exe".to_string(),
-            })]
+            vec![RuntimeStep::ProcessHollowing {
+                params: Params {
+                    target: r"C:\Windows\System32\svchost.exe".to_string(),
+                }
+            }]
         );
         assert_eq!(
             config.build.output.path,
@@ -262,21 +309,52 @@ runtime:
     }
 
     #[test]
-    fn parses_strings_block() {
+    fn parses_stub_strings_block() {
         let yaml = VALID_YAML.replace(
             "  output:\n",
-            "  strings:\n    strategy: stack\n    key: random\n\n  output:\n",
+            "  stub:\n    strings:\n      strategy: stack\n      key: random\n\n  output:\n",
         );
-        let config: Config = serde_yml::from_str(&yaml).expect("strings block should parse");
-        let strings = config.build.strings.expect("strings should be present");
+        let config: Config = serde_yml::from_str(&yaml).expect("stub strings block should parse");
+        let strings = config
+            .build
+            .stub
+            .strings
+            .expect("strings should be present");
         assert_eq!(strings.strategy, "stack");
         assert_eq!(strings.key, "random");
     }
 
     #[test]
+    fn parses_stub_strings_and_syscalls_together() {
+        let yaml = VALID_YAML.replace(
+            "  output:\n",
+            "  stub:\n    syscalls:\n      mode: indirect\n    strings:\n      strategy: xor\n\n  output:\n",
+        );
+        let config: Config = serde_yml::from_str(&yaml).expect("stub block should parse");
+        assert_eq!(
+            config.build.stub.syscalls.expect("syscalls").mode,
+            "indirect"
+        );
+        assert_eq!(config.build.stub.strings.expect("strings").strategy, "xor");
+    }
+
+    #[test]
     fn strings_block_is_optional() {
         let config: Config = serde_yml::from_str(VALID_YAML).expect("valid YAML should parse");
-        assert_eq!(config.build.strings, None);
+        assert_eq!(config.build.stub.strings, None);
+    }
+
+    #[test]
+    fn rejects_strings_block_at_build_level() {
+        // Schema 2's `build.strings` is no longer a valid sibling of `payload`.
+        let yaml = VALID_YAML.replace(
+            "  output:\n",
+            "  strings:\n    strategy: xor\n\n  output:\n",
+        );
+        assert!(
+            serde_yml::from_str::<Config>(&yaml).is_err(),
+            "build.strings should be rejected (deny_unknown_fields)"
+        );
     }
 
     #[test]
@@ -349,24 +427,112 @@ runtime:
     #[test]
     fn process_hollowing_defaults_target() {
         let yaml = VALID_YAML.replace(
-            "runtime:\n  - technique: process_hollowing\n    target: \"C:\\\\Windows\\\\System32\\\\svchost.exe\"\n",
-            "runtime:\n  - technique: process_hollowing\n",
+            "  - technique: process_hollowing\n    params:\n      target: \"C:\\\\Windows\\\\System32\\\\svchost.exe\"\n",
+            "  - technique: process_hollowing\n",
         );
         let config: Config =
             serde_yml::from_str(&yaml).expect("process_hollowing without target should parse");
         assert_eq!(
             config.runtime,
-            vec![RuntimeStep::ProcessHollowing(Params {
-                target: default_target(),
-            })]
+            vec![RuntimeStep::ProcessHollowing {
+                params: Params {
+                    target: default_target(),
+                }
+            }]
+        );
+    }
+
+    #[test]
+    fn payload_args_default_to_join() {
+        let config: Config = serde_yml::from_str(VALID_YAML).expect("valid YAML should parse");
+        assert_eq!(config.build.payload.args, None);
+        assert_eq!(config.build.payload.args_mode, ArgsMode::Join);
+    }
+
+    /// Locks in the documented migration hazard: unknown keys inside a runtime
+    /// entry are dropped, so a config migrated from schema 3 that leaves its
+    /// parameters flat parses and silently falls back to the defaults.
+    #[test]
+    fn a_flat_param_is_dropped_and_the_default_applies() {
+        let yaml = VALID_YAML.replace(
+            "    params:\n      target: \"C:\\\\Windows\\\\System32\\\\svchost.exe\"\n",
+            "    target: \"C:\\\\Windows\\\\System32\\\\notepad.exe\"\n",
+        );
+        let config: Config = serde_yml::from_str(&yaml).expect("a flat param still parses");
+        assert_eq!(
+            config.runtime,
+            vec![RuntimeStep::ProcessHollowing {
+                params: Params {
+                    target: default_target(),
+                }
+            }],
+            "the flat target must be dropped in favour of the default"
+        );
+    }
+
+    #[test]
+    fn payload_args_and_override_mode_parse() {
+        let yaml = VALID_YAML.replace(
+            "    source: ./mimikatz.exe\n",
+            "    source: ./mimikatz.exe\n    args: [\"privilege::debug\", \"log\", \"C:\\\\temp\\\\out.log\"]\n    args_mode: override\n",
+        );
+        let config: Config = serde_yml::from_str(&yaml).expect("args should parse");
+        assert_eq!(
+            config.build.payload.args,
+            Some(vec![
+                "privilege::debug".to_string(),
+                "log".to_string(),
+                r"C:\temp\out.log".to_string(),
+            ])
+        );
+        assert_eq!(config.build.payload.args_mode, ArgsMode::Override);
+    }
+
+    #[test]
+    fn empty_payload_args_are_valid() {
+        let yaml = VALID_YAML.replace(
+            "    source: ./mimikatz.exe\n",
+            "    source: ./mimikatz.exe\n    args: []\n",
+        );
+        let config: Config = serde_yml::from_str(&yaml).expect("empty args should parse");
+        assert_eq!(config.build.payload.args, Some(vec![]));
+        assert_eq!(config.build.payload.args_mode, ArgsMode::Join);
+    }
+
+    #[test]
+    fn payload_args_keep_special_characters() {
+        let yaml = VALID_YAML.replace(
+            "    source: ./mimikatz.exe\n",
+            "    source: ./mimikatz.exe\n    args: ['hello world', 'say \"hi\"', 'C:\\Program Files\\x']\n",
+        );
+        let config: Config = serde_yml::from_str(&yaml).expect("special args should parse");
+        assert_eq!(
+            config.build.payload.args,
+            Some(vec![
+                "hello world".to_string(),
+                "say \"hi\"".to_string(),
+                r"C:\Program Files\x".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_args_mode() {
+        let yaml = VALID_YAML.replace(
+            "    source: ./mimikatz.exe\n",
+            "    source: ./mimikatz.exe\n    args_mode: prepend\n",
+        );
+        assert!(
+            serde_yml::from_str::<Config>(&yaml).is_err(),
+            "an unknown args_mode should fail"
         );
     }
 
     #[test]
     fn rejects_invalid_target_type() {
         let yaml = VALID_YAML.replace(
-            "    target: \"C:\\\\Windows\\\\System32\\\\svchost.exe\"\n",
-            "    target: 123\n",
+            "      target: \"C:\\\\Windows\\\\System32\\\\svchost.exe\"\n",
+            "      target: 123\n",
         );
         assert!(
             serde_yml::from_str::<Config>(&yaml).is_err(),
@@ -376,7 +542,7 @@ runtime:
 
     #[test]
     fn rejects_schema_one_with_a_migration_message() {
-        let yaml = VALID_YAML.replace("schema: 2", "schema: 1");
+        let yaml = VALID_YAML.replace("schema: 4", "schema: 1");
         let err = serde_yml::from_str::<Config>(&yaml).expect_err("schema 1 should fail");
         let msg = err.to_string();
         assert!(
@@ -385,13 +551,39 @@ runtime:
         );
         assert!(msg.contains("build.payload.source"), "msg: {msg}");
         assert!(msg.contains("$arg.N$"), "msg: {msg}");
-        assert!(msg.contains("docs/migration-v1-v2.md"), "msg: {msg}");
+        assert!(msg.contains("docs/migration-v1-v3.md"), "msg: {msg}");
+    }
+
+    #[test]
+    fn rejects_schema_two_with_a_migration_message() {
+        let yaml = VALID_YAML.replace("schema: 4", "schema: 2");
+        let err = serde_yml::from_str::<Config>(&yaml).expect_err("schema 2 should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("schema 2 is no longer supported"),
+            "unclear error message: {msg}"
+        );
+        assert!(msg.contains("build.stub.strings"), "msg: {msg}");
+        assert!(msg.contains("docs/migration-v2-v3.md"), "msg: {msg}");
+    }
+
+    #[test]
+    fn rejects_schema_three_with_a_migration_message() {
+        let yaml = VALID_YAML.replace("schema: 4", "schema: 3");
+        let err = serde_yml::from_str::<Config>(&yaml).expect_err("schema 3 should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("schema 3 is no longer supported"),
+            "unclear error message: {msg}"
+        );
+        assert!(msg.contains("params:"), "msg: {msg}");
+        assert!(msg.contains("docs/migration-v3-v4.md"), "msg: {msg}");
     }
 
     #[test]
     fn rejects_unknown_schema_version() {
-        let yaml = VALID_YAML.replace("schema: 2", "schema: 3");
-        let err = serde_yml::from_str::<Config>(&yaml).expect_err("schema 3 should fail");
+        let yaml = VALID_YAML.replace("schema: 4", "schema: 5");
+        let err = serde_yml::from_str::<Config>(&yaml).expect_err("schema 5 should fail");
         let msg = err.to_string();
         assert!(
             msg.contains("unsupported schema version"),
@@ -458,7 +650,7 @@ output:
     #[test]
     fn allows_empty_runtime() {
         let yaml = VALID_YAML.replace(
-            "runtime:\n  - technique: process_hollowing\n    target: \"C:\\\\Windows\\\\System32\\\\svchost.exe\"\n",
+            "runtime:\n  - technique: process_hollowing\n    params:\n      target: \"C:\\\\Windows\\\\System32\\\\svchost.exe\"\n",
             "",
         );
         let config: Config = serde_yml::from_str(&yaml).expect("an empty runtime should be valid");

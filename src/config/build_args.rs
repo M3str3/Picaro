@@ -94,7 +94,7 @@ fn substitute_string(s: &mut String, args: &BTreeMap<String, String>) -> Result<
     if let Some(token) = legacy_token(s) {
         return Err(PackerError::Validation(format!(
             "the config uses the schema-1 build argument '{token}'; \
-             use $arg.0$ instead (schema 2 syntax)"
+             use $arg.0$ instead (schema 3 syntax)"
         )));
     }
 
@@ -257,11 +257,11 @@ mod tests {
 
     #[test]
     fn leaves_non_string_values_untouched() {
-        let mut value: Value = serde_yml::from_str("schema: 2\nstrip: true\n").expect("yaml");
+        let mut value: Value = serde_yml::from_str("schema: 3\nstrip: true\n").expect("yaml");
         substitute(&mut value, &args()).expect("substitute");
 
         let out = rendered(&value);
-        assert!(out.contains("schema: 2"), "rendered: {out}");
+        assert!(out.contains("schema: 3"), "rendered: {out}");
         assert!(out.contains("strip: true"), "rendered: {out}");
     }
 }

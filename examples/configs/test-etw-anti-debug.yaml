@@ -1,4 +1,4 @@
-schema: 2
+schema: 4
 name: test-etw-anti-debug
 
 build:
@@ -7,9 +7,10 @@ build:
     crypto:
       algo: xchacha20poly1305
       key: random
-  strings:
-    strategy: xor
-    key: random
+  stub:
+    strings:
+      strategy: xor
+      key: random
   output:
     path: ./dist/test_etw_anti_debug.exe
     arch: x64
@@ -18,7 +19,9 @@ build:
 
 runtime:
   - technique: anti_debug
-    action: abort
+    params:
+      action: abort
   - technique: patch_etw
-    full: true
+    params:
+      full: true
   - technique: reflective_loading

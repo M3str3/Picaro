@@ -38,6 +38,23 @@ pub const SENSITIVE_LITERALS: &[&str] = &[
     "SystemFunction032",
     "RtlCaptureContext",
     "NtContinue",
+    // Bouncer: analysis-environment indicators, reconstructed at runtime.
+    // `test` is deliberately absent: it is too short to be a meaningful signal
+    // and would match unrelated strings.
+    "vboxservice",
+    "vmwaretray",
+    "vmtoolsd",
+    "wireshark",
+    "procmon",
+    "x64dbg",
+    "x32dbg",
+    "sandbox",
+    "malware",
+    "analysis",
+    // Mimikatz-style runtime arguments: a YAML `build.payload.args` literal is a
+    // telltale signature, so it must reach the stub through `StringsConfig`.
+    "sekurlsa::logonpasswords",
+    "privilege::debug",
 ];
 
 /// Findings of the string scan.
@@ -114,9 +131,10 @@ pub fn find_sensitive_literals_in_source(source: &str) -> Vec<String> {
 /// Comment characters are replaced by spaces (newlines are kept) so the
 /// surrounding tokens are not glued together. Used by
 /// [`find_sensitive_literals_in_source`] so that a name mentioned only in a
-/// doc comment is not mistaken for a leaked literal.
+/// doc comment is not mistaken for a leaked literal, and by technique tests
+/// that check their rendered fragment's *code* for cleartext.
 #[cfg(test)]
-fn strip_comments(source: &str) -> String {
+pub(crate) fn strip_comments(source: &str) -> String {
     let bytes = source.as_bytes();
     let mut out = bytes.to_vec();
     let mut i = 0;

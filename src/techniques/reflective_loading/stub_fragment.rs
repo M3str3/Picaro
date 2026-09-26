@@ -418,6 +418,11 @@ fn execute_entrypoint(
 /// Adapter expected by the stub skeleton (`run()` calls this with the
 /// decrypted payload).
 fn execute_payload(image: &mut [u8]) -> Result<i32, String> {
+    // The payload runs in *this* process and reads its command line from the
+    // PEB (`GetCommandLineW`). Repoint it at `<exe> <yaml args> <runtime
+    // args>` first, so the payload receives its arguments instead of the
+    // stub's own command line (process argument spoofing).
+    crate::patch_command_line()?;
     // SAFETY: `image` is the decrypted, valid x64 PE produced by the packer.
     unsafe { run_reflective(image) }.map_err(|e| e.to_string())
 }

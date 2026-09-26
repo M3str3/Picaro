@@ -11,7 +11,7 @@ use crate::engine::obfuscation::StringsConfig;
 use super::{Capability, Category, Stability, TechniqueDef};
 
 /// Parameters for the AMSI patch (none).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Params {}
 
 /// Static metadata for the AMSI patch.

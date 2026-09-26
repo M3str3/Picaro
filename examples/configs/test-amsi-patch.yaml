@@ -1,4 +1,4 @@
-schema: 2
+schema: 4
 name: test-amsi-patch
 
 build:
@@ -7,9 +7,10 @@ build:
     crypto:
       algo: xchacha20poly1305
       key: random
-  strings:
-    strategy: xor
-    key: random
+  stub:
+    strings:
+      strategy: xor
+      key: random
   output:
     path: ./dist/test_amsi_patch.exe
     arch: x64

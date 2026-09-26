@@ -11,28 +11,35 @@ fn parses_params_from_empty_yaml_and_defaults_to_abort() {
         serde_yml::from_str("technique: anti_debug\n").expect("anti_debug should parse");
     assert_eq!(
         step,
-        RuntimeStep::AntiDebug(Params {
-            action: Action::Abort
-        })
+        RuntimeStep::AntiDebug {
+            params: Params {
+                action: Action::Abort
+            }
+        }
     );
 }
 
 #[test]
 fn parses_explicit_continue() {
-    let step: RuntimeStep = serde_yml::from_str("technique: anti_debug\naction: continue\n")
-        .expect("anti_debug should parse");
+    let step: RuntimeStep =
+        serde_yml::from_str("technique: anti_debug\nparams:\n  action: continue\n")
+            .expect("anti_debug should parse");
     assert_eq!(
         step,
-        RuntimeStep::AntiDebug(Params {
-            action: Action::Continue
-        })
+        RuntimeStep::AntiDebug {
+            params: Params {
+                action: Action::Continue
+            }
+        }
     );
 }
 
 #[test]
 fn rejects_an_unknown_action() {
-    let err = serde_yml::from_str::<RuntimeStep>("technique: anti_debug\naction: nope\n")
-        .expect_err("an unknown action must be rejected");
+    let err = serde_yml::from_str::<RuntimeStep>(
+        "technique: anti_debug\nparams:\n  action: nope\n",
+    )
+    .expect_err("an unknown action must be rejected");
     assert!(
         err.to_string().contains("unknown variant") && err.to_string().contains("abort"),
         "unclear error: {err}"

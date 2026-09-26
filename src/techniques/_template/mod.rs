@@ -23,7 +23,7 @@ pub const DEF: TechniqueDef = TechniqueDef {
     conflicts: &[],
     doc_path: "src/techniques/<technique_key>/README.md",
     stub_fragment: include_str!("stub_fragment.rs"),
-    params_example: "technique: <technique_key>\n",
+    params_example: "technique: <technique_key>\nparams:\n  <param>: <value>\n",
     readme: include_str!("README.md"),
 };
 

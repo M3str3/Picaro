@@ -22,6 +22,7 @@ use std::sync::OnceLock;
 use rand::RngCore;
 use regex::Regex;
 
+use super::args::{self, ArgsMode};
 use super::obfuscation::{byte_array_literal, StringsConfig};
 use super::syscalls::{self, SyscallsConfig, SyscallsMode};
 use super::{imports, BuildError, Result};
@@ -43,6 +44,11 @@ pub struct StubParams {
     pub payload_path: String,
     /// Positional build args, exposed to the template as `$ARG_<index>$`.
     pub build_args: BTreeMap<String, String>,
+    /// Fixed payload arguments from `build.payload.args`.
+    pub payload_args: Vec<String>,
+    /// How [`StubParams::payload_args`] combine with the packed binary's runtime
+    /// args (`build.payload.args_mode`).
+    pub args_mode: ArgsMode,
 }
 
 /// The result of rendering a custom loader stub.
@@ -66,6 +72,7 @@ const BUILTIN_REQUIRED: &[&str] = &[
     "$PAYLOAD_PATH$",
     "$PREPARATION_BLOCKS$",
     "$SYSCALLS_BLOCK$",
+    "$ARGS_BLOCK$",
     "$IMPORTS_BLOCK$",
     "$EXECUTION_BLOCK$",
 ];
@@ -148,6 +155,13 @@ pub fn render_custom_stub(
                 .to_string(),
         );
     }
+    if args::needed(pipeline) && !template.contains("$ARGS_BLOCK$") {
+        warnings.push(
+            "loader stub does not reference $ARGS_BLOCK$; the declared \
+             techniques' payload command line will not be built"
+                .to_string(),
+        );
+    }
 
     let source = render_common(template, params, pipeline, strings, syscalls)?;
     Ok(RenderedStub { source, warnings })
@@ -222,6 +236,10 @@ fn placeholder_values(
         syscalls::render_block(syscalls, pipeline, strings),
     );
     values.insert(
+        "$ARGS_BLOCK$".to_string(),
+        args::render_block(&params.payload_args, params.args_mode, pipeline, strings),
+    );
+    values.insert(
         "$IMPORTS_BLOCK$".to_string(),
         imports::render_block(pipeline, strings),
     );
@@ -256,8 +274,10 @@ fn render_blocks(pipeline: &[RuntimeStep], strings: &StringsConfig) -> (String, 
                 preparation_blocks.push_str(&format!("mod {module} {{\n"));
                 preparation_blocks.push_str(&fragment);
                 preparation_blocks.push_str("\n}\n\n");
+                // A preparation returning `false` aborts the pipeline before
+                // the payload runs (see the contract in `techniques/README.md`).
                 preparation_calls.push_str(&format!(
-                    "    {module}::{}().map_err(|e| e.to_string())?;\n",
+                    "    if !{module}::{}().map_err(|e| e.to_string())? {{\n        return Ok(false);\n    }}\n",
                     step.name()
                 ));
             }
@@ -269,10 +289,11 @@ fn render_blocks(pipeline: &[RuntimeStep], strings: &StringsConfig) -> (String, 
     }
 
     // The dispatcher is always emitted (an empty body when there are no
-    // Preparation techniques) so the template can call it unconditionally.
-    preparation_blocks.push_str("fn run_preparations() -> Result<(), String> {\n");
+    // Preparation techniques) so the template can call it unconditionally. It
+    // returns `false` when a preparation asked to abort the pipeline.
+    preparation_blocks.push_str("fn run_preparations() -> Result<bool, String> {\n");
     preparation_blocks.push_str(&preparation_calls);
-    preparation_blocks.push_str("    Ok(())\n}\n");
+    preparation_blocks.push_str("    Ok(true)\n}\n");
 
     (preparation_blocks, execution_block)
 }
@@ -371,6 +392,7 @@ fn run() {
 }
 $PREPARATION_BLOCKS$
 $SYSCALLS_BLOCK$
+$ARGS_BLOCK$
 $IMPORTS_BLOCK$
 $EXECUTION_BLOCK$
 "#;
@@ -384,13 +406,17 @@ $EXECUTION_BLOCK$
             stub_marker: "STUB_MARKER_deadbeef".to_string(),
             payload_path: "payload.bin".to_string(),
             build_args: BTreeMap::new(),
+            payload_args: Vec::new(),
+            args_mode: ArgsMode::Join,
         }
     }
 
     fn pipeline() -> Vec<RuntimeStep> {
-        vec![RuntimeStep::ProcessHollowing(Params {
-            target: r"C:\Windows\System32\svchost.exe".to_string(),
-        })]
+        vec![RuntimeStep::ProcessHollowing {
+            params: Params {
+                target: r"C:\Windows\System32\svchost.exe".to_string(),
+            },
+        }]
     }
 
     fn xor_config() -> StringsConfig {
@@ -455,8 +481,12 @@ $EXECUTION_BLOCK$
     #[test]
     fn preparation_and_execution_blocks_are_both_emitted() {
         let pipeline = vec![
-            RuntimeStep::PatchAmsi(crate::techniques::patch_amsi::Params {}),
-            RuntimeStep::ReflectiveLoading(crate::techniques::reflective_loading::Params {}),
+            RuntimeStep::PatchAmsi {
+                params: crate::techniques::patch_amsi::Params {},
+            },
+            RuntimeStep::ReflectiveLoading {
+                params: crate::techniques::reflective_loading::Params {},
+            },
         ];
         let out = render_main_rs(
             TEMPLATE,
@@ -532,7 +562,7 @@ $EXECUTION_BLOCK$
         );
     }
 
-    /// The `build.strings` YAML block reaches the technique fragments: a
+    /// The `build.stub.strings` YAML block reaches the technique fragments: a
     /// `stack` strategy leaves no decoder and no cleartext target.
     #[test]
     fn strings_block_strategy_reaches_the_fragments() {
@@ -606,6 +636,8 @@ $EXECUTION_BLOCK$
                 ("0".to_string(), "abc".to_string()),
                 ("name".to_string(), "value".to_string()),
             ]),
+            payload_args: Vec::new(),
+            args_mode: ArgsMode::Join,
         }
     }
 
@@ -636,11 +668,15 @@ $EXECUTION_BLOCK$
     #[test]
     fn custom_stub_ignoring_preparation_blocks_warns() {
         // The stub ignores both technique blocks; patch_amsi is Preparation.
-        let pipeline = vec![
-            RuntimeStep::PatchAmsi(crate::techniques::patch_amsi::Params {}),
-            RuntimeStep::ReflectiveLoading(crate::techniques::reflective_loading::Params {}),
-        ];
         let template = "fn main() {}\n";
+        let pipeline = vec![
+            RuntimeStep::PatchAmsi {
+                params: crate::techniques::patch_amsi::Params {},
+            },
+            RuntimeStep::ReflectiveLoading {
+                params: crate::techniques::reflective_loading::Params {},
+            },
+        ];
         let rendered = render_custom_stub(
             template,
             &custom_params(),
@@ -800,6 +836,54 @@ $EXECUTION_BLOCK$
                 .iter()
                 .any(|w| w.contains("IMPORTS_BLOCK")),
             "expected an imports-block warning: {:?}",
+            rendered.warnings
+        );
+    }
+
+    // --- payload argument helpers ---
+
+    #[test]
+    fn args_block_is_injected_for_an_execution_technique() {
+        let out = render_main_rs(
+            TEMPLATE,
+            &params(),
+            &pipeline(),
+            &xor_config(),
+            &default_syscalls(),
+        )
+        .expect("should render");
+        assert!(out.contains("mod payload_args"), "args block missing");
+        assert!(
+            out.contains("pub fn build_command_line"),
+            "command-line builder missing"
+        );
+        assert!(!out.contains("$ARGS_BLOCK$"), "placeholder left behind");
+    }
+
+    #[test]
+    fn args_block_is_empty_without_an_execution_technique() {
+        let out = render_main_rs(TEMPLATE, &params(), &[], &xor_config(), &default_syscalls())
+            .expect("should render");
+        assert!(
+            !out.contains("pub fn build_command_line"),
+            "args block leaked into a pipeline that does not need it"
+        );
+    }
+
+    #[test]
+    fn custom_stub_ignoring_args_block_warns() {
+        let template = "fn main() {}\n";
+        let rendered = render_custom_stub(
+            template,
+            &custom_params(),
+            &pipeline(),
+            &xor_config(),
+            &default_syscalls(),
+        )
+        .expect("should render");
+        assert!(
+            rendered.warnings.iter().any(|w| w.contains("ARGS_BLOCK")),
+            "expected an args-block warning: {:?}",
             rendered.warnings
         );
     }

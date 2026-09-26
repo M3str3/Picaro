@@ -2,7 +2,7 @@
 # Usage:
 #   batesian build examples/configs/test-build-args.yaml \
 #     "C:\\Windows\\System32\\svchost.exe" ./dist/custom.exe
-schema: 2
+schema: 4
 name: test-build-args
 
 build:
@@ -19,4 +19,5 @@ build:
 
 runtime:
   - technique: process_hollowing
-    target: "$arg.0$"
+    params:
+      target: "$arg.0$"

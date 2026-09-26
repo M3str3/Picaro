@@ -10,9 +10,11 @@ fn parses_params_with_default_target() {
         .expect("process_hollowing without target should parse");
     assert_eq!(
         step,
-        RuntimeStep::ProcessHollowing(Params {
-            target: default_target(),
-        })
+        RuntimeStep::ProcessHollowing {
+            params: Params {
+                target: default_target(),
+            }
+        }
     );
 }
 
@@ -20,14 +22,17 @@ fn parses_params_with_default_target() {
 fn parses_params_with_explicit_target() {
     let step: RuntimeStep = serde_yml::from_str(
         r#"technique: process_hollowing
-target: "C:\\Windows\\System32\\notepad.exe""#,
+params:
+  target: "C:\\Windows\\System32\\notepad.exe""#,
     )
     .expect("process_hollowing with target should parse");
     assert_eq!(
         step,
-        RuntimeStep::ProcessHollowing(Params {
-            target: r"C:\Windows\System32\notepad.exe".to_string(),
-        })
+        RuntimeStep::ProcessHollowing {
+            params: Params {
+                target: r"C:\Windows\System32\notepad.exe".to_string(),
+            }
+        }
     );
 }
 

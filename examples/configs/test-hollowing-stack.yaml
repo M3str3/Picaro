@@ -1,4 +1,4 @@
-schema: 2
+schema: 4
 name: test-hollowing-stack
 
 build:
@@ -7,8 +7,9 @@ build:
     crypto:
       algo: xchacha20poly1305
       key: random
-  strings:
-    strategy: stack
+  stub:
+    strings:
+      strategy: stack
   output:
     path: ./dist/test_packed_stack.exe
     arch: x64
@@ -17,4 +18,5 @@ build:
 
 runtime:
   - technique: process_hollowing
-    target: "C:\\Windows\\System32\\svchost.exe"
+    params:
+      target: "C:\\Windows\\System32\\svchost.exe"

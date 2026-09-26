@@ -2,6 +2,7 @@
 //!
 //! Three subcommands:
 //! - `build`: YAML → encrypt payload → render Rust stub → compile → out.exe.
+//!   `build interactive <payload>` generates that YAML from a few questions.
 //! - `audit`: static analysis of a PE (measurement infrastructure).
 //! - `techniques`: inspect the technique registry.
 //!
@@ -13,6 +14,7 @@ mod engine;
 mod error;
 mod techniques;
 mod ui;
+mod wizard;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -20,7 +22,7 @@ use std::time::Instant;
 
 use clap::{CommandFactory, Parser, Subcommand};
 
-use config::schema::{Arch, CryptoAlgorithm, KeySource, TrimPaths};
+use config::schema::{Arch, CryptoAlgorithm, KeySource, PayloadConfig, TrimPaths};
 use engine::{compiler, crypto, obfuscation, pe, stub, syscalls};
 use error::Result;
 use techniques::RuntimeStep;
@@ -30,6 +32,7 @@ use ui::{format_elapsed, glyph, human_size, Palette};
 const AFTER_HELP: &str = "\
 Examples:
   batesian build examples/configs/mimikatz.yaml
+  batesian build interactive mimikatz.exe
   batesian audit dist/test_amsi_patch.exe --focus imports,strings
   batesian techniques list
 
@@ -61,11 +64,16 @@ struct Cli {
 /// Available subcommands.
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Build a packed PE from a YAML configuration file.
+    /// Build a packed PE: from a YAML configuration file, or interactively.
+    #[command(subcommand_precedence_over_arg = true)]
     Build {
+        /// Generate the configuration interactively instead of reading a file.
+        #[command(subcommand)]
+        action: Option<BuildAction>,
+
         /// Path to the YAML configuration file.
         #[arg(value_name = "CONFIG")]
-        config: PathBuf,
+        config: Option<PathBuf>,
 
         /// Positional arguments referenced by the YAML as `$arg.N$`.
         #[arg(value_name = "ARG")]
@@ -87,6 +95,21 @@ enum Commands {
     Techniques {
         #[command(subcommand)]
         command: TechniquesCommand,
+    },
+}
+
+/// Ways to build that do not start from a hand-written YAML file.
+#[derive(Debug, Subcommand)]
+enum BuildAction {
+    /// Answer a few questions, write the YAML, then build it.
+    Interactive {
+        /// Path to the payload PE to pack.
+        #[arg(value_name = "PAYLOAD")]
+        payload: PathBuf,
+
+        /// Where to write the generated YAML (default: `dist/<name>.yaml`).
+        #[arg(long, value_name = "PATH")]
+        config_out: Option<PathBuf>,
     },
 }
 
@@ -137,12 +160,42 @@ fn run() -> Result<()> {
     };
 
     match command {
-        Commands::Build { config, args } => {
-            let config_path = config.clone();
-            let build_args = config::build_args::parse(&args);
-            let config = config::load_config(&config, &build_args)?;
-            build(&config, &build_args, &config_path, &ui, cli.verbose)?;
-        }
+        Commands::Build {
+            action,
+            config,
+            args,
+        } => match action {
+            Some(BuildAction::Interactive {
+                payload,
+                config_out,
+            }) => {
+                if config.is_some() {
+                    return Err(error::PackerError::Validation(
+                        "`build interactive` takes a payload, not a config file".to_string(),
+                    ));
+                }
+                // The wizard writes the YAML and hands back its path; loading it
+                // through the normal path proves the file is what gets built.
+                if let Some(path) = wizard::run(&payload, config_out.as_deref(), &ui)? {
+                    let build_args = BTreeMap::new();
+                    let config = config::load_config(&path, &build_args)?;
+                    build(&config, &build_args, &path, &ui, cli.verbose)?;
+                }
+            }
+            None => {
+                let Some(config) = config else {
+                    return Err(error::PackerError::Validation(
+                        "missing CONFIG: use `batesian build <config.yaml>` or \
+                         `batesian build interactive <payload>`"
+                            .to_string(),
+                    ));
+                };
+                let config_path = config.clone();
+                let build_args = config::build_args::parse(&args);
+                let config = config::load_config(&config, &build_args)?;
+                build(&config, &build_args, &config_path, &ui, cli.verbose)?;
+            }
+        },
         Commands::Audit { binary, focus } => {
             let report = audit::run(&binary, focus.as_deref(), &ui)?;
             anstream::print!("{report}");
@@ -303,14 +356,14 @@ fn build(
 
     // 3. Per-build marker, the string-obfuscation and syscall configurations.
     let stub_marker = stub::generate_stub_marker();
-    if config.build.strings.is_none() {
+    if config.build.stub.strings.is_none() {
         anstream::eprintln!(
             "  {} {}",
             ui.bang(),
-            ui.warn("obfuscation.strings not specified, defaulting to xor+random")
+            ui.warn("build.stub.strings not specified, defaulting to xor+random")
         );
     }
-    let strings = obfuscation::StringsConfig::from_yaml(config.build.strings.as_ref())?;
+    let strings = obfuscation::StringsConfig::from_yaml(config.build.stub.strings.as_ref())?;
     let syscalls = syscalls::SyscallsConfig::from_yaml(config.build.stub.syscalls.as_ref())?;
     if syscalls.mode == syscalls::SyscallsMode::Indirect
         && syscalls::required(&config.runtime).is_empty()
@@ -323,6 +376,10 @@ fn build(
                  uses NT syscalls yet (phase 6a: only process_hollowing does)"
             )
         );
+    }
+    // Config-level advisories from semantic validation (e.g. a no-op bouncer).
+    for warning in config::validate::advisories(config) {
+        anstream::eprintln!("  {} {}", ui.bang(), ui.warn(format!("warning: {warning}")));
     }
 
     // 4. Prepare `build/` and write the ciphertext the builtin template embeds.
@@ -362,6 +419,8 @@ fn build(
         stub_marker: stub_marker.clone(),
         payload_path: "payload.bin".to_string(),
         build_args: build_args.clone(),
+        payload_args: config.build.payload.args.clone().unwrap_or_default(),
+        args_mode: config.build.payload.args_mode,
     };
 
     let stub_src = if is_custom {
@@ -379,26 +438,33 @@ fn build(
     std::fs::write(&stub_path, &stub_src)?;
     let stub_time = timer.elapsed();
 
-    anstream::println!(
-        "{}",
-        ui.done(
-            "stub",
-            dotted(
-                ui,
-                &[
-                    pipeline_chain(ui, &config.runtime),
-                    format!("{} {}", ui.dim("strings"), strings.strategy.label()),
-                    format!("{} {}", ui.dim("syscalls"), syscalls.mode.label()),
-                ]
-            )
-        )
-    );
+    let mut stub_parts = vec![
+        pipeline_chain(ui, &config.runtime),
+        format!("{} {}", ui.dim("strings"), strings.strategy.label()),
+        format!("{} {}", ui.dim("syscalls"), syscalls.mode.label()),
+    ];
+    if !params.payload_args.is_empty() {
+        stub_parts.push(format!(
+            "{} {} ({})",
+            ui.dim("args"),
+            params.payload_args.len(),
+            config.build.payload.args_mode.label()
+        ));
+    }
+    anstream::println!("{}", ui.done("stub", dotted(ui, &stub_parts)));
     if verbose {
         anstream::println!("{}", ui.detail("template", ui.dim(&template_display)));
         anstream::println!("{}", ui.detail("marker", ui.dim(&stub_marker)));
         anstream::println!(
             "{}",
             ui.detail("resolver", ui.dim(syscalls.resolver.label()))
+        );
+        anstream::println!(
+            "{}",
+            ui.detail(
+                "payload args",
+                ui.dim(payload_args_label(&config.build.payload))
+            )
         );
         anstream::println!(
             "{}",
@@ -512,6 +578,10 @@ fn print_config(config: &config::Config, config_path: &Path, ui: &Palette) {
     );
     anstream::println!(
         "{}",
+        ui.field("payload args", payload_args_label(&config.build.payload))
+    );
+    anstream::println!(
+        "{}",
         ui.field("output", ui.target(config.build.output.path.display()))
     );
     anstream::println!("{}", ui.field("arch", arch_label(config.build.output.arch)));
@@ -611,6 +681,16 @@ fn describe_source(source: &str) -> String {
 fn crypto_label(algo: CryptoAlgorithm) -> &'static str {
     match algo {
         CryptoAlgorithm::XChaCha20Poly1305 => "xchacha20poly1305",
+    }
+}
+
+/// `(none)` or `N (mode)` for the payload's configured runtime arguments.
+fn payload_args_label(payload: &PayloadConfig) -> String {
+    match &payload.args {
+        Some(args) if !args.is_empty() => {
+            format!("{} ({})", args.len(), payload.args_mode.label())
+        }
+        _ => "(none)".to_string(),
     }
 }
 

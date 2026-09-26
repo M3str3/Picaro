@@ -8,7 +8,7 @@ use crate::techniques::RuntimeStep;
 fn parses_params_from_empty_yaml() {
     let step: RuntimeStep =
         serde_yml::from_str("technique: patch_amsi\n").expect("patch_amsi should parse");
-    assert_eq!(step, RuntimeStep::PatchAmsi(Params {}));
+    assert_eq!(step, RuntimeStep::PatchAmsi { params: Params {} });
 }
 
 #[test]

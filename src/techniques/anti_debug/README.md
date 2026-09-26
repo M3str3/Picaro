@@ -27,7 +27,8 @@ stub fail closed instead of handing over a decrypted payload.
 ```yaml
 runtime:
   - technique: anti_debug
-    action: abort
+    params:
+      action: abort
 ```
 
 ## How it works

@@ -119,7 +119,7 @@ A build is one YAML document. Strict by design: unknown keys are an error, so
 typos surface immediately instead of silently doing nothing.
 
 ```yaml
-schema: 2                 # only version 2 is accepted
+schema: 4                 # only version 4 is accepted
 name: mimikatz-basic
 
 build:
@@ -128,14 +128,14 @@ build:
     crypto:
       algo: xchacha20poly1305
       key: random
-  strings:
-    strategy: xor         # xor | stack
-    key: random           # random | literal:<64 hex chars>
   stub:
     path: null            # null = builtin stub; or a path to a custom .rs
     syscalls:
       mode: indirect      # none | indirect
       resolver: hells_gate
+    strings:
+      strategy: xor       # xor | stack
+      key: random         # random | literal:<64 hex chars>
   output:
     path: ./dist/mimikatz_packed.exe
     arch: x64
@@ -145,17 +145,18 @@ build:
 runtime:                  # 0..N preparation, then exactly one execution
   - technique: patch_amsi
   - technique: process_hollowing
-    target: "C:\\Windows\\System32\\svchost.exe"
+    params:
+      target: "C:\\Windows\\System32\\svchost.exe"
 ```
 
 | Block | What it decides |
 | --- | --- |
 | `build.payload.source` | The PE to pack: a local path or an `http(s)://` URL (fetched in memory, never written to disk). |
 | `build.payload.crypto` | Payload encryption. XChaCha20-Poly1305, 24-byte nonce, fresh random key per build. |
-| `build.strings` | How every runtime literal in the stub is obfuscated (`xor` or `stack`). Defaults to `xor` + random key, with a warning. |
-| `build.stub` | The stub itself: a custom template (`path`, `null` = builtin) and/or the syscall layer (`syscalls`). |
-| `build.output` | Where the packed PE goes and how it is finalized. `arch` is validated and reported; the stub toolchain is x64 today. |
-| `runtime` | The techniques to apply, in order. `0..N` Preparation followed by exactly one Execution. |
+| `build.stub.strings` | How every runtime literal in the stub is obfuscated (`xor` or `stack`). Defaults to `xor` + random key, with a warning. |
+| `build.stub` | The stub itself: a custom template (`path`, `null` = builtin), the syscall layer (`syscalls`) and string obfuscation (`strings`). |
+| `build.output` | Where the packed PE goes and how it is finalized. `arch` is `x64`; `x86` is recognized but rejected as not integrated yet. |
+| `runtime` | The techniques to apply, in order. `0..N` Preparation followed by exactly one Execution. A technique's parameters go under a nested `params:` mapping. |
 
 **Build arguments.** Positional args after the config path are substituted in
 the YAML as `$arg.N$` (0-based); an arg of the form `name=value` is available
@@ -168,10 +169,33 @@ batesian build config.yaml "C:\\Windows\\System32\\svchost.exe"
 ```yaml
 runtime:
   - technique: process_hollowing
-    target: "$arg.0$"
+    params:
+      target: "$arg.0$"
 ```
 
 A referenced-but-missing argument is a clear error, not a silent empty string.
+
+### Interactive build
+
+Rather than writing the YAML by hand, answer a few questions and let the packer
+write it for you:
+
+```bash
+batesian build interactive mimikatz.exe
+```
+
+The wizard walks through the payload (name, runtime args), the techniques (one
+Execution plus any Preparation, each with its own parameters), the stub
+(`strings`, `syscalls`) and the output, then prints the resulting document and
+writes it. The YAML is the source of truth: the build runs from the file it just
+wrote, so re-running `batesian build dist/mimikatz.yaml` reproduces the artifact
+with no prompts. `--config-out <path>` picks where the YAML lands (default
+`dist/<name>.yaml`).
+
+Generated configs pass through the same validation as hand-written ones, so they
+are never the reason a build fails. Questions cover the common path only: a
+literal `strings.key`, a custom `build.stub.path`, `args_mode: override` or
+non-default `sleep_obfuscation` regions are one edit away in the written file.
 
 ## Techniques
 
@@ -322,6 +346,11 @@ user-facing output goes through `src/ui.rs`. The full list is in
 
 ## Known limitations
 
+- **`arch: x86` is not integrated yet.** The value is recognized (so the enum
+  is complete) but rejected at validation time; the stub toolchain only
+  produces x64 today. Adding x86 needs a 32-bit stub variant and a
+  per-architecture fragment for every technique — more work than the enum value
+  suggests.
 - **Process hollowing does not yet run a full PE.** The payload's IAT is
   resolved, but a `CREATE_SUSPENDED` target has not run its loader
   (`PEB->Ldr == NULL`; only `ntdll` plus the main image are mapped), so the

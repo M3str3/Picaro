@@ -49,4 +49,10 @@ windows = { version = "0.58", features = [
     "Win32_System_SystemInformation",
     # IMAGE_THUNK_DATA64 for reflective import resolution.
     "Win32_System_WindowsProgramming",
+    # Bouncer: GetUserDefaultLocaleName (T1614).
+    "Win32_Globalization",
+    # Bouncer: GetKeyboardLayout* (T1614).
+    "Win32_UI_Input_KeyboardAndMouse",
+    # Bouncer: CreateToolhelp32Snapshot + PROCESSENTRY32W (T1497).
+    "Win32_System_Diagnostics_ToolHelp",
 ] }

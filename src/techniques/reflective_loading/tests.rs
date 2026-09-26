@@ -7,7 +7,7 @@ use crate::techniques::RuntimeStep;
 fn parses_params_from_empty_yaml() {
     let step: RuntimeStep = serde_yml::from_str("technique: reflective_loading\n")
         .expect("reflective_loading should parse");
-    assert_eq!(step, RuntimeStep::ReflectiveLoading(Params {}));
+    assert_eq!(step, RuntimeStep::ReflectiveLoading { params: Params {} });
 }
 
 #[test]
@@ -67,8 +67,10 @@ fn compiles_reflective_loading_stub_to_pe() {
         stub_marker: crate::engine::stub::generate_stub_marker(),
         payload_path: "payload.bin".to_string(),
         build_args: std::collections::BTreeMap::new(),
+        payload_args: Vec::new(),
+        args_mode: crate::engine::args::ArgsMode::Join,
     };
-    let pipeline = vec![RuntimeStep::ReflectiveLoading(Params {})];
+    let pipeline = vec![RuntimeStep::ReflectiveLoading { params: Params {} }];
     let strings = crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap();
     let stub_src = crate::engine::stub::render_main_rs(
         &template,

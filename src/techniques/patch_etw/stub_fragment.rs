@@ -36,12 +36,14 @@ pub enum PatchEtwError {
 /// The DLL and function names are substituted at build time by
 /// `Params::render_fragment` with code that rebuilds them at runtime, so they
 /// do not appear in `strings`.
-pub fn patch_etw() -> Result<(), PatchEtwError> {
+pub fn patch_etw() -> Result<bool, PatchEtwError> {
     patch_export(&$ETW_DLL_DEF$, &$ETW_FUNC_DEF$)?;
     if PATCH_FULL {
         let _ = patch_export(&$ETW_DLL_DEF$, &$ETW_FULL_FUNC_DEF$);
     }
-    Ok(())
+    // A Preparation always continues the pipeline; only the `bouncer` gate
+    // decides to abort (see `techniques/README.md`).
+    Ok(true)
 }
 
 /// Resolves `func` in `dll` and overwrites its prologue with [`ETW_PATCH`].

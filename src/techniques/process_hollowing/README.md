@@ -25,7 +25,8 @@ name.
 ```yaml
 runtime:
   - technique: process_hollowing
-    target: "C:\\Windows\\System32\\svchost.exe"
+    params:
+      target: "C:\\Windows\\System32\\svchost.exe"
 ```
 
 ## How it works
@@ -70,8 +71,25 @@ contracts).
 > the target, in which case the first import call jumps to unmapped memory. The
 > Windows loader also refuses to initialize the swapped-in image (it exits with
 > `STATUS_DLL_INIT_FAILED`), so the target's own loader cannot be used to load
-these DLLs either. See `docs/techniques/process_hollowing.md` for the measured
-evidence and the proposed follow-up.
+> these DLLs either. See `docs/techniques/process_hollowing.md` for the measured
+> evidence and the proposed follow-up.
+
+### Payload arguments
+
+The command line passed to `CreateProcessA` is built from `build.payload.args`
+plus the args the operator passes to the packed binary, combined by
+`build.payload.args_mode` (`join`/`override`). The shared helper lives in
+`src/engine/args.rs` (`$ARGS_BLOCK$`); see
+`docs/techniques/process_argument_spoofing.md`.
+
+The line is `<target exe name> <args>`: **token 0 is the executable name, never
+an argument**, so the payload's `argv[0]` is `svchost.exe` and the payload args
+start at `argv[1]`. The suspended target's `RTL_USER_PROCESS_PARAMETERS` keeps
+this line when the payload image is swapped in, and the target's CRT has already
+built its `argv` from it, so `GetCommandLineW` inside the payload returns it.
+
+> The command line is ANSI (`CreateProcessA`), so non-ASCII arguments are
+> converted to the active code page; keep payload arguments ASCII.
 
 ## What it evades
 
@@ -111,6 +129,9 @@ evidence and the proposed follow-up.
 - Import resolution is shared with reflective loading
   (`src/engine/imports.rs`); the fragment only supplies an RVA→file-offset
   mapper.
+- The payload command line is shared with reflective loading
+  (`src/engine/args.rs`, `$ARGS_BLOCK$`) and passed as `lpCommandLine`;
+  `build_command_line` returns it with the target's file name as token 0.
 
 ## References
 

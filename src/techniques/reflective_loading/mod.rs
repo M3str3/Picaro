@@ -11,7 +11,7 @@ use crate::engine::obfuscation::StringsConfig;
 use super::{Capability, Category, Stability, TechniqueDef};
 
 /// Parameters for reflective loading (none for now; args are a later phase).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Params {}
 
 /// Static metadata for reflective loading.

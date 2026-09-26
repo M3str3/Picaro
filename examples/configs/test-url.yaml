@@ -1,6 +1,6 @@
 # Example: fetch the input payload from a URL, in memory (no disk write).
 # Usage: batesian build examples/configs/test-url.yaml
-schema: 2
+schema: 4
 name: test-url
 
 build:
@@ -17,4 +17,5 @@ build:
 
 runtime:
   - technique: process_hollowing
-    target: "C:\\Windows\\System32\\svchost.exe"
+    params:
+      target: "C:\\Windows\\System32\\svchost.exe"
