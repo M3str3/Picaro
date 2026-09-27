@@ -44,3 +44,10 @@
 .md-nav--primary .md-nav__item--nested .md-nav__item--nested {
   margin-top: 0.6rem;
 }
+
+/* Home page brand mark: centered above the H1, kept modest in size. */
+.md-typeset img.picaro-logo {
+  display: block;
+  margin: 0 auto 1.2rem;
+  width: 16rem;
+}

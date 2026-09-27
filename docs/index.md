@@ -1,3 +1,5 @@
+![picaro logo](assets/picaro_logo.png){ .picaro-logo }
+
 # picaro
 
 `picaro` is a declarative PE packer for authorized red team research. It takes

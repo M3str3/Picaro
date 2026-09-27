@@ -67,8 +67,6 @@ pub const TAGLINE: &str = "mimicry-based packer";
 // ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠻⢿⣿⠿⣀⣦⣿⣿⣿⣿⣿⡿⠛⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
 // ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠑⠒⠻⠿⠟⠛⠉⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀";
 
-
-
 /// The wordmark shown at the left of the header.
 ///
 /// Kept as a literal rather than a data file: the art lives with the code that
@@ -103,8 +101,6 @@ pub const ASCII_ART: &str = "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
 ⠀⠀⠀⢀⣶⣾⣿⠟⠛⠻⠿⣿⣿⣿⣿⣿⣿⠀⠀⠀⠀⣿⡟⠀⠀⠀⠀⠀⠀⠀
 ⠀⠀⠀⡾⠟⠋⠀⠀⠀⠀⠀⠀⠀⠀⠈⠉⠉⠀⠀⠀⠸⢿⣧⣄⠀⠀⠀⠀⠀⠀
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠁⠀⠀⠀⠀⠀";
-
-
 
 /// Glyphs used across the CLI.
 ///
@@ -536,7 +532,11 @@ fn split_lines(art: &str) -> Vec<&str> {
 
 /// The width of the widest line (its trailing blanks are already trimmed).
 fn block_width(lines: &[&str]) -> usize {
-    lines.iter().map(|line| line.chars().count()).max().unwrap_or(0)
+    lines
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0)
 }
 
 /// Lays `left` and `right` out as two columns of one canvas, centering the

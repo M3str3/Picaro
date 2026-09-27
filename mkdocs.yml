@@ -11,6 +11,10 @@ use_directory_urls: false
 theme:
   name: material
   language: en
+  # Square brand mark shown in the nav header and as the favicon; the file
+  # lives in docs/assets/ so MkDocs copies it into the built site.
+  logo: assets/picaro_logo.png
+  favicon: assets/picaro_logo.png
   palette:
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
