@@ -2,7 +2,7 @@
 //!
 //! Every evasion/execution technique lives in its own subdirectory (e.g.
 //! [`process_hollowing`]) and is registered in [`all`]. The registry is pure
-//! metadata: it feeds the `batesian techniques` CLI, the `validate` CI check
+//! metadata: it feeds the `picaro techniques` CLI, the `validate` CI check
 //! and the stub renderer. How to add a technique is documented in
 //! `src/techniques/README.md`.
 
@@ -22,9 +22,9 @@ use crate::engine::obfuscation::StringsConfig;
 use crate::error::{PackerError, Result};
 use crate::ui::{glyph, Palette};
 
-use crate::config::schema::PayloadFormat;
+use crate::plan::schema::PayloadFormat;
 
-/// One step of the `runtime` list in the YAML config.
+/// One step of the `runtime` list in the YAML plan.
 ///
 /// Internally-tagged enum: the step names the technique with `technique: <name>`
 /// and carries the technique's parameters under a nested `params:` mapping. The
@@ -165,7 +165,7 @@ pub enum Category {
 }
 
 impl Category {
-    /// Lowercase label used by `batesian techniques list`.
+    /// Lowercase label used by `picaro techniques list`.
     pub fn label(self) -> &'static str {
         match self {
             Category::Preparation => "preparation",
@@ -190,7 +190,7 @@ pub enum Stability {
 }
 
 impl Stability {
-    /// Lowercase label used by `batesian techniques list`.
+    /// Lowercase label used by `picaro techniques list`.
     pub fn label(self) -> &'static str {
         match self {
             Stability::Stable => "stable",
@@ -287,7 +287,7 @@ const REQUIRED_SECTIONS: &[&str] = &[
     "## References",
 ];
 
-/// Renders the `batesian techniques list` output.
+/// Renders the `picaro techniques list` output.
 pub fn list(ui: &Palette) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -343,7 +343,7 @@ fn stability_label(def: &TechniqueDef, ui: &Palette) -> String {
     }
 }
 
-/// Returns the README of `name` for `batesian techniques show`.
+/// Returns the README of `name` for `picaro techniques show`.
 pub fn show(name: &str) -> Result<String> {
     find(name)
         .map(|def| def.readme.to_string())

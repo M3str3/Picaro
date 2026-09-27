@@ -11,7 +11,7 @@ Usage:
     python scripts/docs.py build           # static site into ./site
     python scripts/docs.py build --strict  # fail on warnings (broken links, ...)
 
-Set ``BATESIAN_DOCS_IMAGE`` to use a different image tag.
+Set ``PICARO_DOCS_IMAGE`` to use a different image tag.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from pathlib import Path
 # The repository root (this file lives in scripts/). It is mounted at /docs,
 # which is where mkdocs.yml and `docs_dir` expect to be.
 ROOT = Path(__file__).resolve().parent.parent
-IMAGE = os.environ.get("BATESIAN_DOCS_IMAGE", "squidfunk/mkdocs-material:9")
+IMAGE = os.environ.get("PICARO_DOCS_IMAGE", "squidfunk/mkdocs-material:9")
 CONTAINER_DIR = "/docs"
 PORT = 8000
 
@@ -41,14 +41,14 @@ def build_command(args: list[str]) -> list[str]:
     command = ["docker", "run", "--rm"]
     if action[0] == "serve":
         command += ["-p", f"{PORT}:{PORT}"]
-    # f"{ROOT.as_posix()}:{CONTAINER_DIR}" -> e.g. C:/code/packerman:/docs
+    # f"{ROOT.as_posix()}:{CONTAINER_DIR}" -> e.g. C:/code/picaro:/docs
     command += ["-v", f"{ROOT.as_posix()}:{CONTAINER_DIR}", IMAGE, *action]
     return command
 
 
 def main(argv: list[str]) -> int:
     command = build_command(argv)
-    if os.environ.get("BATESIAN_DOCS_PRINT"):
+    if os.environ.get("PICARO_DOCS_PRINT"):
         print(" ".join(command))
         return 0
     try:

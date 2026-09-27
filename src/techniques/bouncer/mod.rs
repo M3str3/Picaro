@@ -86,7 +86,7 @@ pub const HYPERVISOR_VENDOR_TOKENS: &[&str] =
 /// Parameters for the bouncer gate.
 ///
 /// Every field is optional. With no field declared the technique is a no-op
-/// (it always lets the payload run); `batesian` warns about that at build time.
+/// (it always lets the payload run); `picaro` warns about that at build time.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Params {
     /// How the declared checks combine (`all` or `any`).
@@ -180,7 +180,7 @@ params:
 
 impl Params {
     /// Whether the gate declares no checks at all, so it can never reject a
-    /// host. Surfaced as a build advisory by `config::validate::advisories`.
+    /// host. Surfaced as a build advisory by `plan::validate::advisories`.
     pub fn is_noop(&self) -> bool {
         self.hostname.is_none()
             && self.username.is_none()
@@ -321,7 +321,7 @@ fn opt_u32_def(value: Option<u32>) -> String {
     }
 }
 
-/// Renders a `Vec<String>` placeholder from the config's `Vec<String>`.
+/// Renders a `Vec<String>` placeholder from the plan's `Vec<String>`.
 fn list_def(values: &[String], strings: &StringsConfig, prefix: &str) -> String {
     let items: Vec<String> = values
         .iter()

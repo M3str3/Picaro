@@ -24,24 +24,87 @@ use anstream::{AutoStream, ColorChoice};
 use anstyle::{Color, Reset, RgbColor, Style};
 
 /// Application name, used in the banner subtitle and the CLI help.
-pub const NAME: &str = "batesian";
+pub const NAME: &str = "picaro";
 
 /// One-line description, reused by the CLI help and the banner subtitle.
 pub const TAGLINE: &str = "mimicry-based packer";
 
-/// The banner art, printed before every subcommand.
+// pub const BANNER: &str = "
+//   ██████╗  █████╗ ████████╗███████╗███████╗██╗ █████╗ ███╗  ██╗
+//   ██╔══██╗██╔══██╗╚══██╔══╝██╔════╝██╔════╝██║██╔══██╗████╗ ██║
+//   ██████╦╝███████║   ██║   █████╗  ███████╗██║███████║██╔██╗██║
+//   ██╔══██╗██╔══██║   ██║   ██╔══╝  ╚════██║██║██╔══██║██║╚████║
+//   ██████╦╝██║  ██║   ██║   ███████╗███████║██║██║  ██║██║ ╚███║
+//   ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚══════╝╚══════╝╚═╝╚═╝  ╚═╝╚═╝  ╚═╝
+// ";
+// //
+// pub const BANNER: &str = "
+// █████▄ ▄▄  ▄▄▄▄  ▄▄▄  ▄▄▄▄   ▄▄▄
+// ██▄▄█▀ ██ ██▀▀▀ ██▀██ ██▄█▄ ██▀██
+// ██     ██ ▀████ ██▀██ ██ ██ ▀███▀
+// ";
+
+// pub const BANNER: &str = "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣴⣾⣾⣿⣿⣶⣿⣿⡿⣏⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+// ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢠⣾⣿⣿⣿⣿⣿⣿⣿⣻⢽⡳⣏⠞⣜⣹⠄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+// ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣰⣿⣿⣿⣿⣿⣿⡟⣧⠳⡍⢖⢣⡙⡚⠴⡸⣆⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+// ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢠⣿⣿⣿⣿⣿⣿⡿⠘⠤⠓⡨⠌⢂⠔⡁⠆⠡⢀⢊⡽⠀⠀⠀⠀⠀⠀⠀⠀
+// ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣾⣿⣿⣿⣿⣿⠛⠒⠙⠒⠲⢤⡈⠄⢂⠐⢈⠐⢤⠋⠀⠀⠀⠀⠀⠀⠀⠀⠀
+// ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⣿⣿⣿⣿⣿⣿⢆⠀⠀⠀⠀⠀⠈⠫⣆⡈⠄⠠⢌⣧⠀⠀⠀⠀⠀⠀⠀⠀⠀
+// ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣿⣿⣿⣿⣿⣿⣿⠫⢦⡀⠀⠀⠀⠀⠀⢱⡇⢌⠘⣯⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+// ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣼⣿⣿⣿⣿⣿⣿⣧⠇⡌⠙⣦⣄⡀⠀⠀⢸⣏⠴⡘⢧⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+// ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣿⣿⣿⣿⣿⣿⣿⡗⡸⣀⢣⠰⣨⢙⡷⣶⣿⣿⣞⡱⢺⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+// ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢰⣿⣿⣿⣿⣿⣿⣿⡰⡑⠦⣌⠳⡄⣿⣾⣿⣿⣿⣿⡭⡙⣆⠀⠀⠀⠀⠀⠀⠀⠀⠀
+// ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⣿⣿⣿⣿⣿⣿⣿⡧⢉⠤⡈⢡⢸⣿⣿⣿⣿⣿⡿⣤⢡⢸⡀⠀⠀⠀⠀⠀⠀⠀⠀
+// ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣸⣿⣿⣿⣿⣿⣿⣿⠜⡡⠒⢡⠃⣿⣿⣿⣿⣿⣿⣿⣽⢷⡆⣇⠀⠀⠀⠀⠀⠀⠀⠀
+// ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣸⣿⣿⣿⣿⣿⣿⣿⡟⢤⡉⢆⡸⢟⢋⣍⣽⣷⣿⣿⣿⣿⣷⠺⣄⠀⣠⣴⡿⣧⣠⡿
+// ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣽⣿⣿⣿⣿⣿⣿⣿⣟⠦⡑⡎⡴⣋⠴⣸⣿⣿⣿⡿⣿⣿⣿⠇⣾⣿⣿⣯⣿⣿⣯⠃
+// ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⣿⣿⣿⣿⣿⣿⣿⣿⣇⠳⣙⠶⣩⣿⣿⣿⣯⣿⣇⠀⠀⢀⡀⣻⠿⣿⣿⣿⣿⠃⠀
+// ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢻⣿⣿⣿⣿⣿⣿⣿⡎⣝⣾⢿⣿⣿⣿⣿⣿⣿⣿⣿⢠⣾⣿⣷⣼⣿⢿⡿⠁⠀⠀
+// ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣾⣭⣟⣛⡻⠿⣿⠧⣼⣿⣿⣿⣿⡿⠟⠀⠀⠀⠀
+// ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢻⣿⣿⣿⣿⣿⣯⣿⣿⣿⣿⠿⢿⣿⣻⣿⣶⣶⣿⢿⣿⣿⡟⠁⠀⠀⠀⠀⠀
+// ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠹⣿⣿⣿⣿⣿⣿⣿⣿⡇⠠⣄⣻⡿⣿⡿⣳⣯⣿⡿⠋⠀⠀⠀⠀⠀⠀⠀
+// ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠻⣿⣿⣿⣿⣿⡿⢧⣡⣽⣿⣿⣿⣰⣿⣾⠏⠀⠀⠀⠀⠀⠀⠀⠀⠀
+// ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠻⢿⣿⠿⣀⣦⣿⣿⣿⣿⣿⡿⠛⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+// ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠑⠒⠻⠿⠟⠛⠉⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀";
+
+
+
+/// The wordmark shown at the left of the header.
 ///
 /// Kept as a literal rather than a data file: the art lives with the code that
-/// prints it, so there is no second copy to keep in sync. The leading blank line
-/// is deliberate — it separates the art from the shell prompt above it.
-pub const BANNER: &str = "
-  ██████╗  █████╗ ████████╗███████╗███████╗██╗ █████╗ ███╗  ██╗
-  ██╔══██╗██╔══██╗╚══██╔══╝██╔════╝██╔════╝██║██╔══██╗████╗ ██║
-  ██████╦╝███████║   ██║   █████╗  ███████╗██║███████║██╔██╗██║
-  ██╔══██╗██╔══██║   ██║   ██╔══╝  ╚════██║██║██╔══██║██║╚████║
-  ██████╦╝██║  ██║   ██║   ███████╗███████║██║██║  ██║██║ ╚███║
-  ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚══════╝╚══════╝╚═╝╚═╝  ╚═╝╚═╝  ╚═╝
-";
+/// prints it, so there is no second copy to keep in sync. The frame around it
+/// (and the art beside it) is drawn by [`frame`] when the banner is rendered.
+pub const BANNER: &str = "   ███████████   ███
+  ░░███░░░░░███ ░░░
+   ░███    ░███ ████   ██████   ██████   ████████   ██████
+   ░██████████ ░░███  ███░░███ ░░░░░███ ░░███░░███ ███░░███
+   ░███░░░░░░   ░███ ░███ ░░░   ███████  ░███ ░░░ ░███ ░███
+   ░███         ░███ ░███  ███ ███░░███  ░███     ░███ ░███
+   █████        █████░░██████ ░░████████ █████    ░░██████
+  ░░░░░        ░░░░░  ░░░░░░   ░░░░░░░░ ░░░░░      ░░░░░░";
+
+/// The mascot art shown at the right of the header.
+///
+/// Its trailing braille blank cells (`U+2800`) are padding, not drawing; the
+/// layout ignores them so the gap to the banner stays exact (see
+/// [`banner_side_by_side`]).
+pub const ASCII_ART: &str = "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⣀⣀⣀⠀⠀⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣾⣿⣿⣿⣿⡿⠿⠿⠆⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⢻⣿⣿⣿⠋⢀⡔⠁⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠿⠿⣿⢠⡞⠀⠀⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣠⣾⣿⣿⣿⣿⠀⠀⠀⢀⣀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣾⣿⣿⣿⣿⣿⣿⠀⣀⣤⣾⠿⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣠⣾⣿⣿⣿⣿⣿⣿⣿⣿⠿⠛⠉⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣘⣯⣿⣿⣿⣿⣿⣿⣿⠋⠁⠀⠀⠀⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⠀⢀⣴⣾⣿⣿⣿⣿⣿⣿⣿⣿⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⣠⣴⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⣶⣤⠀⠀⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⣠⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠙⠛⠻⠿⣿⣿⠀⠀⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⠿⠿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠀⠀⠀⠀⣿⣿⠀⠀⠀⠀⠀⠀⠀
+⠀⠀⠀⢀⣶⣾⣿⠟⠛⠻⠿⣿⣿⣿⣿⣿⣿⠀⠀⠀⠀⣿⡟⠀⠀⠀⠀⠀⠀⠀
+⠀⠀⠀⡾⠟⠋⠀⠀⠀⠀⠀⠀⠀⠀⠈⠉⠉⠀⠀⠀⠸⢿⣧⣄⠀⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠁⠀⠀⠀⠀⠀";
+
+
 
 /// Glyphs used across the CLI.
 ///
@@ -96,6 +159,10 @@ const STEP_WIDTH: usize = 8;
 const META_GAP: usize = 2;
 /// Label width of a verbose detail line ([`Palette::detail`]).
 const DETAIL_WIDTH: usize = 9;
+/// Empty columns between the banner and the art in [`banner_side_by_side`].
+const ART_GAP: usize = 4;
+/// Blank cells [`frame`] leaves between the banner and its border.
+const BANNER_PADDING: usize = 1;
 
 /// Semantic color roles.
 ///
@@ -300,9 +367,13 @@ impl Palette {
         self.faint(glyph::RULE.repeat(width))
     }
 
-    /// The banner, brand-colored and without a trailing newline.
+    /// The banner and the mascot art side by side, boxed, brand-colored and
+    /// without a trailing newline.
     pub fn banner(self) -> String {
-        self.paint(style_of(Tone::Brand), BANNER.trim_end())
+        self.paint(
+            style_of(Tone::Brand),
+            frame(&banner_side_by_side(), BANNER_PADDING),
+        )
     }
 
     /// The `▸ app subcommand · target` echo printed at the top of a command's
@@ -436,6 +507,105 @@ impl Palette {
     }
 }
 
+/// The banner and the mascot art, printed side by side as a single block.
+///
+/// `BANNER` stays on the left, padded to its own widest line so `ASCII_ART`
+/// always starts at the same column, and the shorter drawing is centered
+/// vertically against the taller one. Both widths are measured ignoring trailing
+/// blank cells — ASCII whitespace and the braille blank (`U+2800`) the art pads
+/// with — so the gap is exactly [`ART_GAP`] columns instead of `ART_GAP` plus
+/// invisible filler.
+pub fn banner_side_by_side() -> String {
+    join_blocks(&split_lines(BANNER), &split_lines(ASCII_ART), ART_GAP)
+}
+
+/// Whether `cell` is invisible padding rather than drawing.
+fn is_blank(cell: char) -> bool {
+    cell.is_whitespace() || cell == '\u{2800}'
+}
+
+/// Splits `art` into lines, dropping each line's trailing blank cells.
+///
+/// Leading blanks are kept: they are part of the drawing's shape.
+fn split_lines(art: &str) -> Vec<&str> {
+    art.trim_end_matches(is_blank)
+        .lines()
+        .map(|line| line.trim_end_matches(is_blank))
+        .collect()
+}
+
+/// The width of the widest line (its trailing blanks are already trimmed).
+fn block_width(lines: &[&str]) -> usize {
+    lines.iter().map(|line| line.chars().count()).max().unwrap_or(0)
+}
+
+/// Lays `left` and `right` out as two columns of one canvas, centering the
+/// shorter drawing vertically against the taller one.
+fn join_blocks(left: &[&str], right: &[&str], gap: usize) -> String {
+    let left_width = block_width(left);
+    let height = left.len().max(right.len());
+    let left_top = (height - left.len()) / 2;
+    let right_top = (height - right.len()) / 2;
+    let separator = " ".repeat(gap);
+
+    (0..height)
+        .map(|row| {
+            let left_line = row
+                .checked_sub(left_top)
+                .and_then(|i| left.get(i))
+                .copied()
+                .unwrap_or("");
+            let right_line = row
+                .checked_sub(right_top)
+                .and_then(|i| right.get(i))
+                .copied()
+                .unwrap_or("");
+
+            let mut line = String::from(left_line);
+            for _ in left_line.chars().count()..left_width {
+                line.push(' ');
+            }
+            line.push_str(&separator);
+            line.push_str(right_line);
+            // The right column can be shorter than the canvas, so a row may end
+            // with nothing; keep trailing whitespace out of the block.
+            line.trim_end().to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Draws `content` inside a box with `padding` blank cells on every side.
+///
+/// The border is generated rather than stored, so any block — the joined banner
+/// and art, in particular — is framed by calling this. Widths are measured with
+/// [`split_lines`], so trailing blank cells never widen the box.
+pub fn frame(content: &str, padding: usize) -> String {
+    let lines = split_lines(content);
+    let width = block_width(&lines);
+    let inner = width + padding * 2;
+    let rule = "─".repeat(inner);
+    let blank = format!("│{}│", " ".repeat(inner));
+
+    let mut out = Vec::with_capacity(lines.len() + padding * 2 + 2);
+    out.push(format!("┌{rule}┐"));
+    for _ in 0..padding {
+        out.push(blank.clone());
+    }
+    for line in &lines {
+        out.push(format!(
+            "│{}{line}{}│",
+            " ".repeat(padding),
+            " ".repeat(width - line.chars().count() + padding)
+        ));
+    }
+    for _ in 0..padding {
+        out.push(blank.clone());
+    }
+    out.push(format!("└{rule}┘"));
+    out.join("\n")
+}
+
 /// The terminal width in columns, from `COLUMNS` when set (default 80).
 ///
 /// Layout helpers use this to decide between a wide and a stacked rendering;
@@ -559,18 +729,42 @@ mod tests {
         assert_eq!(format_elapsed(Duration::from_millis(1500)), "1.50 s");
     }
 
-    /// The banner is a literal, with its deliberate leading blank line.
+    /// The banner literal is embedded (not read from disk) and non-empty.
     #[test]
     fn banner_is_embedded() {
         assert!(
             BANNER.contains(glyph::BLOCK),
             "banner looks empty: {BANNER:?}"
         );
-        assert!(
-            BANNER.starts_with('\n') && !BANNER.starts_with("\n\n"),
-            "banner must open with a single blank line: {BANNER:?}"
+        assert_eq!(
+            Palette::plain().banner(),
+            frame(&banner_side_by_side(), BANNER_PADDING)
         );
-        assert_eq!(Palette::plain().banner(), BANNER.trim_end());
+    }
+
+    /// `frame` boxes its content with the requested padding on every side.
+    #[test]
+    fn frame_boxes_content_with_padding() {
+        assert_eq!(
+            frame("ab\nc\n", 1),
+            "┌────┐\n│    │\n│ ab │\n│ c  │\n│    │\n└────┘"
+        );
+    }
+
+    /// The layout pads the left column to its widest line, inserts the gap and
+    /// centers the shorter drawing; trailing blank cells — ASCII spaces or the
+    /// braille blank the art pads with — never count toward a width.
+    #[test]
+    fn side_by_side_pads_gaps_and_centers_the_drawings() {
+        let left = split_lines("aa \nuuub\n"); // 4 wide, 2 tall
+        let right = split_lines("R\nRR\nR\n"); // 2 wide, 3 tall
+        assert_eq!(join_blocks(&left, &right, 1), "aa   R\nuuub RR\n     R");
+
+        let left = split_lines("X\n");
+        let right = split_lines("1\n2\n3\n4\n");
+        assert_eq!(join_blocks(&left, &right, 1), "  1\nX 2\n  3\n  4");
+
+        assert_eq!(split_lines("ab\u{2800}\u{2800}\ncd  \n"), vec!["ab", "cd"]);
     }
 
     /// The command echo carries the tool name, the subcommand and the target.

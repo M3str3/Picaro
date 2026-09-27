@@ -3,12 +3,12 @@
 //! A generated `VERSIONINFO` and certificate subject that look like a real
 //! product keep the artifact from carrying obviously synthetic metadata
 //! ("test", "admin", empty strings). `randomize` in `output.resources.version_info`
-//! turns it on; explicit fields in the config always win.
+//! turns it on; explicit fields in the plan always win.
 
 use rand::Rng;
 use serde::Serialize;
 
-use crate::config::schema::VersionInfoConfig;
+use crate::plan::schema::VersionInfoPlan;
 
 /// Company-name parts: `"<adjective> <noun> <suffix>"`, e.g. `Blue Ridge Systems`.
 const ADJECTIVES: &[&str] = &[
@@ -93,28 +93,25 @@ pub fn generate() -> Identity {
     }
 }
 
-/// Fills the unset fields of `config` with generated values when
-/// `config.randomize` is set.
+/// Fills the unset fields of `plan` with generated values when
+/// `plan.randomize` is set.
 ///
-/// The returned config has `randomize` cleared, so it can be used as a plain,
+/// The returned plan has `randomize` cleared, so it can be used as a plain,
 /// fully-resolved `VERSIONINFO` spec.
-pub fn apply(config: &VersionInfoConfig) -> VersionInfoConfig {
-    if !config.randomize {
-        return config.clone();
+pub fn apply(plan: &VersionInfoPlan) -> VersionInfoPlan {
+    if !plan.randomize {
+        return plan.clone();
     }
     let identity = generate();
-    VersionInfoConfig {
-        company: config.company.clone().or(Some(identity.company)),
-        product: config.product.clone().or(Some(identity.product)),
-        description: config.description.clone().or(Some(identity.description)),
-        original_filename: config.original_filename.clone(),
-        internal_name: config
-            .internal_name
-            .clone()
-            .or(Some(identity.internal_name)),
-        copyright: config.copyright.clone().or(Some(identity.copyright)),
-        file_version: config.file_version.clone().or(Some(identity.file_version)),
-        product_version: config
+    VersionInfoPlan {
+        company: plan.company.clone().or(Some(identity.company)),
+        product: plan.product.clone().or(Some(identity.product)),
+        description: plan.description.clone().or(Some(identity.description)),
+        original_filename: plan.original_filename.clone(),
+        internal_name: plan.internal_name.clone().or(Some(identity.internal_name)),
+        copyright: plan.copyright.clone().or(Some(identity.copyright)),
+        file_version: plan.file_version.clone().or(Some(identity.file_version)),
+        product_version: plan
             .product_version
             .clone()
             .or(Some(identity.product_version)),
@@ -166,11 +163,11 @@ mod tests {
 
     #[test]
     fn randomizes_unset_fields_and_clears_the_flag() {
-        let config = VersionInfoConfig {
+        let plan = VersionInfoPlan {
             randomize: true,
-            ..VersionInfoConfig::default()
+            ..VersionInfoPlan::default()
         };
-        let resolved = apply(&config);
+        let resolved = apply(&plan);
         assert!(!resolved.randomize);
         assert!(resolved.company.is_some());
         assert!(resolved.file_version.is_some());
@@ -178,12 +175,12 @@ mod tests {
 
     #[test]
     fn explicit_fields_win_over_generated_ones() {
-        let config = VersionInfoConfig {
+        let plan = VersionInfoPlan {
             randomize: true,
             company: Some("Explicit Ltd".to_string()),
-            ..VersionInfoConfig::default()
+            ..VersionInfoPlan::default()
         };
-        let resolved = apply(&config);
+        let resolved = apply(&plan);
         assert_eq!(resolved.company.as_deref(), Some("Explicit Ltd"));
         assert!(
             resolved.product.is_some(),
@@ -193,10 +190,10 @@ mod tests {
 
     #[test]
     fn apply_is_a_no_op_without_randomize() {
-        let config = VersionInfoConfig {
+        let plan = VersionInfoPlan {
             company: Some("Only This".to_string()),
-            ..VersionInfoConfig::default()
+            ..VersionInfoPlan::default()
         };
-        assert_eq!(apply(&config), config);
+        assert_eq!(apply(&plan), plan);
     }
 }

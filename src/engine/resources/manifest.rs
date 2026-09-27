@@ -5,10 +5,10 @@
 //! "ran from a temp folder" binary into something that behaves like a normal
 //! installed application for the shell and the compatibility engine.
 
-use crate::config::schema::ManifestConfig;
+use crate::plan::schema::ManifestPlan;
 
-/// Builds the manifest XML for `config`, as UTF-8 bytes.
-pub fn build(config: &ManifestConfig) -> Vec<u8> {
+/// Builds the manifest XML for `plan`, as UTF-8 bytes.
+pub fn build(plan: &ManifestPlan) -> Vec<u8> {
     let mut xml = String::new();
     xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n");
     xml.push_str(
@@ -19,14 +19,14 @@ pub fn build(config: &ManifestConfig) -> Vec<u8> {
     xml.push_str("      <requestedPrivileges>\r\n");
     xml.push_str(&format!(
         "        <requestedExecutionLevel level=\"{}\" uiAccess=\"{}\"/>\r\n",
-        config.level.xml_value(),
-        config.ui_access
+        plan.level.xml_value(),
+        plan.ui_access
     ));
     xml.push_str("      </requestedPrivileges>\r\n");
     xml.push_str("    </security>\r\n");
     xml.push_str("  </trustInfo>\r\n");
 
-    if config.dpi_aware {
+    if plan.dpi_aware {
         xml.push_str("  <application xmlns=\"urn:schemas-microsoft-com:asm.v3\">\r\n");
         xml.push_str("    <windowsSettings>\r\n");
         xml.push_str(
@@ -43,16 +43,16 @@ pub fn build(config: &ManifestConfig) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::schema::ExecutionLevel;
+    use crate::plan::schema::ExecutionLevel;
 
     #[test]
     fn emits_the_requested_execution_level_and_ui_access() {
-        let config = ManifestConfig {
+        let plan = ManifestPlan {
             level: ExecutionLevel::RequireAdministrator,
             ui_access: true,
             dpi_aware: true,
         };
-        let xml = String::from_utf8(build(&config)).expect("utf-8");
+        let xml = String::from_utf8(build(&plan)).expect("utf-8");
         assert!(xml.contains("level=\"requireAdministrator\""));
         assert!(xml.contains("uiAccess=\"true\""));
         assert!(xml.contains("<dpiAware"));
@@ -61,12 +61,12 @@ mod tests {
 
     #[test]
     fn omits_dpi_awareness_when_disabled() {
-        let config = ManifestConfig {
+        let plan = ManifestPlan {
             level: ExecutionLevel::AsInvoker,
             ui_access: false,
             dpi_aware: false,
         };
-        let xml = String::from_utf8(build(&config)).expect("utf-8");
+        let xml = String::from_utf8(build(&plan)).expect("utf-8");
         assert!(xml.contains("level=\"asInvoker\""));
         assert!(!xml.contains("dpiAware"));
     }

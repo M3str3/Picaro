@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-# batesian — build and run the packer inside a container.
+# picaro — build and run the packer inside a container.
 #
 # This image bundles the full toolchain the packer needs to turn its generated
 # Rust stub into a Windows PE, so a machine without Rust + MinGW-w64 can still
@@ -12,8 +12,8 @@
 #   * prebuilt workspace .rlib files for the stub's Windows target
 #
 # Usage (see README.md, "Docker"):
-#   docker build -t batesian .
-#   docker run --rm -it -v "$PWD:/work" -w /work batesian build config.yaml
+#   docker build -t picaro .
+#   docker run --rm -it -v "$PWD:/work" -w /work picaro build plan.yaml
 
 FROM rust:1-bookworm
 
@@ -29,7 +29,7 @@ RUN rustup target add x86_64-pc-windows-gnu
 
 # The packer reads its stub template and Cargo.lock from CARGO_MANIFEST_DIR at
 # runtime, so the source stays in the image next to the built binary.
-WORKDIR /usr/src/batesian
+WORKDIR /usr/src/picaro
 
 # Layer the build: manifests first so dependency resolution is cached, then the
 # source. `examples/` is needed only for the end-to-end smoke test below.
@@ -50,13 +50,13 @@ RUN cargo build --target x86_64-pc-windows-gnu --release
 
 # Smoke test: pack a payload end-to-end to prove the cross toolchain is wired
 # correctly. Fails the image build if anything is misconfigured.
-RUN ./target/release/batesian --quiet build examples/configs/reflective-loading.yaml \
+RUN ./target/release/picaro --quiet build examples/plans/reflective-loading.yaml \
     && test -s dist/test_packed_reflective.exe
 
-# The user mounts a directory with configs/payloads here; outputs land back on
+# The user mounts a directory with plans/payloads here; outputs land back on
 # the host through the same mount.
 WORKDIR /work
 VOLUME ["/work"]
 
-ENTRYPOINT ["/usr/src/batesian/target/release/batesian"]
+ENTRYPOINT ["/usr/src/picaro/target/release/picaro"]
 CMD ["--help"]

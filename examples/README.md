@@ -20,7 +20,7 @@ powershell -ExecutionPolicy Bypass -File examples/payloads/build_msgbox.ps1
 Its source (`msgbox.rs`) is a single `rustc` compile with no Cargo project, like
 the other payloads, and links `user32.lib` for `MessageBoxW`.
 
-Packing it needs no dedicated config: point `build.payload.source` at it (the
+Packing it needs no dedicated plan: point `build.payload.source` at it (the
 default `format: pe` applies) and build as usual.
 
 ```yaml
@@ -46,7 +46,7 @@ powershell -ExecutionPolicy Bypass -File examples/payloads/build_test_payload.ps
 ## 2. Pack
 
 ```powershell
-cargo run -- build examples/configs/process-hollowing.yaml
+cargo run -- build examples/plans/process-hollowing.yaml
 ```
 
 This produces `dist/test_packed.exe` (and leaves intermediate artifacts in
@@ -101,7 +101,7 @@ strings dist/test_packed.exe | grep -i svchost        # should print nothing
 Loads the payload into the current process (no external target).
 
 ```powershell
-cargo run -- build examples/configs/reflective-loading.yaml
+cargo run -- build examples/plans/reflective-loading.yaml
 .\dist\test_packed_reflective.exe
 ```
 
@@ -138,7 +138,7 @@ It prints its `argv` between `ARGS_BEGIN`/`ARGS_END` (and the raw
 ### 2. Pack with `join` and run it with extra args
 
 ```powershell
-cargo run -- build examples/configs/args.yaml
+cargo run -- build examples/plans/args.yaml
 .\dist\test_args_join.exe "runtime-c" "runtime-d"
 ```
 
@@ -160,7 +160,7 @@ Running it with no arguments yields just `yaml-a` and `yaml-b`.
 
 `override` drops the YAML args whenever the packed binary is given any runtime
 argument; with no runtime argument the YAML args still apply. Set it in your own
-config:
+plan:
 
 ```yaml
 build:
@@ -169,7 +169,7 @@ build:
     args_mode: override
 ```
 
-Packing that config produces an exe that behaves like this:
+Packing that plan produces an exe that behaves like this:
 
 ```powershell
 .\dist\my_payload.exe "runtime-c"   # payload sees only runtime-c

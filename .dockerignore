@@ -5,7 +5,7 @@
 .gitignore
 .memory.md
 
-# Host build artifacts (the image builds its own under /usr/src/batesian/target).
+# Host build artifacts (the image builds its own under /usr/src/picaro/target).
 target
 build
 dist

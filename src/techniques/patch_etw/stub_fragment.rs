@@ -92,7 +92,12 @@ fn patch_export(dll: &str, func: &str) -> Result<(), PatchEtwError> {
     if status < 0 {
         return Err(PatchEtwError::RestoreProtectionFailed);
     }
-    crate::tech_dbg!("patch_etw", "patched {dll}!{func} at {target:p}");
+    crate::tech_dbg!(
+        "patch_etw",
+        "patched {}!{} at {target:p}",
+        dll.to_string_lossy(),
+        func.to_string_lossy()
+    );
 
     Ok(())
 }

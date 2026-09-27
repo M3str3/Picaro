@@ -1,10 +1,10 @@
-# Migrating a config from schema 3 to schema 4
+# Migrating a plan from schema 3 to schema 4
 
 Schema 4 is a **syntax** change, not a behaviour change. Schema 3 is no longer
 accepted — a YAML that declares `schema: 3` fails at parse time with a migration
 hint, and there is no compatibility mode.
 
-If your config still declares `schema: 1` or `schema: 2`, apply those steps
+If your plan still declares `schema: 1` or `schema: 2`, apply those steps
 first: `docs/migration-v1-v3.md` and `docs/migration-v2-v3.md`.
 
 ## Why
@@ -98,7 +98,7 @@ runtime:
    need no change.
 
 > **Watch out:** the deserializer ignores unknown keys inside a runtime entry.
-> A config where `schema: 3` was changed to `4` but the parameters were left
+> A plan where `schema: 3` was changed to `4` but the parameters were left
 > flat will parse, and the parameters will be silently dropped — the technique
 > then runs with its defaults (for `process_hollowing`, that means the payload
 > is hollowed into `svchost.exe`). Always nest the parameters under `params:`.
@@ -106,7 +106,7 @@ runtime:
 A YAML that still declares `schema: 3` will fail with:
 
 ```
-error: invalid YAML in 'config.yaml': schema 3 is no longer supported.
+error: invalid YAML in 'plan.yaml': schema 3 is no longer supported.
 Migration: a runtime entry now nests the technique's parameters under a
 `params:` mapping instead of putting them next to `technique:`.
   before (schema 3):

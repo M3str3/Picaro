@@ -1,9 +1,9 @@
-//! Interactive `build` wizard (`batesian build interactive <payload>`).
+//! Interactive `build` wizard (`picaro build interactive <payload>`).
 //!
 //! The wizard walks through the same decisions a schema YAML encodes (payload,
-//! techniques, stub and output), assembles a [`Config`], shows it and writes it.
+//! techniques, stub and output), assembles a [`Plan`], shows it and writes it.
 //! It then hands the file back to the normal build flow, so the generated YAML
-//! is the single source of truth: editing it and running `batesian build <file>`
+//! is the single source of truth: editing it and running `picaro build <file>`
 //! reproduces the build without any prompts.
 //!
 //! When stdin/stdout is a terminal the questions are rendered with
@@ -24,15 +24,15 @@ use std::path::{Path, PathBuf};
 
 use inquire::{Confirm, MultiSelect, Select, Text};
 
-use crate::config::schema::{
-    Arch, BuildConfig, Config, CryptoAlgorithm, CryptoConfig, KeySource, OutputConfig,
-    PayloadConfig, PayloadFormat, StubConfig, Subsystem, TrimPaths, SUPPORTED_SCHEMA,
-};
-use crate::config::validate;
 use crate::engine::args::ArgsMode;
-use crate::engine::obfuscation::YamlStringsConfig;
-use crate::engine::syscalls::YamlSyscallsConfig;
+use crate::engine::obfuscation::YamlStringsPlan;
+use crate::engine::syscalls::YamlSyscallsPlan;
 use crate::error::{PackerError, Result};
+use crate::plan::schema::{
+    Arch, BuildPlan, CryptoAlgorithm, CryptoPlan, KeySource, OutputPlan, PayloadFormat,
+    PayloadPlan, Plan, StubPlan, Subsystem, TrimPaths, SUPPORTED_SCHEMA,
+};
+use crate::plan::validate;
 use crate::techniques::{
     self, anti_debug, bouncer, patch_amsi, patch_etw, process_hollowing, sleep_obfuscation,
     Category, RuntimeStep, TechniqueDef,
@@ -45,7 +45,7 @@ use crate::ui::Palette;
 /// Returns the path of the written YAML, or `None` when the operator quit the
 /// review screen without writing. The payload path is checked before the first
 /// question so a typo fails before a dozen prompts.
-pub fn run(payload: &Path, config_out: Option<&Path>, ui: &Palette) -> Result<Option<PathBuf>> {
+pub fn run(payload: &Path, plan_out: Option<&Path>, ui: &Palette) -> Result<Option<PathBuf>> {
     if !payload.is_file() {
         return Err(PackerError::Validation(format!(
             "payload does not exist: {}",
@@ -64,7 +64,7 @@ pub fn run(payload: &Path, config_out: Option<&Path>, ui: &Palette) -> Result<Op
         })
     };
 
-    run_wizard(payload, config_out, ui, prompts.as_mut())
+    run_wizard(payload, plan_out, ui, prompts.as_mut())
 }
 
 /// Testable core of [`run`]: runs the wizard over `reader`/`out` with the plain
@@ -72,7 +72,7 @@ pub fn run(payload: &Path, config_out: Option<&Path>, ui: &Palette) -> Result<Op
 #[cfg(test)]
 fn run_with<R: BufRead, W: Write>(
     payload: &Path,
-    config_out: Option<&Path>,
+    plan_out: Option<&Path>,
     ui: &Palette,
     reader: R,
     out: W,
@@ -82,13 +82,13 @@ fn run_with<R: BufRead, W: Write>(
         out,
         ui: *ui,
     };
-    run_wizard(payload, config_out, ui, &mut line)
+    run_wizard(payload, plan_out, ui, &mut line)
 }
 
 /// Shared wizard flow, independent of the prompt backend.
 fn run_wizard(
     payload: &Path,
-    config_out: Option<&Path>,
+    plan_out: Option<&Path>,
     ui: &Palette,
     prompts: &mut dyn Prompt,
 ) -> Result<Option<PathBuf>> {
@@ -96,7 +96,7 @@ fn run_wizard(
         ui: *ui,
         prompts,
         payload: payload.to_path_buf(),
-        config_out: config_out.map(Path::to_path_buf),
+        plan_out: plan_out.map(Path::to_path_buf),
     };
 
     wizard.echo(&ui.command_line("build interactive", payload.display()))?;
@@ -106,16 +106,14 @@ fn run_wizard(
     // as the defaults, or quit.
     let mut answers = wizard.ask_all(None)?;
     loop {
-        let config = assemble(payload, &answers);
-        validate::validate(&config)?;
-        let yaml = serde_yml::to_string(&config).map_err(|source| {
-            PackerError::Validation(format!(
-                "could not serialize the generated config: {source}"
-            ))
+        let plan = assemble(payload, &answers);
+        validate::validate(&plan)?;
+        let yaml = serde_yml::to_string(&plan).map_err(|source| {
+            PackerError::Validation(format!("could not serialize the generated plan: {source}"))
         })?;
 
         wizard.blank()?;
-        wizard.section("CONFIG")?;
+        wizard.section("PLAN")?;
         let preview = wizard.ui.dim(yaml.trim_end());
         wizard.echo(&preview)?;
         wizard.blank()?;
@@ -123,16 +121,16 @@ fn run_wizard(
         match wizard.prompts.select(
             "what now",
             &[
-                ("build now", "write the config and run the build"),
+                ("build now", "write the plan and run the build"),
                 ("edit answers", "go back and change something"),
                 ("quit", "discard and exit"),
             ],
             0,
         )? {
             0 => {
-                let path = write_config(&config, &yaml, wizard.config_out.as_deref())?;
+                let path = write_plan(&plan, &yaml, wizard.plan_out.as_deref())?;
                 wizard.blank()?;
-                let line = wizard.ui.done("config", wizard.ui.target(path.display()));
+                let line = wizard.ui.done("plan", wizard.ui.target(path.display()));
                 wizard.echo(&line)?;
                 wizard.blank()?;
                 return Ok(Some(path));
@@ -149,12 +147,12 @@ fn run_wizard(
     }
 }
 
-/// Writes the serialized config to disk, creating the parent directory, and
+/// Writes the serialized plan to disk, creating the parent directory, and
 /// returns the path it was written to.
-fn write_config(config: &Config, yaml: &str, config_out: Option<&Path>) -> Result<PathBuf> {
-    let path = config_out
+fn write_plan(plan: &Plan, yaml: &str, plan_out: Option<&Path>) -> Result<PathBuf> {
+    let path = plan_out
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("dist").join(format!("{}.yaml", config.name)));
+        .unwrap_or_else(|| PathBuf::from("dist").join(format!("{}.yaml", plan.name)));
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
@@ -165,7 +163,7 @@ fn write_config(config: &Config, yaml: &str, config_out: Option<&Path>) -> Resul
 }
 
 /// All the raw answers the wizard collects, kept separate from the assembled
-/// [`Config`] so a review pass can seed each field's default from its previous
+/// [`Plan`] so a review pass can seed each field's default from its previous
 /// value.
 #[derive(Debug, Clone)]
 struct Answers {
@@ -440,7 +438,7 @@ struct Wizard<'a> {
     ui: Palette,
     prompts: &'a mut dyn Prompt,
     payload: PathBuf,
-    config_out: Option<PathBuf>,
+    plan_out: Option<PathBuf>,
 }
 
 impl Wizard<'_> {
@@ -936,38 +934,38 @@ fn describe(defs: &[&'static TechniqueDef]) -> Vec<(&'static str, &'static str)>
         .collect()
 }
 
-/// Assembles the [`Config`] from the answered questions.
-fn assemble(payload: &Path, answers: &Answers) -> Config {
+/// Assembles the [`Plan`] from the answered questions.
+fn assemble(payload: &Path, answers: &Answers) -> Plan {
     let mut runtime = answers.preparations.clone();
     runtime.push(answers.execution.clone());
 
-    Config {
+    Plan {
         schema: SUPPORTED_SCHEMA,
         name: answers.name.clone(),
-        build: BuildConfig {
-            payload: PayloadConfig {
+        build: BuildPlan {
+            payload: PayloadPlan {
                 source: payload.display().to_string(),
                 // Payload formats are an advanced setting; edit them in the YAML.
                 format: PayloadFormat::Pe,
                 export: None,
                 args: (!answers.payload_args.is_empty()).then(|| answers.payload_args.clone()),
                 args_mode: ArgsMode::Join,
-                crypto: CryptoConfig {
+                crypto: CryptoPlan {
                     algo: CryptoAlgorithm::XChaCha20Poly1305,
                     key: KeySource::Random,
                 },
                 // Integrity pinning is an advanced setting; edit it in the YAML.
                 sha256: None,
             },
-            stub: StubConfig {
+            stub: StubPlan {
                 // The wizard always renders the builtin stub.
                 path: None,
                 // Omitted when `none` so the generated YAML stays minimal.
-                syscalls: (answers.syscalls_mode == "indirect").then(|| YamlSyscallsConfig {
+                syscalls: (answers.syscalls_mode == "indirect").then(|| YamlSyscallsPlan {
                     mode: answers.syscalls_mode.clone(),
                     resolver: "hells_gate".to_string(),
                 }),
-                strings: Some(YamlStringsConfig {
+                strings: Some(YamlStringsPlan {
                     strategy: answers.strings_strategy.clone(),
                     // A literal key is an advanced setting; edit it in the YAML.
                     key: "random".to_string(),
@@ -975,7 +973,7 @@ fn assemble(payload: &Path, answers: &Answers) -> Config {
                 // Debug builds are a lab setting; edit it in the YAML.
                 debug: false,
             },
-            output: OutputConfig {
+            output: OutputPlan {
                 path: PathBuf::from(&answers.output_path),
                 // The stub is always compiled for x86-64.
                 arch: Arch::X64,
@@ -1084,7 +1082,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::io::Cursor;
 
-    use crate::config::load_config;
+    use crate::plan::load_plan;
 
     /// Joins answer lines the way a terminal would deliver them.
     fn script(lines: &[&str]) -> String {
@@ -1093,26 +1091,24 @@ mod tests {
         input
     }
 
-    /// A unique, empty directory for one test's generated config.
+    /// A unique, empty directory for one test's generated plan.
     fn temp_dir(test: &str) -> PathBuf {
-        let dir = std::env::temp_dir()
-            .join("batesian_wizard_tests")
-            .join(test);
+        let dir = std::env::temp_dir().join("picaro_wizard_tests").join(test);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir
     }
 
-    /// Runs a scripted session and returns its written config path and output.
+    /// Runs a scripted session and returns its written plan path and output.
     fn session(
         payload: &str,
         answers: &[&str],
-        config_out: Option<&Path>,
+        plan_out: Option<&Path>,
     ) -> (Option<PathBuf>, String) {
         let mut out = Vec::new();
         let result = run_with(
             Path::new(payload),
-            config_out,
+            plan_out,
             &Palette::plain(),
             Cursor::new(script(answers)),
             &mut out,
@@ -1176,42 +1172,42 @@ mod tests {
     }
 
     /// Nine blank first-pass answers plus a blank review selection (`build now`)
-    /// produce a config the packer accepts as-is.
+    /// produce a plan the packer accepts as-is.
     #[test]
-    fn defaults_produce_a_valid_reflective_config() {
+    fn defaults_produce_a_valid_reflective_plan() {
         let dir = temp_dir("defaults");
-        let config_path = dir.join("out.yaml");
+        let plan_path = dir.join("out.yaml");
         let answers = ["", "", "", "", "", "", "", "", "", ""];
 
-        let (written, transcript) = session("payload.exe", &answers, Some(&config_path));
+        let (written, transcript) = session("payload.exe", &answers, Some(&plan_path));
 
-        assert_eq!(written.as_deref(), Some(config_path.as_path()));
+        assert_eq!(written.as_deref(), Some(plan_path.as_path()));
         assert!(
             transcript.contains("build interactive"),
             "no echo: {transcript}"
         );
 
-        let config = load_config(&config_path, &BTreeMap::new()).expect("valid config");
-        assert_eq!(config.name, "payload");
-        assert_eq!(config.build.payload.source, "payload.exe");
-        assert!(config.build.payload.args.is_none());
+        let plan = load_plan(&plan_path, &BTreeMap::new()).expect("valid plan");
+        assert_eq!(plan.name, "payload");
+        assert_eq!(plan.build.payload.source, "payload.exe");
+        assert!(plan.build.payload.args.is_none());
         assert_eq!(
-            config.build.output.path,
+            plan.build.output.path,
             PathBuf::from("./dist/payload_packed.exe")
         );
-        assert!(config.build.output.strip);
-        assert_eq!(config.runtime.len(), 1);
+        assert!(plan.build.output.strip);
+        assert_eq!(plan.runtime.len(), 1);
         assert!(
-            matches!(config.runtime[0], RuntimeStep::ReflectiveLoading { .. }),
+            matches!(plan.runtime[0], RuntimeStep::ReflectiveLoading { .. }),
             "got {:?}",
-            config.runtime[0]
+            plan.runtime[0]
         );
         // The execution technique (reflective_loading) uses the syscall layer,
         // so the syscalls question defaults to `indirect`.
-        let syscalls = config.build.stub.syscalls.expect("indirect syscalls");
+        let syscalls = plan.build.stub.syscalls.expect("indirect syscalls");
         assert_eq!(syscalls.mode, "indirect");
         assert_eq!(syscalls.resolver, "hells_gate");
-        assert!(config.build.stub.strings.is_some());
+        assert!(plan.build.stub.strings.is_some());
     }
 
     /// A full script exercises the execution choice, a preparation with several
@@ -1219,7 +1215,7 @@ mod tests {
     #[test]
     fn hollowing_with_a_bouncer_keeps_the_pipeline_order() {
         let dir = temp_dir("hollowing");
-        let config_path = dir.join("out.yaml");
+        let plan_path = dir.join("out.yaml");
         let answers = [
             "demo",              // name
             "a,b",               // payload args
@@ -1238,34 +1234,34 @@ mod tests {
             "",                  // review -> build now
         ];
 
-        let (written, _) = session("mimikatz.exe", &answers, Some(&config_path));
+        let (written, _) = session("mimikatz.exe", &answers, Some(&plan_path));
         assert!(written.is_some());
 
-        let config = load_config(&config_path, &BTreeMap::new()).expect("valid config");
-        assert_eq!(config.name, "demo");
+        let plan = load_plan(&plan_path, &BTreeMap::new()).expect("valid plan");
+        assert_eq!(plan.name, "demo");
         assert_eq!(
-            config.build.payload.args,
+            plan.build.payload.args,
             Some(vec!["a".to_string(), "b".to_string()])
         );
 
-        assert_eq!(config.runtime.len(), 2);
-        let RuntimeStep::Bouncer { params } = &config.runtime[0] else {
-            panic!("expected a bouncer first, got {:?}", config.runtime[0]);
+        assert_eq!(plan.runtime.len(), 2);
+        let RuntimeStep::Bouncer { params } = &plan.runtime[0] else {
+            panic!("expected a bouncer first, got {:?}", plan.runtime[0]);
         };
         assert_eq!(params.mode, bouncer::Mode::All);
         assert_eq!(params.on_fail, bouncer::OnFail::Silent);
         assert_eq!(params.hostname.as_deref(), Some("WORKSTATION-*"));
         assert_eq!(params.not_in_vm, Some(true));
 
-        let RuntimeStep::ProcessHollowing { params } = &config.runtime[1] else {
+        let RuntimeStep::ProcessHollowing { params } = &plan.runtime[1] else {
             panic!(
                 "expected process_hollowing second, got {:?}",
-                config.runtime[1]
+                plan.runtime[1]
             );
         };
         assert_eq!(params.target, process_hollowing::default_target());
 
-        let syscalls = config.build.stub.syscalls.expect("indirect syscalls");
+        let syscalls = plan.build.stub.syscalls.expect("indirect syscalls");
         assert_eq!(syscalls.mode, "indirect");
         assert_eq!(syscalls.resolver, "hells_gate");
     }
@@ -1275,7 +1271,7 @@ mod tests {
     #[test]
     fn editing_answers_updates_a_single_field() {
         let dir = temp_dir("edit");
-        let config_path = dir.join("out.yaml");
+        let plan_path = dir.join("out.yaml");
         let answers = [
             "first",  // name
             "",       // payload args
@@ -1299,34 +1295,34 @@ mod tests {
             "",       // review -> build now
         ];
 
-        let (written, _) = session("payload.exe", &answers, Some(&config_path));
+        let (written, _) = session("payload.exe", &answers, Some(&plan_path));
         assert!(written.is_some());
 
-        let config = load_config(&config_path, &BTreeMap::new()).expect("valid config");
-        assert_eq!(config.name, "second");
+        let plan = load_plan(&plan_path, &BTreeMap::new()).expect("valid plan");
+        assert_eq!(plan.name, "second");
     }
 
     /// Choosing `quit` at the review leaves the disk untouched.
     #[test]
     fn quitting_the_review_writes_nothing() {
         let dir = temp_dir("aborted");
-        let config_path = dir.join("out.yaml");
+        let plan_path = dir.join("out.yaml");
         let answers = ["", "", "", "", "", "", "", "", "", "3"];
 
-        let (written, _) = session("payload.exe", &answers, Some(&config_path));
+        let (written, _) = session("payload.exe", &answers, Some(&plan_path));
 
         assert!(written.is_none());
-        assert!(!config_path.exists(), "the config must not be written");
+        assert!(!plan_path.exists(), "the plan must not be written");
     }
 
     /// A closed stdin mid-session is an error, not a silent all-defaults build.
     #[test]
     fn truncated_input_is_an_error() {
         let dir = temp_dir("truncated");
-        let config_path = dir.join("out.yaml");
+        let plan_path = dir.join("out.yaml");
         let err = run_with(
             Path::new("payload.exe"),
-            Some(&config_path),
+            Some(&plan_path),
             &Palette::plain(),
             Cursor::new(String::new()),
             Vec::new(),

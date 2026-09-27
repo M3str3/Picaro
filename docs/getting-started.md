@@ -27,11 +27,11 @@ msfvenom -p windows/x64/exec CMD=calc.exe -f exe -o payload.exe   # a PE image
 msfvenom -p windows/x64/exec CMD=calc.exe -f raw -o payload.bin   # raw shellcode
 ```
 
-Do not add an msfvenom encoder (`-e`): `batesian` encrypts the payload with
+Do not add an msfvenom encoder (`-e`): `picaro` encrypts the payload with
 XChaCha20-Poly1305 and obfuscates the stub's strings, so an extra encoder only
 makes the input larger.
 
-## 2. Write the config
+## 2. Write the plan
 
 A build is one schema-4 YAML document. Strict by design: unknown keys are an
 error, so a typo never silently does nothing.
@@ -83,7 +83,7 @@ error, so a typo never silently does nothing.
     ```
 
 Save it as `payload.yaml`. Input and output paths are resolved relative to the
-directory you run `batesian` from (the repo's examples assume the repo root).
+directory you run `picaro` from (the repo's examples assume the repo root).
 
 The four blocks:
 
@@ -111,16 +111,16 @@ runs `format: pe`, and does not yet run a full PE — see
 ## 3. Build, run and measure
 
 ```bash
-# Validate the config and the payload without compiling anything:
+# Validate the plan and the payload without compiling anything:
 cargo run -- build payload.yaml --dry-run
 
 # Pack it:
 cargo run -- build payload.yaml
 ```
 
-`-v`/`--verbose` prints the resolved config and per-step detail; the manifest
-(`dist/demo.manifest.json`) records the artifact, payload and config hashes.
-`batesian` prints a banner before every subcommand; `-q`/`--quiet` skips it.
+`-v`/`--verbose` prints the resolved plan and per-step detail; the manifest
+(`dist/demo.manifest.json`) records the artifact, payload and plan hashes.
+`picaro` prints a banner before every subcommand; `-q`/`--quiet` skips it.
 
 ```powershell
 .\dist\demo.exe                       # run it
@@ -143,13 +143,13 @@ offline Defender scan.
 - Exactly one Execution technique, after any Preparation techniques.
 - `build.output.arch` is `x64`; `x86` is recognized but rejected as not
   integrated yet.
-- Positional CLI args after the config path are substituted as `$arg.0$`,
-  `$arg.1$`, … (and `name=value` as `$arg.name$`), so one config can target
+- Positional CLI args after the plan path are substituted as `$arg.0$`,
+  `$arg.1$`, … (and `name=value` as `$arg.name$`), so one plan can target
   several hosts.
 
 ## Where to go next
 
-- [Configuration](configuration.md) — every block and field, plus the wizard.
-- [Examples](examples/index.md) — the runnable configs.
+- [Plan](plan.md) — every block and field, plus the wizard.
+- [Examples](examples/index.md) — the runnable plans.
 - [Techniques](techniques/index.md) — what each technique does and what it
   costs.

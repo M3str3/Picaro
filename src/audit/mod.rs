@@ -74,7 +74,7 @@ pub enum AuditError {
     Json(serde_json::Error),
 }
 
-/// What `batesian audit` should produce.
+/// What `picaro audit` should produce.
 #[derive(Debug, Clone)]
 pub struct AuditOptions {
     /// `--focus`: comma-separated section list (pretty output only).

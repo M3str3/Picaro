@@ -1,20 +1,20 @@
 # YARA rules
 
-This directory holds YARA rules used by `batesian audit` to tag known
+This directory holds YARA rules used by `picaro audit` to tag known
 signatures in a binary.
 
 The YARA engine is **not wired yet** (there is no stable, ergonomic YARA crate
-for Rust). `batesian audit` reports `✓ no matches (ruleset empty)` until a rule
+for Rust). `picaro audit` reports `✓ no matches (ruleset empty)` until a rule
 file is added and the engine is integrated.
 
 ## Adding rules
 
-Drop one or more `.yar` / `.yara` files here, e.g. `yara/batesian.yar`:
+Drop one or more `.yar` / `.yara` files here, e.g. `yara/picaro.yar`:
 
 ```yara
-rule batesian_stub_marker {
+rule picaro_stub_marker {
     meta:
-        description = "batesian packed stub"
+        description = "picaro packed stub"
     strings:
         $a = "STUB_MARKER_" ascii
     condition:

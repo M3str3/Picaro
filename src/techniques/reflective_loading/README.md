@@ -85,7 +85,7 @@ The technique renders a different fragment per `build.payload.format`:
   on a thread whose entry is a `fn() -> u32`. The region is intentionally leaked,
   since the shellcode may have spawned work that outlives the wait.
 
-`process_hollowing` cannot run these two formats; `config::validate` requires
+`process_hollowing` cannot run these two formats; `plan::validate` requires
 `reflective_loading` for them.
 
 ### Payload arguments

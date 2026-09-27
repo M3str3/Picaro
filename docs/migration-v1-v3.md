@@ -1,11 +1,11 @@
-# Migrating a config from schema 1 to schema 3
+# Migrating a plan from schema 1 to schema 3
 
 Schema 3 is a **syntax** change, not a behaviour change: the same build is
 described with a different key layout. Schema 1 is no longer accepted — a YAML
 that declares `schema: 1` fails at parse time with a migration hint, and there
 is no compatibility mode.
 
-If your config declares `schema: 2`, it is much closer: only the `strings` move
+If your plan declares `schema: 2`, it is much closer: only the `strings` move
 described in `docs/migration-v2-v3.md` applies.
 
 > Schema 3 was later superseded by schema 4 (runtime parameters moved under a
@@ -17,7 +17,7 @@ Schema 1 scattered the build inputs across four top-level blocks (`input`,
 `payload`, `loader`, `output`) plus a `pipeline`. That made it hard to see that
 they all describe the same thing: *how to build the artifact*. Schemas 2 and 3
 group them under a single `build` block (`payload`, `stub`, `output`) and
-rename `pipeline` to `runtime`, so the two halves of a config are explicit:
+rename `pipeline` to `runtime`, so the two halves of a plan are explicit:
 *what to build* (`build`) and *what to run at execution time* (`runtime`).
 Schema 3 tightens this further: everything that describes the **stub** lives
 in `build.stub`, so string obfuscation moves from `build.strings` to
@@ -114,11 +114,11 @@ The token renames are mechanical and can be done with `sed`:
 
 ```bash
 # Build-argument placeholders.
-sed -i 's/\$build\./\$arg./g' config.yaml
+sed -i 's/\$build\./\$arg./g' plan.yaml
 
 # The technique list key.
-sed -i 's/^pipeline:/runtime:/' config.yaml
-sed -i 's/^  pipeline:/  runtime:/' config.yaml
+sed -i 's/^pipeline:/runtime:/' plan.yaml
+sed -i 's/^  pipeline:/  runtime:/' plan.yaml
 ```
 
 The block moves are structural, so do them by hand (or with your editor's
@@ -137,7 +137,7 @@ A YAML that still declares `schema: 1` will fail with the mapping above and a
 pointer to this document:
 
 ```
-error: invalid YAML in 'config.yaml': schema 1 is no longer supported.
+error: invalid YAML in 'plan.yaml': schema 1 is no longer supported.
 Migration:
   input.path      → build.payload.source
   payload.*       → build.payload.*

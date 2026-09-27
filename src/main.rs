@@ -1,4 +1,4 @@
-//! `batesian` entry point.
+//! `picaro` entry point.
 //!
 //! Three subcommands:
 //! - `build`: YAML → encrypt payload → render Rust stub → compile → out.exe.
@@ -9,9 +9,9 @@
 //! Running with no subcommand prints the banner plus the generated help.
 
 mod audit;
-mod config;
 mod engine;
 mod error;
+mod plan;
 mod techniques;
 mod ui;
 mod wizard;
@@ -22,24 +22,24 @@ use std::time::Instant;
 
 use clap::{CommandFactory, Parser, Subcommand};
 
-use config::schema::{
-    Arch, CryptoAlgorithm, KeySource, PayloadConfig, PayloadFormat, Subsystem, TrimPaths,
-};
 use engine::{compiler, crypto, obfuscation, pe, stub, syscalls};
 use error::Result;
+use plan::schema::{
+    Arch, CryptoAlgorithm, KeySource, PayloadFormat, PayloadPlan, Subsystem, TrimPaths,
+};
 use techniques::RuntimeStep;
 use ui::{format_elapsed, glyph, human_size, Palette};
 
 /// Extra help printed under the generated usage block.
 const AFTER_HELP: &str = "\
 Examples:
-  batesian build examples/configs/mimikatz.yaml
-  batesian build examples/configs/mimikatz.yaml --dry-run
-  batesian build interactive mimikatz.exe
-  batesian audit dist/test_amsi_patch.exe --focus imports,strings
-  batesian audit dist/out.exe --json > baseline.json
-  batesian audit dist/out.exe --baseline baseline.json
-  batesian techniques list
+  picaro build examples/plans/mimikatz.yaml
+  picaro build examples/plans/mimikatz.yaml --dry-run
+  picaro build interactive mimikatz.exe
+  picaro audit dist/test_amsi_patch.exe --focus imports,strings
+  picaro audit dist/out.exe --json > baseline.json
+  picaro audit dist/out.exe --baseline baseline.json
+  picaro techniques list
 
 Colors are disabled automatically when the output is not a terminal; set
 NO_COLOR=1 (or pass --no-color) to disable them explicitly. Pass -q (or
@@ -49,9 +49,9 @@ detail (paths, sizes, timings).
 audit --baseline exits 3 when it finds a regression, so it can gate a CI
 job; every other failure exits 1.";
 
-/// `batesian` CLI.
+/// `picaro` CLI.
 #[derive(Debug, Parser)]
-#[command(name = "batesian", bin_name = "batesian", version, about = ui::TAGLINE, after_help = AFTER_HELP)]
+#[command(name = "picaro", bin_name = "picaro", version, about = ui::TAGLINE, after_help = AFTER_HELP)]
 struct Cli {
     /// Disable colored output (also honors the `NO_COLOR` environment variable).
     #[arg(long, global = true)]
@@ -72,16 +72,16 @@ struct Cli {
 /// Available subcommands.
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Build a packed PE: from a YAML configuration file, or interactively.
+    /// Build a packed PE: from a YAML plan file, or interactively.
     #[command(subcommand_precedence_over_arg = true)]
     Build {
-        /// Generate the configuration interactively instead of reading a file.
+        /// Generate the plan interactively instead of reading a file.
         #[command(subcommand)]
         action: Option<BuildAction>,
 
-        /// Path to the YAML configuration file.
-        #[arg(value_name = "CONFIG")]
-        config: Option<PathBuf>,
+        /// Path to the YAML plan file.
+        #[arg(value_name = "PLAN")]
+        plan: Option<PathBuf>,
 
         /// Positional arguments referenced by the YAML as `$arg.N$`.
         #[arg(value_name = "ARG")]
@@ -140,11 +140,11 @@ enum BuildAction {
 
         /// Where to write the generated YAML (default: `dist/<name>.yaml`).
         #[arg(long, value_name = "PATH")]
-        config_out: Option<PathBuf>,
+        plan_out: Option<PathBuf>,
     },
 }
 
-/// Subcommands of `batesian techniques`.
+/// Subcommands of `picaro techniques`.
 #[derive(Debug, Subcommand)]
 enum TechniquesCommand {
     /// List registered techniques.
@@ -211,54 +211,44 @@ fn run() -> Result<()> {
     match command {
         Commands::Build {
             action,
-            config,
+            plan,
             args,
             dry_run: is_dry_run,
             debug: debug_flag,
         } => match action {
-            Some(BuildAction::Interactive {
-                payload,
-                config_out,
-            }) => {
-                if config.is_some() {
+            Some(BuildAction::Interactive { payload, plan_out }) => {
+                if plan.is_some() {
                     return Err(error::PackerError::Validation(
-                        "`build interactive` takes a payload, not a config file".to_string(),
+                        "`build interactive` takes a payload, not a plan file".to_string(),
                     ));
                 }
                 // The wizard writes the YAML and hands back its path; loading it
                 // through the normal path proves the file is what gets built.
-                if let Some(path) = wizard::run(&payload, config_out.as_deref(), &ui)? {
+                if let Some(path) = wizard::run(&payload, plan_out.as_deref(), &ui)? {
                     let build_args = BTreeMap::new();
-                    let config = config::load_config(&path, &build_args)?;
+                    let plan = plan::load_plan(&path, &build_args)?;
                     if is_dry_run {
-                        dry_run(&config, &path, &ui)?;
+                        dry_run(&plan, &path, &ui)?;
                     } else {
-                        build(&config, &build_args, &path, &ui, cli.verbose, debug_flag)?;
+                        build(&plan, &build_args, &path, &ui, cli.verbose, debug_flag)?;
                     }
                 }
             }
             None => {
-                let Some(config) = config else {
+                let Some(plan) = plan else {
                     return Err(error::PackerError::Validation(
-                        "missing CONFIG: use `batesian build <config.yaml>` or \
-                         `batesian build interactive <payload>`"
+                        "missing PLAN: use `picaro build <plan.yaml>` or \
+                         `picaro build interactive <payload>`"
                             .to_string(),
                     ));
                 };
-                let config_path = config.clone();
-                let build_args = config::build_args::parse(&args);
-                let config = config::load_config(&config, &build_args)?;
+                let plan_path = plan.clone();
+                let build_args = plan::build_args::parse(&args);
+                let plan = plan::load_plan(&plan, &build_args)?;
                 if is_dry_run {
-                    dry_run(&config, &config_path, &ui)?;
+                    dry_run(&plan, &plan_path, &ui)?;
                 } else {
-                    build(
-                        &config,
-                        &build_args,
-                        &config_path,
-                        &ui,
-                        cli.verbose,
-                        debug_flag,
-                    )?;
+                    build(&plan, &build_args, &plan_path, &ui, cli.verbose, debug_flag)?;
                 }
             }
         },
@@ -338,21 +328,21 @@ fn validate_techniques(ui: &Palette) {
 
 /// Runs the full packing flow, logging each step as it succeeds.
 ///
-/// `verbose` adds a resolved-configuration block, per-step detail lines and
+/// `verbose` adds a resolved-plan block, per-step detail lines and
 /// timings; the compact form stays on one line per step. `debug_override`
 /// forces the debug build on (`--debug`), on top of `build.stub.debug`.
 fn build(
-    config: &config::Config,
+    plan: &plan::Plan,
     build_args: &BTreeMap<String, String>,
-    config_path: &Path,
+    plan_path: &Path,
     ui: &Palette,
     verbose: bool,
     debug_override: bool,
 ) -> Result<()> {
     let started = Instant::now();
-    let debug = config.build.stub.debug || debug_override;
+    let debug = plan.build.stub.debug || debug_override;
 
-    anstream::println!("{}", ui.command_line("build", config_path.display()));
+    anstream::println!("{}", ui.command_line("build", plan_path.display()));
     anstream::println!();
 
     if debug {
@@ -367,22 +357,22 @@ fn build(
     }
 
     if verbose {
-        print_config(config, config_path, ui);
+        print_plan(plan, plan_path, ui);
     }
 
     // 1. Read the input payload and validate it against its declared format
     //    (fail early, before encrypting or compiling).
     let timer = Instant::now();
-    let plaintext = load_source(&config.build.payload.source)?;
-    verify_payload_hash(&plaintext, config.build.payload.sha256.as_deref())?;
-    let summary = inspect_payload(config.build.payload.format, &plaintext)?;
+    let plaintext = load_source(&plan.build.payload.source)?;
+    verify_payload_hash(&plaintext, plan.build.payload.sha256.as_deref())?;
+    let summary = inspect_payload(plan.build.payload.format, &plaintext)?;
     let read_time = timer.elapsed();
     let mut read_parts = vec![
-        ui.target(describe_source(&config.build.payload.source)),
+        ui.target(describe_source(&plan.build.payload.source)),
         ui.dim(summary.label),
         human_size(plaintext.len()),
     ];
-    if let Some(export) = &config.build.payload.export {
+    if let Some(export) = &plan.build.payload.export {
         read_parts.push(ui.dim(format!("export {export}")));
     }
     anstream::println!("{}", ui.done("read", dotted(ui, &read_parts)));
@@ -402,7 +392,7 @@ fn build(
 
     // 2. Derive the key and encrypt the payload with XChaCha20-Poly1305.
     let timer = Instant::now();
-    let key = match config.build.payload.crypto.key {
+    let key = match plan.build.payload.crypto.key {
         KeySource::Random => crypto::generate_key(),
     };
     let encrypted = crypto::encrypt_payload(&plaintext, &key)?;
@@ -414,7 +404,7 @@ fn build(
             dotted(
                 ui,
                 &[
-                    ui.brand(crypto_label(config.build.payload.crypto.algo)),
+                    ui.brand(crypto_label(plan.build.payload.crypto.algo)),
                     format!(
                         "{} {} {}",
                         human_size(plaintext.len()),
@@ -450,17 +440,17 @@ fn build(
 
     // 3. Per-build marker, the string-obfuscation and syscall configurations.
     let stub_marker = stub::generate_stub_marker();
-    if config.build.stub.strings.is_none() {
+    if plan.build.stub.strings.is_none() {
         anstream::eprintln!(
             "  {} {}",
             ui.bang(),
             ui.warn("build.stub.strings not specified, defaulting to xor+random")
         );
     }
-    let strings = obfuscation::StringsConfig::from_yaml(config.build.stub.strings.as_ref())?;
-    let syscalls = syscalls::SyscallsConfig::from_yaml(config.build.stub.syscalls.as_ref())?;
+    let strings = obfuscation::StringsConfig::from_yaml(plan.build.stub.strings.as_ref())?;
+    let syscalls = syscalls::SyscallsConfig::from_yaml(plan.build.stub.syscalls.as_ref())?;
     if syscalls.mode == syscalls::SyscallsMode::Indirect
-        && syscalls::required(&config.runtime).is_empty()
+        && syscalls::required(&plan.runtime).is_empty()
     {
         anstream::eprintln!(
             "  {} {}",
@@ -471,8 +461,8 @@ fn build(
             )
         );
     }
-    // Config-level advisories from semantic validation (e.g. a no-op bouncer).
-    for warning in config::validate::advisories(config) {
+    // Plan-level advisories from semantic validation (e.g. a no-op bouncer).
+    for warning in plan::validate::advisories(plan) {
         anstream::eprintln!("  {} {}", ui.bang(), ui.warn(format!("warning: {warning}")));
     }
 
@@ -485,7 +475,7 @@ fn build(
     // 5. Load the stub template: the builtin one, or a custom loader stub.
     //    A custom stub receives the payload as `$PAYLOAD_BYTES$` and does not
     //    need `build/payload.bin`. `build.stub.syscalls` applies to both.
-    let (template, template_display, is_custom) = match &config.build.stub.path {
+    let (template, template_display, is_custom) = match &plan.build.stub.path {
         Some(path) => {
             let path = path.clone();
             let source = std::fs::read_to_string(&path).map_err(|source| {
@@ -510,49 +500,45 @@ fn build(
         key: encrypted.key,
         ciphertext: encrypted.ciphertext.clone(),
         plaintext_len: encrypted.plaintext_len,
-        payload_format: config.build.payload.format,
-        payload_export: config.build.payload.export.clone(),
+        payload_format: plan.build.payload.format,
+        payload_export: plan.build.payload.export.clone(),
         stub_marker: stub_marker.clone(),
         payload_path: "payload.bin".to_string(),
         build_args: build_args.clone(),
-        payload_args: config.build.payload.args.clone().unwrap_or_default(),
-        args_mode: config.build.payload.args_mode,
+        payload_args: plan.build.payload.args.clone().unwrap_or_default(),
+        args_mode: plan.build.payload.args_mode,
         debug,
-        windows_subsystem: config.build.output.subsystem == Subsystem::Windows,
+        windows_subsystem: plan.build.output.subsystem == Subsystem::Windows,
     };
 
     let stub_src = if is_custom {
         stub::validate_custom_stub_template(&template)?;
         let rendered =
-            stub::render_custom_stub(&template, &params, &config.runtime, &strings, &syscalls)?;
+            stub::render_custom_stub(&template, &params, &plan.runtime, &strings, &syscalls)?;
         for warning in &rendered.warnings {
             anstream::eprintln!("  {} {}", ui.bang(), ui.warn(format!("warning: {warning}")));
         }
         rendered.source
     } else {
-        stub::render_main_rs(&template, &params, &config.runtime, &strings, &syscalls)?
+        stub::render_main_rs(&template, &params, &plan.runtime, &strings, &syscalls)?
     };
-    let stub_src = apply_subsystem(stub_src, config.build.output.subsystem);
+    let stub_src = apply_subsystem(stub_src, plan.build.output.subsystem);
     let stub_path = build_dir.join("main.rs");
     std::fs::write(&stub_path, &stub_src)?;
     let stub_time = timer.elapsed();
 
     let mut stub_parts = vec![
-        pipeline_chain(ui, &config.runtime),
+        pipeline_chain(ui, &plan.runtime),
         format!("{} {}", ui.dim("strings"), strings.strategy.label()),
         format!("{} {}", ui.dim("syscalls"), syscalls.mode.label()),
-        format!(
-            "{} {}",
-            ui.dim("format"),
-            config.build.payload.format.label()
-        ),
+        format!("{} {}", ui.dim("format"), plan.build.payload.format.label()),
     ];
     if !params.payload_args.is_empty() {
         stub_parts.push(format!(
             "{} {} ({})",
             ui.dim("args"),
             params.payload_args.len(),
-            config.build.payload.args_mode.label()
+            plan.build.payload.args_mode.label()
         ));
     }
     if debug {
@@ -570,7 +556,7 @@ fn build(
             "{}",
             ui.detail(
                 "payload args",
-                ui.dim(payload_args_label(&config.build.payload))
+                ui.dim(payload_args_label(&plan.build.payload))
             )
         );
         anstream::println!(
@@ -592,8 +578,8 @@ fn build(
     let deps = compiler::locate_stub_deps()?;
     let out = build_dir.join("out.exe");
     let options = compiler::CompileOptions {
-        strip: config.build.output.strip,
-        trim_paths: match config.build.output.trim_paths {
+        strip: plan.build.output.strip,
+        trim_paths: match plan.build.output.trim_paths {
             TrimPaths::None => compiler::PathTrim::None,
             TrimPaths::Relative => compiler::PathTrim::Relative,
             TrimPaths::All => compiler::PathTrim::All,
@@ -631,7 +617,7 @@ fn build(
     // 6b. Embed PE resources into the compiled stub (icon, VERSIONINFO and the
     //     application manifest), written into a new `.rsrc` section. Nothing is
     //     injected when `output.resources` is absent.
-    let resources = resolve_resources(config);
+    let resources = resolve_resources(plan);
     if let Some(resources) = &resources {
         let pe = std::fs::read(&out)?;
         let injected = engine::resources::embed(&pe, resources)?;
@@ -650,18 +636,18 @@ fn build(
     }
 
     // 7. Copy `out.exe` to the output path from the YAML.
-    if let Some(parent) = config.build.output.path.parent() {
+    if let Some(parent) = plan.build.output.path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
         }
     }
-    std::fs::copy(&out, &config.build.output.path)?;
-    let out_size = std::fs::metadata(&config.build.output.path)?.len() as usize;
+    std::fs::copy(&out, &plan.build.output.path)?;
+    let out_size = std::fs::metadata(&plan.build.output.path)?.len() as usize;
 
     // 7b. Sign the artifact (Authenticode), if configured. Signing must be the
     //     last modification, so the manifest below hashes the signed file.
-    let sign_config = resolve_sign(config, resources.as_ref());
-    let signature = engine::signing::sign(&config.build.output.path, sign_config.as_ref())?;
+    let sign_plan = resolve_sign(plan, resources.as_ref());
+    let signature = engine::signing::sign(&plan.build.output.path, sign_plan.as_ref())?;
     if let Some(sig) = &signature {
         let mut parts = vec![ui.brand(sig.mode.clone())];
         if let Some(thumbprint) = &sig.thumbprint {
@@ -679,13 +665,13 @@ fn build(
     }
 
     // 7c. Provenance: a manifest next to the artifact (artifact and payload
-    //     hashes, resolved config, toolchain). The payload key is never written.
-    if config.build.output.manifest {
-        let manifest_path = engine::manifest::manifest_path(&config.build.output.path);
+    //     hashes, resolved plan, toolchain). The payload key is never written.
+    if plan.build.output.manifest {
+        let manifest_path = engine::manifest::manifest_path(&plan.build.output.path);
         let mut manifest = engine::manifest::BuildManifest::new(
-            config,
-            config_path,
-            &config.build.output.path,
+            plan,
+            plan_path,
+            &plan.build.output.path,
             &plaintext,
             encrypted.nonce,
         )?;
@@ -711,7 +697,7 @@ fn build(
             dotted(
                 ui,
                 &[
-                    ui.target(config.build.output.path.display().to_string()),
+                    ui.target(plan.build.output.path.display().to_string()),
                     human_size(out_size),
                     ui.dim(format_elapsed(total)),
                 ]
@@ -745,34 +731,34 @@ fn build(
 ///
 /// `build --dry-run` is a pre-flight check: it loads the payload (fetching a URL
 /// as a real build would), verifies `build.payload.sha256` when pinned,
-/// validates the PE and prints the resolved config. Nothing is written, so it is
-/// safe to run against a config before committing it.
-fn dry_run(config: &config::Config, config_path: &Path, ui: &Palette) -> Result<()> {
-    anstream::println!("{}", ui.command_line("build", config_path.display()));
+/// validates the PE and prints the resolved plan. Nothing is written, so it is
+/// safe to run against a plan before committing it.
+fn dry_run(plan: &plan::Plan, plan_path: &Path, ui: &Palette) -> Result<()> {
+    anstream::println!("{}", ui.command_line("build", plan_path.display()));
     anstream::println!();
-    print_config(config, config_path, ui);
+    print_plan(plan, plan_path, ui);
 
-    let payload = load_source(&config.build.payload.source)?;
-    verify_payload_hash(&payload, config.build.payload.sha256.as_deref())?;
-    let summary = inspect_payload(config.build.payload.format, &payload)?;
+    let payload = load_source(&plan.build.payload.source)?;
+    verify_payload_hash(&payload, plan.build.payload.sha256.as_deref())?;
+    let summary = inspect_payload(plan.build.payload.format, &payload)?;
 
     let mut parts = vec![
-        ui.target(describe_source(&config.build.payload.source)),
+        ui.target(describe_source(&plan.build.payload.source)),
         ui.dim(summary.label),
         human_size(payload.len()),
     ];
-    if let Some(export) = &config.build.payload.export {
+    if let Some(export) = &plan.build.payload.export {
         parts.push(ui.dim(format!("export {export}")));
     }
-    if config.build.output.subsystem == Subsystem::Windows {
+    if plan.build.output.subsystem == Subsystem::Windows {
         parts.push(ui.dim("windows subsystem"));
     }
-    if config.build.payload.sha256.is_some() {
+    if plan.build.payload.sha256.is_some() {
         parts.push(ui.ok("sha256 verified"));
     }
     // Resource building is cheap and validates the icon/versions, so a dry run
     // can check it without touching the compiled stub.
-    let resources = resolve_resources(config);
+    let resources = resolve_resources(plan);
     if let Some(resources) = &resources {
         let blob = engine::resources::build(resources, 0)?;
         if !blob.is_empty() {
@@ -783,7 +769,7 @@ fn dry_run(config: &config::Config, config_path: &Path, ui: &Palette) -> Result<
 
     // Signing is validated without signing: locate `signtool` and check the
     // configured .pfx exists (the certificate itself is resolved at build time).
-    let sign = resolve_sign(config, resources.as_ref());
+    let sign = resolve_sign(plan, resources.as_ref());
     if let Some(sign) = &sign {
         if sign.mode != "none" {
             let tool = engine::signing::signtool_path(sign)?;
@@ -823,7 +809,7 @@ struct PayloadSummary {
 ///
 /// `pe`/`dll` must be a well-formed x64 PE image of the matching kind;
 /// `shellcode` has no headers to check, only that it is not empty. The checks
-/// run at build time so a mismatched config fails before anything is encrypted
+/// run at build time so a mismatched plan fails before anything is encrypted
 /// or compiled.
 fn inspect_payload(format: PayloadFormat, data: &[u8]) -> Result<PayloadSummary> {
     match format {
@@ -874,7 +860,7 @@ fn inspect_payload(format: PayloadFormat, data: &[u8]) -> Result<PayloadSummary>
 /// Fails when the payload does not match `build.payload.sha256`.
 ///
 /// The comparison is case-insensitive hex; the format is already validated in
-/// `config::validate`, so a mismatch here means the payload changed.
+/// `plan::validate`, so a mismatch here means the payload changed.
 fn verify_payload_hash(payload: &[u8], expected: Option<&str>) -> Result<()> {
     let Some(expected) = expected else {
         return Ok(());
@@ -883,68 +869,61 @@ fn verify_payload_hash(payload: &[u8], expected: Option<&str>) -> Result<()> {
     let actual = engine::hash::sha256_hex(payload);
     if !actual.eq_ignore_ascii_case(expected) {
         return Err(error::PackerError::Validation(format!(
-            "payload sha256 mismatch: config expects {expected}, payload is {actual}"
+            "payload sha256 mismatch: plan expects {expected}, payload is {actual}"
         )));
     }
     Ok(())
 }
 
-/// Prints the resolved configuration (verbose mode).
+/// Prints the resolved plan (verbose mode).
 ///
 /// Dumping what the YAML resolved to makes a build reproducible from the log
-/// alone, without opening the config file.
-fn print_config(config: &config::Config, config_path: &Path, ui: &Palette) {
-    anstream::println!("{}", ui.heading("CONFIG"));
-    anstream::println!("{}", ui.field("name", &config.name));
-    anstream::println!("{}", ui.field("config", ui.target(config_path.display())));
+/// alone, without opening the plan file.
+fn print_plan(plan: &plan::Plan, plan_path: &Path, ui: &Palette) {
+    anstream::println!("{}", ui.heading("PLAN"));
+    anstream::println!("{}", ui.field("name", &plan.name));
+    anstream::println!("{}", ui.field("plan", ui.target(plan_path.display())));
     anstream::println!(
         "{}",
         ui.field(
             "source",
-            ui.target(describe_source(&config.build.payload.source))
+            ui.target(describe_source(&plan.build.payload.source))
         )
     );
     anstream::println!(
         "{}",
-        ui.field("payload args", payload_args_label(&config.build.payload))
+        ui.field("payload args", payload_args_label(&plan.build.payload))
     );
     anstream::println!(
         "{}",
-        ui.field("output", ui.target(config.build.output.path.display()))
+        ui.field("output", ui.target(plan.build.output.path.display()))
     );
-    anstream::println!("{}", ui.field("arch", arch_label(config.build.output.arch)));
+    anstream::println!("{}", ui.field("arch", arch_label(plan.build.output.arch)));
     anstream::println!(
         "{}",
-        ui.field(
-            "strip",
-            if config.build.output.strip {
-                "yes"
-            } else {
-                "no"
-            }
-        )
+        ui.field("strip", if plan.build.output.strip { "yes" } else { "no" })
     );
     anstream::println!(
         "{}",
-        ui.field("trim paths", trim_label(config.build.output.trim_paths))
+        ui.field("trim paths", trim_label(plan.build.output.trim_paths))
     );
     anstream::println!(
         "{}",
-        ui.field("subsystem", config.build.output.subsystem.label())
+        ui.field("subsystem", plan.build.output.subsystem.label())
     );
-    anstream::println!("{}", ui.field("stub", stub_label(config)));
-    if config.build.stub.debug {
+    anstream::println!("{}", ui.field("stub", stub_label(plan)));
+    if plan.build.stub.debug {
         anstream::println!("{}", ui.field("debug", ui.warn("yes")));
     }
-    if let Some(resources) = &config.build.output.resources {
+    if let Some(resources) = &plan.build.output.resources {
         anstream::println!("{}", ui.field("resources", resources_label(resources)));
     }
-    if let Some(sign) = &config.build.output.sign {
+    if let Some(sign) = &plan.build.output.sign {
         // A lab certificate without a subject takes its name from the generated
         // metadata, so the echo says where the name comes from.
         let derived = sign.mode == "lab"
             && sign.subject.is_none()
-            && config
+            && plan
                 .build
                 .output
                 .resources
@@ -958,11 +937,8 @@ fn print_config(config: &config::Config, config_path: &Path, ui: &Palette) {
         };
         anstream::println!("{}", ui.field("sign", label));
     }
-    anstream::println!(
-        "{}",
-        ui.field("runtime", pipeline_chain(ui, &config.runtime))
-    );
-    anstream::println!("{}", ui.field("schema", config.schema));
+    anstream::println!("{}", ui.field("runtime", pipeline_chain(ui, &plan.runtime)));
+    anstream::println!("{}", ui.field("schema", plan.schema));
     anstream::println!();
 }
 
@@ -1001,20 +977,19 @@ fn trim_label(trim: TrimPaths) -> &'static str {
 }
 
 /// Which stub template the build resolved to (plus the syscall mode).
-fn stub_label(config: &config::Config) -> String {
-    match &config.build.stub.path {
+fn stub_label(plan: &plan::Plan) -> String {
+    match &plan.build.stub.path {
         Some(path) => format!("custom {}", path.display()),
         None => {
-            let mode = stub_mode_label(config);
+            let mode = stub_mode_label(plan);
             format!("builtin (syscalls {mode})")
         }
     }
 }
 
 /// Lowercase label of the resolved syscall mode (used by [`stub_label`]).
-fn stub_mode_label(config: &config::Config) -> &'static str {
-    config
-        .build
+fn stub_mode_label(plan: &plan::Plan) -> &'static str {
+    plan.build
         .stub
         .syscalls
         .as_ref()
@@ -1046,7 +1021,7 @@ fn short_thumbprint(thumbprint: &str) -> String {
 }
 
 /// Human summary of `output.sign`.
-fn sign_label(sign: &config::schema::SignConfig) -> String {
+fn sign_label(sign: &plan::schema::SignPlan) -> String {
     match sign.mode.as_str() {
         "lab" => format!(
             "lab ({})",
@@ -1071,7 +1046,7 @@ fn sign_label(sign: &config::schema::SignConfig) -> String {
 }
 
 /// Human summary of the configured PE resources (`output.resources`).
-fn resources_label(resources: &config::schema::ResourcesConfig) -> String {
+fn resources_label(resources: &plan::schema::ResourcesPlan) -> String {
     let mut parts = Vec::new();
     if let Some(icon) = &resources.icon {
         parts.push(format!("icon {}", icon.display()));
@@ -1095,8 +1070,8 @@ fn resources_label(resources: &config::schema::ResourcesConfig) -> String {
 /// artifact carries plausible company/product/version metadata instead of empty
 /// strings. The generated company is later reused as the lab certificate
 /// subject (see [`resolve_sign`]).
-fn resolve_resources(config: &config::Config) -> Option<config::schema::ResourcesConfig> {
-    let resources = config.build.output.resources.as_ref()?;
+fn resolve_resources(plan: &plan::Plan) -> Option<plan::schema::ResourcesPlan> {
+    let resources = plan.build.output.resources.as_ref()?;
     let mut resolved = resources.clone();
     if let Some(info) = &resolved.version_info {
         resolved.version_info = Some(engine::identity::apply(info));
@@ -1107,10 +1082,10 @@ fn resolve_resources(config: &config::Config) -> Option<config::schema::Resource
 /// Resolves `output.sign`, deriving the lab certificate subject from the
 /// generated company when one is available and no subject was configured.
 fn resolve_sign(
-    config: &config::Config,
-    resources: Option<&config::schema::ResourcesConfig>,
-) -> Option<config::schema::SignConfig> {
-    let sign = config.build.output.sign.as_ref()?;
+    plan: &plan::Plan,
+    resources: Option<&plan::schema::ResourcesPlan>,
+) -> Option<plan::schema::SignPlan> {
+    let sign = plan.build.output.sign.as_ref()?;
     let mut resolved = sign.clone();
     if resolved.mode == "lab" && resolved.subject.is_none() {
         if let Some(company) = resources
@@ -1140,7 +1115,7 @@ fn crypto_label(algo: CryptoAlgorithm) -> &'static str {
 }
 
 /// `(none)` or `N (mode)` for the payload's configured runtime arguments.
-fn payload_args_label(payload: &PayloadConfig) -> String {
+fn payload_args_label(payload: &PayloadPlan) -> String {
     match &payload.args {
         Some(args) if !args.is_empty() => {
             format!("{} ({})", args.len(), payload.args_mode.label())

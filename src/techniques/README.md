@@ -14,7 +14,7 @@ Every technique is either Preparation or Execution (`TechniqueDef.category`):
 - **Execution** (`Category::Execution`) — runs the decrypted payload. The stub
   runs exactly one of these, after all Preparation techniques.
 
-The pipeline validation (`src/config/validate.rs`) enforces `0..N` Preparation
+The pipeline validation (`src/plan/validate.rs`) enforces `0..N` Preparation
 followed by exactly one Execution. Preparation techniques must appear before
 the Execution technique in the YAML.
 
@@ -37,7 +37,7 @@ copied files.
 - Fill in `DEF` — the `TechniqueDef` metadata (name, ATT&CK, stability,
   category, …). `params_example` is a YAML snippet that must parse as a
   `RuntimeStep`; write the parameters under a nested `params:` mapping, exactly
-  as they appear in a config:
+  as they appear in a plan:
 
   ```yaml
   technique: my_technique
@@ -54,7 +54,7 @@ An **Execution** technique also gets the payload's binary format
 format exposes `Params::render_fragment_for(&self, strings, format, export)` and
 picks the fragment or substitutes the format-specific values there (see
 `reflective_loading`, which ships a PE mapper and a shellcode runner); one that
-only runs a PE may delegate to `render_fragment`, since `config::validate`
+only runs a PE may delegate to `render_fragment`, since `plan::validate`
 rejects the other formats first.
 
 ## 3. Fill in `stub_fragment.rs`
@@ -125,7 +125,7 @@ correctly. An Execution technique that supports several payload formats gets the
 ## 6. Write the README
 
 Copy the fixed template `src/techniques/_template/README.md` and fill in every
-section. All sections are required; `batesian techniques validate` checks them.
+section. All sections are required; `picaro techniques validate` checks them.
 
 ## 7. Update the measurements page
 

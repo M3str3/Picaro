@@ -1,15 +1,15 @@
-# batesian
+# picaro
 
-> batesian is a declarative PE packer for authorized red team research. It takes
-> a PE (or DLL / shellcode) and a YAML config and emits a packed PE with the
+> picaro is a declarative PE packer for authorized red team research. It takes
+> a PE (or DLL / shellcode) and a YAML plan and emits a packed PE with the
 > selected evasion techniques baked into a generated Rust stub.
 
 ## Getting started
 
-- [Introduction](index.html): what batesian is and its authorized-use scope.
-- [Getting started](getting-started.html): requirements, a first config, and the build/run/measure commands.
-- [Configuration](configuration.html): every block and field, plus the interactive wizard.
-- [Examples](examples/index.html): the runnable configs, recipes and end-to-end tests.
+- [Introduction](index.html): what picaro is and its authorized-use scope.
+- [Getting started](getting-started.html): requirements, a first plan, and the build/run/measure commands.
+- [Plan](plan.html): every block and field, plus the interactive wizard.
+- [Examples](examples/index.html): the runnable plans, recipes and end-to-end tests.
 
 ## Techniques
 
@@ -43,7 +43,7 @@
 
 - The canonical sources are the Markdown files in docs/ plus
   src/techniques/*/README.md, README.md and examples/README.md.
-- mkdocs.yml holds the navigation; the per-technique pages, the configuration
+- mkdocs.yml holds the navigation; the per-technique pages, the plan
   reference and the examples page are generated from those files via
   pymdownx.snippets.
 - The site is built with Material for MkDocs. The links above are

@@ -9,11 +9,11 @@
 
 **mimicry-based packer**
 
-> Batesian mimicry is nature's original loader: a harmless species evolves the
-> warning colors of a dangerous one, and predators look right past it. This is
-> that idea, but for PEs.
+> A pícaro survives by mimicry: a rogue in borrowed livery, dressed in the
+> colors of something trusted, waved through every gate that would stop the
+> real thing. This is that idea, but for PEs.
 
-`batesian` takes a PE file and a YAML config, and emits a packed PE with the
+`picaro` takes a PE file and a YAML plan, and emits a packed PE with the
 selected evasion techniques baked into a freshly generated Rust stub. No
 cleartext payload ever touches disk: the payload is authenticated-encrypted at
 build time and only ever exists decrypted in memory at run time.
@@ -42,9 +42,9 @@ Requirements:
 
 ```bash
 # Pack the bundled test payload: hollow it into a suspended svchost.exe.
-cargo run -- build examples/configs/process-hollowing.yaml
+cargo run -- build examples/plans/process-hollowing.yaml
 
-# The artifact lands where the config says (here, dist/test_packed.exe).
+# The artifact lands where the plan says (here, dist/test_packed.exe).
 ./dist/test_packed.exe
 
 # Measure what the packer actually did.
@@ -54,8 +54,8 @@ cargo run -- audit dist/test_packed.exe
 cargo run -- techniques list
 ```
 
-`batesian` prints a banner before every subcommand; `-q`/`--quiet` skips it,
-`-v`/`--verbose` adds per-step detail (resolved config, paths, sizes, timings),
+`picaro` prints a banner before every subcommand; `-q`/`--quiet` skips it,
+`-v`/`--verbose` adds per-step detail (resolved plan, paths, sizes, timings),
 and `--no-color` (or `NO_COLOR=1`) turns off color — it is disabled
 automatically when output is redirected.
 
@@ -67,10 +67,10 @@ linker) plus the prebuilt workspace `.rlib` files, so one command is enough.
 
 ```bash
 # One-time build (a few minutes the first time).
-docker build -t batesian .
+docker build -t picaro .
 
-# Pack, mounting the current directory as /work: configs + payloads in, dist/ out.
-docker run --rm -it -v "$PWD:/work" -w /work batesian build examples/configs/reflective-loading.yaml
+# Pack, mounting the current directory as /work: plans + payloads in, dist/ out.
+docker run --rm -it -v "$PWD:/work" -w /work picaro build examples/plans/reflective-loading.yaml
 ```
 
 Or use the wrapper, which builds the image on first use and passes every
@@ -78,12 +78,12 @@ argument through unchanged. It is one standard-library-only Python script, the
 same on Linux, macOS and Windows:
 
 ```bash
-python scripts/batesian.py build examples/configs/reflective-loading.yaml
-python scripts/batesian.py audit dist/test_packed_reflective.exe
-python scripts/batesian.py techniques list
+python scripts/picaro.py build examples/plans/reflective-loading.yaml
+python scripts/picaro.py audit dist/test_packed_reflective.exe
+python scripts/picaro.py techniques list
 ```
 
-Pass `--build` first to force a rebuild of the image, and set `BATESIAN_IMAGE`
+Pass `--build` first to force a rebuild of the image, and set `PICARO_IMAGE`
 to use a different tag.
 
 On Windows, arguments are translated for the Linux container: relative paths
@@ -91,15 +91,15 @@ On Windows, arguments are translated for the Linux container: relative paths
 the current directory becomes `/work/...`, and an opaque `$arg.N$` value such as
 `C:\Windows\System32\svchost.exe` is left untouched (the stub resolves it at
 runtime on Windows). Paths *inside* the YAML (`source`, `output.path`) must use
-forward slashes, as the example configs do.
+forward slashes, as the example plans do.
 
 How it works:
 
-- The repo is baked in at `/usr/src/batesian`; the packer reads its stub
+- The repo is baked in at `/usr/src/picaro`; the packer reads its stub
   template and `Cargo.lock` from there and links the stub against the
-  `.rlib`s under `/usr/src/batesian/target`.
+  `.rlib`s under `/usr/src/picaro/target`.
 - Your working directory is mounted at `/work`. Run from the repo root (or any
-  directory holding your `config.yaml` and payload) and use paths relative to
+  directory holding your `plan.yaml` and payload) and use paths relative to
   it; outputs (`dist/…`) land on your host through the mount.
 - Subcommands and flags pass through unchanged (`build`, `audit`,
   `techniques …`, plus `-q`/`-v`/`--no-color`).
@@ -107,8 +107,8 @@ How it works:
 > The container only *builds* the packed Windows PE (it cross-compiles the stub
 > to `x86_64-pc-windows-gnu`). Run the resulting `.exe` on a Windows host.
 
-<!-- --8<-- [start:configuration] -->
-## Configuration
+<!-- --8<-- [start:plan] -->
+## Plan
 
 A build is one YAML document. Strict by design: unknown keys are an error, so
 typos surface immediately instead of silently doing nothing.
@@ -173,12 +173,12 @@ runtime:                  # 0..N preparation, then exactly one execution
 | `build.output.sign` | Optional Authenticode signing via `signtool`: `lab` (self-signed), `store` (an existing cert) or `file` (a `.pfx`). |
 | `runtime` | The techniques to apply, in order. `0..N` Preparation followed by exactly one Execution. A technique's parameters go under a nested `params:` mapping. |
 
-**Build arguments.** Positional args after the config path are substituted in
+**Build arguments.** Positional args after the plan path are substituted in
 the YAML as `$arg.N$` (0-based); an arg of the form `name=value` is available
-as `$arg.name$`. One config can target several hosts:
+as `$arg.name$`. One plan can target several hosts:
 
 ```bash
-batesian build config.yaml "C:\\Windows\\System32\\svchost.exe"
+picaro build plan.yaml "C:\\Windows\\System32\\svchost.exe"
 ```
 
 ```yaml
@@ -190,7 +190,7 @@ runtime:
 
 A referenced-but-missing argument is a clear error, not a silent empty string.
 
-<!-- --8<-- [end:configuration] -->
+<!-- --8<-- [end:plan] -->
 <!-- --8<-- [start:interactive] -->
 ### Interactive build
 
@@ -198,15 +198,15 @@ Rather than writing the YAML by hand, answer a few questions and let the packer
 write it for you:
 
 ```bash
-batesian build interactive mimikatz.exe
+picaro build interactive mimikatz.exe
 ```
 
 The wizard walks through the payload (name, runtime args), the techniques (one
 Execution plus any Preparation, each with its own parameters), the stub
 (`strings`, `syscalls`) and the output, then prints the resulting document and
 writes it. The YAML is the source of truth: the build runs from the file it just
-wrote, so re-running `batesian build dist/mimikatz.yaml` reproduces the artifact
-with no prompts. `--config-out <path>` picks where the YAML lands (default
+wrote, so re-running `picaro build dist/mimikatz.yaml` reproduces the artifact
+with no prompts. `--plan-out <path>` picks where the YAML lands (default
 `dist/<name>.yaml`).
 
 The wizard is a form, not a list of numbered prompts: arrow keys move through
@@ -215,7 +215,7 @@ cancels. When you finish, a **review** screen shows the YAML it will write and
 lets you **build now**, **edit answers** (re-ask with your previous answers as
 the defaults, so a mistake is one cursor move away, never a restart) or **quit**.
 
-Generated configs pass through the same validation as hand-written ones, so they
+Generated plans pass through the same validation as hand-written ones, so they
 are never the reason a build fails. Questions cover the common path only: a
 literal `strings.key`, a custom `build.stub.path`, `args_mode: override` or
 non-default `sleep_obfuscation` regions are one edit away in the written file.
@@ -243,9 +243,9 @@ order, followed by exactly one Execution technique.
 The registry is metadata-only. Inspect it, don't guess:
 
 ```bash
-batesian techniques list                 # colored table: category, ATT&CK, stability
-batesian techniques show process_hollowing   # the technique's full README
-batesian techniques validate             # CI helper: registry well-formedness
+picaro techniques list                 # colored table: category, ATT&CK, stability
+picaro techniques show process_hollowing   # the technique's full README
+picaro techniques validate             # CI helper: registry well-formedness
 ```
 
 Adding one is a documented, four-file ritual — see
@@ -255,7 +255,7 @@ Adding one is a documented, four-file ritual — see
 
 ```mermaid
 flowchart TD
-    Y[YAML config] --> V[Parse and validate]
+    Y[YAML plan] --> V[Parse and validate]
     V --> I[Load input PE]
     I --> E[Encrypt payload]
     E --> R[Render Rust stub]
@@ -306,11 +306,11 @@ not an error. Full contract and examples:
 
 ### Audit
 
-Evasion claims are worth nothing unmeasured. `batesian audit` is the
+Evasion claims are worth nothing unmeasured. `picaro audit` is the
 measurement half of the project:
 
 ```bash
-batesian audit dist/test_packed.exe --focus imports,strings
+picaro audit dist/test_packed.exe --focus imports,strings
 ```
 
 It reports PE headers, sections and their entropy, imports/exports, a strings
@@ -322,8 +322,8 @@ live in [`docs/measurements.md`](docs/measurements.md).
 report, and `--baseline` compares a build against a saved one:
 
 ```bash
-batesian audit dist/out.exe --json > dist/out.baseline.json
-batesian audit dist/out.exe --baseline dist/out.baseline.json
+picaro audit dist/out.exe --json > dist/out.baseline.json
+picaro audit dist/out.exe --baseline dist/out.baseline.json
 ```
 
 The comparison fails (exit code `3`) when a sensitive literal or a suspicious
@@ -339,20 +339,20 @@ Each build writes a provenance record next to the artifact, at
 
 ```json
 {
-  "manifest_schema": 1,
+  "manifest_schema": 2,
   "artifact_sha256": "…",
   "payload_sha256": "…",
-  "config_sha256": "…",
+  "plan_sha256": "…",
   "nonce": "…",
   "toolchain": { "rustc": "rustc 1.90.0 (…)", "target": "x86_64-pc-windows-msvc" },
-  "resolved_config": { "…": "the config after build-arg substitution" }
+  "resolved_plan": { "…": "the plan after build-arg substitution" }
 }
 ```
 
 It records the public nonce but never the payload key, so it is safe to archive
-alongside the artifact. `batesian build <config> --dry-run` resolves, verifies
+alongside the artifact. `picaro build <plan> --dry-run` resolves, verifies
 `build.payload.sha256` and validates the payload without encrypting, compiling
-or writing anything — a pre-flight check for CI or for a config review.
+or writing anything — a pre-flight check for CI or for a plan review.
 
 ### PE resources
 
@@ -392,7 +392,7 @@ build:
 ### Signing
 
 `build.output.sign` signs the finished artifact with `signtool.exe` (Windows SDK;
-found in `PATH`, then `BATESIAN_SIGNTOOL`, then the Windows Kits directories, or
+found in `PATH`, then `PICARO_SIGNTOOL`, then the Windows Kits directories, or
 set `signtool` explicitly). Signing runs last, so the signature covers the
 resources, and the manifest records the certificate and thumbprint.
 
@@ -418,7 +418,7 @@ output:
 - `mode: file` uses a `.pfx`/`.p12`; the password comes from the environment
   variable named by `password_env`, never from the YAML.
 
-See [`examples/configs/mimikatz.yaml`](examples/configs/mimikatz.yaml) — a
+See [`examples/plans/mimikatz.yaml`](examples/plans/mimikatz.yaml) — a
 complete example that combines a randomized identity with an automatic lab
 signature.
 
@@ -431,18 +431,18 @@ machine's trust stores.
 
 ```text
 src/
-  config/       YAML parsing and validation
+  plan/       YAML parsing and validation
   engine/       crypto, PE parsing, stub generation, compilation, syscall layer, imports
   audit/        static measurement (pe_info, strings, yara, defender, report)
   techniques/   one directory per technique + the registry (mod.rs)
   error.rs      top-level error types
   ui.rs         terminal output: banner, palette, formatting helpers
 templates/stub/ Rust stub template with $placeholders$
-examples/       curated example configs, test payloads, sample custom stubs
+examples/       curated example plans, test payloads, sample custom stubs
 docs/           Markdown sources (Material for MkDocs; nav in mkdocs.yml)
-scripts/        Docker wrappers (batesian.py, docs.py)
+scripts/        Docker wrappers (picaro.py, docs.py)
 yara/           YARA rules (placeholder for now)
-tests/          CLI integration tests + fixtures (tests/configs/, tests/fixtures/)
+tests/          CLI integration tests + fixtures (tests/plans/, tests/fixtures/)
 build/  dist/   (gitignored) intermediate artifacts and final binaries
 ```
 
@@ -491,13 +491,13 @@ Planned:
   (T1055) and `ppid_spoofing` (T1134.004).
 - `unhook_ntdll` (Preparation) and stack spoofing, which closes the gap the
   syscall notes acknowledge.
-- Fuzz `src/engine/pe.rs` and the config parser (both take untrusted input).
+- Fuzz `src/engine/pe.rs` and the plan parser (both take untrusted input).
 - `cargo deny` / `cargo audit` in CI.
 - Reproducible builds: a deterministic key or `--seed` (today the random key
   blocks bit-for-bit reproducibility).
 - Close the remaining wizard gaps (`strings.key`, `build.stub.path`,
   `args_mode: override`, non-default `sleep_obfuscation` regions) and add
-  `batesian config validate <file>`.
+  `picaro plan validate <file>`.
 
 ## Known limitations
 

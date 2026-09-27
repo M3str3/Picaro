@@ -14,7 +14,7 @@
 // A payload is not stub code: it never goes through `StringsConfig`, so the
 // literals can stay in cleartext.
 const TEXT: &str = "Hello world";
-const CAPTION: &str = "batesian payload";
+const CAPTION: &str = "picaro payload";
 
 // `MB_OK | MB_ICONINFORMATION`.
 const MB_OK: u32 = 0x0000_0000;

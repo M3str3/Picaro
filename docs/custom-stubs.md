@@ -56,12 +56,12 @@ warning: loader stub does not reference $PREPARATION_BLOCKS$; declared preparati
 
 ## Build arguments
 
-Positional arguments after the config path are substituted into the YAML as
+Positional arguments after the plan path are substituted into the YAML as
 `$arg.N$` and into a custom stub as `$ARG_<key>$`. An argument of the form
 `name=value` is available as `$arg.name$` (and `$ARG_name$`):
 
 ```bash
-batesian build config.yaml "C:\\Windows\\System32\\svchost.exe"
+picaro build plan.yaml "C:\\Windows\\System32\\svchost.exe"
 ```
 
 ```yaml
@@ -72,7 +72,7 @@ runtime:
 ```
 
 A referenced-but-missing argument is an error:
-`the config references '$arg.0$' but no build argument '0' was provided`.
+`the plan references '$arg.0$' but no build argument '0' was provided`.
 
 ## Examples
 
@@ -80,7 +80,7 @@ A referenced-but-missing argument is an error:
   blocks. The smallest stub that verifies substitution works.
 - `examples/stubs/runtime-key.rs` — reads the key from argv, so it is never
   embedded (the decryption body is left for you to write).
-- `examples/configs/custom-stub.yaml` — end-to-end config for `minimal.rs`.
+- `examples/plans/custom-stub.yaml` — end-to-end plan for `minimal.rs`.
 
 ## Limitations
 

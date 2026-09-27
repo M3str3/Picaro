@@ -1,10 +1,10 @@
-# Migrating a config from schema 2 to schema 3
+# Migrating a plan from schema 2 to schema 3
 
 Schema 3 is a **syntax** change, not a behaviour change. Schema 2 is no longer
 accepted — a YAML that declares `schema: 2` fails at parse time with a migration
 hint, and there is no compatibility mode.
 
-For a config that still declares `schema: 1`, see `docs/migration-v1-v3.md`.
+For a plan that still declares `schema: 1`, see `docs/migration-v1-v3.md`.
 
 > Schema 3 was later superseded by schema 4 (runtime parameters moved under a
 > nested `params:` mapping); see `docs/migration-v3-v4.md` for the second step.
@@ -88,12 +88,12 @@ runtime:
 1. `schema: 2` → `schema: 3`.
 2. Move the `strings:` block (two spaces of indentation, under `build:`) inside
    the `stub:` block, adding two spaces of indentation to its contents. If the
-   config has no `stub:` block yet, create one.
+   plan has no `stub:` block yet, create one.
 
 A YAML that still declares `schema: 2` will fail with:
 
 ```
-error: invalid YAML in 'config.yaml': schema 2 is no longer supported.
+error: invalid YAML in 'plan.yaml': schema 2 is no longer supported.
 Migration:
   build.strings → build.stub.strings
   runtime entries now nest parameters under `params:` (schema 3 → 4)

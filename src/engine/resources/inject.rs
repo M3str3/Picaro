@@ -214,7 +214,7 @@ fn write_u32(buf: &mut [u8], offset: usize, value: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::schema::{ExecutionLevel, ManifestConfig, ResourcesConfig};
+    use crate::plan::schema::{ExecutionLevel, ManifestPlan, ResourcesPlan};
     use std::path::Path;
 
     fn fixture() -> Vec<u8> {
@@ -227,11 +227,11 @@ mod tests {
         .expect("read the PE fixture")
     }
 
-    fn manifest_config() -> ResourcesConfig {
-        ResourcesConfig {
+    fn manifest_plan() -> ResourcesPlan {
+        ResourcesPlan {
             icon: None,
             version_info: None,
-            manifest: Some(ManifestConfig {
+            manifest: Some(ManifestPlan {
                 level: ExecutionLevel::RequireAdministrator,
                 ui_access: false,
                 dpi_aware: true,
@@ -245,7 +245,7 @@ mod tests {
         let before = crate::audit::pe_info::analyze(&pe).expect("fixture parses");
         assert!(!before.has_manifest);
 
-        let out = crate::engine::resources::embed(&pe, &manifest_config()).expect("embed");
+        let out = crate::engine::resources::embed(&pe, &manifest_plan()).expect("embed");
         let after = crate::audit::pe_info::analyze(&out).expect("output parses");
         assert_eq!(after.sections.len(), before.sections.len() + 1);
         assert!(
@@ -262,7 +262,7 @@ mod tests {
         // `[section_rva, section_rva + section_size)`.
         let pe = fixture();
         let rva = next_section_rva(&pe).expect("rva");
-        let blob = crate::engine::resources::build(&manifest_config(), rva).expect("build");
+        let blob = crate::engine::resources::build(&manifest_plan(), rva).expect("build");
         // Walk root -> type 24 -> name 1 -> lang 0x409 to the data entry.
         let root = 0usize;
         let find = |dir: usize, id: u32| -> u32 {
@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn a_non_pe_is_rejected() {
-        let err = crate::engine::resources::embed(b"not a pe at all", &manifest_config())
+        let err = crate::engine::resources::embed(b"not a pe at all", &manifest_plan())
             .expect_err("must fail");
         assert!(err.to_string().contains("MZ"), "unclear: {err}");
     }

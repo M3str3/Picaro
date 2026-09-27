@@ -50,7 +50,7 @@ impl StringStrategy {
 /// instead of a generic deserialization message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct YamlStringsConfig {
+pub struct YamlStringsPlan {
     /// Obfuscation strategy (`xor` or `stack`).
     #[serde(default = "default_strategy")]
     pub strategy: String,
@@ -87,11 +87,11 @@ impl std::fmt::Debug for StringsConfig {
 }
 
 impl StringsConfig {
-    /// Resolves the obfuscation config from the (optional) YAML block.
+    /// Resolves the obfuscation plan from the (optional) YAML block.
     ///
     /// `None` means "defaults" (`xor` + a fresh random key). An invalid
     /// strategy or an ill-formed `literal:` key is a validation error.
-    pub fn from_yaml(yaml: Option<&YamlStringsConfig>) -> Result<Self> {
+    pub fn from_yaml(yaml: Option<&YamlStringsPlan>) -> Result<Self> {
         let Some(yaml) = yaml else {
             return Ok(Self::xor(generate_xor_key()));
         };
@@ -120,7 +120,7 @@ impl StringsConfig {
         match self.strategy {
             StringStrategy::Xor => {
                 // `from_yaml` always stores a key for xor; the fallback only
-                // defends against a hand-constructed config missing its key.
+                // defends against a hand-constructed plan missing its key.
                 let key = match self.key {
                     Some(key) => key,
                     None => generate_xor_key(),
@@ -262,13 +262,13 @@ mod tests {
     #[test]
     fn xor_round_trips_with_known_key() {
         let key = [0x11u8; XOR_KEY_LEN];
-        let config = StringsConfig {
+        let plan = StringsConfig {
             strategy: StringStrategy::Xor,
             key: Some(key),
         };
         let plaintext = "STUB_MARKER_deadbeef";
 
-        let obf = config.obfuscate(plaintext);
+        let obf = plan.obfuscate(plaintext);
         let ObfuscatedString::Xor { bytes, key } = obf else {
             panic!("expected an xor obfuscation");
         };
@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn deserializes_yaml_strings_block() {
-        let yaml: YamlStringsConfig =
+        let yaml: YamlStringsPlan =
             serde_yml::from_str("strategy: stack\nkey: random\n").expect("should parse");
         assert_eq!(yaml.strategy, "stack");
         assert_eq!(yaml.key, "random");
@@ -336,36 +336,36 @@ mod tests {
 
     #[test]
     fn from_yaml_defaults_to_xor_random() {
-        let config = StringsConfig::from_yaml(None).expect("defaults should be valid");
-        assert_eq!(config.strategy, StringStrategy::Xor);
-        assert!(config.key.is_some());
+        let plan = StringsConfig::from_yaml(None).expect("defaults should be valid");
+        assert_eq!(plan.strategy, StringStrategy::Xor);
+        assert!(plan.key.is_some());
     }
 
     #[test]
     fn from_yaml_parses_xor_with_random_key() {
-        let yaml = YamlStringsConfig {
+        let yaml = YamlStringsPlan {
             strategy: "xor".into(),
             key: "random".into(),
         };
-        let config = StringsConfig::from_yaml(Some(&yaml)).expect("xor+random should be valid");
-        assert_eq!(config.strategy, StringStrategy::Xor);
-        assert!(config.key.is_some());
+        let plan = StringsConfig::from_yaml(Some(&yaml)).expect("xor+random should be valid");
+        assert_eq!(plan.strategy, StringStrategy::Xor);
+        assert!(plan.key.is_some());
     }
 
     #[test]
     fn from_yaml_parses_stack_without_key() {
-        let yaml = YamlStringsConfig {
+        let yaml = YamlStringsPlan {
             strategy: "stack".into(),
             key: "random".into(),
         };
-        let config = StringsConfig::from_yaml(Some(&yaml)).expect("stack should be valid");
-        assert_eq!(config.strategy, StringStrategy::Stack);
-        assert_eq!(config.key, None);
+        let plan = StringsConfig::from_yaml(Some(&yaml)).expect("stack should be valid");
+        assert_eq!(plan.strategy, StringStrategy::Stack);
+        assert_eq!(plan.key, None);
     }
 
     #[test]
     fn from_yaml_rejects_invalid_strategy() {
-        let yaml = YamlStringsConfig {
+        let yaml = YamlStringsPlan {
             strategy: "rot13".into(),
             key: "random".into(),
         };
@@ -375,17 +375,17 @@ mod tests {
 
     #[test]
     fn from_yaml_parses_literal_key() {
-        let yaml = YamlStringsConfig {
+        let yaml = YamlStringsPlan {
             strategy: "xor".into(),
             key: format!("literal:{}", "00".repeat(XOR_KEY_LEN)),
         };
-        let config = StringsConfig::from_yaml(Some(&yaml)).expect("literal key should be valid");
-        assert_eq!(config.key, Some([0u8; XOR_KEY_LEN]));
+        let plan = StringsConfig::from_yaml(Some(&yaml)).expect("literal key should be valid");
+        assert_eq!(plan.key, Some([0u8; XOR_KEY_LEN]));
     }
 
     #[test]
     fn from_yaml_rejects_non_hex_literal_key() {
-        let yaml = YamlStringsConfig {
+        let yaml = YamlStringsPlan {
             strategy: "xor".into(),
             key: "literal:zzzz".into(),
         };
@@ -395,7 +395,7 @@ mod tests {
 
     #[test]
     fn from_yaml_rejects_wrong_length_literal_key() {
-        let yaml = YamlStringsConfig {
+        let yaml = YamlStringsPlan {
             strategy: "xor".into(),
             key: "literal:00".into(),
         };

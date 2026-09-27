@@ -1,7 +1,7 @@
-# batesian
+# picaro
 
-`batesian` is a declarative PE packer for authorized red team research. It takes
-a PE (or a DLL, or raw shellcode) and a YAML config, and emits a packed PE with
+`picaro` is a declarative PE packer for authorized red team research. It takes
+a PE (or a DLL, or raw shellcode) and a YAML plan, and emits a packed PE with
 the selected evasion techniques baked into a freshly generated Rust stub. The
 payload is authenticated-encrypted at build time and only ever exists decrypted
 in memory at run time.
@@ -15,11 +15,11 @@ in memory at run time.
 
 ## The docs in one screen
 
-- **[Getting started](getting-started.md)** — requirements, a first config, and
+- **[Getting started](getting-started.md)** — requirements, a first plan, and
   the commands to build, run and measure it.
-- **[Configuration](configuration.md)** — every block of a schema-4 document,
+- **[Plan](plan.md)** — every block of a schema-4 document,
   plus the interactive wizard that writes one.
-- **[Examples](examples/index.md)** — the runnable configs and recipes.
+- **[Examples](examples/index.md)** — the runnable plans and recipes.
 - **[Techniques](techniques/index.md)** — the Preparation/Execution model, one
   page per technique, and the cross-cutting layers (syscalls, payload
   arguments, string obfuscation).
@@ -29,6 +29,6 @@ in memory at run time.
   the schema migration guides.
 
 The Markdown under `docs/` is the single source of truth. The per-technique
-pages, the configuration reference and the examples page are pulled from
+pages, the plan reference and the examples page are pulled from
 `src/techniques/<name>/README.md`, `README.md` and `examples/README.md` at build
 time, so they never drift.

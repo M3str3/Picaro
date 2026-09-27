@@ -1,6 +1,6 @@
 //! Rendering of the audit report.
 //!
-//! The layout follows the `batesian · audit` design: a command echo, a
+//! The layout follows the `picaro · audit` design: a command echo, a
 //! horizontal metadata bar, uppercase section headings with flush-left content,
 //! an entropy gauge per section and a closing summary whose risk level is the
 //! one thing the eye should land on.
@@ -794,7 +794,7 @@ mod tests {
     fn renders_all_sections() {
         let out = render_sample(None);
 
-        assert!(out.contains("batesian audit"), "missing echo: {out}");
+        assert!(out.contains("picaro audit"), "missing echo: {out}");
         assert!(out.contains("test.exe"));
         assert!(out.contains("SECTIONS"));
         assert!(out.contains("IMPORTS"));

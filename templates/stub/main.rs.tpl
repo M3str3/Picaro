@@ -1,4 +1,4 @@
-//! Stub generated automatically by batesian.
+//! Stub generated automatically by picaro.
 //!
 //! Decrypts the embedded payload with XChaCha20-Poly1305, reports its per-build
 //! marker on stderr, and runs the payload in memory using the selected execution

@@ -37,7 +37,7 @@ use super::obfuscation::StringsConfig;
 /// instead of a generic deserialization message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct YamlSyscallsConfig {
+pub struct YamlSyscallsPlan {
     /// Syscall mode (`none` or `indirect`).
     #[serde(default = "default_mode")]
     pub mode: String,
@@ -119,11 +119,11 @@ impl Default for SyscallsConfig {
 }
 
 impl SyscallsConfig {
-    /// Resolves the syscall config from the (optional) YAML block.
+    /// Resolves the syscall plan from the (optional) YAML block.
     ///
     /// `None` means the defaults (`mode: none`, `resolver: hells_gate`). An
     /// unknown mode or resolver is a validation error with a clear message.
-    pub fn from_yaml(yaml: Option<&YamlSyscallsConfig>) -> Result<Self> {
+    pub fn from_yaml(yaml: Option<&YamlSyscallsPlan>) -> Result<Self> {
         let Some(yaml) = yaml else {
             return Ok(Self::default());
         };
@@ -1141,7 +1141,7 @@ fn api_hash(name: &[u8]) -> u64 {
 ///   Gate, Tartarus Gate or API hashing —, ASM trampoline, gadget scanner) plus
 ///   the helpers.
 pub fn render_block(
-    config: &SyscallsConfig,
+    plan: &SyscallsConfig,
     pipeline: &[RuntimeStep],
     strings: &StringsConfig,
 ) -> String {
@@ -1154,7 +1154,7 @@ pub fn render_block(
         );
     }
 
-    let (header, body) = match config.mode {
+    let (header, body) = match plan.mode {
         SyscallsMode::None => (
             "// --- Syscall layer (build.stub.syscalls.mode = none) ---\n// Direct Win32 calls: the \
              fragments always call the nt_* helpers, which map to\n// the Win32 APIs below. The \
@@ -1164,7 +1164,7 @@ pub fn render_block(
             render_none(&required, strings),
         ),
         SyscallsMode::Indirect => {
-            let resolver = config.resolver.label();
+            let resolver = plan.resolver.label();
             (
                 format!(
                     "// --- Syscall layer (build.stub.syscalls.mode = indirect, resolver = {resolver}) ---\n// \
@@ -1172,7 +1172,7 @@ pub fn render_block(
                      the binary: Hell's/Tartarus Gate rebuild them at runtime from\n// obfuscated bytes, \
                      api_hash replaces them with precomputed FNV-1a hashes.\n// See docs/techniques/indirect_syscalls.md."
                 ),
-                render_indirect(config, &required, strings),
+                render_indirect(plan, &required, strings),
             )
         }
     };
@@ -1751,7 +1751,7 @@ fn render_none(required: &[&'static NtFunction], strings: &StringsConfig) -> Str
 /// initializers and the selected resolver's resolution lines) plus the indirect
 /// helpers.
 fn render_indirect(
-    config: &SyscallsConfig,
+    plan: &SyscallsConfig,
     required: &[&'static NtFunction],
     strings: &StringsConfig,
 ) -> String {
@@ -1793,7 +1793,7 @@ fn render_indirect(
         helpers.push('\n');
     }
 
-    let resolver_body = match config.resolver {
+    let resolver_body = match plan.resolver {
         Resolver::HellsGate => HELLS_GATE_RESOLVER
             .replace("$SSN_INIT$", init.trim_end())
             .replace("$SSN_RESOLVE$", resolve_hg.trim_end())
@@ -1906,25 +1906,25 @@ mod tests {
 
     #[test]
     fn from_yaml_defaults_to_none_when_absent() {
-        let config = SyscallsConfig::from_yaml(None).expect("defaults should be valid");
-        assert_eq!(config.mode, SyscallsMode::None);
-        assert_eq!(config.resolver, Resolver::HellsGate);
+        let plan = SyscallsConfig::from_yaml(None).expect("defaults should be valid");
+        assert_eq!(plan.mode, SyscallsMode::None);
+        assert_eq!(plan.resolver, Resolver::HellsGate);
     }
 
     #[test]
     fn from_yaml_parses_indirect_mode() {
-        let yaml = YamlSyscallsConfig {
+        let yaml = YamlSyscallsPlan {
             mode: "indirect".into(),
             resolver: "hells_gate".into(),
         };
-        let config = SyscallsConfig::from_yaml(Some(&yaml)).expect("indirect should be valid");
-        assert_eq!(config.mode, SyscallsMode::Indirect);
-        assert_eq!(config.resolver, Resolver::HellsGate);
+        let plan = SyscallsConfig::from_yaml(Some(&yaml)).expect("indirect should be valid");
+        assert_eq!(plan.mode, SyscallsMode::Indirect);
+        assert_eq!(plan.resolver, Resolver::HellsGate);
     }
 
     #[test]
     fn from_yaml_rejects_unknown_mode() {
-        let yaml = YamlSyscallsConfig {
+        let yaml = YamlSyscallsPlan {
             mode: "direct".into(),
             resolver: "hells_gate".into(),
         };
@@ -1937,29 +1937,29 @@ mod tests {
 
     #[test]
     fn from_yaml_parses_tartarus_gate() {
-        let yaml = YamlSyscallsConfig {
+        let yaml = YamlSyscallsPlan {
             mode: "indirect".into(),
             resolver: "tartarus_gate".into(),
         };
-        let config = SyscallsConfig::from_yaml(Some(&yaml)).expect("tartarus_gate should be valid");
-        assert_eq!(config.mode, SyscallsMode::Indirect);
-        assert_eq!(config.resolver, Resolver::TartarusGate);
+        let plan = SyscallsConfig::from_yaml(Some(&yaml)).expect("tartarus_gate should be valid");
+        assert_eq!(plan.mode, SyscallsMode::Indirect);
+        assert_eq!(plan.resolver, Resolver::TartarusGate);
     }
 
     #[test]
     fn from_yaml_parses_api_hash() {
-        let yaml = YamlSyscallsConfig {
+        let yaml = YamlSyscallsPlan {
             mode: "indirect".into(),
             resolver: "api_hash".into(),
         };
-        let config = SyscallsConfig::from_yaml(Some(&yaml)).expect("api_hash should be valid");
-        assert_eq!(config.mode, SyscallsMode::Indirect);
-        assert_eq!(config.resolver, Resolver::ApiHash);
+        let plan = SyscallsConfig::from_yaml(Some(&yaml)).expect("api_hash should be valid");
+        assert_eq!(plan.mode, SyscallsMode::Indirect);
+        assert_eq!(plan.resolver, Resolver::ApiHash);
     }
 
     #[test]
     fn from_yaml_rejects_unknown_resolver() {
-        let yaml = YamlSyscallsConfig {
+        let yaml = YamlSyscallsPlan {
             mode: "indirect".into(),
             resolver: "halos_gate".into(),
         };
@@ -1972,7 +1972,7 @@ mod tests {
 
     #[test]
     fn yaml_block_defaults_to_none_and_hells_gate() {
-        let yaml: YamlSyscallsConfig = serde_yml::from_str("mode: indirect\n").expect("parse");
+        let yaml: YamlSyscallsPlan = serde_yml::from_str("mode: indirect\n").expect("parse");
         assert_eq!(yaml.mode, "indirect");
         assert_eq!(yaml.resolver, "hells_gate");
     }
@@ -2011,7 +2011,7 @@ mod tests {
 
     #[test]
     fn required_deduplicates_across_the_pipeline() {
-        // Two hollowing steps would be invalid config, but the union logic
+        // Two hollowing steps would be invalid plan, but the union logic
         // must still deduplicate (defensive).
         let pipeline = hollowing_pipeline();
         let names: BTreeSet<&str> = required(&pipeline).into_iter().collect();

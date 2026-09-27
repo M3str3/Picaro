@@ -191,7 +191,7 @@ fn compiles_sleep_obfuscation_stub_to_pe() {
     let key = crate::engine::crypto::generate_key();
     let encrypted = crate::engine::crypto::encrypt_payload(&plaintext, &key).unwrap();
 
-    let build_dir = std::env::temp_dir().join(format!("batesian_sleep_{}", std::process::id()));
+    let build_dir = std::env::temp_dir().join(format!("picaro_sleep_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&build_dir);
     std::fs::create_dir_all(&build_dir).unwrap();
     std::fs::write(build_dir.join("payload.bin"), &encrypted.ciphertext).unwrap();
@@ -208,7 +208,7 @@ fn compiles_sleep_obfuscation_stub_to_pe() {
         key: encrypted.key,
         ciphertext: encrypted.ciphertext.clone(),
         plaintext_len: encrypted.plaintext_len,
-        payload_format: crate::config::schema::PayloadFormat::Pe,
+        payload_format: crate::plan::schema::PayloadFormat::Pe,
         payload_export: None,
         stub_marker: crate::engine::stub::generate_stub_marker(),
         payload_path: "payload.bin".to_string(),

@@ -1,20 +1,20 @@
 # Examples
 
-Small, runnable configs live in `examples/configs/`. Run any of them from the
+Small, runnable plans live in `examples/plans/`. Run any of them from the
 repository root:
 
 ```bash
-cargo run -- build examples/configs/<name>.yaml
+cargo run -- build examples/plans/<name>.yaml
 ```
 
-| Config | What it demonstrates |
+| Plan | What it demonstrates |
 | --- | --- |
 | `process-hollowing.yaml` | The default Execution technique: run the payload inside a suspended `svchost.exe`. |
 | `reflective-loading.yaml` | Manual mapping into the packed binary's own process. |
 | `shellcode.yaml` | A raw shellcode payload (`format: shellcode`); the blob is `mov eax, 42; ret`. |
 | `args.yaml` | `build.payload.args` and `args_mode` — YAML args plus the packed binary's own. |
 | `custom-stub.yaml` | `build.stub.path`: replace the builtin stub with your own Rust template. |
-| `mimikatz.yaml` | A full-featured config: remote payload URL, indirect syscalls, randomised VERSIONINFO and a lab signature. |
+| `mimikatz.yaml` | A full-featured plan: remote payload URL, indirect syscalls, randomised VERSIONINFO and a lab signature. |
 
 ## Recipe: pack an msfvenom payload
 
@@ -62,13 +62,13 @@ build:
     # sha256: "<the expected 64-hex digest>"
 ```
 
-## Recipe: one config, several targets
+## Recipe: one plan, several targets
 
-Positional args after the config path are substituted as `$arg.0$`, `$arg.1$`,
+Positional args after the plan path are substituted as `$arg.0$`, `$arg.1$`,
 …:
 
 ```bash
-batesian build config.yaml "C:\\Windows\\System32\\svchost.exe"
+picaro build plan.yaml "C:\\Windows\\System32\\svchost.exe"
 ```
 
 ```yaml

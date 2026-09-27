@@ -1,9 +1,9 @@
-# batesian — Agent Instructions
+# picaro — Agent Instructions
 
 ## What this project is
 
 A malware loader packer for authorized red team engagements and security
-research. Takes a PE file and a YAML config, produces a packed PE with
+research. Takes a PE file and a YAML plan, produces a packed PE with
 selected evasion techniques applied.
 
 Intended use: lab environments, authorized audits, security research.
@@ -47,7 +47,7 @@ Any other use is out of scope and not supported.
 
 ```text
 src/
-  config/       YAML parsing and validation
+  plan/       YAML parsing and validation
   engine/       crypto, stub generation, compilation, syscall layer,
                 resources, manifest, hash
   audit/        static measurement (pe_info, strings, yara, defender, report)
@@ -57,10 +57,10 @@ src/
 templates/
   stub/         Rust stub template with $placeholders$
 examples/
-  configs/      curated example YAMLs
+  plans/      curated example YAMLs
   payloads/     test payloads for end-to-end verification
 tests/
-  configs/      CI / validation fixtures
+  plans/      CI / validation fixtures
   fixtures/     committed PE fixtures
 docs/           docs source (mkdocs.yml lives at the root)
 build/          (gitignored) intermediate artifacts
@@ -69,12 +69,12 @@ dist/           (gitignored) final packed binaries
 
 Each technique lives under `src/techniques/<name>/` (README + stub fragment +
 tests). The registry (`src/techniques/mod.rs`) is metadata-only; inspect it with
-`batesian techniques {list,show,validate}`. Adding a technique is documented in
+`picaro techniques {list,show,validate}`. Adding a technique is documented in
 `src/techniques/README.md`.
 
 ## Current state
 
-**YAML schema 4 (done).** The config document is schema 4; a document that
+**YAML schema 4 (done).** The plan document is schema 4; a document that
 declares `schema: 3` (or the retired `schema: 1`/`schema: 2`) is rejected at
 parse time with a migration hint (mappings in `docs/migration-v1-v3.md`,
 `docs/migration-v2-v3.md` and `docs/migration-v3-v4.md`). A `runtime` entry is
@@ -90,7 +90,7 @@ rejected in validation as not integrated yet). String obfuscation lives at
 `$build.N$` to `$arg.N$` (`$arg.0$`, `$arg.1$`, or a named `$arg.foo$` from a
 `foo=value` CLI arg); the stub still accesses already-resolved args as
 `$ARG_<key>$`. The old `InputConfig`/`LoaderConfig` are gone
-(`src/config/schema.rs`); `PipelineStep` is renamed `RuntimeStep`
+(`src/plan/schema.rs`); `PipelineStep` is renamed `RuntimeStep`
 (`src/techniques/mod.rs`). `build.payload.source` is a single string:
 `http(s)://` is fetched in memory, `file://` is read from disk, `ftp://` is
 rejected, anything else is a local path.
@@ -119,7 +119,7 @@ diagnostics through `thiserror`.
 
 **Phase 6: indirect syscalls done.** New `build.stub.syscalls` block
 (`mode: none|indirect`, `resolver: hells_gate|tartarus_gate|api_hash`; defaults
-`none`/`hells_gate`). It is a *loader* config, not a pipeline technique. The
+`none`/`hells_gate`). It is a *loader* configuration, not a pipeline technique. The
 stub template gains `$SYSCALLS_BLOCK$`, rendered by `src/engine/syscalls.rs`
 from the union of `TechniqueDef::syscalls` requirements. Technique fragments
 always call the `nt_*` helpers (`crate::nt_alloc_vm`, ...) — `mode: none` maps
@@ -164,7 +164,7 @@ Not done (by design): stack spoofing, unhooking (7), and the payload's TLS
 at).
 
 **Phase 5 complete.** Static measurement infrastructure:
-- `batesian audit <binary>` reports header, sections + entropy, imports/exports,
+- `picaro audit <binary>` reports header, sections + entropy, imports/exports,
   strings, YARA (stub) and an optional offline Defender scan.
 - The process-hollowing binary's static baseline is documented in
   `docs/measurements.md` and `.memory.md`.
@@ -177,7 +177,7 @@ at).
 **Technique categories + `patch_amsi` (done).** Techniques are now Preparation
 vs Execution (`TechniqueDef.category`); a pipeline is `0..N` Preparation followed
 by exactly one Execution. `patch_amsi` (T1562.001) is the first Preparation
-technique. Validation in `src/config/validate.rs`; the stub renders into
+technique. Validation in `src/plan/validate.rs`; the stub renders into
 `$PREPARATION_BLOCKS$` / `$EXECUTION_BLOCK$` (Preparation fragments are
 wrapped in per-technique modules to avoid `use` collisions).
 
@@ -191,8 +191,8 @@ literal only when it is in the compiled stub **and** in the generated stub
 source (comments stripped) — a binary hit alone can come from the toolchain
 (e.g. `windows-result` ships `ntdll.dll`).
 
-**CLI UX, app renamed to `batesian` (done).** The crate, binary and CLI are
-`batesian` (previously `husk`, originally `packerman`). UX lives in `src/ui.rs`:
+**CLI UX, app named `picaro` (done).** The crate, binary and CLI are `picaro`.
+UX lives in `src/ui.rs`:
 a truecolor `Palette` with a soft violet brand accent, clear green/yellow/red
 status colors and a steel blue for targets (color auto-disabled when not a
 terminal, plus `NO_COLOR`/`--no-color`). Legibility rules: primary values use
@@ -201,9 +201,9 @@ the terminal's default foreground (a fixed light gray vanishes on a light
 banner (the `BANNER` literal in `src/ui.rs`) is printed before every subcommand,
 followed by the dim tagline (`mimicry-based packer · vX.Y.Z`); `-q`/`--quiet`
 skips it. `build` and `audit` open with a
-`▸ batesian <cmd> · <target>` echo; `build` logs `✓` steps with compact
+`▸ picaro <cmd> · <target>` echo; `build` logs `✓` steps with compact
 path/size detail and a green result line, while `-v`/`--verbose` adds a
-resolved-config block plus per-step detail (template, marker, rustc path,
+resolved-plan block plus per-step detail (template, marker, rustc path,
 timings); `audit` renders the redesigned report (metadata bar, entropy gauges,
 uppercase headings, colored `LOW/MEDIUM/HIGH RISK`); `techniques list` is a
 colored table.
@@ -237,10 +237,10 @@ fragments (`stub_fragment.rs` PE mapper, `stub_fragment_shellcode.rs` runner)
 and, for a DLL export, calls `DllMain(DLL_PROCESS_ATTACH)` before invoking the
 export with no arguments (both `SHELLCODE_FRAGMENT` and the placeholder
 substitution are tested). `process_hollowing` only runs `pe`;
-`config::validate` rejects the other formats with a pointer to
+`plan::validate` rejects the other formats with a pointer to
 `reflective_loading`. DLL/shellcode payloads run in-process, so
 `patch_command_line()` still delivers `build.payload.args` through the PEB.
-Examples: `examples/configs/shellcode.yaml` (+ `examples/payloads/demo_shellcode.bin`,
+Examples: `examples/plans/shellcode.yaml` (+ `examples/payloads/demo_shellcode.bin`,
 `mov eax, 42; ret`). Verified end to end on Windows (shellcode exits 42; a Rust
 cdylib export ran and wrote its file). The `dll` format ships no example (the old
 `test-dll.yaml` pointed at a payload that was never committed). Wizard/`--dry-run`
@@ -255,7 +255,7 @@ optional and each activates one check — `hostname`/`username`/`domain`
 codes), `not_in_vm` (CPUID hypervisor leaves), `not_in_sandbox` (aggregate
 heuristic, threshold 3), `min_uptime_min`, `min_ram_mb`; `mode: all|any`
 combines them and `on_fail: silent|exit` picks the rejection behaviour. No
-field declared is a no-op (surfaced by `config::validate::advisories` and
+field declared is a no-op (surfaced by `plan::validate::advisories` and
 printed as a build warning). **Preparation contract change:** a preparation now
 returns `Result<bool, E>` — `Ok(true)` continues, `Ok(false)` aborts — so
 the generated `run_preparations` returns `Result<bool, String>` and the builtin
@@ -266,18 +266,18 @@ template exits `0` on `false`; `patch_amsi`/`patch_etw`/`anti_debug`/
 `x32dbg`, `sandbox`, `malware`, `analysis`). Every check literal, every
 analysis process name and every hypervisor vendor token goes through
 `StringsConfig`. Docs: `src/techniques/bouncer/README.md`,
-`docs/measurements.md`; examples `tests/configs/bouncer.yaml` and
-`tests/configs/bouncer-miss.yaml`. Not done (by design): `on_fail: decoy` and
+`docs/measurements.md`; examples `tests/plans/bouncer.yaml` and
+`tests/plans/bouncer-miss.yaml`. Not done (by design): `on_fail: decoy` and
 checks outside the documented list.
 
-**Interactive build (done).** `batesian build interactive <payload>`
+**Interactive build (done).** `picaro build interactive <payload>`
 (`src/wizard.rs`) asks the questions a schema-4 YAML encodes — name/args, the
 execution technique, preparation techniques plus their parameters, the stub
-(`strings`/`syscalls`) and the output — assembles a `Config`, prints it and
+(`strings`/`syscalls`) and the output — assembles a `Plan`, prints it and
 writes it, then hands the file to the normal build, so the written YAML is the
-source of truth and `batesian build <file>` reproduces the artifact.
-`--config-out` sets the path (default `dist/<name>.yaml`). `build` gained an
-optional `interactive` subcommand (`subcommand_precedence_over_arg`), so `CONFIG`
+source of truth and `picaro build <file>` reproduces the artifact.
+`--plan-out` sets the path (default `dist/<name>.yaml`). `build` gained an
+optional `interactive` subcommand (`subcommand_precedence_over_arg`), so `PLAN`
 is now optional and validated in `run`. Prompts are a `Prompt` trait with two
 backends: `InquirePrompt` (arrow-key menus, checkbox multi-select, confirmations;
 the `inquire` crate) when stdin/stdout is a terminal, and `LinePrompt` (plain
@@ -304,7 +304,7 @@ offsets are section-relative, but `IMAGE_RESOURCE_DATA_ENTRY.OffsetToData` is an
 image RVA — that is why `embed()` resolves the RVA before building the blob.
 Verified against `FindResource`/`LoadResource` and `version.dll`
 (`GetFileVersionInfo`/`VerQueryValue`) on Windows. Example:
-`tests/configs/resources.yaml`, asset `examples/assets/sample.ico`.
+`tests/plans/resources.yaml`, asset `examples/assets/sample.ico`.
 Note the name clash: `build.output.manifest` (bool) is the provenance JSON;
 `build.output.manifest` is **not** the embedded manifest — that is
 `build.output.resources.manifest`.
@@ -317,7 +317,7 @@ code-signing leaf signed by it; the CA's public cert is exported next to the
 artifact as `<stem>.ca.cer` and **no trust store is modified**: the lab installs
 that file in its own Trusted Root), `store` (an existing cert by
 `thumbprint`/`subject`) and `file` (a `.pfx`; password from `password_env`, never
-the YAML). `signtool` is discovered in PATH → `BATESIAN_SIGNTOOL` → Windows Kits
+the YAML). `signtool` is discovered in PATH → `PICARO_SIGNTOOL` → Windows Kits
 (`...\Windows Kits\10\bin\<ver>\x64`) → `output.sign.signtool`. Optional
 `timestamp_url` (RFC 3161). `src/engine/identity.rs` generates plausible metadata
 when `output.resources.version_info.randomize: true` (company/product/
@@ -329,12 +329,12 @@ ca_file}` and the resolved `version_info`. `build.output.subsystem`
 rendered stub (skipped if the stub sets its own). A lab signature verifies only
 where its CA is trusted; it gives no SmartScreen reputation.
 `.pfx`/`.p12`/`.pem`/`.key` are gitignored. Example:
-`examples/configs/mimikatz.yaml` (randomized identity + lab signature).
+`examples/plans/mimikatz.yaml` (randomized identity + lab signature).
 
 ## Known limitations
 
 - **`x86` is parsed but rejected.** `Arch::X86` exists so the enum is complete,
-  but `config::validate` rejects it: the stub toolchain only produces x64, and
+  but `plan::validate` rejects it: the stub toolchain only produces x64, and
   adding x86 means a 32-bit stub variant plus a per-architecture fragment for
   every technique.
 

@@ -1,19 +1,19 @@
-//! Integration tests for the `batesian` CLI.
+//! Integration tests for the `picaro` CLI.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 
-/// Serializes the e2e `batesian build` tests: they share the repo's `build/`
+/// Serializes the e2e `picaro build` tests: they share the repo's `build/`
 /// directory (wiped by each build), so two of them must not run concurrently.
 static BUILD_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn techniques_list_lists_all_techniques() {
-    let output = Command::new(env!("CARGO_BIN_EXE_batesian"))
+    let output = Command::new(env!("CARGO_BIN_EXE_picaro"))
         .args(["techniques", "list"])
         .output()
-        .expect("run batesian techniques list");
+        .expect("run picaro techniques list");
 
     assert!(output.status.success(), "list must exit 0");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -29,10 +29,10 @@ fn techniques_list_lists_all_techniques() {
 
 #[test]
 fn techniques_show_prints_readme() {
-    let output = Command::new(env!("CARGO_BIN_EXE_batesian"))
+    let output = Command::new(env!("CARGO_BIN_EXE_picaro"))
         .args(["techniques", "show", "process_hollowing"])
         .output()
-        .expect("run batesian techniques show");
+        .expect("run picaro techniques show");
 
     assert!(output.status.success(), "show must exit 0");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -42,17 +42,17 @@ fn techniques_show_prints_readme() {
     );
 }
 
-/// End-to-end: `batesian build` with a Preparation + Execution pipeline
+/// End-to-end: `picaro build` with a Preparation + Execution pipeline
 /// produces a PE. Marked `#[ignore]` because it compiles the stub (needs
 /// `rustc` + the compiled dependencies).
 #[test]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn build_with_amsi_patch_produces_pe() {
     let _guard = BUILD_LOCK.lock().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_batesian"))
-        .args(["build", "tests/configs/amsi-patch.yaml"])
+    let output = Command::new(env!("CARGO_BIN_EXE_picaro"))
+        .args(["build", "tests/plans/amsi-patch.yaml"])
         .output()
-        .expect("run batesian build");
+        .expect("run picaro build");
     assert!(
         output.status.success(),
         "build failed: {}",
@@ -69,10 +69,10 @@ fn build_with_amsi_patch_produces_pe() {
 #[test]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn build_with_invalid_order_fails() {
-    let output = Command::new(env!("CARGO_BIN_EXE_batesian"))
-        .args(["build", "tests/configs/invalid-order.yaml"])
+    let output = Command::new(env!("CARGO_BIN_EXE_picaro"))
+        .args(["build", "tests/plans/invalid-order.yaml"])
         .output()
-        .expect("run batesian build");
+        .expect("run picaro build");
     assert!(!output.status.success(), "invalid order must fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -84,10 +84,10 @@ fn build_with_invalid_order_fails() {
 /// The banner (and its tagline) is printed before every subcommand.
 #[test]
 fn banner_is_printed_by_default() {
-    let output = Command::new(env!("CARGO_BIN_EXE_batesian"))
+    let output = Command::new(env!("CARGO_BIN_EXE_picaro"))
         .args(["techniques", "list"])
         .output()
-        .expect("run batesian techniques list");
+        .expect("run picaro techniques list");
 
     assert!(output.status.success(), "list must exit 0");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -100,10 +100,10 @@ fn banner_is_printed_by_default() {
 /// `--quiet` suppresses the banner but keeps the command output.
 #[test]
 fn quiet_flag_hides_the_banner() {
-    let output = Command::new(env!("CARGO_BIN_EXE_batesian"))
+    let output = Command::new(env!("CARGO_BIN_EXE_picaro"))
         .args(["--quiet", "techniques", "list"])
         .output()
-        .expect("run batesian --quiet techniques list");
+        .expect("run picaro --quiet techniques list");
 
     assert!(output.status.success(), "list must exit 0");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -123,10 +123,10 @@ fn quiet_flag_hides_the_banner() {
 #[ignore = "requires rustc and the compiled dependencies"]
 fn build_with_bouncer_produces_pe() {
     let _guard = BUILD_LOCK.lock().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_batesian"))
-        .args(["build", "tests/configs/bouncer.yaml"])
+    let output = Command::new(env!("CARGO_BIN_EXE_picaro"))
+        .args(["build", "tests/plans/bouncer.yaml"])
         .output()
-        .expect("run batesian build");
+        .expect("run picaro build");
     assert!(
         output.status.success(),
         "build failed: {}",
@@ -151,15 +151,15 @@ fn bouncer_gate_blocks_and_allows_on_windows() {
     }
     let _guard = BUILD_LOCK.lock().unwrap();
 
-    // Build the config and run the packed binary, returning its stdout.
-    let run = |config: &str, exe: &str| -> String {
-        let build = Command::new(env!("CARGO_BIN_EXE_batesian"))
-            .args(["build", config])
+    // Build the plan and run the packed binary, returning its stdout.
+    let run = |plan: &str, exe: &str| -> String {
+        let build = Command::new(env!("CARGO_BIN_EXE_picaro"))
+            .args(["build", plan])
             .output()
-            .expect("run batesian build");
+            .expect("run picaro build");
         assert!(
             build.status.success(),
-            "build {config} failed: {}",
+            "build {plan} failed: {}",
             String::from_utf8_lossy(&build.stderr)
         );
         let packed = Command::new(exe).output().expect("run the packed exe");
@@ -169,7 +169,7 @@ fn bouncer_gate_blocks_and_allows_on_windows() {
     const MARKER: &str = "PAYLOAD_MARKER_7f3a9c2e";
 
     let miss = run(
-        "tests/configs/bouncer-miss.yaml",
+        "tests/plans/bouncer-miss.yaml",
         "dist/test_bouncer_miss.exe",
     );
     assert!(
@@ -177,23 +177,23 @@ fn bouncer_gate_blocks_and_allows_on_windows() {
         "the payload ran even though the host name did not match: {miss}"
     );
 
-    let hit = run("tests/configs/bouncer.yaml", "dist/test_bouncer.exe");
+    let hit = run("tests/plans/bouncer.yaml", "dist/test_bouncer.exe");
     assert!(
         hit.contains(MARKER),
         "the payload did not run on a matching host: {hit}"
     );
 }
 
-/// End-to-end: `batesian build` with a custom loader stub produces a PE.
+/// End-to-end: `picaro build` with a custom loader stub produces a PE.
 /// Marked `#[ignore]` because it compiles the stub.
 #[test]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn build_with_custom_stub_produces_pe() {
     let _guard = BUILD_LOCK.lock().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_batesian"))
-        .args(["build", "examples/configs/custom-stub.yaml"])
+    let output = Command::new(env!("CARGO_BIN_EXE_picaro"))
+        .args(["build", "examples/plans/custom-stub.yaml"])
         .output()
-        .expect("run batesian build");
+        .expect("run picaro build");
     assert!(
         output.status.success(),
         "build failed: {}",
@@ -212,18 +212,18 @@ fn build_interactive_quit_writes_nothing() {
     use std::io::Write;
     use std::process::Stdio;
 
-    let config_out = std::env::temp_dir().join("batesian_wizard_cli_quit.yaml");
-    let _ = std::fs::remove_file(&config_out);
+    let plan_out = std::env::temp_dir().join("picaro_wizard_cli_quit.yaml");
+    let _ = std::fs::remove_file(&plan_out);
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_batesian"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_picaro"))
         .args(["build", "interactive", "examples/payloads/test_payload.exe"])
-        .arg("--config-out")
-        .arg(&config_out)
+        .arg("--plan-out")
+        .arg(&plan_out)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn batesian build interactive");
+        .expect("spawn picaro build interactive");
 
     // Nine blank answers walk the first pass with their defaults; `3` quits the
     // review screen, so the wizard stops before writing (or compiling) anything.
@@ -232,13 +232,13 @@ fn build_interactive_quit_writes_nothing() {
     stdin.write_all(b"3\n").expect("write the quit choice");
     drop(stdin);
 
-    let output = child.wait_with_output().expect("wait for batesian");
+    let output = child.wait_with_output().expect("wait for picaro");
     assert!(
         output.status.success(),
         "wizard failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(!config_out.exists(), "the quit config must not be written");
+    assert!(!plan_out.exists(), "the quit plan must not be written");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("build interactive"),
@@ -254,8 +254,7 @@ fn build_args_payload() -> PathBuf {
         .join("examples")
         .join("payloads")
         .join("test_args_payload.rs");
-    let out =
-        std::env::temp_dir().join(format!("batesian_args_payload_{}.exe", std::process::id()));
+    let out = std::env::temp_dir().join(format!("picaro_args_payload_{}.exe", std::process::id()));
     let status = Command::new("rustc")
         .arg(&src)
         .arg("-O")
@@ -277,7 +276,7 @@ fn pack_args_payload(name: &str, payload: &Path, args: &[&str], mode: &str) -> P
         .map(|arg| format!("      - \"{arg}\"\n"))
         .collect::<String>();
     let source = payload.display().to_string().replace('\\', "/");
-    let config = format!(
+    let plan = format!(
         r#"schema: 4
 name: {name}
 build:
@@ -298,13 +297,13 @@ runtime:
 "#
     );
 
-    let config_path = std::env::temp_dir().join(format!("batesian_args_{name}.yaml"));
-    std::fs::write(&config_path, config).expect("write the temp config");
+    let plan_path = std::env::temp_dir().join(format!("picaro_args_{name}.yaml"));
+    std::fs::write(&plan_path, plan).expect("write the temp plan");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_batesian"))
-        .args(["build", config_path.to_str().expect("utf-8 config path")])
+    let output = Command::new(env!("CARGO_BIN_EXE_picaro"))
+        .args(["build", plan_path.to_str().expect("utf-8 plan path")])
         .output()
-        .expect("run batesian build");
+        .expect("run picaro build");
     assert!(
         output.status.success(),
         "build failed: {}",
@@ -390,18 +389,18 @@ fn payload_override_mode_prefers_runtime_args() {
 /// A checked-in x64 PE used by the hermetic audit tests.
 const AUDIT_FIXTURE: &str = "tests/fixtures/minimal_x64.exe";
 
-/// Runs `batesian` with `args` and returns the output.
-fn batesian(args: &[&std::ffi::OsStr]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_batesian"))
+/// Runs `picaro` with `args` and returns the output.
+fn picaro(args: &[&std::ffi::OsStr]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_picaro"))
         .args(args)
         .output()
-        .expect("run batesian")
+        .expect("run picaro")
 }
 
 /// `audit --json` emits a JSON report whose top level is the report itself.
 #[test]
 fn audit_json_emits_a_machine_readable_report() {
-    let out = batesian(&[
+    let out = picaro(&[
         "--quiet".as_ref(),
         "audit".as_ref(),
         AUDIT_FIXTURE.as_ref(),
@@ -430,7 +429,7 @@ fn audit_json_emits_a_machine_readable_report() {
 /// same binary is clean, a forced entropy jump exits 3.
 #[test]
 fn audit_baseline_gates_a_regression() {
-    let json = batesian(&[
+    let json = picaro(&[
         "--quiet".as_ref(),
         "audit".as_ref(),
         AUDIT_FIXTURE.as_ref(),
@@ -438,11 +437,11 @@ fn audit_baseline_gates_a_regression() {
     ]);
     assert!(json.status.success());
 
-    let baseline = std::env::temp_dir().join("batesian_cli_baseline.json");
+    let baseline = std::env::temp_dir().join("picaro_cli_baseline.json");
     std::fs::write(&baseline, &json.stdout).expect("write the baseline");
 
     // The same binary must not regress against its own report.
-    let clean = batesian(&[
+    let clean = picaro(&[
         "--quiet".as_ref(),
         "audit".as_ref(),
         AUDIT_FIXTURE.as_ref(),
@@ -461,7 +460,7 @@ fn audit_baseline_gates_a_regression() {
     report["sections"][0]["entropy"] = serde_json::json!(0.0);
     std::fs::write(&baseline, serde_json::to_vec(&report).unwrap()).expect("rewrite baseline");
 
-    let regressed = batesian(&[
+    let regressed = picaro(&[
         "--quiet".as_ref(),
         "audit".as_ref(),
         AUDIT_FIXTURE.as_ref(),
@@ -479,8 +478,8 @@ fn audit_baseline_gates_a_regression() {
 
 // --- build --dry-run / build.payload.sha256 ---
 
-/// A minimal build config (reflective loading, builtin stub) for `out`.
-fn minimal_build_config(out: &Path, sha256: Option<&str>) -> String {
+/// A minimal build plan (reflective loading, builtin stub) for `out`.
+fn minimal_build_plan(out: &Path, sha256: Option<&str>) -> String {
     let sha_line = match sha256 {
         Some(hash) => format!("    sha256: \"{hash}\"\n"),
         None => String::new(),
@@ -506,26 +505,26 @@ runtime:
     )
 }
 
-fn write_temp_config(name: &str, body: &str) -> PathBuf {
+fn write_temp_plan(name: &str, body: &str) -> PathBuf {
     let path = std::env::temp_dir().join(name);
-    std::fs::write(&path, body).expect("write the temp config");
+    std::fs::write(&path, body).expect("write the temp plan");
     path
 }
 
-/// `build --dry-run` validates the config and payload but writes nothing — and
+/// `build --dry-run` validates the plan and payload but writes nothing — and
 /// therefore needs no `rustc`, so it runs in the fast suite.
 #[test]
 fn build_dry_run_validates_without_writing() {
-    let out = std::env::temp_dir().join("batesian_dry_run_out.exe");
-    let manifest = std::env::temp_dir().join("batesian_dry_run_out.manifest.json");
+    let out = std::env::temp_dir().join("picaro_dry_run_out.exe");
+    let manifest = std::env::temp_dir().join("picaro_dry_run_out.manifest.json");
     let _ = std::fs::remove_file(&out);
     let _ = std::fs::remove_file(&manifest);
 
-    let config = write_temp_config("batesian_dry_run.yaml", &minimal_build_config(&out, None));
-    let output = batesian(&[
+    let plan = write_temp_plan("picaro_dry_run.yaml", &minimal_build_plan(&out, None));
+    let output = picaro(&[
         "--quiet".as_ref(),
         "build".as_ref(),
-        config.as_os_str(),
+        plan.as_os_str(),
         "--dry-run".as_ref(),
     ]);
 
@@ -543,14 +542,14 @@ fn build_dry_run_validates_without_writing() {
 /// with a clear message, before anything is compiled.
 #[test]
 fn build_rejects_a_payload_sha256_mismatch() {
-    let out = std::env::temp_dir().join("batesian_sha_out.exe");
+    let out = std::env::temp_dir().join("picaro_sha_out.exe");
     let wrong = "0".repeat(64);
-    let config = write_temp_config(
-        "batesian_sha_mismatch.yaml",
-        &minimal_build_config(&out, Some(&wrong)),
+    let plan = write_temp_plan(
+        "picaro_sha_mismatch.yaml",
+        &minimal_build_plan(&out, Some(&wrong)),
     );
 
-    let output = batesian(&["--quiet".as_ref(), "build".as_ref(), config.as_os_str()]);
+    let output = picaro(&["--quiet".as_ref(), "build".as_ref(), plan.as_os_str()]);
     assert!(!output.status.success(), "a mismatch must fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -566,10 +565,10 @@ fn build_rejects_a_payload_sha256_mismatch() {
 /// manifest) without compiling, so it runs in the fast suite.
 #[test]
 fn build_dry_run_validates_resources() {
-    let output = batesian(&[
+    let output = picaro(&[
         "--quiet".as_ref(),
         "build".as_ref(),
-        "tests/configs/resources.yaml".as_ref(),
+        "tests/plans/resources.yaml".as_ref(),
         "--dry-run".as_ref(),
     ]);
     assert!(
@@ -585,20 +584,20 @@ fn build_dry_run_validates_resources() {
     );
 }
 
-/// End-to-end: a config with icon + version info + manifest embeds a `.rsrc`
+/// End-to-end: a plan with icon + version info + manifest embeds a `.rsrc`
 /// section, which `audit --json` reports. Marked `#[ignore]` (compiles a stub).
 #[test]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn build_with_resources_embeds_a_resource_section() {
     let _guard = BUILD_LOCK.lock().unwrap();
-    let build = batesian(&["build".as_ref(), "tests/configs/resources.yaml".as_ref()]);
+    let build = picaro(&["build".as_ref(), "tests/plans/resources.yaml".as_ref()]);
     assert!(
         build.status.success(),
         "build failed: {}",
         String::from_utf8_lossy(&build.stderr)
     );
 
-    let audit = batesian(&[
+    let audit = picaro(&[
         "--quiet".as_ref(),
         "audit".as_ref(),
         "dist/test_resources.exe".as_ref(),
@@ -628,17 +627,17 @@ fn build_with_resources_embeds_a_resource_section() {
 /// needed for this path, so the test is hermetic).
 #[test]
 fn build_dry_run_rejects_a_missing_signing_file() {
-    let out = std::env::temp_dir().join("batesian_sign_out.exe");
-    let yaml = minimal_build_config(&out, None).replace(
+    let out = std::env::temp_dir().join("picaro_sign_out.exe");
+    let yaml = minimal_build_plan(&out, None).replace(
         "    trim_paths: all\n",
         "    trim_paths: all\n    sign:\n      mode: file\n      file: ./does-not-exist.pfx\n",
     );
-    let config = write_temp_config("batesian_sign_missing.yaml", &yaml);
+    let plan = write_temp_plan("picaro_sign_missing.yaml", &yaml);
 
-    let output = batesian(&[
+    let output = picaro(&[
         "--quiet".as_ref(),
         "build".as_ref(),
-        config.as_os_str(),
+        plan.as_os_str(),
         "--dry-run".as_ref(),
     ]);
     assert!(!output.status.success(), "a missing .pfx must fail");
@@ -649,17 +648,17 @@ fn build_dry_run_rejects_a_missing_signing_file() {
 /// An unknown `sign.mode` is rejected before anything runs.
 #[test]
 fn build_rejects_an_unknown_signing_mode() {
-    let out = std::env::temp_dir().join("batesian_sign_mode_out.exe");
-    let yaml = minimal_build_config(&out, None).replace(
+    let out = std::env::temp_dir().join("picaro_sign_mode_out.exe");
+    let yaml = minimal_build_plan(&out, None).replace(
         "    trim_paths: all\n",
         "    trim_paths: all\n    sign:\n      mode: bogus\n",
     );
-    let config = write_temp_config("batesian_sign_mode.yaml", &yaml);
+    let plan = write_temp_plan("picaro_sign_mode.yaml", &yaml);
 
-    let output = batesian(&[
+    let output = picaro(&[
         "--quiet".as_ref(),
         "build".as_ref(),
-        config.as_os_str(),
+        plan.as_os_str(),
         "--dry-run".as_ref(),
     ]);
     assert!(!output.status.success());
@@ -674,17 +673,17 @@ fn build_rejects_an_unknown_signing_mode() {
 /// `signtool` needed), so the generated metadata is exercised hermetically.
 #[test]
 fn build_dry_run_resolves_randomized_metadata() {
-    let out = std::env::temp_dir().join("batesian_random_out.exe");
-    let yaml = minimal_build_config(&out, None).replace(
+    let out = std::env::temp_dir().join("picaro_random_out.exe");
+    let yaml = minimal_build_plan(&out, None).replace(
         "    trim_paths: all\n",
         "    trim_paths: all\n    resources:\n      version_info:\n        randomize: true\n",
     );
-    let config = write_temp_config("batesian_random.yaml", &yaml);
+    let plan = write_temp_plan("picaro_random.yaml", &yaml);
 
-    let output = batesian(&[
+    let output = picaro(&[
         "--quiet".as_ref(),
         "build".as_ref(),
-        config.as_os_str(),
+        plan.as_os_str(),
         "--dry-run".as_ref(),
     ]);
     assert!(

@@ -1,4 +1,4 @@
-site_name: batesian
+site_name: picaro
 site_description: Declarative PE packer for authorized red team research
 
 docs_dir: docs
@@ -48,7 +48,7 @@ extra_css:
 nav:
   - Home: index.md
   - Getting started: getting-started.md
-  - Configuration: configuration.md
+  - Plan: plan.md
   - Examples: examples/index.md
   - Techniques:
       - Overview: techniques/index.md
@@ -88,7 +88,7 @@ markdown_extensions:
   - pymdownx.details
   - pymdownx.tabbed:
       alternate_style: true
-  # Pulls the per-technique READMEs, the README config section and the examples
+  # Pulls the per-technique READMEs, the README plan section and the examples
   # README in, so the Markdown stays the single source of truth. Paths are
   # relative to the repo root; `check_paths` fails the build if one is missing.
   - pymdownx.snippets:

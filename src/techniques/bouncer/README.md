@@ -19,7 +19,7 @@ a research VM, or the wrong workstation.
 
 Every field is optional and activates one check; undeclared checks are skipped.
 With no field declared the technique is a no-op (it always lets the payload
-run), which `batesian build` reports as a warning.
+run), which `picaro build` reports as a warning.
 
 ## YAML parameters
 

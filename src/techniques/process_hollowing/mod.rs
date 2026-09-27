@@ -6,8 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::schema::PayloadFormat;
 use crate::engine::obfuscation::StringsConfig;
+use crate::plan::schema::PayloadFormat;
 
 use super::{Capability, Category, Stability, TechniqueDef};
 
@@ -216,7 +216,7 @@ impl Params {
     /// Renders the fragment for the payload's binary format.
     ///
     /// `process_hollowing` replaces a suspended process's image, so it only
-    /// runs a PE executable. `config::validate` rejects `format: dll`/
+    /// runs a PE executable. `plan::validate` rejects `format: dll`/
     /// `shellcode` before this runs; the parameter is accepted (and ignored) to
     /// keep the execution-technique contract uniform with `reflective_loading`.
     pub fn render_fragment_for(&self, strings: &StringsConfig, _format: PayloadFormat) -> String {

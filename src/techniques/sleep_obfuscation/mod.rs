@@ -42,7 +42,7 @@ impl Variant {
 /// One region class in `encrypt_regions`.
 ///
 /// All three values are recognized by the parser; only [`EncryptRegion::Payload`]
-/// is implemented in this phase (rejected otherwise in `config::validate`).
+/// is implemented in this phase (rejected otherwise in `plan::validate`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EncryptRegion {
@@ -159,7 +159,7 @@ impl Params {
     /// Renders the ekko stub fragment, baking in the sleep length and the
     /// obfuscated API/DLL names.
     ///
-    /// `config::validate` rejects non-`ekko` variants and region lists other
+    /// `plan::validate` rejects non-`ekko` variants and region lists other
     /// than `[payload]` before this runs, so only the ekko body is rendered.
     pub fn render_fragment(&self, strings: &StringsConfig) -> String {
         // Every runtime name is rebuilt at runtime through `strings` so it

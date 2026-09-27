@@ -15,9 +15,9 @@ use crate::engine::BuildError;
 /// Main project error.
 #[derive(Debug, thiserror::Error)]
 pub enum PackerError {
-    /// The configuration file could not be read from disk.
-    #[error("could not read config file '{path}': {source}")]
-    ReadConfig {
+    /// The plan file could not be read from disk.
+    #[error("could not read plan file '{path}': {source}")]
+    ReadPlan {
         path: PathBuf,
         #[source]
         source: std::io::Error,
@@ -49,14 +49,14 @@ pub enum PackerError {
 
     /// The file is not valid YAML or does not match the schema.
     #[error("invalid YAML in '{path}': {source}")]
-    ParseConfig {
+    ParsePlan {
         path: PathBuf,
         #[source]
         source: serde_yml::Error,
     },
 
     /// The YAML deserialized correctly but violates a business rule.
-    #[error("invalid configuration: {0}")]
+    #[error("invalid plan: {0}")]
     Validation(String),
 
     /// The input payload is not a valid PE.

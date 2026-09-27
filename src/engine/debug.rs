@@ -92,7 +92,7 @@ const ENABLED_WITH_CONSOLE: &str = r#"
 #[macro_export]
 macro_rules! tech_dbg {
     ($tech:literal, $($arg:tt)*) => {{
-        crate::__batesian_debug_console();
+        crate::__picaro_debug_console();
         eprintln!("[+] [{}] {}", $tech, format_args!($($arg)*));
     }};
 }
@@ -100,7 +100,7 @@ macro_rules! tech_dbg {
 /// Allocates a console the first time a trace line is printed. A `windows`
 /// subsystem process runs without one, so stderr would otherwise be discarded.
 #[allow(dead_code)]
-fn __batesian_debug_console() {
+fn __picaro_debug_console() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let _ = unsafe { windows::Win32::System::Console::AllocConsole() };
@@ -135,7 +135,7 @@ mod tests {
     fn enabled_windows_prelude_allocates_a_console() {
         let prelude = render_prelude(true, true);
         assert!(prelude.contains("AllocConsole"));
-        assert!(prelude.contains("__batesian_debug_console"));
+        assert!(prelude.contains("__picaro_debug_console"));
         assert!(prelude.contains("eprintln!"));
     }
 

@@ -3,15 +3,15 @@
 ## What this project is
 
 A malware loader packer for authorized red team engagements and security
-research. It takes a PE (or a DLL, or raw shellcode) and a YAML config and
+research. It takes a PE (or a DLL, or raw shellcode) and a YAML plan and
 produces a packed PE with the selected evasion techniques applied.
 
 ## Pipeline (build)
 
 ```
-batesian build config.yaml
+picaro build plan.yaml
     │
-    ├─ 1. Parse YAML, substitute build args, validate   (src/config)
+    ├─ 1. Parse YAML, substitute build args, validate   (src/plan)
     ├─ 2. Read (file or URL) + validate the payload     (src/engine/pe, src/engine/fetch)
     │      + verify build.payload.sha256 when pinned
     ├─ 3. Encrypt payload              (src/engine/crypto, XChaCha20-Poly1305)
@@ -22,7 +22,7 @@ batesian build config.yaml
     ├─ 6b. Sign the artifact           (src/engine/signing, signtool; optional)
     └─ 7. Write the provenance manifest (src/engine/manifest)
 
-`batesian build config.yaml --dry-run` stops after step 2 (no encryption,
+`picaro build plan.yaml --dry-run` stops after step 2 (no encryption,
 compilation or output).
 ```
 
@@ -39,7 +39,7 @@ Each technique is Preparation or Execution (`src/techniques/mod.rs`):
   `reflective_loading`).
 
 A valid pipeline is `0..N` Preparation techniques followed by exactly one
-Execution technique; `src/config/validate.rs` rejects anything else, including a
+Execution technique; `src/plan/validate.rs` rejects anything else, including a
 Preparation placed after the Execution technique.
 
 The stub renders the pipeline into two placeholders:
@@ -92,7 +92,7 @@ The stub template renders the layer into `$SYSCALLS_BLOCK$` (a no-op
   into an executable allocation and runs them on a thread.
 
 `process_hollowing` replaces a suspended process's image, so it only runs
-`format: pe` today and `config::validate` rejects the other formats with a
+`format: pe` today and `plan::validate` rejects the other formats with a
 pointer to `reflective_loading`. The format reaches the Execution fragment
 through `RuntimeStep::render_fragment`, which selects the technique's
 format-specific fragment.
@@ -121,7 +121,7 @@ the payload's `argv[0]` is the exe and its args start at `argv[1]`. See
 ## Pipeline (audit)
 
 ```
-batesian audit binary [--focus sections] [--json] [--baseline report.json]
+picaro audit binary [--focus sections] [--json] [--baseline report.json]
     │
     ├─ PE header + sections + entropy  (src/audit/pe_info)
     ├─ imports / exports              (src/audit/pe_info)
@@ -149,7 +149,7 @@ has to be right for Windows to load the resources.
 
 ## Cross-compilation from Linux
 
-When `batesian` runs on Linux/WSL the stub is cross-compiled to
+When `picaro` runs on Linux/WSL the stub is cross-compiled to
 `x86_64-pc-windows-gnu`. Two `-L` flags are required and easy to forget:
 
 - `-L native=<...>/windows_x86_64_gnu-<ver>/lib` — `windows-rs` links via
@@ -165,7 +165,7 @@ second, compilation fails with `can't find crate for windows_implement`.
 
 ```text
 src/
-  config/     YAML parsing and validation
+  plan/     YAML parsing and validation
   engine/     crypto, pe parsing, stub generation, compilation, syscall layer,
               imports, resources (icon/VERSIONINFO/manifest), identity, signing,
               manifest, hash
@@ -176,7 +176,7 @@ src/
 templates/
   stub/       Rust stub template with $placeholders$
 examples/
-  configs/    example YAMLs
+  plans/    example YAMLs
   payloads/   test payloads
 yara/         YARA rules (empty for now)
 docs/         this file + the rest of the book

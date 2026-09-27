@@ -8,8 +8,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::schema::PayloadFormat;
 use crate::engine::obfuscation::StringsConfig;
+use crate::plan::schema::PayloadFormat;
 
 use super::{Capability, Category, Stability, TechniqueDef};
 

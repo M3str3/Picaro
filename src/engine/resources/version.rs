@@ -9,14 +9,14 @@
 //! the root uses the 52-byte fixed struct. Every node is padded to 4 bytes.
 
 use super::ResourceError;
-use crate::config::schema::VersionInfoConfig;
+use crate::plan::schema::VersionInfoPlan;
 
 /// Language id encoded in the string-table key and the translation entry.
 const LANG: u16 = 0x0409;
 /// Code page encoded in the string-table key and the translation entry.
 const CODEPAGE: u16 = 1200;
 
-/// The version used when the config omits one.
+/// The version used when the plan omits one.
 const DEFAULT_VERSION: (u16, u16, u16, u16) = (1, 0, 0, 0);
 
 /// Parses `MAJOR.MINOR.PATCH.BUILD` (1 to 4 dot-separated numbers).
@@ -43,13 +43,13 @@ pub fn parse_version(s: &str) -> Result<(u16, u16, u16, u16), String> {
     Ok((out[0], out[1], out[2], out[3]))
 }
 
-/// Builds the `RT_VERSION` payload for `config`.
-pub fn build(config: &VersionInfoConfig) -> Result<Vec<u8>, ResourceError> {
-    let file = match &config.file_version {
+/// Builds the `RT_VERSION` payload for `plan`.
+pub fn build(plan: &VersionInfoPlan) -> Result<Vec<u8>, ResourceError> {
+    let file = match &plan.file_version {
         Some(value) => parse_version(value).map_err(ResourceError::InvalidVersion)?,
         None => DEFAULT_VERSION,
     };
-    let product = match &config.product_version {
+    let product = match &plan.product_version {
         Some(value) => parse_version(value).map_err(ResourceError::InvalidVersion)?,
         None => file,
     };
@@ -58,23 +58,23 @@ pub fn build(config: &VersionInfoConfig) -> Result<Vec<u8>, ResourceError> {
     let product_string = version_string(product);
 
     let mut entries: Vec<(&str, &str)> = Vec::new();
-    if let Some(value) = &config.company {
+    if let Some(value) = &plan.company {
         entries.push(("CompanyName", value));
     }
-    if let Some(value) = &config.description {
+    if let Some(value) = &plan.description {
         entries.push(("FileDescription", value));
     }
     entries.push(("FileVersion", &file_string));
-    if let Some(value) = &config.internal_name {
+    if let Some(value) = &plan.internal_name {
         entries.push(("InternalName", value));
     }
-    if let Some(value) = &config.copyright {
+    if let Some(value) = &plan.copyright {
         entries.push(("LegalCopyright", value));
     }
-    if let Some(value) = &config.original_filename {
+    if let Some(value) = &plan.original_filename {
         entries.push(("OriginalFilename", value));
     }
-    if let Some(value) = &config.product {
+    if let Some(value) = &plan.product {
         entries.push(("ProductName", value));
     }
     entries.push(("ProductVersion", &product_string));
@@ -223,12 +223,12 @@ mod tests {
 
     #[test]
     fn the_root_starts_with_the_version_signature() {
-        let config = VersionInfoConfig {
+        let plan = VersionInfoPlan {
             company: Some("Contoso".to_string()),
             file_version: Some("1.2.3.4".to_string()),
-            ..VersionInfoConfig::default()
+            ..VersionInfoPlan::default()
         };
-        let built = build(&config).expect("build");
+        let built = build(&plan).expect("build");
         assert!(built.len().is_multiple_of(4));
         assert_eq!(read_u16(&built, 2), 52, "wValueLength is the fixed struct");
         assert_eq!(read_u16(&built, 4), 0, "root is binary");
@@ -247,11 +247,11 @@ mod tests {
 
     #[test]
     fn a_version_round_trips_through_the_fixed_struct() {
-        let config = VersionInfoConfig {
+        let plan = VersionInfoPlan {
             file_version: Some("1.2.3.4".to_string()),
-            ..VersionInfoConfig::default()
+            ..VersionInfoPlan::default()
         };
-        let built = build(&config).expect("build");
+        let built = build(&plan).expect("build");
         let key_len = "VS_VERSION_INFO".encode_utf16().count() * 2 + 2;
         let value_start = (6 + key_len + 3) & !3;
         let file_ms =

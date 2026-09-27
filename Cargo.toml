@@ -1,5 +1,5 @@
 [package]
-name = "batesian"
+name = "picaro"
 version = "0.1.0"
 edition = "2021"
 description = "Declarative PE packer for authorized red team research"
@@ -23,7 +23,7 @@ hex = "0.4"
 regex = "1"
 # In-memory HTTP(S) fetch of the input payload (URL input).
 ureq = { version = "2.12", features = ["tls"] }
-# Declarative CLI (`batesian build config.yaml`).
+# Declarative CLI (`picaro build plan.yaml`).
 clap = { version = "4", features = ["derive"] }
 # Typed errors; we avoid `panic!` and `unwrap` in the main flow.
 thiserror = "2"
@@ -33,7 +33,7 @@ thiserror = "2"
 anstream = "1"
 anstyle = "1"
 # Interactive prompts (arrow-key menus, checkbox multi-select, confirmations)
-# for `batesian build interactive`. Used only when stdin/stdout is a terminal;
+# for `picaro build interactive`. Used only when stdin/stdout is a terminal;
 # scripted/redirected input falls back to a plain line reader.
 inquire = "0.7"
 # Windows FFI (windows-rs). Only the generated stub uses it, but it is declared

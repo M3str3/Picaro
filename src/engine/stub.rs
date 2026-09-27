@@ -27,7 +27,7 @@ use super::debug;
 use super::obfuscation::{byte_array_literal, StringsConfig};
 use super::syscalls::{self, SyscallsConfig, SyscallsMode};
 use super::{imports, BuildError, Result};
-use crate::config::schema::PayloadFormat;
+use crate::plan::schema::PayloadFormat;
 use crate::techniques::{Category, RuntimeStep};
 
 /// Values used to fill the template placeholders.
@@ -644,11 +644,11 @@ $EXECUTION_BLOCK$
     /// `stack` strategy leaves no decoder and no cleartext target.
     #[test]
     fn strings_block_strategy_reaches_the_fragments() {
-        let yaml = crate::engine::obfuscation::YamlStringsConfig {
+        let yaml = crate::engine::obfuscation::YamlStringsPlan {
             strategy: "stack".to_string(),
             key: "random".to_string(),
         };
-        let strings = StringsConfig::from_yaml(Some(&yaml)).expect("stack config");
+        let strings = StringsConfig::from_yaml(Some(&yaml)).expect("stack plan");
         let out = render_main_rs(
             TEMPLATE,
             &params(),

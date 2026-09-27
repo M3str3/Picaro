@@ -13,7 +13,7 @@ pub mod version;
 
 use std::path::PathBuf;
 
-use crate::config::schema::ResourcesConfig;
+use crate::plan::schema::ResourcesPlan;
 use tree::{Resource, RT_GROUP_ICON, RT_ICON, RT_MANIFEST, RT_VERSION};
 
 /// Language id attached to every resource we emit (en-US).
@@ -59,31 +59,31 @@ pub enum ResourceError {
     TooManyIcons(usize),
 }
 
-/// Returns `pe` with the resources described by `config` embedded.
+/// Returns `pe` with the resources described by `plan` embedded.
 ///
 /// The section RVA is resolved first so the blob can bake it into its data
-/// entries (see [`inject`]). A config with no resource set is a no-op.
-pub fn embed(pe: &[u8], config: &ResourcesConfig) -> Result<Vec<u8>, ResourceError> {
-    if config.icon.is_none() && config.version_info.is_none() && config.manifest.is_none() {
+/// entries (see [`inject`]). A plan with no resource set is a no-op.
+pub fn embed(pe: &[u8], plan: &ResourcesPlan) -> Result<Vec<u8>, ResourceError> {
+    if plan.icon.is_none() && plan.version_info.is_none() && plan.manifest.is_none() {
         return Ok(pe.to_vec());
     }
     let rva = inject::next_section_rva(pe)?;
-    let blob = build(config, rva)?;
+    let blob = build(plan, rva)?;
     if blob.is_empty() {
         return Ok(pe.to_vec());
     }
     inject::inject(pe, &blob)
 }
 
-/// Builds the `.rsrc` blob described by `config`.
+/// Builds the `.rsrc` blob described by `plan`.
 ///
 /// `rva_base` is the RVA the section will be loaded at; it becomes each data
-/// entry's `OffsetToData`. Callers that only validate the config (e.g.
+/// entry's `OffsetToData`. Callers that only validate the plan (e.g.
 /// `--dry-run`) can pass `0`. Returns an empty vector when no resource is set.
-pub fn build(config: &ResourcesConfig, rva_base: u32) -> Result<Vec<u8>, ResourceError> {
+pub fn build(plan: &ResourcesPlan, rva_base: u32) -> Result<Vec<u8>, ResourceError> {
     let mut resources = Vec::new();
 
-    if let Some(path) = &config.icon {
+    if let Some(path) = &plan.icon {
         let bytes = std::fs::read(path).map_err(|source| ResourceError::IconRead {
             path: path.clone(),
             source,
@@ -110,7 +110,7 @@ pub fn build(config: &ResourcesConfig, rva_base: u32) -> Result<Vec<u8>, Resourc
         }
     }
 
-    if let Some(info) = &config.version_info {
+    if let Some(info) = &plan.version_info {
         resources.push(Resource {
             type_id: RT_VERSION,
             name_id: 1,
@@ -120,7 +120,7 @@ pub fn build(config: &ResourcesConfig, rva_base: u32) -> Result<Vec<u8>, Resourc
         });
     }
 
-    if let Some(settings) = &config.manifest {
+    if let Some(settings) = &plan.manifest {
         resources.push(Resource {
             type_id: RT_MANIFEST,
             name_id: 1,
@@ -136,40 +136,40 @@ pub fn build(config: &ResourcesConfig, rva_base: u32) -> Result<Vec<u8>, Resourc
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::schema::{ExecutionLevel, ManifestConfig, VersionInfoConfig};
+    use crate::plan::schema::{ExecutionLevel, ManifestPlan, VersionInfoPlan};
 
     #[test]
-    fn an_empty_config_produces_an_empty_blob() {
-        let config = ResourcesConfig::default();
-        assert!(build(&config, 0).expect("build").is_empty());
+    fn an_empty_plan_produces_an_empty_blob() {
+        let plan = ResourcesPlan::default();
+        assert!(build(&plan, 0).expect("build").is_empty());
     }
 
     #[test]
     fn a_manifest_alone_produces_a_blob() {
-        let config = ResourcesConfig {
+        let plan = ResourcesPlan {
             icon: None,
             version_info: None,
-            manifest: Some(ManifestConfig {
+            manifest: Some(ManifestPlan {
                 level: ExecutionLevel::RequireAdministrator,
                 ui_access: false,
                 dpi_aware: true,
             }),
         };
-        assert!(!build(&config, 0).expect("build").is_empty());
+        assert!(!build(&plan, 0).expect("build").is_empty());
     }
 
     #[test]
     fn version_and_manifest_together_produce_a_blob() {
-        let config = ResourcesConfig {
+        let plan = ResourcesPlan {
             icon: None,
-            version_info: Some(VersionInfoConfig {
+            version_info: Some(VersionInfoPlan {
                 description: Some("Widget".to_string()),
                 file_version: Some("1.2.3.4".to_string()),
-                ..VersionInfoConfig::default()
+                ..VersionInfoPlan::default()
             }),
-            manifest: Some(ManifestConfig::default()),
+            manifest: Some(ManifestPlan::default()),
         };
-        let blob = build(&config, 0).expect("build");
+        let blob = build(&plan, 0).expect("build");
         assert!(blob.len().is_multiple_of(4) && !blob.is_empty());
     }
 }

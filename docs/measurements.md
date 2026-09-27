@@ -2,9 +2,9 @@
 
 Point-in-time static and dynamic results for the evasion phases, plus the one EDR
 report so far. These are snapshots from the phase that produced them, not a
-description of the current tree: the configs named inside were the ones in use at
-the time and have since been consolidated into `examples/configs/` and
-`tests/configs/`. Reproduce any number with `batesian audit <binary>` (add
+description of the current tree: the plans named inside were the ones in use at
+the time and have since been consolidated into `examples/plans/` and
+`tests/plans/`. Reproduce any number with `picaro audit <binary>` (add
 `--baseline <report.json>` to compare against a saved run).
 
 ## Summary
@@ -112,7 +112,7 @@ Process hollowing with `build.stub.syscalls.mode` `none` (before) vs `indirect`
 - The stub prints its own marker, but the payload never runs inside `svchost.exe`:
   the suspend → unmap → RWX write → resume sequence is detected at runtime.
   Expected for a tier-1 EDR, since the phase goal is static evasion.
-- Falcon also blocks `batesian.exe` itself (`Access denied`): the audit module
+- Falcon also blocks `picaro.exe` itself (`Access denied`): the audit module
   embeds malware-API and technique keywords for its string scan, so the
   measurement tool trips the heuristics it is meant to measure.
 
@@ -127,7 +127,7 @@ Add a section here rather than a new file. For an EDR test, record:
 - Result: blocked | allowed | partial
 - Where it was blocked (static scan, runtime hook, ETW-TI, kernel callback, …):
 - Evidence (screenshot / log path):
-- Config used:
+- Plan used:
 ```
 
 For new runs, the Defender line uses the real `MpCmdRun.exe`: it is resolved from

@@ -16,7 +16,7 @@
 //!   variable named by `password_env`, never from the YAML.
 //!
 //! `signtool.exe` ships with the Windows SDK (Visual Studio) and is usually not
-//! on `PATH`, so it is looked up in `PATH`, then `BATESIAN_SIGNTOOL`, then the
+//! on `PATH`, so it is looked up in `PATH`, then `PICARO_SIGNTOOL`, then the
 //! Windows Kits install directories, and finally `output.sign.signtool`.
 
 use std::path::{Path, PathBuf};
@@ -24,10 +24,10 @@ use std::process::Command;
 
 use serde::Serialize;
 
-use crate::config::schema::SignConfig;
+use crate::plan::schema::SignPlan;
 
 /// Subject used by `mode: lab` when none is configured.
-const DEFAULT_LAB_SUBJECT: &str = "CN=batesian lab code signing";
+const DEFAULT_LAB_SUBJECT: &str = "CN=picaro lab code signing";
 
 /// Signing error.
 #[derive(Debug, thiserror::Error)]
@@ -84,31 +84,31 @@ pub struct Signature {
     pub timestamp_url: Option<String>,
 }
 
-/// Signs `exe` according to `config`.
+/// Signs `exe` according to `plan`.
 ///
 /// `None` or `mode: none` is a no-op and returns `Ok(None)`.
-pub fn sign(exe: &Path, config: Option<&SignConfig>) -> Result<Option<Signature>, SigningError> {
-    let Some(config) = config else {
+pub fn sign(exe: &Path, plan: Option<&SignPlan>) -> Result<Option<Signature>, SigningError> {
+    let Some(plan) = plan else {
         return Ok(None);
     };
-    if config.mode == "none" {
+    if plan.mode == "none" {
         return Ok(None);
     }
 
-    let signtool = signtool_path(config)?;
+    let signtool = signtool_path(plan)?;
     let mut args: Vec<String> = vec!["sign".to_string()];
     let mut signature = Signature {
-        mode: config.mode.clone(),
-        subject: config.subject.clone(),
+        mode: plan.mode.clone(),
+        subject: plan.subject.clone(),
         issuer: None,
         thumbprint: None,
         ca_file: None,
-        timestamp_url: config.timestamp_url.clone(),
+        timestamp_url: plan.timestamp_url.clone(),
     };
 
-    match config.mode.as_str() {
+    match plan.mode.as_str() {
         "lab" => {
-            let subject = config
+            let subject = plan
                 .subject
                 .clone()
                 .unwrap_or_else(|| DEFAULT_LAB_SUBJECT.to_string());
@@ -128,16 +128,16 @@ pub fn sign(exe: &Path, config: Option<&SignConfig>) -> Result<Option<Signature>
             args.push(leaf);
         }
         "store" => {
-            let thumbprint = resolve_store_cert(config)?;
+            let thumbprint = resolve_store_cert(plan)?;
             args.push("/sha1".to_string());
             args.push(thumbprint.clone());
             signature.thumbprint = Some(thumbprint);
         }
         "file" => {
-            let file = config.file.as_ref().ok_or(SigningError::MissingPfx)?;
+            let file = plan.file.as_ref().ok_or(SigningError::MissingPfx)?;
             args.push("/f".to_string());
             args.push(file.display().to_string());
-            if let Some(var) = &config.password_env {
+            if let Some(var) = &plan.password_env {
                 let password =
                     std::env::var(var).map_err(|_| SigningError::PasswordEnv(var.clone()))?;
                 args.push("/p".to_string());
@@ -153,7 +153,7 @@ pub fn sign(exe: &Path, config: Option<&SignConfig>) -> Result<Option<Signature>
 
     args.push("/fd".to_string());
     args.push("SHA256".to_string());
-    if let Some(url) = &config.timestamp_url {
+    if let Some(url) = &plan.timestamp_url {
         args.push("/tr".to_string());
         args.push(url.clone());
         args.push("/td".to_string());
@@ -165,9 +165,9 @@ pub fn sign(exe: &Path, config: Option<&SignConfig>) -> Result<Option<Signature>
     Ok(Some(signature))
 }
 
-/// Locates `signtool.exe` for `config` (see the module docs for the order).
-pub fn signtool_path(config: &SignConfig) -> Result<PathBuf, SigningError> {
-    if let Some(path) = &config.signtool {
+/// Locates `signtool.exe` for `plan` (see the module docs for the order).
+pub fn signtool_path(plan: &SignPlan) -> Result<PathBuf, SigningError> {
+    if let Some(path) = &plan.signtool {
         if path.is_file() {
             return Ok(path.clone());
         }
@@ -176,7 +176,7 @@ pub fn signtool_path(config: &SignConfig) -> Result<PathBuf, SigningError> {
             path.display()
         )));
     }
-    if let Some(from_env) = std::env::var_os("BATESIAN_SIGNTOOL") {
+    if let Some(from_env) = std::env::var_os("PICARO_SIGNTOOL") {
         let path = PathBuf::from(from_env);
         if path.is_file() {
             return Ok(path);
@@ -327,8 +327,8 @@ fn export_certificate(ca_subject: &str, dest: &Path) -> Result<(), SigningError>
 }
 
 /// Resolves the thumbprint of a certificate already in the current user's store.
-fn resolve_store_cert(config: &SignConfig) -> Result<String, SigningError> {
-    let script = if let Some(thumbprint) = &config.thumbprint {
+fn resolve_store_cert(plan: &SignPlan) -> Result<String, SigningError> {
+    let script = if let Some(thumbprint) = &plan.thumbprint {
         let thumbprint = escape_single_quotes(thumbprint);
         format!(
             "$c = Get-ChildItem Cert:\\CurrentUser\\My \
@@ -336,7 +336,7 @@ fn resolve_store_cert(config: &SignConfig) -> Result<String, SigningError> {
              if ($c) {{ $c.Thumbprint }}"
         )
     } else {
-        let subject = escape_single_quotes(config.subject.as_deref().unwrap_or(""));
+        let subject = escape_single_quotes(plan.subject.as_deref().unwrap_or(""));
         format!(
             "$c = Get-ChildItem Cert:\\CurrentUser\\My -CodeSigningCert \
              | Where-Object {{ $_.Subject -eq '{subject}' }} | Select-Object -First 1; \
@@ -347,14 +347,10 @@ fn resolve_store_cert(config: &SignConfig) -> Result<String, SigningError> {
     if found.is_empty() {
         return Err(SigningError::Certificate(format!(
             "no matching certificate in the current user's store ({})",
-            config
-                .thumbprint
+            plan.thumbprint
                 .as_deref()
                 .map(|t| format!("thumbprint {t}"))
-                .unwrap_or_else(|| format!(
-                    "subject '{}'",
-                    config.subject.as_deref().unwrap_or("")
-                ))
+                .unwrap_or_else(|| format!("subject '{}'", plan.subject.as_deref().unwrap_or("")))
         )));
     }
     Ok(normalize_thumbprint(&found))
@@ -431,8 +427,8 @@ fn normalize_thumbprint(value: &str) -> String {
 mod tests {
     use super::*;
 
-    fn config(mode: &str) -> SignConfig {
-        SignConfig {
+    fn plan(mode: &str) -> SignPlan {
+        SignPlan {
             mode: mode.to_string(),
             subject: None,
             thumbprint: None,
@@ -476,7 +472,7 @@ mod tests {
 
     #[test]
     fn an_explicit_missing_signtool_is_reported() {
-        let mut cfg = config("file");
+        let mut cfg = plan("file");
         cfg.signtool = Some(PathBuf::from("definitely/not/here/signtool.exe"));
         let err = signtool_path(&cfg).expect_err("must fail");
         assert!(err.to_string().contains("does not exist"), "{err}");
@@ -484,10 +480,9 @@ mod tests {
 
     #[test]
     fn an_explicit_existing_signtool_is_used() {
-        let path =
-            std::env::temp_dir().join(format!("batesian_signtool_{}.exe", std::process::id()));
+        let path = std::env::temp_dir().join(format!("picaro_signtool_{}.exe", std::process::id()));
         std::fs::write(&path, b"stub").expect("write");
-        let mut cfg = config("file");
+        let mut cfg = plan("file");
         cfg.signtool = Some(path.clone());
         assert_eq!(signtool_path(&cfg).expect("resolve"), path);
         let _ = std::fs::remove_file(&path);
@@ -495,8 +490,8 @@ mod tests {
 
     #[test]
     fn mode_none_is_a_no_op() {
-        let exe = std::env::temp_dir().join("batesian_none.exe");
-        let signature = sign(&exe, Some(&config("none"))).expect("no-op");
+        let exe = std::env::temp_dir().join("picaro_none.exe");
+        let signature = sign(&exe, Some(&plan("none"))).expect("no-op");
         assert!(signature.is_none());
     }
 }

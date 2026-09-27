@@ -9,7 +9,7 @@ two categories (`TechniqueDef.category`):
   these, after every Preparation technique.
 
 A valid pipeline is `0..N` Preparation techniques followed by **exactly one**
-Execution technique; the order is enforced by `src/config/validate.rs`.
+Execution technique; the order is enforced by `src/plan/validate.rs`.
 
 Every technique fragment calls the stub's `nt_*` helpers (`nt_alloc_vm`,
 `nt_write_vm`, `nt_read_vm`, `nt_resume_thread`, `nt_unmap_view`,
@@ -18,8 +18,8 @@ Every technique fragment calls the stub's `nt_*` helpers (`nt_alloc_vm`,
 [Syscall layer](indirect_syscalls.md).
 
 The registry (`src/techniques/mod.rs`) is metadata-only; inspect it with
-`batesian techniques list`, `batesian techniques show <name>` and
-`batesian techniques validate`. Adding one:
+`picaro techniques list`, `picaro techniques show <name>` and
+`picaro techniques validate`. Adding one:
 [Adding a technique](adding-a-technique.md).
 
 ## Registered techniques
