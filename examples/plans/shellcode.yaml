@@ -5,7 +5,7 @@
 # `demo_shellcode.bin` is 6 hand-written x64 bytes (`mov eax, 42; ret`), so the
 # packed binary exits with 42.
 #
-#   cargo run -- build examples/configs/shellcode.yaml
+#   cargo run -- build examples/plans/shellcode.yaml
 #   .\dist\test_shellcode.exe ; echo $LASTEXITCODE
 #
 # `build.payload.args` is delivered through the PEB command line, exactly as for

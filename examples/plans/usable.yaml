@@ -1,7 +1,7 @@
 # Reflective loading: the payload is mapped and executed inside the packed
 # binary's own process (no suspended target, no executable image on disk).
 #
-#   cargo run -- build examples/configs/reflective-loading.yaml
+#   cargo run -- build examples/plans/reflective-loading.yaml
 #   .\dist\test_packed_reflective.exe
 
 schema: 4

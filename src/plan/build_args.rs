@@ -1,7 +1,7 @@
 //! Build-time argument substitution (`$arg.<key>$`).
 //!
-//! A YAML config may reference arguments passed to
-//! `batesian build config.yaml arg0 arg1 ...` using the `$arg.<key>$` syntax.
+//! A YAML plan may reference arguments passed to
+//! `picaro build plan.yaml arg0 arg1 ...` using the `$arg.<key>$` syntax.
 //! Positional arguments are keyed by their 0-based index (`$arg.0$`); an
 //! argument of the form `name=value` is keyed by `name` (`$arg.name$`).
 //! Substitution happens *before* semantic validation and typed deserialization,
@@ -93,7 +93,7 @@ pub fn substitute(value: &mut Value, args: &BTreeMap<String, String>) -> Result<
 fn substitute_string(s: &mut String, args: &BTreeMap<String, String>) -> Result<()> {
     if let Some(token) = legacy_token(s) {
         return Err(PackerError::Validation(format!(
-            "the config uses the schema-1 build argument '{token}'; \
+            "the plan uses the schema-1 build argument '{token}'; \
              use $arg.0$ instead (schema 3 syntax)"
         )));
     }
@@ -118,7 +118,7 @@ fn substitute_string(s: &mut String, args: &BTreeMap<String, String>) -> Result<
 
         let arg = args.get(key).ok_or_else(|| {
             PackerError::Validation(format!(
-                "the config references '$arg.{key}$' but no build argument '{key}' was provided"
+                "the plan references '$arg.{key}$' but no build argument '{key}' was provided"
             ))
         })?;
 
@@ -134,7 +134,7 @@ fn substitute_string(s: &mut String, args: &BTreeMap<String, String>) -> Result<
 /// Returns the first schema-1 build-argument token in `s`, if any.
 ///
 /// Recognizes both the `$build.N$` form and the older `{{build.N}}` form, so a
-/// config migrated by hand gets a clear pointer instead of silently keeping a
+/// plan migrated by hand gets a clear pointer instead of silently keeping a
 /// literal token.
 fn legacy_token(s: &str) -> Option<String> {
     if let Some(start) = s.find("{{build.") {

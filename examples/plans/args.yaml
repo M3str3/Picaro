@@ -2,7 +2,7 @@
 # first, then whatever arguments the packed binary is invoked with.
 #
 #   powershell -ExecutionPolicy Bypass -File examples/payloads/build_args_payload.ps1
-#   cargo run -- build examples/configs/args.yaml
+#   cargo run -- build examples/plans/args.yaml
 #   .\dist\test_args_join.exe "runtime-c" "runtime-d"
 #
 # The payload sees: <exe> yaml-a yaml-b runtime-c runtime-d

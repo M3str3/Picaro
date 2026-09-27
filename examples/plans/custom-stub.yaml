@@ -1,7 +1,7 @@
 # Custom loader stub: `build.stub.path` replaces the builtin stub with a
 # user-supplied Rust template rendered through the same `$X$` substitution.
 #
-#   batesian build examples/configs/custom-stub.yaml
+#   picaro build examples/plans/custom-stub.yaml
 #
 # `examples/stubs/minimal.rs` ignores the technique blocks, so the packer emits
 # a warning (not an error) and produces a stub that only prints the payload

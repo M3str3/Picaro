@@ -1,6 +1,6 @@
-//! `serde` structs modeling the YAML configuration document (schema 3).
+//! `serde` structs modeling the YAML plan document (schema 4).
 //!
-//! Each struct maps to a block of the YAML (see `examples/configs/`).
+//! Each struct maps to a block of the YAML (see `examples/plans/`).
 //! The design aims to be:
 //! - **Explicit**: fields are required by default (no magic values), except
 //!   where `#[serde(default)]` says otherwise.
@@ -19,14 +19,14 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::engine::args::ArgsMode;
-use crate::engine::obfuscation::YamlStringsConfig;
-use crate::engine::syscalls::YamlSyscallsConfig;
+use crate::engine::obfuscation::YamlStringsPlan;
+use crate::engine::syscalls::YamlSyscallsPlan;
 use crate::techniques::RuntimeStep;
 
 /// The only schema version we accept.
 pub const SUPPORTED_SCHEMA: u32 = 4;
 
-/// Migration hint shown when a config still declares `schema: 1`.
+/// Migration hint shown when a plan still declares `schema: 1`.
 const SCHEMA_1_MIGRATION: &str = "\
 schema 1 is no longer supported.
 Migration:
@@ -41,7 +41,7 @@ Migration:
   $build.N$       → $arg.N$
 See docs/migration-v1-v3.md, then docs/migration-v3-v4.md for details.";
 
-/// Migration hint shown when a config still declares `schema: 2`.
+/// Migration hint shown when a plan still declares `schema: 2`.
 const SCHEMA_2_MIGRATION: &str = "\
 schema 2 is no longer supported.
 Migration:
@@ -49,7 +49,7 @@ Migration:
   runtime entries now nest parameters under `params:` (schema 3 → 4)
 See docs/migration-v2-v3.md (then docs/migration-v3-v4.md) for details.";
 
-/// Migration hint shown when a config still declares `schema: 3`.
+/// Migration hint shown when a plan still declares `schema: 3`.
 const SCHEMA_3_MIGRATION: &str = "\
 schema 3 is no longer supported.
 Migration: a runtime entry now nests the technique's parameters under a
@@ -70,7 +70,7 @@ See docs/migration-v3-v4.md for details.";
 /// generated stub applies), plus the `schema` and `name` metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Config {
+pub struct Plan {
     /// Schema version. Only `3` is accepted; it is validated on deserialize.
     #[serde(deserialize_with = "deserialize_schema_version")]
     pub schema: u32,
@@ -79,7 +79,7 @@ pub struct Config {
     pub name: String,
 
     /// Build block: payload, stub and output.
-    pub build: BuildConfig,
+    pub build: BuildPlan,
 
     /// Execution techniques the stub applies, in order.
     ///
@@ -92,23 +92,23 @@ pub struct Config {
 /// `build` block: everything needed to produce the packed PE.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct BuildConfig {
+pub struct BuildPlan {
     /// Payload block: where the input PE comes from and how it is encrypted.
-    pub payload: PayloadConfig,
+    pub payload: PayloadPlan,
 
     /// Stub configuration: builtin or custom, the syscall layer and the
     /// string obfuscation applied to the stub's literals.
     #[serde(default)]
-    pub stub: StubConfig,
+    pub stub: StubPlan,
 
     /// Output block: how to produce the packed PE.
-    pub output: OutputConfig,
+    pub output: OutputPlan,
 }
 
 /// `payload` block: the input source and its cryptographic transformation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PayloadConfig {
+pub struct PayloadPlan {
     /// The input payload: a local path or a URL (the packer detects the scheme).
     ///
     /// Supports `http://`, `https://` and `file://` sources; anything else is a
@@ -144,7 +144,7 @@ pub struct PayloadConfig {
     pub args_mode: ArgsMode,
 
     /// Sub-block with the cryptographic configuration.
-    pub crypto: CryptoConfig,
+    pub crypto: CryptoPlan,
 
     /// Optional expected SHA-256 (hex) of the input payload.
     ///
@@ -163,14 +163,14 @@ pub struct PayloadConfig {
 /// default syscall mode, and `xor` + a random key are used.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct StubConfig {
+pub struct StubPlan {
     /// Path to a custom stub template (`.rs`). `None` means the builtin stub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
 
     /// Syscall-layer configuration (how the stub invokes the kernel).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub syscalls: Option<YamlSyscallsConfig>,
+    pub syscalls: Option<YamlSyscallsPlan>,
 
     /// Optional string-obfuscation configuration.
     ///
@@ -178,7 +178,7 @@ pub struct StubConfig {
     /// else the packer emits), independent of the techniques. When absent, the
     /// packer defaults to `xor` + a random key (and warns).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub strings: Option<YamlStringsConfig>,
+    pub strings: Option<YamlStringsPlan>,
 
     /// Compile the stub as a debug artifact.
     ///
@@ -224,7 +224,7 @@ impl PayloadFormat {
 /// Cryptographic configuration of the payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CryptoConfig {
+pub struct CryptoPlan {
     /// Authenticated encryption algorithm.
     pub algo: CryptoAlgorithm,
 
@@ -254,7 +254,7 @@ pub enum KeySource {
 /// `output` block: defines the final artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OutputConfig {
+pub struct OutputPlan {
     /// Output path of the packed PE.
     pub path: PathBuf,
 
@@ -270,7 +270,7 @@ pub struct OutputConfig {
     /// Whether to write the build manifest next to the artifact (default: yes).
     ///
     /// The manifest (`<stem>.manifest.json`) records the artifact and payload
-    /// hashes, the resolved config and the toolchain, for provenance.
+    /// hashes, the resolved plan and the toolchain, for provenance.
     #[serde(default = "default_true")]
     pub manifest: bool,
 
@@ -280,7 +280,7 @@ pub struct OutputConfig {
     /// this one is the executable's own resources (icon, version info and the
     /// Windows application manifest) written into a `.rsrc` section.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resources: Option<ResourcesConfig>,
+    pub resources: Option<ResourcesPlan>,
 
     /// Subsystem of the packed binary: `console` (default) or `windows` (GUI).
     ///
@@ -297,7 +297,7 @@ pub struct OutputConfig {
     /// for integrity and lab verification only; it does not buy SmartScreen
     /// reputation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sign: Option<SignConfig>,
+    pub sign: Option<SignPlan>,
 }
 
 /// Subsystem of the packed binary.
@@ -343,12 +343,12 @@ impl Subsystem {
 ///   environment variable named by `password_env` (never from the YAML).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SignConfig {
+pub struct SignPlan {
     /// `none`, `lab`, `store` or `file`.
     #[serde(default = "default_sign_mode")]
     pub mode: String,
 
-    /// Certificate subject to use or create (e.g. `CN=batesian lab`).
+    /// Certificate subject to use or create (e.g. `CN=picaro lab`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
 
@@ -386,18 +386,18 @@ fn default_sign_mode() -> String {
 /// the build stays pure Rust and cross-platform.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ResourcesConfig {
+pub struct ResourcesPlan {
     /// Path to a `.ico` file, embedded as `RT_GROUP_ICON` + `RT_ICON`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<PathBuf>,
 
     /// `VERSIONINFO` strings, embedded as `RT_VERSION`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version_info: Option<VersionInfoConfig>,
+    pub version_info: Option<VersionInfoPlan>,
 
     /// Windows application manifest (UAC/DPI), embedded as `RT_MANIFEST`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub manifest: Option<ManifestConfig>,
+    pub manifest: Option<ManifestPlan>,
 }
 
 /// `output.resources.version_info`: the strings of the `VERSIONINFO` resource.
@@ -407,7 +407,7 @@ pub struct ResourcesConfig {
 /// zero).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct VersionInfoConfig {
+pub struct VersionInfoPlan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub company: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -439,7 +439,7 @@ pub struct VersionInfoConfig {
 /// `output.resources.manifest`: the Windows application manifest to embed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ManifestConfig {
+pub struct ManifestPlan {
     /// Requested UAC execution level (default: `as_invoker`).
     #[serde(default)]
     pub level: ExecutionLevel,
@@ -453,7 +453,7 @@ pub struct ManifestConfig {
     pub dpi_aware: bool,
 }
 
-impl Default for ManifestConfig {
+impl Default for ManifestPlan {
     fn default() -> Self {
         Self {
             level: ExecutionLevel::AsInvoker,
@@ -574,23 +574,22 @@ runtime:
 "#;
 
     #[test]
-    fn parses_valid_config() {
-        let config: Config =
-            serde_yml::from_str(VALID_YAML).expect("the example YAML should parse");
+    fn parses_valid_plan() {
+        let plan: Plan = serde_yml::from_str(VALID_YAML).expect("the example YAML should parse");
 
-        assert_eq!(config.schema, 4);
-        assert_eq!(config.name, "mimikatz-basic");
-        assert_eq!(config.build.payload.source, "./mimikatz.exe");
+        assert_eq!(plan.schema, 4);
+        assert_eq!(plan.name, "mimikatz-basic");
+        assert_eq!(plan.build.payload.source, "./mimikatz.exe");
         assert_eq!(
-            config.build.payload.crypto.algo,
+            plan.build.payload.crypto.algo,
             CryptoAlgorithm::XChaCha20Poly1305
         );
-        assert_eq!(config.build.payload.crypto.key, KeySource::Random);
-        assert_eq!(config.build.stub.path, None);
-        assert_eq!(config.build.stub.syscalls, None);
-        assert_eq!(config.build.stub.strings, None);
+        assert_eq!(plan.build.payload.crypto.key, KeySource::Random);
+        assert_eq!(plan.build.stub.path, None);
+        assert_eq!(plan.build.stub.syscalls, None);
+        assert_eq!(plan.build.stub.strings, None);
         assert_eq!(
-            config.runtime,
+            plan.runtime,
             vec![RuntimeStep::ProcessHollowing {
                 params: Params {
                     target: r"C:\Windows\System32\svchost.exe".to_string(),
@@ -598,12 +597,12 @@ runtime:
             }]
         );
         assert_eq!(
-            config.build.output.path,
+            plan.build.output.path,
             PathBuf::from("./dist/mimikatz_packed.exe")
         );
-        assert_eq!(config.build.output.arch, Arch::X64);
-        assert!(config.build.output.strip);
-        assert_eq!(config.build.output.trim_paths, TrimPaths::All);
+        assert_eq!(plan.build.output.arch, Arch::X64);
+        assert!(plan.build.output.strip);
+        assert_eq!(plan.build.output.trim_paths, TrimPaths::All);
     }
 
     #[test]
@@ -612,12 +611,8 @@ runtime:
             "  output:\n",
             "  stub:\n    strings:\n      strategy: stack\n      key: random\n\n  output:\n",
         );
-        let config: Config = serde_yml::from_str(&yaml).expect("stub strings block should parse");
-        let strings = config
-            .build
-            .stub
-            .strings
-            .expect("strings should be present");
+        let plan: Plan = serde_yml::from_str(&yaml).expect("stub strings block should parse");
+        let strings = plan.build.stub.strings.expect("strings should be present");
         assert_eq!(strings.strategy, "stack");
         assert_eq!(strings.key, "random");
     }
@@ -628,18 +623,15 @@ runtime:
             "  output:\n",
             "  stub:\n    syscalls:\n      mode: indirect\n    strings:\n      strategy: xor\n\n  output:\n",
         );
-        let config: Config = serde_yml::from_str(&yaml).expect("stub block should parse");
-        assert_eq!(
-            config.build.stub.syscalls.expect("syscalls").mode,
-            "indirect"
-        );
-        assert_eq!(config.build.stub.strings.expect("strings").strategy, "xor");
+        let plan: Plan = serde_yml::from_str(&yaml).expect("stub block should parse");
+        assert_eq!(plan.build.stub.syscalls.expect("syscalls").mode, "indirect");
+        assert_eq!(plan.build.stub.strings.expect("strings").strategy, "xor");
     }
 
     #[test]
     fn strings_block_is_optional() {
-        let config: Config = serde_yml::from_str(VALID_YAML).expect("valid YAML should parse");
-        assert_eq!(config.build.stub.strings, None);
+        let plan: Plan = serde_yml::from_str(VALID_YAML).expect("valid YAML should parse");
+        assert_eq!(plan.build.stub.strings, None);
     }
 
     #[test]
@@ -650,15 +642,15 @@ runtime:
             "  strings:\n    strategy: xor\n\n  output:\n",
         );
         assert!(
-            serde_yml::from_str::<Config>(&yaml).is_err(),
+            serde_yml::from_str::<Plan>(&yaml).is_err(),
             "build.strings should be rejected (deny_unknown_fields)"
         );
     }
 
     #[test]
     fn stub_block_is_optional_and_defaults_to_builtin() {
-        let config: Config = serde_yml::from_str(VALID_YAML).expect("valid YAML should parse");
-        assert_eq!(config.build.stub, StubConfig::default());
+        let plan: Plan = serde_yml::from_str(VALID_YAML).expect("valid YAML should parse");
+        assert_eq!(plan.build.stub, StubPlan::default());
     }
 
     #[test]
@@ -667,15 +659,15 @@ runtime:
             "  output:\n",
             "  stub:\n    path: ./my_stub.rs\n\n  output:\n",
         );
-        let config: Config = serde_yml::from_str(&yaml).expect("stub block should parse");
-        assert_eq!(config.build.stub.path, Some(PathBuf::from("./my_stub.rs")));
+        let plan: Plan = serde_yml::from_str(&yaml).expect("stub block should parse");
+        assert_eq!(plan.build.stub.path, Some(PathBuf::from("./my_stub.rs")));
     }
 
     #[test]
     fn stub_path_null_means_builtin() {
         let yaml = VALID_YAML.replace("  output:\n", "  stub:\n    path: null\n\n  output:\n");
-        let config: Config = serde_yml::from_str(&yaml).expect("null path should parse");
-        assert_eq!(config.build.stub.path, None);
+        let plan: Plan = serde_yml::from_str(&yaml).expect("null path should parse");
+        assert_eq!(plan.build.stub.path, None);
     }
 
     #[test]
@@ -684,9 +676,9 @@ runtime:
             "  output:\n",
             "  stub:\n    syscalls:\n      mode: indirect\n\n  output:\n",
         );
-        let config: Config = serde_yml::from_str(&yaml).expect("syscalls block should parse");
-        assert_eq!(config.build.stub.path, None);
-        let syscalls = config
+        let plan: Plan = serde_yml::from_str(&yaml).expect("syscalls block should parse");
+        assert_eq!(plan.build.stub.path, None);
+        let syscalls = plan
             .build
             .stub
             .syscalls
@@ -698,8 +690,8 @@ runtime:
     #[test]
     fn stub_syscalls_defaults_mode_and_resolver() {
         let yaml = VALID_YAML.replace("  output:\n", "  stub:\n    syscalls: {}\n\n  output:\n");
-        let config: Config = serde_yml::from_str(&yaml).expect("empty syscalls should parse");
-        let syscalls = config
+        let plan: Plan = serde_yml::from_str(&yaml).expect("empty syscalls should parse");
+        let syscalls = plan
             .build
             .stub
             .syscalls
@@ -714,10 +706,10 @@ runtime:
             "    source: ./mimikatz.exe\n",
             "    source: https://example.com/mimikatz.exe\n",
         );
-        let config: Config = serde_yml::from_str(&yaml).expect("a url source should parse");
+        let plan: Plan = serde_yml::from_str(&yaml).expect("a url source should parse");
 
         assert_eq!(
-            config.build.payload.source,
+            plan.build.payload.source,
             "https://example.com/mimikatz.exe"
         );
     }
@@ -728,10 +720,10 @@ runtime:
             "  - technique: process_hollowing\n    params:\n      target: \"C:\\\\Windows\\\\System32\\\\svchost.exe\"\n",
             "  - technique: process_hollowing\n",
         );
-        let config: Config =
+        let plan: Plan =
             serde_yml::from_str(&yaml).expect("process_hollowing without target should parse");
         assert_eq!(
-            config.runtime,
+            plan.runtime,
             vec![RuntimeStep::ProcessHollowing {
                 params: Params {
                     target: default_target(),
@@ -742,13 +734,13 @@ runtime:
 
     #[test]
     fn payload_args_default_to_join() {
-        let config: Config = serde_yml::from_str(VALID_YAML).expect("valid YAML should parse");
-        assert_eq!(config.build.payload.args, None);
-        assert_eq!(config.build.payload.args_mode, ArgsMode::Join);
+        let plan: Plan = serde_yml::from_str(VALID_YAML).expect("valid YAML should parse");
+        assert_eq!(plan.build.payload.args, None);
+        assert_eq!(plan.build.payload.args_mode, ArgsMode::Join);
     }
 
     /// Locks in the documented migration hazard: unknown keys inside a runtime
-    /// entry are dropped, so a config migrated from schema 3 that leaves its
+    /// entry are dropped, so a plan migrated from schema 3 that leaves its
     /// parameters flat parses and silently falls back to the defaults.
     #[test]
     fn a_flat_param_is_dropped_and_the_default_applies() {
@@ -756,9 +748,9 @@ runtime:
             "    params:\n      target: \"C:\\\\Windows\\\\System32\\\\svchost.exe\"\n",
             "    target: \"C:\\\\Windows\\\\System32\\\\notepad.exe\"\n",
         );
-        let config: Config = serde_yml::from_str(&yaml).expect("a flat param still parses");
+        let plan: Plan = serde_yml::from_str(&yaml).expect("a flat param still parses");
         assert_eq!(
-            config.runtime,
+            plan.runtime,
             vec![RuntimeStep::ProcessHollowing {
                 params: Params {
                     target: default_target(),
@@ -774,16 +766,16 @@ runtime:
             "    source: ./mimikatz.exe\n",
             "    source: ./mimikatz.exe\n    args: [\"privilege::debug\", \"log\", \"C:\\\\temp\\\\out.log\"]\n    args_mode: override\n",
         );
-        let config: Config = serde_yml::from_str(&yaml).expect("args should parse");
+        let plan: Plan = serde_yml::from_str(&yaml).expect("args should parse");
         assert_eq!(
-            config.build.payload.args,
+            plan.build.payload.args,
             Some(vec![
                 "privilege::debug".to_string(),
                 "log".to_string(),
                 r"C:\temp\out.log".to_string(),
             ])
         );
-        assert_eq!(config.build.payload.args_mode, ArgsMode::Override);
+        assert_eq!(plan.build.payload.args_mode, ArgsMode::Override);
     }
 
     #[test]
@@ -792,9 +784,9 @@ runtime:
             "    source: ./mimikatz.exe\n",
             "    source: ./mimikatz.exe\n    args: []\n",
         );
-        let config: Config = serde_yml::from_str(&yaml).expect("empty args should parse");
-        assert_eq!(config.build.payload.args, Some(vec![]));
-        assert_eq!(config.build.payload.args_mode, ArgsMode::Join);
+        let plan: Plan = serde_yml::from_str(&yaml).expect("empty args should parse");
+        assert_eq!(plan.build.payload.args, Some(vec![]));
+        assert_eq!(plan.build.payload.args_mode, ArgsMode::Join);
     }
 
     #[test]
@@ -803,9 +795,9 @@ runtime:
             "    source: ./mimikatz.exe\n",
             "    source: ./mimikatz.exe\n    args: ['hello world', 'say \"hi\"', 'C:\\Program Files\\x']\n",
         );
-        let config: Config = serde_yml::from_str(&yaml).expect("special args should parse");
+        let plan: Plan = serde_yml::from_str(&yaml).expect("special args should parse");
         assert_eq!(
-            config.build.payload.args,
+            plan.build.payload.args,
             Some(vec![
                 "hello world".to_string(),
                 "say \"hi\"".to_string(),
@@ -821,16 +813,16 @@ runtime:
             "    source: ./mimikatz.exe\n    args_mode: prepend\n",
         );
         assert!(
-            serde_yml::from_str::<Config>(&yaml).is_err(),
+            serde_yml::from_str::<Plan>(&yaml).is_err(),
             "an unknown args_mode should fail"
         );
     }
 
     #[test]
     fn payload_format_defaults_to_pe() {
-        let config: Config = serde_yml::from_str(VALID_YAML).expect("valid YAML should parse");
-        assert_eq!(config.build.payload.format, PayloadFormat::Pe);
-        assert_eq!(config.build.payload.export, None);
+        let plan: Plan = serde_yml::from_str(VALID_YAML).expect("valid YAML should parse");
+        assert_eq!(plan.build.payload.format, PayloadFormat::Pe);
+        assert_eq!(plan.build.payload.export, None);
     }
 
     #[test]
@@ -839,9 +831,9 @@ runtime:
             "    source: ./mimikatz.exe\n",
             "    source: ./beacon.bin\n    format: shellcode\n",
         );
-        let config: Config = serde_yml::from_str(&yaml).expect("shellcode format should parse");
-        assert_eq!(config.build.payload.format, PayloadFormat::Shellcode);
-        assert!(!config.build.payload.format.is_pe_image());
+        let plan: Plan = serde_yml::from_str(&yaml).expect("shellcode format should parse");
+        assert_eq!(plan.build.payload.format, PayloadFormat::Shellcode);
+        assert!(!plan.build.payload.format.is_pe_image());
     }
 
     #[test]
@@ -850,10 +842,10 @@ runtime:
             "    source: ./mimikatz.exe\n",
             "    source: ./payload.dll\n    format: dll\n    export: Run\n",
         );
-        let config: Config = serde_yml::from_str(&yaml).expect("dll format should parse");
-        assert_eq!(config.build.payload.format, PayloadFormat::Dll);
-        assert_eq!(config.build.payload.export.as_deref(), Some("Run"));
-        assert!(config.build.payload.format.is_pe_image());
+        let plan: Plan = serde_yml::from_str(&yaml).expect("dll format should parse");
+        assert_eq!(plan.build.payload.format, PayloadFormat::Dll);
+        assert_eq!(plan.build.payload.export.as_deref(), Some("Run"));
+        assert!(plan.build.payload.format.is_pe_image());
     }
 
     #[test]
@@ -863,7 +855,7 @@ runtime:
             "    source: ./beacon.bin\n    format: vbs\n",
         );
         assert!(
-            serde_yml::from_str::<Config>(&yaml).is_err(),
+            serde_yml::from_str::<Plan>(&yaml).is_err(),
             "an unknown payload format should fail"
         );
     }
@@ -875,7 +867,7 @@ runtime:
             "      target: 123\n",
         );
         assert!(
-            serde_yml::from_str::<Config>(&yaml).is_err(),
+            serde_yml::from_str::<Plan>(&yaml).is_err(),
             "a non-string target should fail"
         );
     }
@@ -883,7 +875,7 @@ runtime:
     #[test]
     fn rejects_schema_one_with_a_migration_message() {
         let yaml = VALID_YAML.replace("schema: 4", "schema: 1");
-        let err = serde_yml::from_str::<Config>(&yaml).expect_err("schema 1 should fail");
+        let err = serde_yml::from_str::<Plan>(&yaml).expect_err("schema 1 should fail");
         let msg = err.to_string();
         assert!(
             msg.contains("schema 1 is no longer supported"),
@@ -897,7 +889,7 @@ runtime:
     #[test]
     fn rejects_schema_two_with_a_migration_message() {
         let yaml = VALID_YAML.replace("schema: 4", "schema: 2");
-        let err = serde_yml::from_str::<Config>(&yaml).expect_err("schema 2 should fail");
+        let err = serde_yml::from_str::<Plan>(&yaml).expect_err("schema 2 should fail");
         let msg = err.to_string();
         assert!(
             msg.contains("schema 2 is no longer supported"),
@@ -910,7 +902,7 @@ runtime:
     #[test]
     fn rejects_schema_three_with_a_migration_message() {
         let yaml = VALID_YAML.replace("schema: 4", "schema: 3");
-        let err = serde_yml::from_str::<Config>(&yaml).expect_err("schema 3 should fail");
+        let err = serde_yml::from_str::<Plan>(&yaml).expect_err("schema 3 should fail");
         let msg = err.to_string();
         assert!(
             msg.contains("schema 3 is no longer supported"),
@@ -923,7 +915,7 @@ runtime:
     #[test]
     fn rejects_unknown_schema_version() {
         let yaml = VALID_YAML.replace("schema: 4", "schema: 5");
-        let err = serde_yml::from_str::<Config>(&yaml).expect_err("schema 5 should fail");
+        let err = serde_yml::from_str::<Plan>(&yaml).expect_err("schema 5 should fail");
         let msg = err.to_string();
         assert!(
             msg.contains("unsupported schema version"),
@@ -950,7 +942,7 @@ output:
   strip: true
   trim_paths: all
 "#;
-        let err = serde_yml::from_str::<Config>(yaml).expect_err("schema 1 should fail");
+        let err = serde_yml::from_str::<Plan>(yaml).expect_err("schema 1 should fail");
         assert!(
             err.to_string().contains("schema 1 is no longer supported"),
             "unclear error: {err}"
@@ -961,7 +953,7 @@ output:
     fn rejects_unknown_technique() {
         let yaml = VALID_YAML.replace("process_hollowing", "indirect_syscalls");
         assert!(
-            serde_yml::from_str::<Config>(&yaml).is_err(),
+            serde_yml::from_str::<Plan>(&yaml).is_err(),
             "an unknown technique should fail"
         );
     }
@@ -970,7 +962,7 @@ output:
     fn rejects_typo_in_field_name() {
         let yaml = VALID_YAML.replace("name: mimikatz-basic", "naem: mimikatz-basic");
         assert!(
-            serde_yml::from_str::<Config>(&yaml).is_err(),
+            serde_yml::from_str::<Plan>(&yaml).is_err(),
             "a typo in a key should fail (deny_unknown_fields)"
         );
     }
@@ -982,7 +974,7 @@ output:
             "input:\n  path: ./mimikatz.exe\nbuild:\n  payload:\n    crypto:\n      algo: xchacha20poly1305\n      key: random\n",
         );
         assert!(
-            serde_yml::from_str::<Config>(&yaml).is_err(),
+            serde_yml::from_str::<Plan>(&yaml).is_err(),
             "the schema-1 `input` block should fail (deny_unknown_fields)"
         );
     }
@@ -993,7 +985,7 @@ output:
             "runtime:\n  - technique: process_hollowing\n    params:\n      target: \"C:\\\\Windows\\\\System32\\\\svchost.exe\"\n",
             "",
         );
-        let config: Config = serde_yml::from_str(&yaml).expect("an empty runtime should be valid");
-        assert!(config.runtime.is_empty());
+        let plan: Plan = serde_yml::from_str(&yaml).expect("an empty runtime should be valid");
+        assert!(plan.runtime.is_empty());
     }
 }

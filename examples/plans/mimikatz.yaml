@@ -1,5 +1,5 @@
-# Example configuration to pack mimikatz.exe.
-# Usage: batesian build examples/configs/mimikatz.yaml
+# Example plan to pack mimikatz.exe.
+# Usage: picaro build examples/plans/mimikatz.yaml
 
 schema: 4
 name: mimikatz-basic

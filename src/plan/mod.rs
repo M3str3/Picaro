@@ -1,12 +1,12 @@
-//! `config` module: loading, parsing and validation of the YAML.
+//! `plan` module: loading, parsing and validation of the YAML.
 //!
 //! Responsibilities:
-//! - `schema`: `serde` structs modeling the YAML document (schema 3).
+//! - `schema`: `serde` structs modeling the YAML document (schema 4).
 //! - `validate`: semantic validation after parsing.
 //! - `build_args`: `$arg.N$` placeholder substitution from CLI args.
-//! - `load_config`: single entry point that reads a file, resolves build
+//! - `load_plan`: single entry point that reads a file, resolves build
 //!   arguments, deserializes it and validates it, returning a ready-to-use
-//!   [`Config`].
+//!   [`Plan`].
 
 pub mod build_args;
 pub mod schema;
@@ -17,30 +17,30 @@ use std::path::Path;
 
 use crate::error::{PackerError, Result};
 
-pub use schema::Config;
+pub use schema::Plan;
 
 /// Reads `path`, resolves `$arg.N$` placeholders, deserializes the YAML and
-/// validates the resulting config.
+/// validates the resulting plan.
 ///
 /// `build_args` maps the CLI arguments (positional indices and `name=value`
 /// pairs, see [`build_args::parse`]) to the values substituted into the YAML.
 /// Each stage (read, parse, substitute, validate) returns a typed error so the
 /// user gets a clear message without the program panicking.
-pub fn load_config(path: &Path, build_args: &BTreeMap<String, String>) -> Result<Config> {
-    let raw = std::fs::read_to_string(path).map_err(|source| PackerError::ReadConfig {
+pub fn load_plan(path: &Path, build_args: &BTreeMap<String, String>) -> Result<Plan> {
+    let raw = std::fs::read_to_string(path).map_err(|source| PackerError::ReadPlan {
         path: path.to_path_buf(),
         source,
     })?;
 
-    let config = parse_and_substitute(&raw, build_args, path)?;
+    let plan = parse_and_substitute(&raw, build_args, path)?;
 
-    validate::validate(&config)?;
+    validate::validate(&plan)?;
 
-    Ok(config)
+    Ok(plan)
 }
 
 /// Parses the raw YAML into an untyped [`serde_yml::Value`], substitutes the
-/// build arguments, then deserializes the result into a typed [`Config`].
+/// build arguments, then deserializes the result into a typed [`Plan`].
 ///
 /// Substituting on the untyped value tree (rather than on the raw string) keeps
 /// quoting and escaping correct, while typed fields are still fully checked by
@@ -49,16 +49,16 @@ fn parse_and_substitute(
     raw: &str,
     build_args: &BTreeMap<String, String>,
     path: &Path,
-) -> Result<Config> {
+) -> Result<Plan> {
     let mut value: serde_yml::Value =
-        serde_yml::from_str(raw).map_err(|source| PackerError::ParseConfig {
+        serde_yml::from_str(raw).map_err(|source| PackerError::ParsePlan {
             path: path.to_path_buf(),
             source,
         })?;
 
     build_args::substitute(&mut value, build_args)?;
 
-    serde_yml::from_value(value).map_err(|source| PackerError::ParseConfig {
+    serde_yml::from_value(value).map_err(|source| PackerError::ParsePlan {
         path: path.to_path_buf(),
         source,
     })
@@ -91,7 +91,7 @@ runtime:
 "#;
 
     fn write_temp(name: &str, contents: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join("batesian_config_tests");
+        let dir = std::env::temp_dir().join("picaro_plan_tests");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(name);
         std::fs::write(&path, contents).unwrap();
@@ -99,13 +99,13 @@ runtime:
     }
 
     #[test]
-    fn load_config_substitutes_build_args() {
+    fn load_plan_substitutes_build_args() {
         let path = write_temp("build_args.yaml", ARGS_YAML);
         let args = build_args::parse(&["C:\\Windows\\System32\\notepad.exe".to_string()]);
 
-        let config = load_config(&path, &args).expect("load with build args");
+        let plan = load_plan(&path, &args).expect("load with build args");
 
-        match &config.runtime[0] {
+        match &plan.runtime[0] {
             crate::techniques::RuntimeStep::ProcessHollowing { params } => {
                 assert_eq!(params.target, r"C:\Windows\System32\notepad.exe");
             }
@@ -114,14 +114,14 @@ runtime:
     }
 
     #[test]
-    fn load_config_substitutes_named_build_args() {
+    fn load_plan_substitutes_named_build_args() {
         let yaml = ARGS_YAML.replace("$arg.0$", "$arg.target$");
         let path = write_temp("named_args.yaml", &yaml);
         let args = build_args::parse(&["target=C:\\Windows\\System32\\notepad.exe".to_string()]);
 
-        let config = load_config(&path, &args).expect("load with a named build arg");
+        let plan = load_plan(&path, &args).expect("load with a named build arg");
 
-        match &config.runtime[0] {
+        match &plan.runtime[0] {
             crate::techniques::RuntimeStep::ProcessHollowing { params } => {
                 assert_eq!(params.target, r"C:\Windows\System32\notepad.exe");
             }

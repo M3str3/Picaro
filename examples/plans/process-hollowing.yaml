@@ -1,7 +1,7 @@
 # Process hollowing: the payload runs inside a freshly created, suspended
 # `svchost.exe` instead of the packed binary's own process.
 #
-#   cargo run -- build examples/configs/process-hollowing.yaml
+#   cargo run -- build examples/plans/process-hollowing.yaml
 #   .\dist\test_packed.exe
 
 schema: 4
