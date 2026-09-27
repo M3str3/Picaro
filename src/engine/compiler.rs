@@ -20,12 +20,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::{BuildError, Result};
+use crate::plan::schema::Arch;
 
 /// `rustc` executable names (Windows and Unix).
 const RUSTC_NAMES: &[&str] = &["rustc.exe", "rustc"];
-
-/// Cross-compilation target used when the packer runs on a non-Windows host.
-const STUB_TARGET: &str = "x86_64-pc-windows-gnu";
 
 /// The `MZ` magic of a Windows PE (what the stub must be).
 const PE_MAGIC: [u8; 2] = *b"MZ";
@@ -80,18 +78,40 @@ fn find_executable_in_path(path_entries: &OsStr, names: &[&str]) -> Option<PathB
     None
 }
 
-/// Human-readable target the stub is compiled for: the host triple on Windows,
-/// or the GNU cross target when building off-Windows.
-pub fn stub_target_label() -> &'static str {
-    if ON_WINDOWS {
-        if cfg!(target_env = "msvc") {
-            "x86_64-pc-windows-msvc"
-        } else {
-            "x86_64-pc-windows-gnu"
-        }
-    } else {
-        STUB_TARGET
+/// The `rustc` target triple the stub is compiled for, for a given architecture.
+///
+/// On Windows the host's environment (MSVC or GNU) picks the ABI; off Windows
+/// the stub is always cross-compiled with the GNU ABI, which is what the Docker
+/// image provides.
+pub fn stub_target(arch: Arch) -> &'static str {
+    match (ON_WINDOWS, cfg!(target_env = "msvc"), arch) {
+        (true, true, Arch::X64) => "x86_64-pc-windows-msvc",
+        (true, true, Arch::X86) => "i686-pc-windows-msvc",
+        (true, false, Arch::X64) => "x86_64-pc-windows-gnu",
+        (true, false, Arch::X86) => "i686-pc-windows-gnu",
+        (false, _, Arch::X64) => "x86_64-pc-windows-gnu",
+        (false, _, Arch::X86) => "i686-pc-windows-gnu",
     }
+}
+
+/// The triple `rustc` targets by default on this host (empty off Windows: there
+/// the stub is always cross-compiled).
+fn host_target() -> &'static str {
+    if !ON_WINDOWS {
+        return "";
+    }
+    match (cfg!(target_env = "msvc"), cfg!(target_arch = "x86_64")) {
+        (true, true) => "x86_64-pc-windows-msvc",
+        (true, false) => "i686-pc-windows-msvc",
+        (false, true) => "x86_64-pc-windows-gnu",
+        (false, false) => "i686-pc-windows-gnu",
+    }
+}
+
+/// Whether the requested stub target is the host's own target: no `--target`
+/// flag, and the stub's dependencies live in the host's `deps` directory.
+fn is_native_target(arch: Arch) -> bool {
+    ON_WINDOWS && stub_target(arch) == host_target()
 }
 
 /// The `rustc --version` line of the compiler the stub is built with.
@@ -116,36 +136,30 @@ pub fn rustc_version() -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// Locates every dependency required to compile the stub.
-pub fn locate_stub_deps() -> Result<StubDeps> {
-    if ON_WINDOWS {
-        // Native build: the rlibs live in the host's `deps` directory.
-        let deps_dir = find_deps_dir_in(&target_dir())?;
-        Ok(StubDeps {
-            chacha_rlib: find_rlib(&deps_dir, "chacha20poly1305")?,
-            hex_rlib: find_rlib(&deps_dir, "hex")?,
-            windows_rlib: find_rlib(&deps_dir, "windows")?,
-            thiserror_rlib: find_rlib(&deps_dir, "thiserror")?,
-            windows_import_lib_dir: find_windows_import_lib_dir()?,
-            host_deps_dir: deps_dir.clone(),
-            deps_dir,
-        })
+/// Locates every dependency required to compile the stub for `arch`.
+pub fn locate_stub_deps(arch: Arch) -> Result<StubDeps> {
+    let native = is_native_target(arch);
+    let deps_dir = if native {
+        find_deps_dir_in(&target_dir())?
     } else {
-        // Cross-compile from Linux/WSL: target rlibs live under the cross
-        // target's `deps` directory, and the host `deps` directory provides the
-        // `windows-rs` proc-macros.
-        let deps_dir = find_cross_deps_dir()?;
-        let host_deps_dir = find_host_deps_dir()?;
-        Ok(StubDeps {
-            chacha_rlib: find_rlib(&deps_dir, "chacha20poly1305")?,
-            hex_rlib: find_rlib(&deps_dir, "hex")?,
-            windows_rlib: find_rlib(&deps_dir, "windows")?,
-            thiserror_rlib: find_rlib(&deps_dir, "thiserror")?,
-            windows_import_lib_dir: find_windows_import_lib_dir()?,
-            deps_dir,
-            host_deps_dir,
-        })
-    }
+        find_target_deps_dir(stub_target(arch))?
+    };
+    // Cross-compiling needs the host's `deps` directory too: the `windows-rs`
+    // proc-macros are host binaries, not target artifacts.
+    let host_deps_dir = if native {
+        deps_dir.clone()
+    } else {
+        find_host_deps_dir()?
+    };
+    Ok(StubDeps {
+        chacha_rlib: find_rlib(&deps_dir, "chacha20poly1305")?,
+        hex_rlib: find_rlib(&deps_dir, "hex")?,
+        windows_rlib: find_rlib(&deps_dir, "windows")?,
+        thiserror_rlib: find_rlib(&deps_dir, "thiserror")?,
+        windows_import_lib_dir: find_windows_import_lib_dir(arch)?,
+        deps_dir,
+        host_deps_dir,
+    })
 }
 
 /// Determines the `target/` directory of the workspace.
@@ -170,15 +184,18 @@ fn find_host_deps_dir() -> Result<PathBuf> {
     })
 }
 
-/// Finds the cross-target's `deps` directory
-/// (`target/x86_64-pc-windows-gnu/{debug,release}/deps`), reporting a clear
-/// error when the cross-compilation target has not been installed.
-fn find_cross_deps_dir() -> Result<PathBuf> {
-    let triple_dir = target_dir().join(STUB_TARGET);
-    if !triple_dir.is_dir() {
-        return Err(BuildError::MissingCrossTarget);
+/// Finds the target's `deps` directory (`target/<triple>/{debug,release}/deps`),
+/// reporting a clear error when the target has not been built.
+fn find_target_deps_dir(triple: &str) -> Result<PathBuf> {
+    let triple_dir = target_dir().join(triple);
+    if triple_dir.is_dir() {
+        if let Ok(deps) = find_deps_dir_in(&triple_dir) {
+            return Ok(deps);
+        }
     }
-    find_deps_dir_in(&triple_dir)
+    Err(BuildError::MissingTarget {
+        target: triple.to_string(),
+    })
 }
 
 /// Finds the `deps` directory holding the three `.rlib` files under
@@ -245,15 +262,12 @@ fn find_rlib(deps_dir: &Path, crate_name: &str) -> Result<PathBuf> {
 /// Locates the directory with the Windows native import lib.
 ///
 /// `windows` links via `raw-dylib` against an import library provided by the
-/// `windows_x86_64_*` crate: `windows_x86_64_msvc` on Windows and
-/// `windows_x86_64_gnu` when cross-compiling from Linux. The version is read
-/// from `Cargo.lock` so it matches exactly the one `windows` uses.
-fn find_windows_import_lib_dir() -> Result<PathBuf> {
-    let crate_name = if ON_WINDOWS {
-        "windows_x86_64_msvc"
-    } else {
-        "windows_x86_64_gnu"
-    };
+/// per-architecture `windows_*` crate: `windows_x86_64_msvc` / `windows_i686_msvc`
+/// on Windows and their `_gnu` counterparts when cross-compiling from Linux. The
+/// version is read from `Cargo.lock` so it matches exactly the one `windows`
+/// uses.
+fn find_windows_import_lib_dir(arch: Arch) -> Result<PathBuf> {
+    let crate_name = windows_import_crate(arch);
     let version = windows_crate_version(crate_name)?;
     let crate_dir_name = format!("{crate_name}-{version}");
 
@@ -267,6 +281,16 @@ fn find_windows_import_lib_dir() -> Result<PathBuf> {
     Err(BuildError::WindowsImportLibNotFound(format!(
         "'{crate_dir_name}/lib' was not found in Cargo's registry"
     )))
+}
+
+/// The `windows` per-architecture import-lib crate name for a target.
+fn windows_import_crate(arch: Arch) -> &'static str {
+    match (ON_WINDOWS && cfg!(target_env = "msvc"), arch) {
+        (true, Arch::X64) => "windows_x86_64_msvc",
+        (true, Arch::X86) => "windows_i686_msvc",
+        (false, Arch::X64) => "windows_x86_64_gnu",
+        (false, Arch::X86) => "windows_i686_gnu",
+    }
 }
 
 /// Returns the `$CARGO_HOME/registry/src/*` directories (crate indexes).
@@ -309,14 +333,15 @@ fn cargo_home() -> Result<PathBuf> {
     ))
 }
 
-/// Reads the resolved version of a `windows_x86_64_*` crate from `Cargo.lock`.
+/// Reads the resolved version of a `windows_*` per-architecture crate from
+/// `Cargo.lock`.
 ///
-/// `windows` links against the import library provided by the `windows_x86_64_*`
-/// crate that its `windows-targets` dependency pulls in. The lock file can hold
-/// several `windows_x86_64_*` versions at once (e.g. `windows-sys 0.48` pulls
+/// `windows` links against the import library provided by the per-arch crate
+/// that its `windows-targets` dependency pulls in. The lock file can hold
+/// several versions at once (e.g. `windows-sys 0.48` pulls
 /// `windows-targets 0.48` while `windows` uses `windows-targets 0.52`), so we
 /// resolve the chain `windows` → `windows-targets` → per-arch crate instead of
-/// trusting the first `windows_x86_64_*` entry, which need not match.
+/// trusting the first matching entry, which need not match.
 fn windows_crate_version(crate_name: &str) -> Result<String> {
     let lock_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock");
     let content = std::fs::read_to_string(&lock_path).map_err(|e| {
@@ -421,6 +446,9 @@ pub struct CompileOptions {
     /// stripped, the debug info is kept, the optimization level drops to 0 and
     /// path remapping is skipped, so a debugger can open the generated source.
     pub debug: bool,
+    /// Architecture the stub is compiled for: selects the `rustc` target and the
+    /// matching dependency set (`build.output.arch`).
+    pub arch: Arch,
 }
 
 impl Default for CompileOptions {
@@ -430,6 +458,7 @@ impl Default for CompileOptions {
             strip: true,
             trim_paths: PathTrim::All,
             debug: false,
+            arch: Arch::X64,
         }
     }
 }
@@ -518,8 +547,8 @@ pub fn compile_stub(
     let home = cargo_home().ok();
 
     let mut cmd = Command::new(rustc);
-    if !ON_WINDOWS {
-        cmd.arg("--target").arg(STUB_TARGET);
+    if !is_native_target(options.arch) {
+        cmd.arg("--target").arg(stub_target(options.arch));
     }
     cmd.arg(stub_rs)
         .arg("--edition")
@@ -533,7 +562,7 @@ pub fn compile_stub(
         .arg("target-feature=+crt-static")
         .arg("-L")
         .arg(format!("dependency={}", deps.deps_dir.display()));
-    if !ON_WINDOWS {
+    if deps.host_deps_dir != deps.deps_dir {
         cmd.arg("-L")
             .arg(format!("dependency={}", deps.host_deps_dir.display()));
     }
@@ -591,6 +620,25 @@ mod tests {
     #[test]
     fn find_executable_in_empty_path_is_none() {
         assert!(find_executable_in_path(OsStr::new(""), RUSTC_NAMES).is_none());
+    }
+
+    /// The stub target follows the requested architecture (and the host ABI on
+    /// Windows); off Windows it is always the GNU cross target.
+    #[test]
+    fn stub_target_follows_the_arch() {
+        let x64 = stub_target(Arch::X64);
+        let x86 = stub_target(Arch::X86);
+        assert!(x64.starts_with("x86_64-pc-windows-"), "x64: {x64}");
+        assert!(x86.starts_with("i686-pc-windows-"), "x86: {x86}");
+        assert_ne!(x64, x86);
+    }
+
+    /// The `windows` import-lib crate name is per architecture: `windows_i686_*`
+    /// for x86, `windows_x86_64_*` for x64.
+    #[test]
+    fn windows_import_crate_is_per_arch() {
+        assert!(windows_import_crate(Arch::X64).starts_with("windows_x86_64_"));
+        assert!(windows_import_crate(Arch::X86).starts_with("windows_i686_"));
     }
 
     #[test]
@@ -677,6 +725,7 @@ dependencies = [
                 strip: true,
                 trim_paths: PathTrim::None,
                 debug: false,
+                arch: Arch::X64,
             },
             manifest,
             None,
@@ -688,6 +737,7 @@ dependencies = [
                 strip: false,
                 trim_paths: PathTrim::None,
                 debug: false,
+                arch: Arch::X64,
             },
             manifest,
             None,
@@ -703,6 +753,7 @@ dependencies = [
                 strip: true,
                 trim_paths: PathTrim::None,
                 debug: false,
+                arch: Arch::X64,
             },
             Path::new("/proj"),
             Some(Path::new("/home/dev")),
@@ -717,6 +768,7 @@ dependencies = [
                 strip: true,
                 trim_paths: PathTrim::Relative,
                 debug: false,
+                arch: Arch::X64,
             },
             Path::new("/proj"),
             Some(Path::new("/home/dev")),
@@ -731,6 +783,7 @@ dependencies = [
                 strip: true,
                 trim_paths: PathTrim::All,
                 debug: false,
+                arch: Arch::X64,
             },
             Path::new("/proj"),
             Some(Path::new("/home/dev/.cargo")),
@@ -745,6 +798,7 @@ dependencies = [
                 strip: true,
                 trim_paths: PathTrim::All,
                 debug: false,
+                arch: Arch::X64,
             },
             Path::new("/proj"),
             None,
@@ -761,6 +815,7 @@ dependencies = [
                 strip: true,
                 trim_paths: PathTrim::All,
                 debug: true,
+                arch: Arch::X64,
             },
             Path::new("/proj"),
             Some(Path::new("/home/dev/.cargo")),
@@ -826,7 +881,7 @@ dependencies = [
         let stub_path = build_dir.join("main.rs");
         std::fs::write(&stub_path, stub_src).unwrap();
 
-        let deps = locate_stub_deps().unwrap();
+        let deps = locate_stub_deps(Arch::X64).unwrap();
         let out = build_dir.join("out.exe");
         compile_stub(&stub_path, &out, &deps, CompileOptions::default()).unwrap();
 
@@ -867,7 +922,7 @@ dependencies = [
         )
         .unwrap();
 
-        let deps = locate_stub_deps().unwrap();
+        let deps = locate_stub_deps(Arch::X64).unwrap();
 
         let marker = "STUB_MARKER_test00000000".to_string();
         let target = r"C:\Windows\System32\svchost.exe".to_string();
@@ -968,7 +1023,7 @@ dependencies = [
         )
         .unwrap();
 
-        let deps = locate_stub_deps().unwrap();
+        let deps = locate_stub_deps(Arch::X64).unwrap();
         let strings = crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap();
 
         for def in crate::techniques::all() {
@@ -1085,7 +1140,7 @@ dependencies = [
         let stub_path = build_dir.join("main.rs");
         std::fs::write(&stub_path, &rendered.source).unwrap();
 
-        let deps = locate_stub_deps().unwrap();
+        let deps = locate_stub_deps(Arch::X64).unwrap();
         let out = build_dir.join("out.exe");
         compile_stub(&stub_path, &out, &deps, CompileOptions::default()).unwrap();
 
@@ -1144,7 +1199,7 @@ dependencies = [
         let stub_path = build_dir.join(format!("main_{name}.rs"));
         std::fs::write(&stub_path, stub_src).unwrap();
 
-        let deps = locate_stub_deps().unwrap();
+        let deps = locate_stub_deps(Arch::X64).unwrap();
         let out = build_dir.join(format!("out_{name}.exe"));
         compile_stub(&stub_path, &out, &deps, CompileOptions::default()).unwrap();
         out
@@ -1393,5 +1448,273 @@ dependencies = [
         }
 
         let _ = std::fs::remove_dir_all(&build_dir);
+    }
+
+    /// Renders a custom stub template with a fresh key and a small payload.
+    ///
+    /// The pipeline only drives the shared blocks (args/imports/syscalls); a
+    /// custom template that ignores `$EXECUTION_BLOCK$` never pulls in a
+    /// technique fragment, which is what lets the x86 toolchain be tested while
+    /// every fragment is still x64-only.
+    fn render_custom(template: &str, pipeline: &[crate::techniques::RuntimeStep]) -> String {
+        let plaintext: Vec<u8> = (0..64u32).map(|i| i as u8).collect();
+        let key = crate::engine::crypto::generate_key();
+        let encrypted = crate::engine::crypto::encrypt_payload(&plaintext, &key).unwrap();
+        let params = crate::engine::stub::StubParams {
+            nonce: encrypted.nonce,
+            key: encrypted.key,
+            ciphertext: encrypted.ciphertext.clone(),
+            plaintext_len: encrypted.plaintext_len,
+            payload_format: PayloadFormat::Pe,
+            payload_export: None,
+            stub_marker: crate::engine::stub::generate_stub_marker(),
+            payload_path: "payload.bin".to_string(),
+            build_args: std::collections::BTreeMap::new(),
+            payload_args: Vec::new(),
+            args_mode: crate::engine::args::ArgsMode::Join,
+            debug: false,
+            windows_subsystem: false,
+        };
+        crate::engine::stub::render_custom_stub_with(
+            template,
+            &params,
+            pipeline,
+            &crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap(),
+            &crate::engine::syscalls::SyscallsConfig::default(),
+            &crate::engine::api_resolution::ApiResolutionConfig::default(),
+        )
+        .unwrap()
+        .source
+    }
+
+    /// Renders the builtin stub template for a pipeline, returning the source and
+    /// the ciphertext to write as `payload.bin` next to it (the builtin template
+    /// `include_bytes!`s the payload).
+    fn render_builtin(pipeline: &[crate::techniques::RuntimeStep]) -> (String, Vec<u8>) {
+        let template = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("templates")
+                .join("stub")
+                .join("main.rs.tpl"),
+        )
+        .unwrap();
+
+        let plaintext: Vec<u8> = (0..256u32).map(|i| i as u8).collect();
+        let key = crate::engine::crypto::generate_key();
+        let encrypted = crate::engine::crypto::encrypt_payload(&plaintext, &key).unwrap();
+        let params = crate::engine::stub::StubParams {
+            nonce: encrypted.nonce,
+            key: encrypted.key,
+            ciphertext: encrypted.ciphertext.clone(),
+            plaintext_len: encrypted.plaintext_len,
+            payload_format: PayloadFormat::Pe,
+            payload_export: None,
+            stub_marker: crate::engine::stub::generate_stub_marker(),
+            payload_path: "payload.bin".to_string(),
+            build_args: std::collections::BTreeMap::new(),
+            payload_args: Vec::new(),
+            args_mode: crate::engine::args::ArgsMode::Join,
+            debug: false,
+            windows_subsystem: false,
+        };
+        let source = crate::engine::stub::render_main_rs_with(
+            &template,
+            &params,
+            pipeline,
+            &crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap(),
+            &crate::engine::syscalls::SyscallsConfig::default(),
+            &crate::engine::api_resolution::ApiResolutionConfig::default(),
+        )
+        .unwrap();
+        (source, encrypted.ciphertext)
+    }
+
+    /// Compiles `source` for i686 (writing `payload.bin` when the template needs
+    /// it) and returns the parsed artifact.
+    fn compile_i686(source: &str, payload: Option<&[u8]>, name: &str) -> crate::engine::pe::PeInfo {
+        let build_dir =
+            std::env::temp_dir().join(format!("picaro_i686_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&build_dir);
+        std::fs::create_dir_all(&build_dir).unwrap();
+
+        if let Some(bytes) = payload {
+            std::fs::write(build_dir.join("payload.bin"), bytes).unwrap();
+        }
+        let stub_path = build_dir.join("main.rs");
+        std::fs::write(&stub_path, source).unwrap();
+
+        let deps = locate_stub_deps(Arch::X86).unwrap();
+        let out = build_dir.join("out.exe");
+        compile_stub(
+            &stub_path,
+            &out,
+            &deps,
+            CompileOptions {
+                arch: Arch::X86,
+                ..CompileOptions::default()
+            },
+        )
+        .unwrap();
+
+        let bytes = std::fs::read(&out).unwrap();
+        let info = crate::engine::pe::parse(&bytes).unwrap();
+        let _ = std::fs::remove_dir_all(&build_dir);
+        info
+    }
+
+    /// M0: picaro compiles a valid **i686** stub. The custom template ignores the
+    /// technique blocks, so this exercises the toolchain (target selection, i686
+    /// dependency set, `windows_i686_*` import lib, `--target` on a Windows host)
+    /// while every technique fragment is still x64-only.
+    ///
+    /// Marked `#[ignore]` because it needs `rustc` and the workspace built for
+    /// the i686 target: `cargo build --target i686-pc-windows-msvc` (or
+    /// `i686-pc-windows-gnu` off Windows).
+    #[test]
+    #[ignore = "requires rustc and the workspace built for the i686 target"]
+    fn compiles_an_i686_stub() {
+        let template = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("examples")
+                .join("stubs")
+                .join("minimal.rs"),
+        )
+        .unwrap();
+        let source = render_custom(&template, &[]);
+
+        let info = compile_i686(&source, None, "minimal");
+        assert_eq!(info.machine, crate::engine::pe::IMAGE_FILE_MACHINE_I386);
+        assert_eq!(info.arch(), Some(Arch::X86));
+    }
+
+    /// M0: the shared blocks (payload arguments and the import resolver) compile
+    /// for i686, including their x86 branches (`fs:[0x30]`, the 32-bit PEB
+    /// offsets, 4-byte thunks and `IMAGE_ORDINAL_FLAG32`).
+    ///
+    /// The pipeline is only there to make the renderer emit `$ARGS_BLOCK$` /
+    /// `$IMPORTS_BLOCK$`; the template ignores `$EXECUTION_BLOCK$`, so no x64
+    /// technique fragment is linked in.
+    #[test]
+    #[ignore = "requires rustc and the workspace built for the i686 target"]
+    fn compiles_the_shared_blocks_for_i686() {
+        const TEMPLATE: &str = r#"
+// The builtin template provides `dec_xor`; a custom stub that pulls in the
+// obfuscated blocks has to provide it too.
+#[inline(never)]
+#[allow(dead_code)]
+fn dec_xor(bytes: &[u8], key: &[u8; 32]) -> Vec<u8> {
+    let mut out = bytes.to_vec();
+    for (i, b) in out.iter_mut().enumerate() {
+        *b ^= key[i % 32];
+    }
+    out
+}
+
+fn main() {
+    let len = $PAYLOAD_LEN$;
+    println!("{len}");
+}
+
+$SYSCALLS_BLOCK$
+$ARGS_BLOCK$
+$IMPORTS_BLOCK$
+"#;
+
+        let pipeline = vec![crate::techniques::RuntimeStep::ReflectiveLoading {
+            params: crate::techniques::reflective_loading::Params {},
+        }];
+        let source = render_custom(TEMPLATE, &pipeline);
+        assert!(source.contains("fs:[0x30]"), "the x86 PEB read is missing");
+        assert!(
+            source.contains("IMAGE_ORDINAL_FLAG32"),
+            "the PE32 ordinal flag is missing"
+        );
+
+        let info = compile_i686(&source, None, "shared_blocks");
+        assert_eq!(info.machine, crate::engine::pe::IMAGE_FILE_MACHINE_I386);
+    }
+
+    /// M1: the reflective-loading fragment compiles for i686 — the PE32 mapper,
+    /// the hand-defined 32-bit `IMAGE_TLS_DIRECTORY` and the x86 entry call.
+    #[test]
+    #[ignore = "requires rustc and the workspace built for the i686 target"]
+    fn compiles_a_reflective_stub_for_i686() {
+        let pipeline = vec![crate::techniques::RuntimeStep::ReflectiveLoading {
+            params: crate::techniques::reflective_loading::Params {},
+        }];
+        let (source, ciphertext) = render_builtin(&pipeline);
+
+        let info = compile_i686(&source, Some(&ciphertext), "reflective");
+        assert_eq!(info.machine, crate::engine::pe::IMAGE_FILE_MACHINE_I386);
+        assert_eq!(info.arch(), Some(Arch::X86));
+    }
+
+    /// M2: the process-hollowing fragment compiles for i686 — PE32 parsing,
+    /// `CONTEXT32`, the `fs:[0x2C]` TLS array and the 32-bit `THREAD_BASIC_INFORMATION`.
+    #[test]
+    #[ignore = "requires rustc and the workspace built for the i686 target"]
+    fn compiles_a_hollowing_stub_for_i686() {
+        let pipeline = vec![crate::techniques::RuntimeStep::ProcessHollowing {
+            params: crate::techniques::process_hollowing::Params::default(),
+        }];
+        let (source, ciphertext) = render_builtin(&pipeline);
+
+        let info = compile_i686(&source, Some(&ciphertext), "hollowing");
+        assert_eq!(info.machine, crate::engine::pe::IMAGE_FILE_MACHINE_I386);
+        assert_eq!(info.arch(), Some(Arch::X86));
+    }
+
+    /// M3: every x86-capable Preparation compiles for i686 next to an execution
+    /// technique — `anti_debug`'s x86 debug-register `CONTEXT`, the arch-neutral
+    /// AMSI/ETW patches and the `bouncer`'s Win32 checks.
+    #[test]
+    #[ignore = "requires rustc and the workspace built for the i686 target"]
+    fn compiles_the_x86_preparations_for_i686() {
+        use crate::techniques::{
+            anti_debug, bouncer, patch_amsi, patch_etw, reflective_loading, RuntimeStep,
+        };
+        let pipeline = vec![
+            RuntimeStep::AntiDebug {
+                params: anti_debug::Params::default(),
+            },
+            RuntimeStep::PatchAmsi {
+                params: patch_amsi::Params::default(),
+            },
+            RuntimeStep::PatchEtw {
+                params: patch_etw::Params::default(),
+            },
+            RuntimeStep::Bouncer {
+                params: bouncer::Params {
+                    hostname: Some("WORKSTATION-*".to_string()),
+                    not_in_vm: Some(true),
+                    min_ram_mb: Some(2048),
+                    ..bouncer::Params::default()
+                },
+            },
+            RuntimeStep::ReflectiveLoading {
+                params: reflective_loading::Params::default(),
+            },
+        ];
+        let (source, ciphertext) = render_builtin(&pipeline);
+
+        let info = compile_i686(&source, Some(&ciphertext), "preparations");
+        assert_eq!(info.machine, crate::engine::pe::IMAGE_FILE_MACHINE_I386);
+        assert_eq!(info.arch(), Some(Arch::X86));
+    }
+
+    /// M5: the `dotnet_hosting` fragment compiles for i686 — the COM vtable
+    /// calls, the 16-byte `VARIANT` layout and the x86 `Invoke_3` ABI (the
+    /// variant passed by value, not by reference as on x64).
+    #[test]
+    #[ignore = "requires rustc and the workspace built for the i686 target"]
+    fn compiles_a_dotnet_hosting_stub_for_i686() {
+        let pipeline = vec![crate::techniques::RuntimeStep::DotnetHosting {
+            params: crate::techniques::dotnet_hosting::Params {},
+        }];
+        let (source, ciphertext) = render_builtin(&pipeline);
+
+        let info = compile_i686(&source, Some(&ciphertext), "dotnet_hosting");
+        assert_eq!(info.machine, crate::engine::pe::IMAGE_FILE_MACHINE_I386);
+        assert_eq!(info.arch(), Some(Arch::X86));
     }
 }

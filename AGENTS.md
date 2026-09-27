@@ -59,12 +59,17 @@ templates/
 examples/
   plans/      curated example YAMLs
   payloads/     test payloads for end-to-end verification
+  stubs/        custom stub templates (build.stub.path)
+  assets/       sample icon for build.output.resources
 tests/
   plans/      CI / validation fixtures
   fixtures/     committed PE fixtures
+scripts/        Docker wrappers (picaro.py, docs.py)
+yara/           YARA rules (engine not wired yet)
 docs/           docs source (mkdocs.yml lives at the root)
 build/          (gitignored) intermediate artifacts
 dist/           (gitignored) final packed binaries
+code_examples/  (gitignored) local reference scratch
 ```
 
 Each technique lives under `src/techniques/<name>/` (README + stub fragment +
@@ -83,9 +88,15 @@ parameters next to `technique:`); a technique with no parameters omits
 `params:`. Unknown keys inside a runtime entry are ignored by serde, so a
 half-migrated flat entry silently falls back to the technique's defaults
 (`process_hollowing` then hollows `svchost.exe`). `build` has exactly three
-blocks: `payload` (`source` + `crypto`), `stub` (`path`/`syscalls`/`strings`)
-and `output`; `build.output.arch` is `x64` only (`x86` is recognized but
-rejected in validation as not integrated yet). String obfuscation lives at
+blocks: `payload` (`source` + `crypto`), `stub`
+(`path`/`syscalls`/`api_resolution`/`strings`/`debug`) and `output`;
+`build.output.arch` is `x64` or `x86` and the stub, the payload and (for
+hollowing) the target must all share it; `x86` is fully supported for
+`reflective_loading`, `process_hollowing`, `anti_debug`, `patch_amsi`,
+`patch_etw` and `bouncer` (`sleep_obfuscation` stays x64-only, and an x86
+pipeline that uses it is rejected by the capability check with a message naming
+the technique). String
+obfuscation lives at
 `build.stub.strings` (it only ever affected stub literals). Build args move from
 `$build.N$` to `$arg.N$` (`$arg.0$`, `$arg.1$`, or a named `$arg.foo$` from a
 `foo=value` CLI arg); the stub still accesses already-resolved args as
@@ -210,13 +221,38 @@ colored table.
 
 **Phase 6 done.** Indirect syscalls (see the “Phase 6” entry above).
 
+**API resolution (Phases A–D done, E parked).** New loader-level
+`build.stub.api_resolution` (`mode: none|proxy`, `apis: [dll!func]`,
+`unmatched: forward|abort`). In `proxy` mode the loader serves selected payload
+imports from proxies generated in the stub: the catalogue
+(`src/engine/api_resolution.rs`) is `ntdll!NtReadVirtualMemory`,
+`ntdll!NtOpenProcess`, `kernel32!ReadProcessMemory` and `kernel32!OpenProcess`
+rebuilt on the `Nt*` calls through the syscall layer, plus a
+`kernel32!GetProcAddress` handler. `$API_RESOLUTION_BLOCK$` is rendered by
+`render_block` (the selected `Nt*` names are merged into the syscall block via
+`render_block_with`); the shared `patch_imports` serves catalogue hits, and the
+shadowed names never enter the loader's IAT (`verify_no_intercepted_imports` in
+the build flow). Requires `syscalls.mode: indirect` and a `pe`/`dll` payload;
+rejected with `process_hollowing` (the proxies live in the loader image, which is
+not mapped in the target — Phase E, D-23). The generated `resolution_policy`
+returns `crate::ImportPolicy` (`Proxy(u64) | Forward | Abort`); `unmatched: abort`
+makes `resolve_imports` fail the load on the first non-catalogue import (with an
+advisory printed at build time). Design, phases and decision log:
+`docs/api-resolution.md` (in the docs nav under Architecture).
+
+**`build.stub.debug` (done).** `true` compiles the stub without the hardening
+(`opt-level=0`, `debuginfo=2`, no strip, no path remapping) and makes the
+techniques log to stderr (`[+] [<technique>] <message>`). Markedly less evasive;
+laboratory only, never for delivery.
+
 **Custom loader stubs (done).** A YAML `build.stub.path` replaces the builtin
 stub with a user `.rs` template rendered through the same substitution engine
-(see `docs/custom-stubs.md`); `build.stub` may be set for `syscalls`/`strings`
-alone.
+(see `docs/custom-stubs.md`); `build.stub` may be set for
+`syscalls`/`api_resolution`/`strings` alone.
 Placeholders use the `$X$` delimiter (`$PAYLOAD_BYTES$`, `$PAYLOAD_LEN$`,
 `$PAYLOAD_NONCE_DEF$`, `$PAYLOAD_KEY_DEF$` (embedded only when referenced),
-`$PREPARATION_BLOCKS$`, `$SYSCALLS_BLOCK$`, `$EXECUTION_BLOCK$`, `$ARG_<key>$`;
+`$PREPARATION_BLOCKS$`, `$SYSCALLS_BLOCK$`, `$ARGS_BLOCK$`, `$IMPORTS_BLOCK$`,
+`$API_RESOLUTION_BLOCK$`, `$EXECUTION_BLOCK$`, `$ARG_<key>$`;
 YAML build args are `$arg.N$`). The stub must define `fn main()`; ignoring the
 technique blocks is a warning, not an error (a custom stub that skips
 `$SYSCALLS_BLOCK$` while declaring syscall-using techniques also warns). Build
@@ -245,6 +281,18 @@ Examples: `examples/plans/shellcode.yaml` (+ `examples/payloads/demo_shellcode.b
 cdylib export ran and wrote its file). The `dll` format ships no example (the old
 `test-dll.yaml` pointed at a payload that was never committed). Wizard/`--dry-run`
 do not prompt for the format yet (edit the YAML).
+
+**`.NET` payloads (`format: dotnet` + `dotnet_hosting`, done).** A managed image
+is not native code, so `pe`/`dll` on one is a build-time error that names the
+right combination (`PeInfo::is_dotnet()` reads the CLR header / COM descriptor,
+data directory 14, and its `flags`); `format: dotnet` and
+`technique: dotnet_hosting` imply each other in `plan::validate`. The technique
+hosts the CLR in the stub's process and loads the assembly from memory; the
+assembly's bitness is checked against `output.arch` (`32BITREQUIRED` ⇒ `x86`).
+Fixtures: `tests/fixtures/managed_x86.exe` (32BITREQUIRED) and
+`managed_anycpu.exe` (IL-only), from `tests/fixtures/managed_marker.cs` with
+`csc -nologo -target:exe -platform:x86|anycpu`. Acceptance: `SharpHound.exe` in
+the repo root packs with `arch: x86` and its output matches the unpacked run.
 
 **Phase 8: `bouncer` environment gate (done).** New
 `src/techniques/bouncer/` Preparation technique (T1497.001, T1614.001,
@@ -290,9 +338,11 @@ is now public so the wizard and `techniques list` share wording. **Compiler fix:
 `windows_crate_version` resolves the import-lib version through
 `windows` → `windows-targets` → the per-arch crate, because a second
 `windows-targets` (e.g. `windows-sys 0.48` via `inquire`'s `crossterm`/`mio`)
-made the old "first match" pick the wrong `windows_x86_64_msvc`. Not prompted
-yet: `strings.key`, `build.stub.path`, `args_mode: override`, non-default
-`sleep_obfuscation` regions.
+made the old "first match" pick the wrong `windows_x86_64_msvc`. The wizard asks
+for the architecture (second question, `x64` by default) and hides
+`syscalls: indirect` on x86, so it only assembles plans the packer accepts. Not
+prompted yet: `strings.key`, `build.stub.path`, `args_mode: override`,
+non-default `sleep_obfuscation` regions.
 
 **PE resources (done).** `build.output.resources` embeds an icon (`RT_GROUP_ICON`
 + `RT_ICON`), `VERSIONINFO` (`RT_VERSION`) and the Windows application manifest
@@ -338,10 +388,42 @@ where its CA is trusted; it gives no SmartScreen reputation.
 
 ## Known limitations
 
-- **`x86` is parsed but rejected.** `Arch::X86` exists so the enum is complete,
-  but `plan::validate` rejects it: the stub toolchain only produces x64, and
-  adding x86 means a 32-bit stub variant plus a per-architecture fragment for
-  every technique.
+- **`x86` is supported for everything except the one parked workstream.** M0–M5
+  landed (see `docs/x86.md` for the phase table): both execution techniques, the
+  four preparation techniques, the arch-aware shared blocks
+  (`$IMPORTS_BLOCK$` reads PE32/PE32+ magic, `$ARGS_BLOCK$` uses the x86 PEB
+  offsets), the i686 compiler path, the WOW64-aware hollowing-target check and
+  `dotnet_hosting` (the stub hosts the CLR and runs a managed assembly from
+  memory). Verified end to end: `packs_and_runs_an_x86_reflective_payload`,
+  `packs_and_runs_an_x86_hollowed_payload` (a 32-bit payload hollowed into the
+  WOW64 `svchost.exe`, marker + `tls=42` + exit code 42),
+  `x86_preparations_run_before_the_payload`,
+  `packs_and_runs_a_managed_payload` and `packs_and_runs_sharphound`.
+  **Parked by decision:** x86 indirect syscalls (needs a Heaven's Gate thunk plus
+  64-bit SSN resolution — a redesign of the syscall layer, not a flag;
+  `syscalls.mode: indirect` and `api_resolution` stay x64-only and are rejected
+  on x86). Fixture:
+  `tests/fixtures/minimal_x86.exe` (`scripts/build_test_fixture.sh x86`); the
+  example plan is `examples/plans/x86.yaml` (payload
+  `examples/payloads/test_payload_x86.exe`). Plan and checklist: `.plan.md`
+  (repo root; not tracked yet — add it to the commit if you want it kept).
+- **A managed (.NET) payload needs `format: dotnet` + `dotnet_hosting`.** A
+  managed assembly's entry point calls `mscoree.dll!_CorExeMain`, which starts
+  the CLR for the *stub*, not the mapped payload, so `format: pe`/`dll` on a
+  managed image is a build-time error. The technique hosts the CLR in the stub's
+  process (`CLRCreateInstance` → `ICorRuntimeHost` → `_AppDomain.Load_3` →
+  `GetEntryPoint` → `Invoke_3`), so it is `reflective_loading`-only in practice
+  (one execution technique per pipeline) and the assembly runs on the CLR of the
+  stub's bitness — a `32BITREQUIRED` assembly needs `arch: x86` (checked at
+  build time). `SharpHound.exe` (32-bit .NET) is the acceptance case.
+- **A mapped image's TLS index can collide with a loaded module's.** Both
+  execution techniques give a manually mapped image a TLS index reserved through
+  `TlsAlloc` and write its block into the loader's TLS array (`gs:[0x58]` /
+  `fs:[0x2C]` — *not* the `TlsSetValue` array, which is what picaro used before
+  and which left payloads reading another module's block). `TlsAlloc` returns the
+  lowest free index, which can be a loaded module's `_tls_index`; that module then
+  sees the payload's template bytes in the affected thread. Measurements and the
+  ntdll teardown behaviour that forces this shape: `docs/measurements.md`.
 
 - **`bouncer` is a fragile gate by construction.** `not_in_sandbox` combines
   five indicators and rejects at a score of 3, deliberately preferring false
@@ -364,11 +446,15 @@ where its CA is trusted; it gives no SmartScreen reputation.
   uses `$PAYLOAD_KEY_DEF$` / `$PAYLOAD_NONCE_DEF$`, the values land in `.rdata`.
   Use `$PAYLOAD_KEY_DEF_OBFUSCATED$` when available, or read the key at runtime
   (see `examples/stubs/runtime-key.rs`).
-- `GetThreadContext`/`SetThreadContext` (process hollowing's loader hand-off),
-  `WaitForSingleObject`/`GetExitCodeProcess` (reflective loading) and
-  `CreateRemoteThread`/`CreateThread` still import statically: `NtCreateThreadEx`
-  takes eleven arguments, more stack arguments than the indirect trampoline
-  currently shuffles.
+- **`api_resolution.mode: proxy` is `reflective_loading`-only.** The proxies are
+  ordinary Rust functions bound to the loader image (statics, obfuscated data,
+  CRT), so a hollowed payload running in another process can only point its IAT
+  at the real exports; `plan::validate` rejects the combination. Closing it needs
+  a position-independent proxy emitter written into the target
+  (`docs/api-resolution.md`, Phase E).
+- `CreateProcessA`, `LoadLibraryA`/`GetProcAddress` and `TlsAlloc`/`TlsSetValue`
+  still import statically: they are loader entry points, not kernel calls the stub
+  issues.
 - Windows Defender flags the packed artifacts (unavoidable); the dev machine
   had it disabled during the 6a runtime tests.
 - **The container cannot `sign.mode: store`, and cannot run the Defender scan.**

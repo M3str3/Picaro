@@ -31,19 +31,19 @@ build:
 
 ## Process hollowing
 
-## 0. Requirements
+### 0. Requirements
 
 - `rustc` on the PATH.
 - Workspace dependencies already compiled: `cargo build` at the repo root.
 - Process Explorer or Process Hacker (to confirm the hollowing in step 5).
 
-## 1. Compile the test payload (if missing)
+### 1. Compile the test payload (if missing)
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File examples/payloads/build_test_payload.ps1
 ```
 
-## 2. Pack
+### 2. Pack
 
 ```powershell
 cargo run -- build examples/plans/process-hollowing.yaml
@@ -52,12 +52,12 @@ cargo run -- build examples/plans/process-hollowing.yaml
 This produces `dist/test_packed.exe` (and leaves intermediate artifacts in
 `build/`).
 
-## 3. Open Process Explorer / Process Hacker
+### 3. Open Process Explorer / Process Hacker
 
 Open it *before* running the packed binary so you can watch which process runs
 the payload.
 
-## 4. Run the packed binary
+### 4. Run the packed binary
 
 ```powershell
 .\dist\test_packed.exe
@@ -74,18 +74,18 @@ The payload runs in the hollowed `svchost.exe`, which has **no console attached*
 process), so the payload's stdout is not visible from the parent. Look for the
 marker in Process Explorer instead (step 5).
 
-## 5. Confirm the hollowing (the key check)
+### 5. Confirm the hollowing (the key check)
 
 The payload runs **inside `svchost.exe`**, not in `test_packed.exe`. In Process
 Explorer, the `svchost.exe` created by the stub is the process hosting the
 payload; `test_packed.exe` only waits for it.
 
-## 6. Verify no cleartext payload on disk
+### 6. Verify no cleartext payload on disk
 
 The stub never writes the decrypted payload. There must be **no**
 `payload_decrypted.bin` in the working directory.
 
-## 7. Verify obfuscation (no cleartext markers)
+### 7. Verify obfuscation (no cleartext markers)
 
 ```bash
 strings dist/test_packed.exe | grep STUB_MARKER      # should print nothing

@@ -12,9 +12,12 @@ cargo run -- build examples/plans/<name>.yaml
 | `process-hollowing.yaml` | The default Execution technique: run the payload inside a suspended `svchost.exe`. |
 | `reflective-loading.yaml` | Manual mapping into the packed binary's own process. |
 | `shellcode.yaml` | A raw shellcode payload (`format: shellcode`); the blob is `mov eax, 42; ret`. |
+| `dotnet.yaml` | A managed (.NET) payload (`format: dotnet` + `dotnet_hosting`): the stub hosts the CLR and runs the assembly from memory. |
+| `x86.yaml` | A 32-bit build (`arch: x86`): an i686 stub and a PE32 payload, run under WOW64 on 64-bit Windows. |
 | `args.yaml` | `build.payload.args` and `args_mode` — YAML args plus the packed binary's own. |
 | `custom-stub.yaml` | `build.stub.path`: replace the builtin stub with your own Rust template. |
-| `mimikatz.yaml` | A full-featured plan: remote payload URL, indirect syscalls, randomised VERSIONINFO and a lab signature. |
+| `lab-signed.yaml` | A self-signed (`mode: lab`) Authenticode signature and an embedded VERSIONINFO. |
+| `mimikatz.yaml` | A full-featured plan: remote payload URL, indirect syscalls, API resolution (import proxying), `patch_etw`, randomised VERSIONINFO and a lab signature. |
 
 ## Recipe: pack an msfvenom payload
 

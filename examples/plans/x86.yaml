@@ -1,0 +1,34 @@
+# Reflective loading, 32-bit: the same payload as `reflective-loading.yaml`, but
+# built for (and packed with) an x86 stub. `build.output.arch` selects the stub's
+# architecture and the payload must match it.
+#
+#   cargo run -- build examples/plans/x86.yaml
+#   .\dist\x86_reflective.exe
+#
+# On 64-bit Windows the artifact runs under WOW64. The payload is committed as
+# `examples/payloads/test_payload_x86.exe`; regenerate it with
+# `build_test_payload.ps1 -Arch x86` or
+# `rustc examples/payloads/test_payload.rs --target i686-pc-windows-msvc -O
+#  -C strip=symbols -o examples/payloads/test_payload_x86.exe`.
+
+schema: 4
+name: x86-reflective
+
+build:
+  payload:
+    source: ./examples/payloads/test_payload_x86.exe
+    crypto:
+      algo: xchacha20poly1305
+      key: random
+  stub:
+    strings:
+      strategy: xor
+      key: random
+  output:
+    path: ./dist/x86_reflective.exe
+    arch: x86
+    strip: true
+    trim_paths: all
+
+runtime:
+  - technique: reflective_loading

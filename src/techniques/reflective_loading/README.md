@@ -128,6 +128,34 @@ at `argv[1]`.
   signatures that flag the file on disk apply in memory).
 - High-entropy executable regions that do not map to a loaded module.
 
+## Architectures
+
+The mapper is shared by `x64` and `x86`: the NT headers, the TLS directory and
+the entry-point call are selected by `#[cfg]`, and the 4-byte thunks / 32-bit
+IAT slots come from the shared import resolver (`src/engine/imports.rs`). On x86
+the entry point is called through the x86 ABI (arguments on the stack); the
+mapper never uses a register hand-off.
+
+## TLS provisioning
+
+A manually mapped image gets a real TLS index, a private copy of its `.tls`
+template and a slot on the calling thread, so a payload's `thread_local` state
+starts at its image-initialized values. Two measured facts shape the code:
+
+- The slot has to be written into the loader's array
+  (`gs:[0x58]` / `fs:[0x2C]`), which is what a CRT reads through `_tls_index`.
+  `TlsSetValue` writes a *different* array (`gs:[0x1480]` / `fs:[0xE10]`), and a
+  payload provisioned that way reads another module's block.
+- The index still comes from `TlsAlloc`, because the reservation it makes is
+  what the thread's teardown expects: ntdll reads the block header of every
+  unreserved entry when the thread exits and the process dies with an access
+  violation or heap corruption. See `docs/measurements.md`.
+
+Limitations: threads the payload creates itself have no slot for this index, the
+index can coincide with a loaded module's (the module then sees the payload's
+template bytes in that thread), and a module loaded later can be handed the same
+index.
+
 ## Measurements
 
 - TODO — pending a static/dynamic baseline (see `docs/measurements.md`).

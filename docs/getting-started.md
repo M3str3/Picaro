@@ -13,8 +13,9 @@ measure the result.
   When it is missing the packer stops with instructions.
 - Workspace dependencies built once (`cargo build --release` at the repo root),
   so the stub can link the `.rlib` files under `target/`.
-- **x64 Windows.** On Linux/WSL the stub cross-compiles to
-  `x86_64-pc-windows-gnu` (see [How it fits together](architecture.md)); to
+- **Windows.** The stub is built for `arch: x64` or `arch: x86` (the payload
+  must match). On Linux/WSL it cross-compiles to the matching
+  `-pc-windows-gnu` target (see [How it fits together](architecture.md)); to
   build with no local toolchain use the Docker workflow in the repository
   `README.md`.
 
@@ -99,14 +100,20 @@ The four blocks:
 
 | `build.payload.format` | Input | Runs with |
 | --- | --- | --- |
-| `pe` (default) | an x64 executable | `reflective_loading`, or `process_hollowing` |
-| `dll` | an x64 library | `reflective_loading` (set `export` to call a function) |
+| `pe` (default) | an executable matching `output.arch` | `reflective_loading`, or `process_hollowing` |
+| `dll` | a library matching `output.arch` | `reflective_loading` (set `export` to call a function) |
 | `shellcode` | a raw code blob | `reflective_loading` |
+| `dotnet` | a managed (.NET) assembly | `dotnet_hosting` (the stub hosts the CLR) |
 
 `reflective_loading` maps the payload into the packed binary's own process and
-handles all three formats, so it is the safe default. `process_hollowing` only
-runs `format: pe`, and does not yet run a full PE — see
-[Process hollowing evidence](techniques/process_hollowing.md).
+handles the native formats, so it is the safe default. `process_hollowing` only
+runs `format: pe`; it runs a full PE (imports, TLS state, entry hand-off) but not
+the payload's TLS callbacks — see
+[Process hollowing evidence](techniques/process_hollowing.md). A managed
+assembly is not native code: it needs `format: dotnet` and the `dotnet_hosting`
+technique, which hosts the CLR in the stub and loads the assembly from memory
+(the two imply each other, and the assembly's bitness must match
+`output.arch`).
 
 ## 3. Build, run and measure
 
@@ -141,8 +148,12 @@ offline Defender scan.
   migration hint (see [Migrations](migration-v3-v4.md)).
 - Unknown keys are an error.
 - Exactly one Execution technique, after any Preparation techniques.
-- `build.output.arch` is `x64`; `x86` is recognized but rejected as not
-  integrated yet.
+- `build.output.arch` is `x64` or `x86`, and the payload must match it: the stub
+  and the payload share one address space. Both execution techniques and the
+  preparations support `x86` (see [x86 support](x86.md)); `sleep_obfuscation`,
+  `syscalls.mode: indirect` and `api_resolution` stay `x64`-only, and an `x86`
+  pipeline that needs one of them is rejected at validation with a message
+  naming the technique.
 - Positional CLI args after the plan path are substituted as `$arg.0$`,
   `$arg.1$`, … (and `name=value` as `$arg.name$`), so one plan can target
   several hosts.

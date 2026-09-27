@@ -133,6 +133,25 @@ built its `argv` from it, so `GetCommandLineW` inside the payload returns it.
   rebuilds each one at runtime — so no diagnostic text, and no technique keyword
   such as `loader`, reaches `.rdata`.
 
+## Architectures
+
+`process_hollowing` supports `x64` and `x86`, and the stub must match the
+target's architecture: the technique replaces a *32-bit* process's image with a
+32-bit payload, and a 64-bit one with a 64-bit payload. `arch: x86` builds a
+32-bit stub, which runs under WOW64 and hollows the 32-bit `svchost.exe` (the
+default `System32\svchost.exe` is redirected to `SysWOW64` for it).
+
+What differs from the x64 path:
+
+- the payload parser reads PE32 offsets (`ImageBase` is a `u32` at 28, the data
+  directories start at 96);
+- `Get`/`SetThreadContext` use the native `CONTEXT32` and the PEB's
+  `ImageBaseAddress` is read from `Ebx` (the x64 path uses `Rdx`);
+- the entry point is written to `Eip`; there is no register hand-off, because
+  x86 passes arguments on the stack;
+- the target thread's TLS array is `fs:[0x2C]` with 4-byte entries (x64:
+  `gs:[0x58]`, 8-byte).
+
 ## Measurements
 
 - See `docs/measurements.md`.
@@ -162,6 +181,15 @@ built its `argv` from it, so `GetCommandLineW` inside the payload returns it.
 - The payload command line is shared with reflective loading
   (`src/engine/args.rs`, `$ARGS_BLOCK$`) and passed as `lpCommandLine`;
   `build_command_line` returns it with the target's file name as token 0.
+- The payload's TLS is provisioned in the target before the thread is
+  redirected: `TlsAlloc` runs there (on a throwaway thread, reading the index
+  back from its exit status), the index is published where the payload's CRT
+  reads `_tls_index`, and the main thread's TLS array slot is pointed at a
+  private copy of the `.tls` template. The index has to be *reserved* through
+  `TlsAlloc` — see `docs/measurements.md` for what ntdll does at thread exit to
+  an unreserved entry. The TLS *callbacks* (`DLL_PROCESS_ATTACH`) are still not
+  run (a never-started thread has no TLS array to point at; see the
+  limitations in `AGENTS.md`).
 
 ## References
 

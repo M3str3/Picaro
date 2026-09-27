@@ -338,6 +338,13 @@ fn normalize_klid(value: &str) -> String {
     text
 }
 
+/// The architecture's `core::arch` module: the CPUID intrinsic moved between
+/// `x86_64` and `x86` and is the only architecture-specific piece in this check.
+#[cfg(target_arch = "x86_64")]
+use core::arch::x86_64 as arch_intrinsics;
+#[cfg(target_arch = "x86")]
+use core::arch::x86 as arch_intrinsics;
+
 /// Whether CPUID reports a known hypervisor vendor.
 ///
 /// Uses the standard hypervisor leaves: `CPUID.1:ECX[31]` is the "running under
@@ -345,18 +352,18 @@ fn normalize_klid(value: &str) -> String {
 /// A CPU without the leaf, or one that returns an empty vendor, is reported as
 /// [`BouncerError::CpuIdFailed`] rather than assumed to be bare metal.
 fn hypervisor_vendor_present(vendor_tokens: &[String]) -> Result<bool, BouncerError> {
-    let features = unsafe { core::arch::x86_64::__cpuid(1) };
+    let features = unsafe { arch_intrinsics::__cpuid(1) };
     if features.ecx & (1 << 31) == 0 {
         // Bare metal: no hypervisor present bit.
         return Ok(false);
     }
 
-    let max_leaf = unsafe { core::arch::x86_64::__cpuid(0) }.eax;
+    let max_leaf = unsafe { arch_intrinsics::__cpuid(0) }.eax;
     if max_leaf < 0x4000_0000 {
         return Err(BouncerError::CpuIdFailed);
     }
 
-    let leaf = unsafe { core::arch::x86_64::__cpuid(0x4000_0000) };
+    let leaf = unsafe { arch_intrinsics::__cpuid(0x4000_0000) };
     let mut vendor = Vec::with_capacity(12);
     for register in [leaf.ebx, leaf.ecx, leaf.edx] {
         vendor.extend_from_slice(&register.to_le_bytes());

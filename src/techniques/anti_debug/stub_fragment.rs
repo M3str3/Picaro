@@ -1,6 +1,10 @@
 // --- Anti-debug (technique fragment) ---
 
-use windows::Win32::System::Diagnostics::Debug::{CONTEXT, CONTEXT_DEBUG_REGISTERS_AMD64};
+use windows::Win32::System::Diagnostics::Debug::{CONTEXT, CONTEXT_FLAGS};
+#[cfg(target_arch = "x86_64")]
+use windows::Win32::System::Diagnostics::Debug::CONTEXT_DEBUG_REGISTERS_AMD64;
+#[cfg(target_arch = "x86")]
+use windows::Win32::System::Diagnostics::Debug::CONTEXT_DEBUG_REGISTERS_X86;
 use windows::Win32::System::Threading::{GetCurrentProcess, GetCurrentThread};
 
 /// `NtQueryInformationProcess` information classes. Compile-time constants, not
@@ -18,8 +22,17 @@ pub enum AntiDebugError {
     DebuggerDetected,
 }
 
+/// `CONTEXT_DEBUG_REGISTERS` for the stub's architecture: DR0-DR3 are what the
+/// hardware-breakpoint check reads, and the flag value differs between x64 and
+/// x86 (`0x10010` there).
+#[cfg(target_arch = "x86_64")]
+const CONTEXT_FLAGS_DEBUG: CONTEXT_FLAGS = CONTEXT_DEBUG_REGISTERS_AMD64;
+#[cfg(target_arch = "x86")]
+const CONTEXT_FLAGS_DEBUG: CONTEXT_FLAGS = CONTEXT_DEBUG_REGISTERS_X86;
+
 /// `NtGetContextThread` requires a 16-byte aligned `CONTEXT` on x64; the
-/// `windows` binding only guarantees 8, so force it here.
+/// `windows` binding only guarantees 8, so force it here. x86 has no such
+/// requirement; the stricter alignment is harmless there.
 #[repr(align(16))]
 struct AlignedContext(CONTEXT);
 
@@ -90,7 +103,7 @@ fn debug_object_set() -> bool {
 /// breakpoint.
 fn hardware_breakpoint_set() -> bool {
     let mut context = AlignedContext(CONTEXT::default());
-    context.0.ContextFlags = CONTEXT_DEBUG_REGISTERS_AMD64;
+    context.0.ContextFlags = CONTEXT_FLAGS_DEBUG;
     let status = crate::nt_get_context_thread(
         unsafe { GetCurrentThread() },
         &mut context.0 as *mut CONTEXT as *mut core::ffi::c_void,

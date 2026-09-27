@@ -228,7 +228,7 @@ fn build_interactive_quit_writes_nothing() {
     // Nine blank answers walk the first pass with their defaults; `3` quits the
     // review screen, so the wizard stops before writing (or compiling) anything.
     let mut stdin = child.stdin.take().expect("stdin is piped");
-    stdin.write_all(&b"\n".repeat(9)).expect("write answers");
+    stdin.write_all(&b"\n".repeat(10)).expect("write answers");
     stdin.write_all(b"3\n").expect("write the quit choice");
     drop(stdin);
 
@@ -692,4 +692,577 @@ fn build_dry_run_resolves_randomized_metadata() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("resources"));
+}
+
+// --- x86 (M1) ---
+
+/// The `i686` rustc triple for the host's ABI: the stub and the payload share it.
+fn x86_target() -> &'static str {
+    if cfg!(target_env = "msvc") {
+        "i686-pc-windows-msvc"
+    } else {
+        "i686-pc-windows-gnu"
+    }
+}
+
+/// End-to-end x86: a 32-bit payload packed with `reflective_loading` is mapped
+/// into the (32-bit) stub and prints its marker.
+///
+/// `#[ignore]`: needs `rustc`, the `i686` target installed and the workspace
+/// built for it (`cargo build --target i686-pc-windows-msvc`), plus a Windows
+/// host to run the artifact (under WOW64 on an x64 one).
+#[test]
+#[ignore = "requires rustc, the i686 target and a Windows host"]
+fn packs_and_runs_an_x86_reflective_payload() {
+    if !cfg!(windows) {
+        return;
+    }
+    let _guard = BUILD_LOCK.lock().unwrap();
+
+    // 1. Build the 32-bit payload.
+    let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join("payloads")
+        .join("test_payload.rs");
+    let payload =
+        std::env::temp_dir().join(format!("picaro_x86_payload_{}.exe", std::process::id()));
+    let status = Command::new("rustc")
+        .arg(&src)
+        .arg("--target")
+        .arg(x86_target())
+        .args(["-O", "-C", "strip=symbols", "-o"])
+        .arg(&payload)
+        .status()
+        .expect("run rustc to build the 32-bit payload");
+    assert!(status.success(), "the 32-bit payload must compile");
+
+    // 2. Pack it with `arch: x86`.
+    let source = payload.display().to_string().replace('\\', "/");
+    let plan = format!(
+        r#"schema: 4
+name: x86_reflective
+build:
+  payload:
+    source: "{source}"
+    crypto:
+      algo: xchacha20poly1305
+      key: random
+  output:
+    path: ./dist/x86_reflective.exe
+    arch: x86
+    strip: true
+    trim_paths: all
+runtime:
+  - technique: reflective_loading
+"#
+    );
+    let plan_path = std::env::temp_dir().join(format!("picaro_x86_{}.yaml", std::process::id()));
+    std::fs::write(&plan_path, plan).expect("write the temp plan");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_picaro"))
+        .args(["build", plan_path.to_str().expect("utf-8 plan path")])
+        .output()
+        .expect("run picaro build");
+    assert!(
+        output.status.success(),
+        "x86 build failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // 3. The artifact must be a 32-bit PE...
+    let artifact = Path::new("dist/x86_reflective.exe");
+    let bytes = std::fs::read(artifact).expect("read the artifact");
+    let e_lfanew =
+        u32::from_le_bytes([bytes[0x3C], bytes[0x3D], bytes[0x3E], bytes[0x3F]]) as usize;
+    let machine = u16::from_le_bytes([bytes[e_lfanew + 4], bytes[e_lfanew + 5]]);
+    assert_eq!(machine, 0x014c, "the artifact must be a 32-bit PE");
+
+    // 4. ...and run the payload: the marker comes from the mapped image.
+    let run = Command::new(artifact)
+        .output()
+        .expect("run the packed x86 binary");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("PAYLOAD_MARKER_7f3a9c2e"),
+        "the payload did not run: status={:?} stdout={stdout} stderr={}",
+        run.status,
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+// --- process hollowing (x64 + x86) ---
+
+/// Compiles `examples/payloads/test_hollow_payload.rs` for `target` (`None` for
+/// the host) and returns the payload path.
+fn build_hollow_payload(target: Option<&str>) -> PathBuf {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join("payloads")
+        .join("test_hollow_payload.rs");
+    let suffix = target.unwrap_or("host");
+    let out = std::env::temp_dir().join(format!(
+        "picaro_hollow_payload_{suffix}_{}.exe",
+        std::process::id()
+    ));
+    let mut command = Command::new("rustc");
+    command.arg(&src);
+    if let Some(target) = target {
+        command.arg("--target").arg(target);
+    }
+    let status = command
+        .args(["-O", "-C", "strip=symbols", "-o"])
+        .arg(&out)
+        .status()
+        .expect("run rustc to build the hollowing payload");
+    assert!(status.success(), "the hollowing payload must compile");
+    out
+}
+
+/// Packs `payload` with `process_hollowing` for `arch` and returns the artifact.
+fn pack_hollowing_payload(name: &str, payload: &Path, arch: &str) -> PathBuf {
+    let source = payload.display().to_string().replace('\\', "/");
+    let plan = format!(
+        r#"schema: 4
+name: {name}
+build:
+  payload:
+    source: "{source}"
+    args:
+      - "dist/{name}.marker"
+    crypto:
+      algo: xchacha20poly1305
+      key: random
+  output:
+    path: ./dist/{name}.exe
+    arch: {arch}
+    strip: true
+    trim_paths: all
+runtime:
+  - technique: process_hollowing
+    params:
+      target: "C:\\Windows\\System32\\svchost.exe"
+"#
+    );
+    let plan_path = std::env::temp_dir().join(format!("picaro_{name}.yaml"));
+    std::fs::write(&plan_path, plan).expect("write the temp plan");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_picaro"))
+        .args(["build", plan_path.to_str().expect("utf-8 plan path")])
+        .output()
+        .expect("run picaro build");
+    assert!(
+        output.status.success(),
+        "hollowing build failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    PathBuf::from(format!("dist/{name}.exe"))
+}
+
+/// Runs a packed hollowing artifact and asserts that the payload ran inside the
+/// target: the marker file (written by the hollowed process, which has no
+/// console) carries the payload's own `thread_local` value, and the stub relays
+/// the payload's exit code.
+fn assert_hollowed_run(artifact: &Path, name: &str) {
+    let marker = PathBuf::from(format!("dist/{name}.marker"));
+    let _ = std::fs::remove_file(&marker);
+
+    let run = Command::new(artifact)
+        .output()
+        .expect("run the packed hollowing binary");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert_eq!(
+        run.status.code(),
+        Some(42),
+        "the stub must relay the payload's exit code: stdout={stdout} stderr={}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let written = std::fs::read_to_string(&marker)
+        .unwrap_or_else(|e| panic!("the hollowed payload wrote no marker ({e})"));
+    assert!(
+        written.contains("PAYLOAD_MARKER_7f3a9c2e"),
+        "the hollowed payload did not run: {written}"
+    );
+    assert!(
+        written.contains("tls=42"),
+        "the target thread's TLS was not provisioned: {written}"
+    );
+}
+
+/// End-to-end: `process_hollowing` runs a payload inside `svchost.exe` — the
+/// payload writes its marker and `thread_local` value to a file and exits 42.
+/// `#[ignore]`: needs `rustc`, the compiled dependencies and a Windows host.
+#[test]
+#[ignore = "requires rustc, the compiled dependencies and a Windows host"]
+fn packs_and_runs_a_hollowed_payload() {
+    if !cfg!(windows) {
+        return;
+    }
+    let _guard = BUILD_LOCK.lock().unwrap();
+    let payload = build_hollow_payload(None);
+    let artifact = pack_hollowing_payload("hollow_x64", &payload, "x64");
+    assert_hollowed_run(&artifact, "hollow_x64");
+}
+
+/// End-to-end x86: a 32-bit stub hollows a 32-bit target (the default
+/// `System32\svchost.exe`, which WOW64 redirects to `SysWOW64`), sets up the
+/// `CONTEXT32` entry hand-off and the `fs:[0x2C]` TLS slot, and the payload
+/// writes its marker and `thread_local` value before exiting 42.
+#[test]
+#[ignore = "requires rustc, the i686 target and a Windows host"]
+fn packs_and_runs_an_x86_hollowed_payload() {
+    if !cfg!(windows) {
+        return;
+    }
+    let _guard = BUILD_LOCK.lock().unwrap();
+    let payload = build_hollow_payload(Some(x86_target()));
+    let artifact = pack_hollowing_payload("hollow_x86", &payload, "x86");
+    assert_hollowed_run(&artifact, "hollow_x86");
+}
+
+// --- x86 preparations (M3) ---
+
+/// End-to-end x86: every Preparation that accepts `arch: x86` runs in a 32-bit
+/// stub before the payload — `anti_debug` (x86 debug-register `CONTEXT`),
+/// `patch_amsi`, `patch_etw` (arch-neutral patches) and `bouncer` (a
+/// trivially-passing check) — and the payload still runs.
+///
+/// `#[ignore]`: needs `rustc`, the `i686` target and a Windows host.
+#[test]
+#[ignore = "requires rustc, the i686 target and a Windows host"]
+fn x86_preparations_run_before_the_payload() {
+    if !cfg!(windows) {
+        return;
+    }
+    let _guard = BUILD_LOCK.lock().unwrap();
+
+    // The plain marker payload: it prints to stdout, which the stub's own
+    // console shows (a hollowed payload would not).
+    let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join("payloads")
+        .join("test_payload.rs");
+    let payload = std::env::temp_dir().join(format!("picaro_x86_prep_{}.exe", std::process::id()));
+    let status = Command::new("rustc")
+        .arg(&src)
+        .arg("--target")
+        .arg(x86_target())
+        .args(["-O", "-C", "strip=symbols", "-o"])
+        .arg(&payload)
+        .status()
+        .expect("run rustc to build the 32-bit payload");
+    assert!(status.success(), "the 32-bit payload must compile");
+    let source = payload.display().to_string().replace('\\', "/");
+    let plan = format!(
+        r#"schema: 4
+name: x86_preparations
+build:
+  payload:
+    source: "{source}"
+    crypto:
+      algo: xchacha20poly1305
+      key: random
+  output:
+    path: ./dist/x86_preparations.exe
+    arch: x86
+    strip: true
+    trim_paths: all
+runtime:
+  - technique: anti_debug
+  - technique: patch_amsi
+  - technique: patch_etw
+  - technique: bouncer
+    params:
+      min_ram_mb: 1
+  - technique: reflective_loading
+"#
+    );
+    let plan_path =
+        std::env::temp_dir().join(format!("picaro_x86_prep_{}.yaml", std::process::id()));
+    std::fs::write(&plan_path, plan).expect("write the temp plan");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_picaro"))
+        .args(["build", plan_path.to_str().expect("utf-8 plan path")])
+        .output()
+        .expect("run picaro build");
+    assert!(
+        output.status.success(),
+        "x86 preparation build failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let run = Command::new("dist/x86_preparations.exe")
+        .output()
+        .expect("run the packed x86 binary");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("PAYLOAD_MARKER_7f3a9c2e"),
+        "the payload did not run after the preparations: status={:?} stdout={stdout} stderr={}",
+        run.status,
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+// --- .NET hosting (M5) ---
+
+/// A build plan for a managed payload: `source` is the full path relative to the
+/// crate root, and `format`, `arch` and `technique` are the parameters, since the
+/// point of these tests is the coupling between them.
+fn managed_plan(name: &str, source: &str, format: &str, arch: &str, technique: &str) -> String {
+    format!(
+        r#"schema: 4
+name: {name}
+build:
+  payload:
+    source: {source}
+    format: {format}
+    crypto:
+      algo: xchacha20poly1305
+      key: random
+  output:
+    path: ./dist/{name}.exe
+    arch: {arch}
+    strip: true
+    trim_paths: all
+runtime:
+  - technique: {technique}
+"#
+    )
+}
+
+/// A managed image is not native code: `format: pe` must fail at build time with
+/// a message that says what to use instead, instead of failing inside the CLR at
+/// run time. Hermetic (no `rustc` needed: the rejection happens in `--dry-run`).
+#[test]
+fn build_rejects_a_dotnet_payload_with_format_pe() {
+    let plan = write_temp_plan(
+        "picaro_dotnet_pe.yaml",
+        &managed_plan(
+            "dotnet_pe",
+            "./tests/fixtures/managed_x86.exe",
+            "pe",
+            "x86",
+            "reflective_loading",
+        ),
+    );
+    let output = picaro(&["--quiet".as_ref(), "build".as_ref(), plan.as_os_str()]);
+    assert!(
+        !output.status.success(),
+        "a managed image must not be packed as native code"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("is a .NET assembly") && stderr.contains("format: dotnet"),
+        "unclear error: {stderr}"
+    );
+}
+
+/// The CLR of the stub's bitness runs the assembly, so a `32BITREQUIRED`
+/// assembly cannot be packed for x64.
+#[test]
+fn build_rejects_a_managed_payload_of_the_wrong_bitness() {
+    let plan = write_temp_plan(
+        "picaro_dotnet_bits.yaml",
+        &managed_plan(
+            "dotnet_bits",
+            "./tests/fixtures/managed_x86.exe",
+            "dotnet",
+            "x64",
+            "dotnet_hosting",
+        ),
+    );
+    let output = picaro(&["--quiet".as_ref(), "build".as_ref(), plan.as_os_str()]);
+    assert!(
+        !output.status.success(),
+        "a 32-bit assembly needs a 32-bit runtime"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("32BITREQUIRED"), "unclear error: {stderr}");
+}
+
+/// `format: dotnet` and `technique: dotnet_hosting` imply each other.
+#[test]
+fn build_rejects_a_dotnet_format_without_the_hosting_technique() {
+    let plan = write_temp_plan(
+        "picaro_dotnet_tech.yaml",
+        &managed_plan(
+            "dotnet_tech",
+            "./tests/fixtures/managed_x86.exe",
+            "dotnet",
+            "x86",
+            "reflective_loading",
+        ),
+    );
+    let output = picaro(&["--quiet".as_ref(), "build".as_ref(), plan.as_os_str()]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("dotnet_hosting"), "unclear error: {stderr}");
+}
+
+/// End-to-end: a 32-bit managed assembly is loaded from memory by the CLR the
+/// stub hosts, its `Main` runs (with the payload args) and its exit code comes
+/// back through the stub.
+///
+/// `#[ignore]`: compiles a stub, and needs a Windows host with .NET Framework.
+#[test]
+#[ignore = "requires rustc, the compiled dependencies and a Windows host"]
+fn packs_and_runs_a_managed_payload() {
+    if !cfg!(windows) {
+        return;
+    }
+    let _guard = BUILD_LOCK.lock().unwrap();
+    let plan = write_temp_plan(
+        "picaro_managed_x86.yaml",
+        &managed_plan(
+            "managed_x86",
+            "./tests/fixtures/managed_x86.exe",
+            "dotnet",
+            "x86",
+            "dotnet_hosting",
+        )
+        .replace(
+            "    format: dotnet
+",
+            "    format: dotnet
+    args:
+      - one
+      - two
+",
+        ),
+    );
+
+    let build = picaro(&["build".as_ref(), plan.as_os_str()]);
+    assert!(
+        build.status.success(),
+        "managed build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let run = Command::new("dist/managed_x86.exe")
+        .output()
+        .expect("run the packed managed binary");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("MANAGED_MARKER_7f3a9c2e"),
+        "the managed payload did not run: status={:?} stdout={stdout} stderr={}",
+        run.status,
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        stdout.contains("args=2"),
+        "the managed entry point did not receive the payload args: {stdout}"
+    );
+    assert!(
+        stdout.contains("x64=False"),
+        "a 32-bit assembly must run on the 32-bit CLR: {stdout}"
+    );
+    assert_eq!(
+        run.status.code(),
+        Some(42),
+        "the managed exit code must come back through the stub"
+    );
+}
+
+/// End-to-end on x64: an AnyCPU assembly runs on the 64-bit CLR.
+///
+/// `#[ignore]`: compiles a stub, and needs a Windows host with .NET Framework.
+#[test]
+#[ignore = "requires rustc, the compiled dependencies and a Windows host"]
+fn packs_and_runs_a_managed_payload_on_x64() {
+    if !cfg!(windows) {
+        return;
+    }
+    let _guard = BUILD_LOCK.lock().unwrap();
+    let plan = write_temp_plan(
+        "picaro_managed_x64.yaml",
+        &managed_plan(
+            "managed_x64",
+            "./tests/fixtures/managed_anycpu.exe",
+            "dotnet",
+            "x64",
+            "dotnet_hosting",
+        ),
+    );
+
+    let build = picaro(&["build".as_ref(), plan.as_os_str()]);
+    assert!(
+        build.status.success(),
+        "managed x64 build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let run = Command::new("dist/managed_x64.exe")
+        .output()
+        .expect("run the packed managed binary");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("MANAGED_MARKER_7f3a9c2e") && stdout.contains("x64=True"),
+        "the AnyCPU assembly did not run on the 64-bit CLR: {stdout}"
+    );
+    assert_eq!(run.status.code(), Some(42));
+}
+
+/// Acceptance case: the real-world managed assembly in the repository root
+/// (`SharpHound.exe`, a 32-bit .NET assembly) packs and runs, and behaves the
+/// same as it does unpacked.
+///
+/// `#[ignore]`: it needs `SharpHound.exe` (not committed) plus a Windows host.
+#[test]
+#[ignore = "requires SharpHound.exe in the repository root and a Windows host"]
+fn packs_and_runs_sharphound() {
+    if !cfg!(windows) || !Path::new("SharpHound.exe").exists() {
+        return;
+    }
+    let _guard = BUILD_LOCK.lock().unwrap();
+    let plan = write_temp_plan(
+        "picaro_sharphound.yaml",
+        &managed_plan(
+            "sharphound",
+            "./SharpHound.exe",
+            "dotnet",
+            "x86",
+            "dotnet_hosting",
+        ),
+    );
+
+    let build = picaro(&["build".as_ref(), plan.as_os_str()]);
+    assert!(
+        build.status.success(),
+        "SharpHound build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let run = Command::new("dist/sharphound.exe")
+        .output()
+        .expect("run the packed SharpHound");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("SharpHound Version"),
+        "SharpHound did not start inside the stub: stdout={stdout} stderr={}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    // The acceptance criterion is not just "it starts": the packed assembly must
+    // behave like the original. Running both and comparing the output catches a
+    // host that loads the assembly but hands it the wrong environment. SharpHound
+    // timestamps every line with sub-second precision, so the timestamps are
+    // stripped before comparing.
+    let direct = Command::new("./SharpHound.exe")
+        .output()
+        .expect("run the unpacked SharpHound");
+    assert_eq!(
+        without_timestamps(&direct.stdout),
+        without_timestamps(&run.stdout),
+        "the packed assembly does not behave like the original"
+    );
+}
+
+/// Drop the leading `<timestamp>|` of every line, so two runs of a logging tool
+/// can be compared.
+fn without_timestamps(stdout: &[u8]) -> String {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .map(|line| line.split_once('|').map_or(line, |(_, rest)| rest))
+        .collect::<Vec<_>>()
+        .join("\n")
 }

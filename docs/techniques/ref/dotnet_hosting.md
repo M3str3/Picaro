@@ -1,0 +1,1 @@
+--8<-- "src/techniques/dotnet_hosting/README.md"

@@ -100,7 +100,7 @@ impl BuildManifest {
             version_info: None,
             toolchain: Toolchain {
                 rustc: compiler::rustc_version()?,
-                target: compiler::stub_target_label().to_string(),
+                target: compiler::stub_target(plan.build.output.arch).to_string(),
             },
             resolved_plan: plan.clone(),
         })

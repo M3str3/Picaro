@@ -52,11 +52,12 @@ pub enum BuildError {
     #[error("could not locate the .rlib for '{crate_name}': {detail}")]
     RlibNotFound { crate_name: String, detail: String },
 
-    /// The `x86_64-pc-windows-gnu` cross-compilation target is not installed.
+    /// The requested stub target is not installed or its dependencies have not
+    /// been built for it.
     #[error(
-        "the cross-compilation target is missing. Install it with:\n  rustup target add x86_64-pc-windows-gnu"
+        "the '{target}' target is not available. Install and build it with:\n  rustup target add {target}\n  cargo build --target {target}"
     )]
-    MissingCrossTarget,
+    MissingTarget { target: String },
 
     /// The Windows native import lib could not be located.
     #[error("could not locate the Windows import lib: {0}")]

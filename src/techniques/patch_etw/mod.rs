@@ -40,7 +40,7 @@ pub const DEF: TechniqueDef = TechniqueDef {
     name: "patch_etw",
     attck: &["T1562.006"],
     stability: Stability::Stable,
-    requires: &[Capability::WindowsX64],
+    requires: &[Capability::WindowsX64, Capability::WindowsX86],
     conflicts: &[],
     category: Category::Preparation,
     doc_path: "src/techniques/patch_etw/README.md",

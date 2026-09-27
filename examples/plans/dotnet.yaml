@@ -1,0 +1,36 @@
+# .NET hosting: a managed (.NET) assembly is not native code, so it is not
+# mapped. The stub hosts the CLR in its own process and loads the assembly from
+# memory (`CLRCreateInstance` -> `ICorRuntimeHost` -> `_AppDomain.Load_3` ->
+# `GetEntryPoint` -> `Invoke_3`).
+#
+#   cargo run -- build examples/plans/dotnet.yaml
+#   .\dist\dotnet_managed.exe
+#
+# `format: dotnet` and `technique: dotnet_hosting` imply each other (validation
+# rejects one without the other), and the assembly runs on the CLR of the
+# stub's bitness: `managed_x86.exe` is a 32BITREQUIRED assembly, so it needs
+# `arch: x86`. The fixture is committed under `tests/fixtures/`; regenerate it
+# with `csc -nologo -target:exe -platform:x86 tests/fixtures/managed_marker.cs`.
+
+schema: 4
+name: dotnet-managed
+
+build:
+  payload:
+    source: ./tests/fixtures/managed_x86.exe
+    format: dotnet
+    crypto:
+      algo: xchacha20poly1305
+      key: random
+  stub:
+    strings:
+      strategy: xor
+      key: random
+  output:
+    path: ./dist/dotnet_managed.exe
+    arch: x86
+    strip: true
+    trim_paths: all
+
+runtime:
+  - technique: dotnet_hosting

@@ -17,6 +17,9 @@ the time and have since been consolidated into `examples/plans/` and
 | 6a | indirect syscalls | suspicious imports 2 → 0; `NtUnmapViewOfSection` string gone |
 | 7 | ETW patch + anti-debug | 499 → 505 KB; `+CheckRemoteDebuggerPresent`, `+GetThreadContext` |
 | 8 | bouncer | 503 KB → 530 KB (host only) / ~571 KB (full); literals stay obfuscated |
+| x86 | TLS provisioning (M1/M2) | `TlsSetValue` → loader's array; a payload reads its own `thread_local` (`tls=42`) |
+| x86 | reflective loading (static) | 468 KB; 1 suspicious import (`VirtualAllocEx`); no literals leak |
+| M5 | .NET hosting (static) | 389 KB managed fixture / 1.7 MB SharpHound; the CLR-hosting imports (`mscoree`, `ole32`, `oleaut32`) are the signature |
 | EDR | CrowdStrike Falcon | hollowing blocked at runtime (partial) |
 
 ## Phase 5 — static baseline (process hollowing)
@@ -106,6 +109,85 @@ Process hollowing with `build.stub.syscalls.mode` `none` (before) vs `indirect`
 - Runtime: a host that does not match aborts the pipeline silently (exit `0`),
   the intended host runs the payload. Covered by
   `tests/cli.rs::bouncer_gate_blocks_and_allows_on_windows`.
+
+## x86 — static baseline (reflective loading, 2026-09-27)
+
+`examples/plans/x86.yaml` (32-bit `test_payload_x86.exe`, `reflective_loading`,
+`strings: xor`), packed and audited on Windows:
+
+- 468,480 B; `arch x86`, console subsystem, unsigned, no overlay.
+- Sections: `.text` 280 KB / entropy 6.41, `.rdata` 163 KB / 7.45, `.data` 2 KB,
+  `.fptable` 0 KB, `.reloc` 10 KB / 6.51.
+- Imports: 3 DLLs, 93 functions; one suspicious (`VirtualAllocEx`, the syscall
+  layer's `mode: none` mapping of `nt_alloc_vm`).
+- Strings: 1 flagged (`NtUtto`, a false positive — a fragment of the obfuscated
+  syscall-layer data), 0 paths, 0 URLs, 0 technique names, 0 sensitive literals.
+- Defender: clean; `audit` risk MEDIUM (one suspicious import + one flagged
+  string + the expected high-entropy payload section).
+
+## x86 — TLS provisioning for a manually mapped image (2026-09-27)
+
+Found while porting the techniques to x86, with a payload that *reads* a
+`thread_local` (the older test payloads only printed to stdout, so they never
+touched TLS). Everything below was reproduced with standalone probes on
+Windows 10 x64 (and under WOW64 for the 32-bit numbers); the arrays and the
+teardown code are the same on both architectures, only the offsets differ:
+
+| | x64 | x86 |
+| --- | --- | --- |
+| The array a CRT reads (`_tls_index` → block) | `TEB->ThreadLocalStoragePointer`, `gs:[0x58]` | `fs:[0x2C]` |
+| The array `TlsAlloc`/`TlsSetValue` use | `TEB->TlsSlots`, `gs:[0x1480]` | `fs:[0xE10]` |
+
+1. **`TlsSetValue` is not what a CRT reads.** Provisioning a mapped image with
+   `TlsAlloc` + `TlsSetValue` (what picaro did) makes its `thread_local` reads
+   return *another module's* data: the payload printed
+   `tls=1526337116` instead of `42` on x86 and `tls=1809635094` on x64. Writing
+   the block into the loader's array at the same index fixes the value on both
+   architectures.
+2. **The index has to be reserved.** Writing the loader's array at an index that
+   is *not* claimed by `TlsAlloc` makes ntdll fault when the thread exits: it
+   reads the block header at `block - 8` (a `VirtualAlloc`ed block faults with
+   `0xC0000005`; a heap block reports `0xC0000374`). Reserving the index with
+   `TlsAlloc` first (which sets its bit in `PEB->TlsBitmap`) makes the teardown
+   leave the entry alone — the process then exits with the payload's own code.
+3. **`TlsAlloc` returns the lowest free index**, which can be a loaded module's
+   `_tls_index` (`1` for `KERNELBASE` on both architectures). picaro accepts the
+   collision — it costs that module its thread-locals in that thread — because
+   the alternative (hand-picking a free index) is exactly the unreserved entry
+   that (2) rules out. `build.stub.debug` logs the index.
+
+Verified end to end after the fix: a 32-bit and a 64-bit payload packed with
+`reflective_loading` print `tls=42` and exit `0`; the same payload hollowed into
+`svchost.exe` writes `PAYLOAD_MARKER_7f3a9c2e tls=42` and its exit code (`42`)
+comes back through the stub.
+
+## M5 — .NET hosting (static, 2026-09-27)
+
+`dotnet_hosting` with a managed payload, `arch: x86`, packed and audited on
+Windows. Two builds: the 4 KB managed fixture (`tests/fixtures/managed_x86.exe`)
+and the real-world `SharpHound.exe` (1.3 MB, 32-bit .NET).
+
+| | fixture | SharpHound |
+| --- | --- | --- |
+| Artifact | 398,336 B (389 KB) | 1,750,528 B (1.7 MB) |
+| `.text` | 305 KB / 6.35 | 305 KB / 6.37 |
+| `.rdata` | 69 KB / 5.55 | 1390 KB / 7.97 |
+
+- Imports: 6 DLLs, 103 functions, `IAT looks minimal` (no suspicious import).
+  The hosting surface is visible and expected: `mscoree.dll!CLRCreateInstance`,
+  `ole32.dll!CoInitializeEx` and the `oleaut32` `SAFEARRAY`/`BSTR` family
+  (`SafeArrayCreateVector`, `SafeArrayAccessData`, `SafeArrayUnaccessData`,
+  `SysAllocStringLen`, `SysStringLen`, `SysFreeString`, `VariantClear`, …).
+  `mscoree.dll` is a static import — the stub never `LoadLibrary`s it at runtime.
+- Strings: 1 sensitive hit (`ntdll.dll`, imported) and, for SharpHound, one
+  false-positive "api by name" (`ZwSj`, a fragment of the obfuscated syscall-layer
+  data — the same effect as `NtUtto` in the x86 baseline). The CLR version string
+  (`v4.0.30319`) and `COMPLUS_Version` are rebuilt at runtime and do not appear.
+- Defender: clean; `audit` risk MEDIUM (flagged string + the encrypted payload's
+  high-entropy section + unsigned, all expected).
+- Runtime: the fixture prints `MANAGED_MARKER_7f3a9c2e args=0 x64=False` and exits
+  `42`; SharpHound's output is identical to running the original, line for line
+  (modulo its own timestamps).
 
 ## CrowdStrike Falcon — process hollowing (partial)
 

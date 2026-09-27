@@ -29,6 +29,8 @@ jobs:
 
   # The build compiles a Rust stub per technique, so it needs a Windows host
   # (the stub targets x86_64-pc-windows-msvc and links the `windows` import lib).
+  # The i686 target is installed too: `build.output.arch: x86` compiles the stub
+  # for i686-pc-windows-msvc, and the ignored suite builds one.
   test:
     name: tests (windows)
     runs-on: windows-latest
@@ -36,7 +38,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
+      # The i686 stub links against rlibs built for that target, exactly as the
+      # x64 stub uses the host's.
+      - name: Build the i686 stub dependencies
+        run: cargo build --target i686-pc-windows-msvc
       - name: Fast suite
         run: cargo test
       # The ignored suite is the safety net: it compiles a stub per technique

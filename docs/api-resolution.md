@@ -1,12 +1,12 @@
-# FUTURE — API resolution interposition (payload import proxy)
+# API resolution (payload import proxy)
 
 Status: **implemented for `reflective_loading` (Phases A–D, 2026-09-27); Phase E
 (`process_hollowing`) is parked as not viable without a redesign and the mode is
-rejected at validation there.** All five catalogue entries work end to end.
+rejected at validation there.** All five catalogue entries work end to end, and
+`unmatched: abort` fails the load on the first import outside the catalogue.
 
-This page is deliberately not in the site navigation.
-
-Goal: let the **loader** (the generated stub) own how the payload's Windows API
+The goal: let the **loader** (the generated stub) own how the payload's Windows
+API
 calls are resolved, so a "noisy" payload that reaches the API the normal userland
 way — through its IAT, `GetProcAddress`, or `LdrGetProcedureAddress` — is served by
 a proxy generated in the stub instead of by the real export. Intercepted calls are
@@ -86,7 +86,7 @@ resolves the payload's imports before running it, exactly like
 Preparation/Execution contract (it is not a step that modifies process state or
 runs the payload), so it does **not** go in `src/techniques/`.
 
-Proposed placement: **`build.stub.api_resolution`**. It sits next to
+Placement: **`build.stub.api_resolution`**. It sits next to
 `build.stub.syscalls`, which it depends on (the coupling is then inside one
 block). `build.payload.api_resolution` was considered — the content is
 payload-relative — but the generated code and the validation coupling are both
@@ -148,7 +148,7 @@ So the minimal cut adds **one** syscall helper (`NtOpenProcess`; the syscall lay
 lists 14 today) and one special handler. `NtReadVirtualMemory` already exists in
 `NT_FUNCTIONS` as `read_vm` / `nt_read_vm`.
 
-The catalogue is a single Rust const (proposed `src/engine/api_resolution.rs`)
+The catalogue is a single Rust const (`src/engine/api_resolution.rs`)
 that is the source of truth for: the proxy generation, the `GetProcAddress`
 name matching, and the plan validation. Adding an entry is a deliberate code
 change, not a config-only edit.

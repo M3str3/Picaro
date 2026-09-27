@@ -187,6 +187,15 @@ const ARGS_BLOCK: &str = r##"mod payload_args {
         out
     }
 
+    /// The resolved payload arguments, without the executable token.
+    ///
+    /// `dotnet_hosting` hands these to the managed entry point as its
+    /// `string[]`; the command-line builders use the same list behind
+    /// [`build_command_line`].
+    pub fn payload_arguments() -> Vec<String> {
+        resolve()
+    }
+
     /// Builds `<exe> <resolved args>` as a Windows command line.
     ///
     /// Token 0 is always the executable name, never an argument: Windows
@@ -243,15 +252,15 @@ const ARGS_BLOCK: &str = r##"mod payload_args {
         if peb.is_null() {
             return Err("could not read the PEB".to_string());
         }
-        // PEB->ProcessParameters is a pointer at PEB + 0x20.
-        let params = unsafe { peb.add(0x20).cast::<*mut u8>().read() };
+        // PEB->ProcessParameters is a pointer at PEB + 0x20 on x64, +0x10 on x86.
+        let params = unsafe { peb.add(PROCESS_PARAMETERS_OFFSET).cast::<*mut u8>().read() };
         if params.is_null() {
             return Err("the process parameters are not initialized".to_string());
         }
-        // RTL_USER_PROCESS_PARAMETERS->CommandLine is a UNICODE_STRING at
-        // +0x70: Length (u16), MaximumLength (u16), padding (u32),
-        // Buffer (*mut u16). Length excludes the terminating NUL.
-        let command_line = unsafe { params.add(0x70) };
+        // RTL_USER_PROCESS_PARAMETERS->CommandLine is a UNICODE_STRING at +0x70
+        // on x64, +0x40 on x86: Length (u16), MaximumLength (u16), padding
+        // (u32), Buffer (*mut u16). Length excludes the terminating NUL.
+        let command_line = unsafe { params.add(COMMAND_LINE_OFFSET) };
         let previous = unsafe { command_line.add(8).cast::<*mut u16>().read() };
         let previous_length = unsafe { command_line.cast::<u16>().read() };
         unsafe {
@@ -309,10 +318,26 @@ const ARGS_BLOCK: &str = r##"mod payload_args {
         }
     }
 
+    /// `PEB->ProcessParameters` offset: `0x10` on x86, `0x20` on x64.
+    const PROCESS_PARAMETERS_OFFSET: usize = if cfg!(target_arch = "x86") { 0x10 } else { 0x20 };
+
+    /// `RTL_USER_PROCESS_PARAMETERS->CommandLine` offset: `0x40` on x86, `0x70`
+    /// on x64 (the 32-bit structure is 12 bytes narrower up to that field).
+    const COMMAND_LINE_OFFSET: usize = if cfg!(target_arch = "x86") { 0x40 } else { 0x70 };
+
     /// Reads the current thread's PEB (x64: `gs:[0x60]`).
+    #[cfg(target_arch = "x86_64")]
     unsafe fn current_peb() -> *mut u8 {
         let peb: *mut u8;
         core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, preserves_flags, readonly));
+        peb
+    }
+
+    /// Reads the current thread's PEB (x86: `fs:[0x30]`).
+    #[cfg(target_arch = "x86")]
+    unsafe fn current_peb() -> *mut u8 {
+        let peb: *mut u8;
+        core::arch::asm!("mov {}, fs:[0x30]", out(reg) peb, options(nostack, preserves_flags, readonly));
         peb
     }
 
@@ -327,7 +352,7 @@ const ARGS_BLOCK: &str = r##"mod payload_args {
 }
 
 #[allow(unused_imports)]
-use payload_args::{build_command_line, patch_command_line};
+use payload_args::{build_command_line, patch_command_line, payload_arguments};
 "##;
 
 #[cfg(test)]
@@ -489,7 +514,9 @@ mod tests {
         assert!(block.contains("pub fn build_command_line"));
         assert!(block.contains("pub fn patch_command_line"));
         assert!(
-            block.contains("use payload_args::{build_command_line, patch_command_line};"),
+            block.contains(
+                "use payload_args::{build_command_line, patch_command_line, payload_arguments};"
+            ),
             "helpers not re-exported: {block}"
         );
         // No internal placeholder may survive.

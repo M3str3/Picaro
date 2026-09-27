@@ -23,7 +23,7 @@ pub const DEF: TechniqueDef = TechniqueDef {
     name: "reflective_loading",
     attck: &["T1620"],
     stability: Stability::Experimental,
-    requires: &[Capability::WindowsX64],
+    requires: &[Capability::WindowsX64, Capability::WindowsX86],
     conflicts: &["process_hollowing"],
     category: Category::Execution,
     doc_path: "src/techniques/reflective_loading/README.md",

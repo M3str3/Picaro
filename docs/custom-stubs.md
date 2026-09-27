@@ -22,8 +22,9 @@ build:
   `fn main()`. The file is a template: `$PLACEHOLDER$` tokens are substituted
   before compilation.
 
-The same block also carries the syscall layer (`syscalls`) and the string
-obfuscation (`strings`); both apply to custom stubs. The packer compiles it with
+The same block also carries the syscall layer (`syscalls`), the API resolution
+(`api_resolution`) and the string obfuscation (`strings`); all apply to custom
+stubs. The packer compiles it with
 the builtin stub's dependency set (`chacha20poly1305`, `hex`, `windows`);
 importing anything else fails with a plain `rustc` "crate not found" error.
 
@@ -39,7 +40,9 @@ Your template must define `fn main()`. Nothing else is imposed.
 | `$PAYLOAD_KEY_DEF$`    | A `[u8; 32]` array literal rebuilding the key (only when referenced) |
 | `$PREPARATION_BLOCKS$` | Preparation technique fragments (in runtime order) |
 | `$SYSCALLS_BLOCK$`     | The syscall layer (from `build.stub.syscalls`) |
+| `$ARGS_BLOCK$`         | The payload command-line builder (from `build.payload.args`) |
 | `$IMPORTS_BLOCK$`      | The shared payload import resolver |
+| `$API_RESOLUTION_BLOCK$` | The API-resolution policy and proxies (from `build.stub.api_resolution`) |
 | `$EXECUTION_BLOCK$`    | The single Execution technique fragment |
 | `$ARG_<key>$`          | A build argument (index or name), substituted literally |
 

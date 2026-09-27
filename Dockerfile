@@ -21,18 +21,21 @@
 
 FROM rust:1-bookworm
 
-# MinGW-w64 provides `x86_64-w64-mingw32-gcc`, the linker `rustc --target
-# x86_64-pc-windows-gnu` uses to link the stub into a PE. `osslsigncode` is the
-# portable Authenticode signer and `openssl` builds the lab certificate chain.
+# MinGW-w64 provides `x86_64-w64-mingw32-gcc` and `i686-w64-mingw32-gcc`, the
+# linkers `rustc --target <arch>-pc-windows-gnu` uses to link the stub into a PE.
+# `osslsigncode` is the portable Authenticode signer and `openssl` builds the lab
+# certificate chain.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         gcc-mingw-w64-x86-64 \
+        gcc-mingw-w64-i686 \
         openssl \
         osslsigncode \
     && rm -rf /var/lib/apt/lists/*
 
-# Standard library for the Windows GNU cross-compilation target.
-RUN rustup target add x86_64-pc-windows-gnu
+# Standard library for the Windows GNU cross-compilation targets (both
+# architectures: `build.output.arch` selects which one the stub is built for).
+RUN rustup target add x86_64-pc-windows-gnu i686-pc-windows-gnu
 
 # The packer reads its stub template and Cargo.lock from CARGO_MANIFEST_DIR at
 # runtime, so the source stays in the image next to the built binary.
@@ -50,10 +53,12 @@ COPY examples ./examples
 # proc-macro rlibs (windows-implement, windows-interface) in target/release/deps.
 RUN cargo build --release
 
-# Cross-compile the workspace for the stub's Windows target. This produces the
+# Cross-compile the workspace for the stub's Windows targets. This produces the
 # .rlib files the packer links with bare rustc (chacha20poly1305, hex, windows,
-# thiserror) plus the windows_x86_64_gnu import lib in the cargo registry cache.
+# thiserror) plus the windows_<arch>_gnu import libs in the cargo registry cache.
+# The i686 build is what makes `build.output.arch: x86` work in here.
 RUN cargo build --target x86_64-pc-windows-gnu --release
+RUN cargo build --target i686-pc-windows-gnu --release
 
 # Smoke test: pack a payload end-to-end to prove the cross toolchain is wired
 # correctly. Fails the image build if anything is misconfigured.

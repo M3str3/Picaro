@@ -4,11 +4,11 @@
 //! business rules that cannot be expressed naturally with `serde`: empty
 //! values, invalid combinations, supported architectures, etc.
 
-use crate::engine::api_resolution::{ApiResolutionConfig, ApiResolutionMode};
+use crate::engine::api_resolution::{ApiResolutionConfig, ApiResolutionMode, Unmatched};
 use crate::engine::obfuscation::StringsConfig;
 use crate::engine::syscalls::{SyscallsConfig, SyscallsMode};
 use crate::error::{PackerError, Result};
-use crate::techniques::{category_of, Category, RuntimeStep};
+use crate::techniques::{category_of, Capability, Category, RuntimeStep};
 
 use super::schema::{Arch, PayloadFormat, Plan, StubPlan};
 
@@ -35,7 +35,8 @@ pub fn validate(plan: &Plan) -> Result<()> {
         ));
     }
 
-    validate_arch(plan)?;
+    validate_capabilities(plan)?;
+    validate_hollowing_target(plan)?;
     validate_payload_format(plan)?;
     validate_payload_sha256(plan)?;
     validate_sign(plan)?;
@@ -43,6 +44,7 @@ pub fn validate(plan: &Plan) -> Result<()> {
     validate_conflicts(&plan.runtime)?;
     validate_sleep_obfuscation(&plan.runtime)?;
     validate_stub(&plan.build.stub)?;
+    validate_syscalls_arch(plan)?;
     validate_api_resolution(plan)?;
 
     Ok(())
@@ -52,9 +54,10 @@ pub fn validate(plan: &Plan) -> Result<()> {
 ///
 /// These do not reject a plan (unlike [`validate`]); the build prints them as
 /// warnings. Today they cover a `bouncer` gate with no check declared (a no-op,
-/// almost certainly not intended) and the debug build, whose whole point is to
+/// almost certainly not intended), the debug build, whose whole point is to
 /// trade evasion for observability and whose artifact is therefore never for
-/// delivery.
+/// delivery, and `api_resolution.unmatched: abort`, a strict allowlist that
+/// fails the load on the first import outside the catalogue.
 pub fn advisories(plan: &Plan) -> Vec<String> {
     let mut warnings = Vec::new();
     for step in &plan.runtime {
@@ -94,6 +97,13 @@ pub fn advisories(plan: &Plan) -> Vec<String> {
             warnings.push(
                 "build.stub.api_resolution.mode is 'proxy' but no 'apis' are declared, so it is a \
                  no-op"
+                    .to_string(),
+            );
+        }
+        if config.mode == ApiResolutionMode::Proxy && config.unmatched == Unmatched::Abort {
+            warnings.push(
+                "build.stub.api_resolution.unmatched is 'abort': the loader will fail on any \
+                 payload import outside the catalogue (a strict allowlist / debugging posture)"
                     .to_string(),
             );
         }
@@ -158,7 +168,7 @@ fn validate_api_resolution(plan: &Plan) -> Result<()> {
             "build.stub.api_resolution.mode 'proxy' is not supported with process_hollowing: the \
              proxies live in the loader image, which is not mapped in the target process, so the \
              payload's IAT there can only point at the real exports. Use reflective_loading (the \
-             payload runs in the loader's process). See docs/FUTURE_API_RESOLUTION.md (Phase E)."
+             payload runs in the loader's process). See docs/api-resolution.md (Phase E)."
                 .to_string(),
         ));
     }
@@ -191,18 +201,33 @@ fn validate_payload_format(plan: &Plan) -> Result<()> {
         }
     }
 
-    if payload.format != PayloadFormat::Pe {
-        let execution = plan
-            .runtime
-            .iter()
-            .find(|step| category_of(step.name()) == Some(Category::Execution));
-        if execution.is_some_and(|step| step.name() == "process_hollowing") {
-            return Err(PackerError::Validation(format!(
-                "build.payload.format '{}' is not supported by process_hollowing yet: it only runs \
-                 'format: pe'. Use reflective_loading, which runs pe, dll and shellcode in-process.",
-                payload.format.label()
-            )));
-        }
+    // A managed assembly is neither mapped nor hollowed: the stub hosts the CLR
+    // and loads the assembly's bytes, which only `dotnet_hosting` does.
+    let execution = plan
+        .runtime
+        .iter()
+        .find(|step| category_of(step.name()) == Some(Category::Execution));
+    let hosts_the_clr = execution.is_some_and(|step| step.name() == "dotnet_hosting");
+    if payload.format == PayloadFormat::Dotnet && !hosts_the_clr {
+        return Err(PackerError::Validation(format!(
+            "build.payload.format 'dotnet' needs an execution technique that hosts the CLR: add 'technique: dotnet_hosting' (this plan runs '{}', which does not run a managed assembly)",
+            execution.map_or("no execution technique", |step| step.name())
+        )));
+    }
+    if payload.format != PayloadFormat::Dotnet && hosts_the_clr {
+        return Err(PackerError::Validation(format!(
+            "'technique: dotnet_hosting' needs 'build.payload.format: dotnet' (this plan declares format: {})",
+            payload.format.label()
+        )));
+    }
+
+    if payload.format != PayloadFormat::Pe
+        && execution.is_some_and(|step| step.name() == "process_hollowing")
+    {
+        return Err(PackerError::Validation(format!(
+            "build.payload.format '{}' is not supported by process_hollowing yet: it only runs 'format: pe'. Use reflective_loading, which runs pe, dll and shellcode in-process.",
+            payload.format.label()
+        )));
     }
 
     Ok(())
@@ -267,19 +292,152 @@ fn validate_sign(plan: &Plan) -> Result<()> {
     Ok(())
 }
 
-/// Rejects an architecture the stub toolchain cannot produce yet.
+/// Rejects a technique that has no implementation for the requested architecture.
 ///
-/// `x86` is a recognized value (the enum documents it for completeness), but the
-/// stub is only generated for x64. Accepting it would silently emit an x64
-/// binary from a plan that asked for x86, so it fails loudly instead.
-/// Integrating x86 is more work than the enum value suggests: a second target, a
-/// 32-bit stub variant, and a per-architecture fragment for every technique.
-fn validate_arch(plan: &Plan) -> Result<()> {
-    if plan.build.output.arch == Arch::X86 {
+/// Every technique declares the capabilities it needs (`TechniqueDef::requires`).
+/// Its architecture capability (`WindowsX64` / `WindowsX86`) must match
+/// `build.output.arch`: the stub and the payload share one address space, so an
+/// x64-only fragment cannot be linked into an i686 stub (nor the reverse).
+fn validate_capabilities(plan: &Plan) -> Result<()> {
+    let arch = plan.build.output.arch;
+    let required = match arch {
+        Arch::X64 => Capability::WindowsX64,
+        Arch::X86 => Capability::WindowsX86,
+    };
+    for step in &plan.runtime {
+        // An unknown technique name is rejected by `validate_runtime`.
+        let Some(def) = crate::techniques::find(step.name()) else {
+            continue;
+        };
+        if !def.requires.contains(&required) {
+            return Err(PackerError::Validation(format!(
+                "technique '{}' does not support build.output.arch '{}' yet: it requires {}; the \
+                 packer can compile an {} stub, but this technique has no {} fragment",
+                def.name,
+                arch.label(),
+                capabilities_label(def.requires),
+                arch.label(),
+                arch.label()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Rejects a hollowing target whose image cannot run in the stub's process.
+///
+/// The target must be a process of the stub's own architecture (see
+/// `process_hollowing`): an x86 stub cannot hollow a 64-bit `svchost.exe` and
+/// vice versa. When the target is a local file the check is exact; a target
+/// that does not resolve locally (`$arg.N$`, a remote path, a missing file) is
+/// left to run time, where the technique fails with its own error.
+///
+/// `C:\Windows\System32` is redirected to `SysWOW64` for a 32-bit process, so
+/// the path is mapped the way WOW64 would resolve it before the file is read —
+/// the default `System32\svchost.exe` is a 64-bit image on a 64-bit host but
+/// the x86 stub actually gets the 32-bit one.
+fn validate_hollowing_target(plan: &Plan) -> Result<()> {
+    let arch = plan.build.output.arch;
+    for step in &plan.runtime {
+        let RuntimeStep::ProcessHollowing { params } = step else {
+            continue;
+        };
+        let Some(path) = wow64_resolve(&params.target, arch) else {
+            continue;
+        };
+        let Ok(bytes) = std::fs::read(&path) else {
+            // Not a local file (a runtime argument, a remote path, or a target
+            // that only exists on the host): nothing to check here.
+            continue;
+        };
+        let Ok(info) = crate::engine::pe::parse(&bytes) else {
+            continue;
+        };
+        if info.arch() != Some(arch) {
+            return Err(PackerError::Validation(format!(
+                "process_hollowing target '{}' is a {} image but build.output.arch is '{}': the target must match the stub's architecture ({} resolves to '{}' under WOW64)",
+                params.target,
+                info.arch().map(|a| a.label()).unwrap_or("non-PE"),
+                arch.label(),
+                params.target,
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Maps a Windows path the way the target process would see it, or `None` when
+/// it cannot be a local file (a runtime argument, or not an absolute path).
+///
+/// Only a 32-bit process is redirected: its `System32` is `SysWOW64`. A 64-bit
+/// process sees both directories as they are (`SysWOW64` keeps the 32-bit
+/// images), so a 64-bit target path is taken literally — except when the packer
+/// itself is a 32-bit process, whose own read of `System32` would be redirected
+/// to the 32-bit image: that case asks for the unredirected view through
+/// `Sysnative`, the WOW64 alias that only exists for 32-bit callers.
+fn wow64_resolve(target: &str, arch: Arch) -> Option<std::path::PathBuf> {
+    if target.contains("$arg.") || target.trim().is_empty() {
+        return None;
+    }
+    let (from, to) = match arch {
+        Arch::X86 => ("System32", "SysWOW64"),
+        Arch::X64 if cfg!(target_arch = "x86") => ("System32", "Sysnative"),
+        Arch::X64 => return local_path(target),
+    };
+    let needle = format!("\\{from}\\");
+    let mapped = match target
+        .to_ascii_lowercase()
+        .find(&needle.to_ascii_lowercase())
+    {
+        Some(index) => {
+            let mut text = target.to_string();
+            text.replace_range(index + 1..index + 1 + from.len(), to);
+            text
+        }
+        None => target.to_string(),
+    };
+    local_path(&mapped)
+}
+
+/// The path as a `PathBuf`, or `None` when it cannot be a local file.
+fn local_path(target: &str) -> Option<std::path::PathBuf> {
+    let path = std::path::PathBuf::from(target);
+    if path.is_absolute() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+/// Human list of a technique's capabilities (`x64 + administrator rights`).
+fn capabilities_label(requires: &[Capability]) -> String {
+    requires
+        .iter()
+        .map(|capability| match capability {
+            Capability::WindowsX64 => "x64",
+            Capability::WindowsX86 => "x86",
+            Capability::KernelAccess => "kernel access",
+            Capability::AdminRequired => "administrator rights",
+        })
+        .collect::<Vec<_>>()
+        .join(" + ")
+}
+
+/// Rejects an x64-only loader configuration on an x86 build.
+///
+/// `syscalls.mode: indirect` relies on the x64 `syscall; ret` gadget and an x64
+/// `global_asm!` trampoline; x86 has neither (and the WOW64 SSNs differ), so the
+/// x86 path is a second implementation, not a flag.
+fn validate_syscalls_arch(plan: &Plan) -> Result<()> {
+    if plan.build.output.arch != Arch::X86 {
+        return Ok(());
+    }
+    let syscalls = SyscallsConfig::from_yaml(plan.build.stub.syscalls.as_ref())?;
+    if syscalls.mode == SyscallsMode::Indirect {
         return Err(PackerError::Validation(
-            "build.output.arch: 'x86' is not integrated yet; the stub toolchain only targets \
-             x86_64 today. Adding x86 means a 32-bit stub variant plus a per-architecture fragment \
-             for every technique, so it is more work than the enum value suggests. Use 'x64'."
+            "build.stub.syscalls.mode 'indirect' is x64-only for now: the trampoline is x64 (x86 \
+             has no 'syscall; ret' gadget, and the WOW64 SSNs differ). Use 'mode: none'"
                 .to_string(),
         ));
     }
@@ -441,6 +599,20 @@ runtime:
   - technique: patch_amsi
 "#;
 
+    /// YAML fragment with the other Execution technique.
+    const HOLLOWING_YAML: &str = r#"
+runtime:
+  - technique: process_hollowing
+"#;
+
+    /// YAML fragment with the one technique that stays x64-only: Ekko works on
+    /// the x64 ABI and is not ported (see the x86 plan).
+    const X64_ONLY_YAML: &str = r#"
+runtime:
+  - technique: sleep_obfuscation
+  - technique: reflective_loading
+"#;
+
     /// YAML fragment with two Execution techniques.
     const TWO_EXECUTION_YAML: &str = r#"
 runtime:
@@ -468,6 +640,153 @@ runtime:
 
     fn with_runtime(runtime_yaml: &str) -> Plan {
         parse(&(NO_RUNTIME.to_string() + runtime_yaml))
+    }
+
+    /// `NO_RUNTIME` with the requested `arch` and a runtime appended.
+    fn with_arch(arch: &str, runtime_yaml: &str) -> Plan {
+        let base = NO_RUNTIME.replace("arch: x64", &format!("arch: {arch}"));
+        parse(&(base + runtime_yaml))
+    }
+
+    /// `NO_RUNTIME` with the requested `arch` and a `build.stub` block inserted
+    /// (`stub_yaml` must already be indented to sit under `build:`).
+    fn with_stub(arch: &str, stub_yaml: &str) -> Plan {
+        let base = NO_RUNTIME
+            .replace("arch: x64", &format!("arch: {arch}"))
+            .replace("  output:", &format!("  stub:\n{stub_yaml}  output:"));
+        parse(&base)
+    }
+
+    /// `arch: x86` is accepted by the schema, but a technique with no x86
+    /// fragment is rejected with a message that says which one and why.
+    #[test]
+    fn rejects_a_technique_without_an_x86_fragment() {
+        let plan = with_arch("x86", X64_ONLY_YAML);
+        let err = validate(&plan).expect_err("sleep_obfuscation is x64-only");
+        let msg = err.to_string();
+        assert!(msg.contains("sleep_obfuscation"), "unclear: {msg}");
+        assert!(msg.contains("'x86'"), "unclear: {msg}");
+        assert!(msg.contains("no x86 fragment"), "unclear: {msg}");
+    }
+
+    /// The techniques that have an x86 fragment accept `arch: x86`: both
+    /// execution techniques and the preparations ported in M3 (`sleep_obfuscation`
+    /// stays x64-only, which the test above covers).
+    #[test]
+    fn accepts_the_x86_capable_techniques_on_x86() {
+        validate(&with_arch("x86", EXECUTION_YAML)).expect("x86 reflective plan is valid");
+        validate(&with_arch("x86", HOLLOWING_YAML)).expect("x86 hollowing plan is valid");
+        for preparation in ["anti_debug", "patch_amsi", "patch_etw", "bouncer"] {
+            let yaml = format!(
+                "runtime:
+  - technique: {preparation}
+  - technique: reflective_loading
+"
+            );
+            validate(&with_arch("x86", &yaml))
+                .unwrap_or_else(|e| panic!("x86 {preparation} plan is valid: {e}"));
+        }
+    }
+
+    /// A hollowing target that exists locally must match the stub's
+    /// architecture; the committed fixtures stand in for the target image.
+    #[test]
+    fn rejects_a_hollowing_target_of_the_wrong_architecture() {
+        let x64_fixture = format!(
+            "{}/tests/fixtures/minimal_x64.exe",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        // YAML single quotes: a Windows path must not be read as escapes.
+        let yaml = format!(
+            r#"runtime:
+  - technique: process_hollowing
+    params:
+      target: '{x64_fixture}'
+"#
+        );
+        let err = validate(&with_arch("x86", &yaml))
+            .expect_err("a 64-bit target cannot be hollowed by an x86 stub");
+        let msg = err.to_string();
+        assert!(msg.contains("minimal_x64.exe"), "unclear: {msg}");
+        assert!(msg.contains("'x86'"), "unclear: {msg}");
+
+        // The matching architecture is accepted, and so is a target that does
+        // not exist locally (it is resolved at run time).
+        let x86_fixture = format!(
+            "{}/tests/fixtures/minimal_x86.exe",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let yaml = format!(
+            r#"runtime:
+  - technique: process_hollowing
+    params:
+      target: '{x86_fixture}'
+"#
+        );
+        validate(&with_arch("x86", &yaml)).expect("an x86 target fits an x86 stub");
+
+        let yaml = "runtime:
+  - technique: process_hollowing
+    params:
+      target: \"$arg.0$\"
+";
+        validate(&with_arch("x86", yaml)).expect("a runtime target is checked at run time");
+    }
+
+    /// `System32` is `SysWOW64` for a 32-bit process (and the reverse for a
+    /// 64-bit one), so the target check resolves the path the way WOW64 would.
+    /// The `Arch::X64` case depends on the packer's own bitness: a 64-bit packer
+    /// reads the real `System32`, a 32-bit one has to ask for `Sysnative`.
+    #[test]
+    fn wow64_resolve_maps_the_redirected_directories() {
+        use super::wow64_resolve;
+        let system32 = r"C:\Windows\System32\svchost.exe";
+        let syswow64 = r"C:\Windows\SysWOW64\svchost.exe";
+
+        assert_eq!(
+            wow64_resolve(system32, Arch::X86)
+                .unwrap()
+                .to_string_lossy(),
+            r"C:\Windows\SysWOW64\svchost.exe"
+        );
+        // `SysWOW64` keeps the 32-bit images, so a path there is read as written
+        // by both a 64-bit and a 32-bit packer.
+        assert_eq!(
+            wow64_resolve(syswow64, Arch::X64)
+                .unwrap()
+                .to_string_lossy(),
+            syswow64
+        );
+        let expected = if cfg!(target_arch = "x86") {
+            r"C:\Windows\Sysnative\svchost.exe"
+        } else {
+            system32
+        };
+        assert_eq!(
+            wow64_resolve(system32, Arch::X64)
+                .unwrap()
+                .to_string_lossy(),
+            expected
+        );
+        assert!(wow64_resolve("$arg.0$", Arch::X86).is_none());
+        assert!(wow64_resolve(r"relative\svchost.exe", Arch::X86).is_none());
+    }
+
+    #[test]
+    fn accepts_the_x64_techniques_on_x64() {
+        validate(&with_arch("x64", EXECUTION_YAML)).expect("x64 plan is valid");
+    }
+
+    /// `syscalls.mode: indirect` is x64-only: the trampoline is x64 and the WOW64
+    /// SSNs differ, so x86 needs a second implementation, not a flag.
+    #[test]
+    fn rejects_indirect_syscalls_on_x86() {
+        let plan = with_stub("x86", "    syscalls:\n      mode: indirect\n");
+        let err = validate_syscalls_arch(&plan).expect_err("x86 has no indirect syscalls");
+        assert!(err.to_string().contains("indirect"), "unclear: {err}");
+
+        let plan = with_stub("x64", "    syscalls:\n      mode: indirect\n");
+        validate_syscalls_arch(&plan).expect("x64 indirect is fine");
     }
 
     #[test]
@@ -883,14 +1202,28 @@ runtime:
         validate(&parse(VALID)).expect("x64 must be valid");
     }
 
+    /// `arch: x86` is a valid schema value now; what fails is the technique
+    /// capability, not the arch itself (the packer can compile an i686 stub).
     #[test]
-    fn rejects_x86_until_it_is_integrated() {
-        let yaml = VALID.replace("    arch: x64\n", "    arch: x86\n");
-        let err = validate(&parse(&yaml)).expect_err("x86 must be rejected");
-        let msg = err.to_string();
-        assert!(msg.contains("build.output.arch"), "unclear error: {msg}");
-        assert!(msg.contains("x86"), "unclear error: {msg}");
-        assert!(msg.contains("not integrated"), "unclear error: {msg}");
+    fn x86_parses_and_fails_on_the_capability_check() {
+        let yaml = VALID
+            .replace(
+                "  - technique: reflective_loading\n",
+                "  - technique: sleep_obfuscation\n  - technique: reflective_loading\n",
+            )
+            .replace("    arch: x64\n", "    arch: x86\n");
+        let plan = parse(&yaml); // x86 must parse: the enum value is supported
+        let msg = validate(&plan)
+            .expect_err("sleep_obfuscation has no x86 fragment")
+            .to_string();
+        assert!(
+            msg.contains("technique 'sleep_obfuscation'"),
+            "unclear error: {msg}"
+        );
+        assert!(
+            !msg.contains("not integrated"),
+            "the architecture is supported now: {msg}"
+        );
     }
 
     #[test]

@@ -2,6 +2,9 @@
 code_examples/
 /payload_decrypted.bin
 
+# Local session memory: a rolling developer note, not part of the repo.
+.memory.md
+
 # Host build output.
 /target
 /build
@@ -22,9 +25,18 @@ code_examples/
 *.pem
 *.key
 
+# Build side-outputs written next to an artifact (see docs/architecture.md).
+*.ca.cer
+*.manifest.json
+
 # Lab signing identity (CA + leaf) generated for `output.sign.mode: lab`.
 **/.picaro/
 
-# Keep the checked-in test payload and the PE parser fixture.
+# Keep the checked-in test payloads and PE fixtures (all of them are read by
+# tests or named by an example plan, so a fresh clone must have them).
 !examples/payloads/test_payload.exe
+!examples/payloads/test_payload_x86.exe
 !tests/fixtures/minimal_x64.exe
+!tests/fixtures/minimal_x86.exe
+!tests/fixtures/managed_x86.exe
+!tests/fixtures/managed_anycpu.exe

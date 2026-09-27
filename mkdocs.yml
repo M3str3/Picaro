@@ -63,6 +63,7 @@ nav:
       - bouncer: techniques/ref/bouncer.md
       - process_hollowing: techniques/ref/process_hollowing.md
       - reflective_loading: techniques/ref/reflective_loading.md
+      - dotnet_hosting: techniques/ref/dotnet_hosting.md
       - Syscall layer: techniques/indirect_syscalls.md
       - Payload arguments: techniques/process_argument_spoofing.md
       - String obfuscation: techniques/string_obfuscation.md
@@ -70,6 +71,8 @@ nav:
   - Architecture:
       - How it fits together: architecture.md
       - Custom stubs: custom-stubs.md
+      - API resolution: api-resolution.md
+      - x86 support: x86.md
   - Reference:
       - Measurements: measurements.md
       - Process hollowing evidence: techniques/process_hollowing.md

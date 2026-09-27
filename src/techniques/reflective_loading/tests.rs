@@ -111,7 +111,7 @@ fn compiles_reflective_loading_stub_for_every_format() {
     )
     .unwrap();
 
-    let deps = crate::engine::compiler::locate_stub_deps().unwrap();
+    let deps = crate::engine::compiler::locate_stub_deps(crate::plan::schema::Arch::X64).unwrap();
     let strings = crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap();
 
     // (format, export, output name)
@@ -223,7 +223,7 @@ fn compiles_reflective_loading_stub_to_pe() {
     let stub_path = build_dir.join("main.rs");
     std::fs::write(&stub_path, stub_src).unwrap();
 
-    let deps = crate::engine::compiler::locate_stub_deps().unwrap();
+    let deps = crate::engine::compiler::locate_stub_deps(crate::plan::schema::Arch::X64).unwrap();
     let out = build_dir.join("out.exe");
     // `compile_stub` verifies the `MZ` header before returning.
     crate::engine::compiler::compile_stub(
@@ -238,9 +238,14 @@ fn compiles_reflective_loading_stub_to_pe() {
 }
 
 /// Builds the `api_resolution` probe payload, packs it with an indirect-syscall
-/// `reflective_loading` stub and the given `apis:` selection (debug build, so the
-/// proxies emit `tech_dbg!` traces), runs it and returns `(stdout, stderr)`.
-fn run_proxy_case(name: &str, apis_yaml: &str) -> (String, String) {
+/// `reflective_loading` stub and the given `apis:` selection and `unmatched`
+/// policy (debug build, so the proxies emit `tech_dbg!` traces), runs it and
+/// returns `(exit status, stdout, stderr)`.
+fn run_proxy_case(
+    name: &str,
+    apis_yaml: &str,
+    unmatched: &str,
+) -> (std::process::ExitStatus, String, String) {
     use std::path::Path;
 
     let build_dir =
@@ -271,7 +276,7 @@ fn run_proxy_case(name: &str, apis_yaml: &str) -> (String, String) {
         mode: crate::engine::syscalls::SyscallsMode::Indirect,
         resolver: crate::engine::syscalls::Resolver::HellsGate,
     };
-    let yaml = format!("mode: proxy\napis:\n{apis_yaml}");
+    let yaml = format!("mode: proxy\nunmatched: {unmatched}\napis:\n{apis_yaml}");
     let yaml: crate::engine::api_resolution::YamlApiResolutionPlan =
         serde_yml::from_str(&yaml).unwrap();
     let api_resolution =
@@ -309,7 +314,7 @@ fn run_proxy_case(name: &str, apis_yaml: &str) -> (String, String) {
     let stub_path = build_dir.join("main.rs");
     std::fs::write(&stub_path, stub_src).unwrap();
 
-    let deps = crate::engine::compiler::locate_stub_deps().unwrap();
+    let deps = crate::engine::compiler::locate_stub_deps(crate::plan::schema::Arch::X64).unwrap();
     let out = build_dir.join("out.exe");
     crate::engine::compiler::compile_stub(
         &stub_path,
@@ -321,10 +326,11 @@ fn run_proxy_case(name: &str, apis_yaml: &str) -> (String, String) {
 
     // 5. Run the artifact and capture both streams.
     let output = Command::new(&out).output().unwrap();
+    let status = output.status;
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     let _ = std::fs::remove_dir_all(&build_dir);
-    (stdout, stderr)
+    (status, stdout, stderr)
 }
 
 /// Strategy `route_to_nt` (rebuild): `kernel32!OpenProcess` is rebuilt on
@@ -332,7 +338,8 @@ fn run_proxy_case(name: &str, apis_yaml: &str) -> (String, String) {
 #[test]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn api_resolution_rebuilds_openprocess() {
-    let (stdout, stderr) = run_proxy_case("rebuild", "  - \"kernel32!OpenProcess\"\n");
+    let (_, stdout, stderr) =
+        run_proxy_case("rebuild", "  - \"kernel32!OpenProcess\"\n", "forward");
     assert!(
         stderr.contains("routed to the syscall layer"),
         "no route trace:\n{stderr}"
@@ -352,7 +359,7 @@ fn api_resolution_rebuilds_openprocess() {
 #[test]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn api_resolution_routes_ntopenprocess() {
-    let (stdout, stderr) = run_proxy_case("ntopen", "  - \"ntdll!NtOpenProcess\"\n");
+    let (_, stdout, stderr) = run_proxy_case("ntopen", "  - \"ntdll!NtOpenProcess\"\n", "forward");
     assert!(
         stderr.contains("routed to the syscall layer"),
         "no route trace:\n{stderr}"
@@ -373,9 +380,10 @@ fn api_resolution_routes_ntopenprocess() {
 #[test]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn api_resolution_handler_returns_proxies() {
-    let (stdout, stderr) = run_proxy_case(
+    let (_, stdout, stderr) = run_proxy_case(
         "handler",
         "  - \"kernel32!GetProcAddress\"\n  - \"kernel32!ReadProcessMemory\"\n",
+        "forward",
     );
     assert!(
         stderr.contains("returned a proxy"),
@@ -396,7 +404,8 @@ fn api_resolution_handler_returns_proxies() {
 #[test]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn api_resolution_routes_ntreadvirtualmemory() {
-    let (stdout, stderr) = run_proxy_case("direct", "  - \"ntdll!NtReadVirtualMemory\"\n");
+    let (_, stdout, stderr) =
+        run_proxy_case("direct", "  - \"ntdll!NtReadVirtualMemory\"\n", "forward");
     assert!(
         stderr.contains("routed to the syscall layer"),
         "no route trace:\n{stderr}"
@@ -416,7 +425,8 @@ fn api_resolution_routes_ntreadvirtualmemory() {
 #[test]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn api_resolution_wraps_readprocessmemory() {
-    let (stdout, stderr) = run_proxy_case("wrapper", "  - \"kernel32!ReadProcessMemory\"\n");
+    let (_, stdout, stderr) =
+        run_proxy_case("wrapper", "  - \"kernel32!ReadProcessMemory\"\n", "forward");
     assert!(
         stderr.contains("routed to the syscall layer"),
         "no route trace:\n{stderr}"
@@ -428,5 +438,25 @@ fn api_resolution_wraps_readprocessmemory() {
     assert!(
         stdout.contains("API_PROBE rpm=1 read=8 bytes=[88, 77, 66, 55, 44, 33, 22, 11]"),
         "wrong data:\n{stdout}"
+    );
+}
+
+/// `unmatched: abort` fails the load on the first payload import outside the
+/// catalogue, so the probe never runs (finding 1: the option used to be parsed
+/// but ignored).
+#[test]
+#[ignore = "requires rustc and the compiled dependencies"]
+fn api_resolution_aborts_on_unmatched() {
+    // Only `NtReadVirtualMemory` is proxied, but the probe imports and uses many
+    // other APIs, so the very first non-catalogue import must abort the load.
+    let (status, stdout, stderr) =
+        run_proxy_case("abort", "  - \"ntdll!NtReadVirtualMemory\"\n", "abort");
+    assert!(
+        !status.success(),
+        "the load should have failed under unmatched: abort:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("API_PROBE"),
+        "the payload ran despite unmatched: abort:\n{stdout}"
     );
 }

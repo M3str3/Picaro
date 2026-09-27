@@ -11,10 +11,10 @@ two categories (`TechniqueDef.category`):
 A valid pipeline is `0..N` Preparation techniques followed by **exactly one**
 Execution technique; the order is enforced by `src/plan/validate.rs`.
 
-Every technique fragment calls the stub's `nt_*` helpers (`nt_alloc_vm`,
-`nt_write_vm`, `nt_read_vm`, `nt_resume_thread`, `nt_unmap_view`,
-`nt_protect_vm`, `nt_suspend_thread`, `nt_query_info_process`,
-`nt_get_context_thread`) and never the Win32 APIs directly. See
+Every technique fragment calls the stub's `nt_*` helpers (`src/engine/syscalls.rs`:
+`nt_alloc_vm`, `nt_write_vm`, `nt_read_vm`, `nt_protect_vm`,
+`nt_create_thread_ex`, `nt_wait_for_single_object`, `nt_get_context_thread`,
+…) and never the Win32 APIs directly. See
 [Syscall layer](indirect_syscalls.md).
 
 The registry (`src/techniques/mod.rs`) is metadata-only; inspect it with
@@ -33,3 +33,4 @@ The registry (`src/techniques/mod.rs`) is metadata-only; inspect it with
 | [bouncer](ref/bouncer.md) | preparation | T1497.001, T1614.001 | experimental | Gates the payload on declared host checks (hostname, locale, uptime, RAM, VM/sandbox) and aborts the pipeline when they fail. |
 | [process_hollowing](ref/process_hollowing.md) | execution | T1055.012 | experimental | Runs the payload inside a suspended, legitimate process (`svchost.exe` by default). |
 | [reflective_loading](ref/reflective_loading.md) | execution | T1620 | experimental | Maps the payload into the current process (manual mapping), resolves imports and relocations, and runs its entry point. |
+| [dotnet_hosting](ref/dotnet_hosting.md) | execution | T1620 | experimental | Hosts the CLR in the stub and runs a managed (`format: dotnet`) assembly from memory. |

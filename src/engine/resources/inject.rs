@@ -239,6 +239,38 @@ mod tests {
         }
     }
 
+    /// The committed 32-bit fixture, for the PE32 layout path.
+    fn fixture_x86() -> Vec<u8> {
+        std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join("fixtures")
+                .join("minimal_x86.exe"),
+        )
+        .expect("read the PE32 fixture")
+    }
+
+    /// Resource injection is layout-driven, so it must work on a PE32 image too:
+    /// its data-directory array sits at `opt + 96`, not `opt + 112`.
+    #[test]
+    fn embedding_a_manifest_works_on_a_pe32_image() {
+        let pe = fixture_x86();
+        let before = crate::audit::pe_info::analyze(&pe).expect("fixture parses");
+        assert_eq!(before.arch, "x86");
+        assert!(!before.has_manifest);
+
+        let out = crate::engine::resources::embed(&pe, &manifest_plan()).expect("embed");
+        let after = crate::audit::pe_info::analyze(&out).expect("output parses");
+        assert_eq!(after.sections.len(), before.sections.len() + 1);
+        assert!(
+            after.sections.iter().any(|s| s.name == ".rsrc"),
+            "sections: {:?}",
+            after.sections.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+        assert!(after.has_manifest, "the RT_MANIFEST must be found");
+        assert_eq!(after.arch, "x86", "the output must stay 32-bit");
+    }
+
     #[test]
     fn embedding_a_manifest_adds_a_resource_section() {
         let pe = fixture();

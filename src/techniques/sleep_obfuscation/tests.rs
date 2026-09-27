@@ -242,7 +242,7 @@ fn compiles_sleep_obfuscation_stub_to_pe() {
     let stub_path = build_dir.join("main.rs");
     std::fs::write(&stub_path, stub_src).unwrap();
 
-    let deps = crate::engine::compiler::locate_stub_deps().unwrap();
+    let deps = crate::engine::compiler::locate_stub_deps(crate::plan::schema::Arch::X64).unwrap();
     let out = build_dir.join("out.exe");
     // `compile_stub` verifies the `MZ` header before returning.
     crate::engine::compiler::compile_stub(

@@ -63,4 +63,12 @@ windows = { version = "0.58", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     # Bouncer: CreateToolhelp32Snapshot + PROCESSENTRY32W (T1497).
     "Win32_System_Diagnostics_ToolHelp",
+    # dotnet_hosting: CLRCreateInstance + the hosting interfaces.
+    "Win32_System_ClrHosting",
+    # dotnet_hosting: CoInitializeEx + SAFEARRAY.
+    "Win32_System_Com",
+    # dotnet_hosting: SafeArrayCreateVector/AccessData/PutElement.
+    "Win32_System_Ole",
+    # dotnet_hosting: the VARIANT the hosting calls exchange.
+    "Win32_System_Variant",
 ] }

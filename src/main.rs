@@ -365,7 +365,11 @@ fn build(
     let timer = Instant::now();
     let plaintext = load_source(&plan.build.payload.source)?;
     verify_payload_hash(&plaintext, plan.build.payload.sha256.as_deref())?;
-    let summary = inspect_payload(plan.build.payload.format, &plaintext)?;
+    let summary = inspect_payload(
+        plan.build.payload.format,
+        &plaintext,
+        plan.build.output.arch,
+    )?;
     let read_time = timer.elapsed();
     let mut read_parts = vec![
         ui.target(describe_source(&plan.build.payload.source)),
@@ -596,7 +600,8 @@ fn build(
 
     // 6. Locate the dependencies and compile the stub.
     let timer = Instant::now();
-    let deps = compiler::locate_stub_deps()?;
+    let arch = plan.build.output.arch;
+    let deps = compiler::locate_stub_deps(arch)?;
     let out = build_dir.join("out.exe");
     let options = compiler::CompileOptions {
         strip: plan.build.output.strip,
@@ -606,6 +611,7 @@ fn build(
             TrimPaths::All => compiler::PathTrim::All,
         },
         debug,
+        arch,
     };
     compiler::compile_stub(&stub_path, &out, &deps, options)?;
     // D-21: a proxy must never import the API it intercepts, or the signature
@@ -619,7 +625,7 @@ fn build(
             "compile",
             dotted(
                 ui,
-                &["rustc".to_string(), ui.dim(compiler::stub_target_label())]
+                &["rustc".to_string(), ui.dim(compiler::stub_target(arch)),]
             )
         )
     );
@@ -764,7 +770,7 @@ fn dry_run(plan: &plan::Plan, plan_path: &Path, ui: &Palette) -> Result<()> {
 
     let payload = load_source(&plan.build.payload.source)?;
     verify_payload_hash(&payload, plan.build.payload.sha256.as_deref())?;
-    let summary = inspect_payload(plan.build.payload.format, &payload)?;
+    let summary = inspect_payload(plan.build.payload.format, &payload, plan.build.output.arch)?;
 
     let mut parts = vec![
         ui.target(describe_source(&plan.build.payload.source)),
@@ -830,13 +836,16 @@ struct PayloadSummary {
     pe: Option<pe::PeInfo>,
 }
 
-/// Parses and validates the payload according to `build.payload.format`.
+/// Parses and validates the payload according to `build.payload.format` and the
+/// requested `arch`.
 ///
-/// `pe`/`dll` must be a well-formed x64 PE image of the matching kind;
-/// `shellcode` has no headers to check, only that it is not empty. The checks
-/// run at build time so a mismatched plan fails before anything is encrypted
-/// or compiled.
-fn inspect_payload(format: PayloadFormat, data: &[u8]) -> Result<PayloadSummary> {
+/// `pe`/`dll` must be a well-formed PE of the matching kind **and** the matching
+/// architecture: the stub and the payload share one address space, so a 32-bit
+/// payload cannot run in a 64-bit stub and vice versa. `shellcode` has no
+/// headers to check, only that it is not empty, so it follows
+/// `build.output.arch`. The checks run at build time so a mismatched plan fails
+/// before anything is encrypted or compiled.
+fn inspect_payload(format: PayloadFormat, data: &[u8], arch: Arch) -> Result<PayloadSummary> {
     match format {
         PayloadFormat::Shellcode => {
             if data.is_empty() {
@@ -849,11 +858,68 @@ fn inspect_payload(format: PayloadFormat, data: &[u8]) -> Result<PayloadSummary>
                 pe: None,
             })
         }
+        PayloadFormat::Dotnet => {
+            let info = pe::parse(data)?;
+            let Some(clr) = info.com else {
+                return Err(error::PackerError::Validation(
+                    "build.payload.format is 'dotnet' but the payload has no CLR header (data directory 14 is empty): it is a native image, so use 'format: pe'"
+                        .to_string(),
+                ));
+            };
+            // A managed assembly is portable when it is IL-only: the CLR of the
+            // stub's bitness runs it. `32BITREQUIRED` pins it to a 32-bit
+            // runtime, and a mixed-mode (non-IL-only) assembly to its own
+            // machine.
+            let portable = clr.is_il_only() && !clr.requires_32bit();
+            let arch_ok = if portable {
+                true
+            } else if clr.requires_32bit() {
+                arch == Arch::X86
+            } else {
+                info.arch() == Some(arch)
+            };
+            if !arch_ok {
+                let requirement = if clr.requires_32bit() {
+                    "a 32-bit runtime (COMIMAGE_FLAGS_32BITREQUIRED)"
+                } else {
+                    "the matching architecture (it is not IL-only)"
+                };
+                return Err(error::PackerError::Validation(format!(
+                    "build.output.arch is '{}' but the .NET payload requires {requirement}: a managed assembly runs on the CLR of the stub's bitness",
+                    arch.label()
+                )));
+            }
+            Ok(PayloadSummary {
+                label: match info.arch() {
+                    Some(Arch::X64) => "x64 .NET assembly",
+                    Some(Arch::X86) => "x86 .NET assembly",
+                    None => ".NET assembly",
+                },
+                pe: Some(info),
+            })
+        }
+
         PayloadFormat::Pe | PayloadFormat::Dll => {
             let info = pe::parse(data)?;
-            if !pe::is_x64(info.machine) {
+            if info.is_dotnet() {
+                return Err(error::PackerError::Validation(
+                    "the payload is a .NET assembly (it has a CLR header): a managed image is not mapped as native code; use 'build.payload.format: dotnet' with 'technique: dotnet_hosting', which hosts the CLR and loads the assembly from memory"
+                        .to_string(),
+                ));
+            }
+            let payload_arch = info.arch().ok_or_else(|| {
+                error::PackerError::Validation(format!(
+                    "unsupported PE machine 0x{:04x}: picaro packs x86 (PE32) and x64 (PE32+)                      images",
+                    info.machine
+                ))
+            })?;
+
+            if payload_arch != arch {
                 return Err(error::PackerError::Validation(format!(
-                    "input payload is not an x64 PE (machine 0x{:04x})",
+                    "build.output.arch is '{}' but the payload is an {} PE (machine 0x{:04x}): the \
+                     stub and the payload must share an architecture",
+                    arch.label(),
+                    payload_arch.label(),
                     info.machine
                 )));
             }
@@ -875,7 +941,12 @@ fn inspect_payload(format: PayloadFormat, data: &[u8]) -> Result<PayloadSummary>
                 _ => {}
             }
             Ok(PayloadSummary {
-                label: if is_dll { "x64 DLL" } else { "x64 PE" },
+                label: match (payload_arch, is_dll) {
+                    (Arch::X64, false) => "x64 PE",
+                    (Arch::X64, true) => "x64 DLL",
+                    (Arch::X86, false) => "x86 PE",
+                    (Arch::X86, true) => "x86 DLL",
+                },
                 pe: Some(info),
             })
         }
@@ -923,7 +994,7 @@ fn print_plan(plan: &plan::Plan, plan_path: &Path, ui: &Palette) {
         "{}",
         ui.field("output", ui.target(plan.build.output.path.display()))
     );
-    anstream::println!("{}", ui.field("arch", arch_label(plan.build.output.arch)));
+    anstream::println!("{}", ui.field("arch", plan.build.output.arch.label()));
     anstream::println!(
         "{}",
         ui.field("strip", if plan.build.output.strip { "yes" } else { "no" })
@@ -939,6 +1010,14 @@ fn print_plan(plan: &plan::Plan, plan_path: &Path, ui: &Palette) {
     anstream::println!("{}", ui.field("stub", stub_label(plan)));
     if plan.build.stub.debug {
         anstream::println!("{}", ui.field("debug", ui.warn("yes")));
+    }
+    if let Some(resolution) = &plan.build.stub.api_resolution {
+        if resolution.mode == "proxy" {
+            anstream::println!(
+                "{}",
+                ui.field("api resolution", api_resolution_label(resolution))
+            );
+        }
     }
     if let Some(resources) = &plan.build.output.resources {
         anstream::println!("{}", ui.field("resources", resources_label(resources)));
@@ -982,14 +1061,6 @@ fn pipeline_chain(ui: &Palette, pipeline: &[RuntimeStep]) -> String {
 /// Joins already-styled fragments with a faint `·` separator.
 fn dotted(ui: &Palette, parts: &[String]) -> String {
     parts.join(&format!(" {} ", ui.faint(glyph::DOT)))
-}
-
-/// Lowercase label for the output architecture.
-fn arch_label(arch: Arch) -> &'static str {
-    match arch {
-        Arch::X64 => "x64",
-        Arch::X86 => "x86",
-    }
 }
 
 /// Lowercase label for the debug-info path policy.
@@ -1111,6 +1182,12 @@ fn sign_label(sign: &plan::schema::SignPlan) -> String {
         ),
         other => other.to_string(),
     }
+}
+
+/// The `api_resolution` echo: `proxy (5 APIs, unmatched forward)`.
+fn api_resolution_label(yaml: &engine::api_resolution::YamlApiResolutionPlan) -> String {
+    let apis = yaml.apis.len();
+    format!("proxy ({apis} APIs, unmatched {})", yaml.unmatched)
 }
 
 /// Human summary of the configured PE resources (`output.resources`).

@@ -1,10 +1,15 @@
 //! Minimal PE parser.
 //!
-//! Only what process hollowing needs: `e_lfanew`, the `PE\0\0` signature, the
-//! machine type (to reject 32-bit payloads), the preferred image base, the size
-//! of the image and the section table. The packer uses this to validate the
-//! input payload before packing; the generated stub performs its own equivalent
+//! Only what the packer needs to validate an input payload: `e_lfanew`, the
+//! `PE\0\0` signature, the machine type (to tell x86 from x64), the optional
+//! header magic (PE32 vs PE32+), the preferred image base, the size of the
+//! image and the section table. The generated stub performs its own equivalent
 //! parsing at runtime.
+
+use crate::plan::schema::Arch;
+
+/// PE machine type for x86 (PE32).
+pub const IMAGE_FILE_MACHINE_I386: u16 = 0x014C;
 
 /// PE machine type for x86-64 (PE32+).
 pub const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
@@ -17,6 +22,50 @@ const IMAGE_DOS_SIGNATURE: u16 = 0x5A4D;
 
 /// NT header `PE\0\0` signature.
 const IMAGE_NT_SIGNATURE: u32 = 0x0000_4550;
+
+/// Optional-header magic of a 32-bit image.
+const PE32_MAGIC: u16 = 0x010B;
+
+/// Optional-header magic of a 64-bit image.
+const PE32_PLUS_MAGIC: u16 = 0x020B;
+
+/// `IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR`: the data directory a managed
+/// assembly points at its CLR header with.
+const COM_DESCRIPTOR_DIRECTORY: usize = 14;
+
+/// `IMAGE_COR20_HEADER::Flags`: the assembly is IL-only (no native code, so it
+/// can run in either bitness).
+pub const COMIMAGE_FLAGS_ILONLY: u32 = 0x0000_0001;
+
+/// `IMAGE_COR20_HEADER::Flags`: the assembly must run on a 32-bit runtime.
+pub const COMIMAGE_FLAGS_32BITREQUIRED: u32 = 0x0000_0002;
+
+/// The CLR header of a managed assembly (`IMAGE_COR20_HEADER`, pointed at by
+/// data directory 14).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClrHeader {
+    /// `VirtualAddress` of the header (its RVA).
+    pub rva: u32,
+    /// `Size` of the header.
+    pub size: u32,
+    /// `Flags`, or `None` when the header itself cannot be read (a truncated
+    /// image: the directory is there but its contents are not).
+    pub flags: Option<u32>,
+}
+
+impl ClrHeader {
+    /// Whether the assembly is IL-only (no native code).
+    pub fn is_il_only(&self) -> bool {
+        self.flags
+            .is_some_and(|flags| flags & COMIMAGE_FLAGS_ILONLY != 0)
+    }
+
+    /// Whether the assembly requires a 32-bit runtime.
+    pub fn requires_32bit(&self) -> bool {
+        self.flags
+            .is_some_and(|flags| flags & COMIMAGE_FLAGS_32BITREQUIRED != 0)
+    }
+}
 
 /// A single section header entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +82,8 @@ pub struct SectionInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeInfo {
     pub machine: u16,
+    /// Whether the optional header is PE32+ (`0x20B`) rather than PE32 (`0x10B`).
+    pub is_pe32plus: bool,
     /// `FileHeader.Characteristics` (e.g. `IMAGE_FILE_DLL`).
     pub characteristics: u16,
     pub image_base: u64,
@@ -40,6 +91,29 @@ pub struct PeInfo {
     pub size_of_headers: u32,
     pub entry_point_rva: u32,
     pub sections: Vec<SectionInfo>,
+    /// The CLR header, when the image is a managed assembly (`.NET`).
+    pub com: Option<ClrHeader>,
+}
+
+impl PeInfo {
+    /// Whether the image is a managed (.NET) assembly.
+    pub fn is_dotnet(&self) -> bool {
+        self.com.is_some()
+    }
+
+    /// The image's architecture, or `None` for a machine picaro does not pack.
+    pub fn arch(&self) -> Option<Arch> {
+        arch_of(self.machine)
+    }
+}
+
+/// Maps a PE machine type to an [`Arch`] (`None` for an unsupported machine).
+pub fn arch_of(machine: u16) -> Option<Arch> {
+    match machine {
+        IMAGE_FILE_MACHINE_I386 => Some(Arch::X86),
+        IMAGE_FILE_MACHINE_AMD64 => Some(Arch::X64),
+        _ => None,
+    }
 }
 
 /// PE parsing error.
@@ -51,17 +125,15 @@ pub enum PeError {
     /// The DOS header is missing the `MZ` signature.
     #[error("invalid DOS header (missing MZ signature)")]
     InvalidDosHeader,
-    /// The NT header is missing the `PE\\0\\0` signature.
+    /// The NT header is missing the `PE\0\0` signature.
     #[error("invalid NT header (missing PE signature)")]
     InvalidNtHeader,
+    /// The optional header magic is neither PE32 nor PE32+.
+    #[error("unknown optional-header magic 0x{0:04x} (expected 0x010b PE32 or 0x020b PE32+)")]
+    UnknownOptionalHeader(u16),
     /// A field read went past the end of the buffer.
     #[error("unexpected end of PE data while reading offsets")]
     ReadOutOfBounds,
-}
-
-/// Returns true if `machine` is x86-64.
-pub fn is_x64(machine: u16) -> bool {
-    machine == IMAGE_FILE_MACHINE_AMD64
 }
 
 /// Returns true if the file-header `characteristics` mark a DLL.
@@ -69,7 +141,7 @@ pub fn is_dll(characteristics: u16) -> bool {
     characteristics & IMAGE_FILE_DLL != 0
 }
 
-/// Parses the minimal PE information needed for hollowing.
+/// Parses the minimal PE information needed to validate a payload.
 pub fn parse(data: &[u8]) -> Result<PeInfo, PeError> {
     // DOS header.
     if data.len() < 64 {
@@ -93,8 +165,19 @@ pub fn parse(data: &[u8]) -> Result<PeInfo, PeError> {
 
     // Optional header (starts right after the file header).
     let opt = e_lfanew + 4 + 20;
+    let is_pe32plus = match read_u16(data, opt)? {
+        PE32_PLUS_MAGIC => true,
+        PE32_MAGIC => false,
+        other => return Err(PeError::UnknownOptionalHeader(other)),
+    };
     let entry_point_rva = read_u32(data, opt + 16)?;
-    let image_base = read_u64(data, opt + 24)?;
+    // `ImageBase` is a `u64` at `opt + 24` in PE32+ and a `u32` at `opt + 28` in
+    // PE32. `SizeOfImage`/`SizeOfHeaders` sit at the same offsets in both.
+    let image_base = if is_pe32plus {
+        read_u64(data, opt + 24)?
+    } else {
+        u64::from(read_u32(data, opt + 28)?)
+    };
     let size_of_image = read_u32(data, opt + 56)?;
     let size_of_headers = read_u32(data, opt + 60)?;
 
@@ -116,15 +199,48 @@ pub fn parse(data: &[u8]) -> Result<PeInfo, PeError> {
         });
     }
 
+    // Data directories. `NumberOfRvaAndSizes` sits at 92 in PE32 and 108 in
+    // PE32+; the directory array starts 4 bytes later in both.
+    let num_directories = read_u32(data, opt + if is_pe32plus { 108 } else { 92 })? as usize;
+    let directories = opt + if is_pe32plus { 112 } else { 96 };
+    let com = if num_directories > COM_DESCRIPTOR_DIRECTORY {
+        let rva = read_u32(data, directories + COM_DESCRIPTOR_DIRECTORY * 8)?;
+        let size = read_u32(data, directories + COM_DESCRIPTOR_DIRECTORY * 8 + 4)?;
+        if rva == 0 || size == 0 {
+            None
+        } else {
+            // `IMAGE_COR20_HEADER::Flags` is the fourth field: cb (4),
+            // MajorRuntimeVersion (2), MinorRuntimeVersion (2), MetaData (8).
+            let flags =
+                rva_to_offset(&sections, rva).and_then(|offset| read_u32(data, offset + 16).ok());
+            Some(ClrHeader { rva, size, flags })
+        }
+    } else {
+        None
+    };
+
     Ok(PeInfo {
         machine,
+        is_pe32plus,
         characteristics,
         image_base,
         size_of_image,
         size_of_headers,
         entry_point_rva,
         sections,
+        com,
     })
+}
+
+/// Maps an RVA to a file offset through the section table.
+fn rva_to_offset(sections: &[SectionInfo], rva: u32) -> Option<usize> {
+    for section in sections {
+        let size = section.virtual_size.max(section.size_of_raw_data);
+        if rva >= section.virtual_address && rva < section.virtual_address + size {
+            return Some((rva - section.virtual_address + section.pointer_to_raw_data) as usize);
+        }
+    }
+    None
 }
 
 fn read_u16(data: &[u8], off: usize) -> Result<u16, PeError> {
@@ -154,37 +270,54 @@ fn read_u64(data: &[u8], off: usize) -> Result<u64, PeError> {
 mod tests {
     use super::*;
 
-    /// Builds a minimal, well-formed PE buffer with one section, using the
-    /// PE32+ layout (image base as `u64`).
-    fn minimal_pe(machine: u16) -> Vec<u8> {
-        let mut b = vec![0u8; 64 + 24 + 240 + 40];
+    /// Builds a minimal, well-formed PE with one section.
+    ///
+    /// `pe32plus` selects the optional-header layout: PE32+ keeps a `u64`
+    /// `ImageBase` at `opt + 24` and a 240-byte optional header, PE32 a `u32` at
+    /// `opt + 28` and 224 bytes.
+    fn minimal_pe(machine: u16, pe32plus: bool) -> Vec<u8> {
+        let opt_size = if pe32plus { 240 } else { 224 };
+        let mut b = vec![0u8; 64 + 24 + opt_size + 40];
         b[0] = b'M';
         b[1] = b'Z';
         b[0x3C] = 64; // e_lfanew
         b[64..68].copy_from_slice(b"PE\0\0");
         b[68..70].copy_from_slice(&machine.to_le_bytes());
         b[70..72].copy_from_slice(&1u16.to_le_bytes()); // one section
-        b[84..86].copy_from_slice(&240u16.to_le_bytes()); // SizeOfOptionalHeader
+        b[84..86].copy_from_slice(&(opt_size as u16).to_le_bytes()); // SizeOfOptionalHeader
         let opt = 88;
+        let magic = if pe32plus {
+            PE32_PLUS_MAGIC
+        } else {
+            PE32_MAGIC
+        };
+        b[opt..opt + 2].copy_from_slice(&magic.to_le_bytes());
         b[opt + 16..opt + 20].copy_from_slice(&0x1000u32.to_le_bytes()); // entry point
-        b[opt + 24..opt + 32].copy_from_slice(&0x140000000u64.to_le_bytes()); // image base
+        if pe32plus {
+            b[opt + 24..opt + 32].copy_from_slice(&0x140000000u64.to_le_bytes());
+        // image base
+        } else {
+            b[opt + 28..opt + 32].copy_from_slice(&0x00400000u32.to_le_bytes());
+            // image base
+        }
         b[opt + 56..opt + 60].copy_from_slice(&0x2000u32.to_le_bytes()); // size of image
         b[opt + 60..opt + 64].copy_from_slice(&0x200u32.to_le_bytes()); // size of headers
-        let s = 328; // section table
+        let s = opt + opt_size; // section table
         b[s + 12..s + 16].copy_from_slice(&0x1000u32.to_le_bytes()); // VA
         b[s + 16..s + 20].copy_from_slice(&0x200u32.to_le_bytes()); // size of raw data
         b[s + 20..s + 24].copy_from_slice(&0x200u32.to_le_bytes()); // pointer to raw data
         b
     }
 
-    /// The `Characteristics` field lives 22 bytes past the NT signature in a
-    /// PE32+ image (FileHeader starts after `PE\0\0`, Characteristics at +18).
+    /// The `Characteristics` field lives 22 bytes past the NT signature in both
+    /// layouts (FileHeader starts after `PE\0\0`, Characteristics at +18).
     const CHARACTERISTICS_OFFSET: usize = 64 + 4 + 18;
 
     #[test]
     fn parses_minimal_pe64() {
-        let pe = parse(&minimal_pe(IMAGE_FILE_MACHINE_AMD64)).expect("valid PE");
-        assert!(is_x64(pe.machine));
+        let pe = parse(&minimal_pe(IMAGE_FILE_MACHINE_AMD64, true)).expect("valid PE");
+        assert!(pe.is_pe32plus);
+        assert_eq!(pe.arch(), Some(Arch::X64));
         assert_eq!(pe.image_base, 0x140000000);
         assert_eq!(pe.size_of_image, 0x2000);
         assert_eq!(pe.size_of_headers, 0x200);
@@ -194,15 +327,62 @@ mod tests {
     }
 
     #[test]
+    fn parses_minimal_pe32() {
+        let pe = parse(&minimal_pe(IMAGE_FILE_MACHINE_I386, false)).expect("valid PE32");
+        assert!(!pe.is_pe32plus);
+        assert_eq!(pe.arch(), Some(Arch::X86));
+        assert_eq!(pe.image_base, 0x00400000);
+        assert_eq!(pe.size_of_image, 0x2000);
+        assert_eq!(pe.size_of_headers, 0x200);
+        assert_eq!(pe.entry_point_rva, 0x1000);
+        assert_eq!(pe.sections.len(), 1);
+        assert_eq!(pe.sections[0].virtual_address, 0x1000);
+    }
+
+    #[test]
+    fn parses_the_committed_pe32_fixture() {
+        // A real compiler-produced PE32 (see `scripts/build_test_fixture.sh`),
+        // so the PE32 path is covered beyond the synthetic builder above.
+        let data: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/minimal_x86.exe"
+        ));
+        let pe = parse(data).expect("valid PE32 fixture");
+        assert_eq!(pe.machine, IMAGE_FILE_MACHINE_I386);
+        assert_eq!(pe.arch(), Some(Arch::X86));
+        assert!(!pe.is_pe32plus);
+        assert!(!pe.sections.is_empty());
+        assert!(pe.image_base > 0);
+        assert!(pe.size_of_image > 0);
+    }
+
+    #[test]
+    fn an_unknown_machine_has_no_arch() {
+        // ARM64: a valid PE picaro does not pack.
+        let pe = parse(&minimal_pe(0xAA64, true)).expect("valid PE");
+        assert_eq!(pe.arch(), None);
+    }
+
+    #[test]
+    fn rejects_an_unknown_optional_header_magic() {
+        let mut b = minimal_pe(IMAGE_FILE_MACHINE_AMD64, true);
+        b[88..90].copy_from_slice(&0x020Cu16.to_le_bytes());
+        assert!(matches!(
+            parse(&b),
+            Err(PeError::UnknownOptionalHeader(0x020C))
+        ));
+    }
+
+    #[test]
     fn an_executable_is_not_a_dll() {
-        let pe = parse(&minimal_pe(IMAGE_FILE_MACHINE_AMD64)).expect("valid PE");
+        let pe = parse(&minimal_pe(IMAGE_FILE_MACHINE_AMD64, true)).expect("valid PE");
         assert_eq!(pe.characteristics, 0);
         assert!(!is_dll(pe.characteristics));
     }
 
     #[test]
     fn a_library_image_is_a_dll() {
-        let mut b = minimal_pe(IMAGE_FILE_MACHINE_AMD64);
+        let mut b = minimal_pe(IMAGE_FILE_MACHINE_AMD64, true);
         b[CHARACTERISTICS_OFFSET..CHARACTERISTICS_OFFSET + 2]
             .copy_from_slice(&IMAGE_FILE_DLL.to_le_bytes());
         let pe = parse(&b).expect("valid PE");
@@ -217,23 +397,15 @@ mod tests {
 
     #[test]
     fn rejects_bad_nt_signature() {
-        let mut b = minimal_pe(IMAGE_FILE_MACHINE_AMD64);
+        let mut b = minimal_pe(IMAGE_FILE_MACHINE_AMD64, true);
         b[64] = b'X';
         assert!(matches!(parse(&b), Err(PeError::InvalidNtHeader)));
     }
 
     #[test]
     fn rejects_bad_dos_signature() {
-        let mut b = minimal_pe(IMAGE_FILE_MACHINE_AMD64);
+        let mut b = minimal_pe(IMAGE_FILE_MACHINE_AMD64, true);
         b[0] = b'X';
         assert!(matches!(parse(&b), Err(PeError::InvalidDosHeader)));
-    }
-
-    #[test]
-    fn reads_x86_machine() {
-        // x86 (PE32) machine type.
-        let pe = parse(&minimal_pe(0x014c)).expect("valid PE32");
-        assert!(!is_x64(pe.machine));
-        assert_eq!(pe.machine, 0x014c);
     }
 }

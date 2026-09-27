@@ -38,7 +38,7 @@ pub const DEF: TechniqueDef = TechniqueDef {
     name: "process_hollowing",
     attck: &["T1055.012"],
     stability: Stability::Experimental,
-    requires: &[Capability::WindowsX64],
+    requires: &[Capability::WindowsX64, Capability::WindowsX86],
     conflicts: &[],
     category: Category::Execution,
     doc_path: "src/techniques/process_hollowing/README.md",

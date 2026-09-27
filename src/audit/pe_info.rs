@@ -108,6 +108,10 @@ pub fn analyze(data: &[u8]) -> Result<PeAudit, AuditError> {
 
     let opt = e_lfanew + 4 + 20;
     let is_pe32plus = read_u16(data, opt)? == 0x20B;
+    // The data-directory array starts 16 bytes earlier in a PE32 image than in a
+    // PE32+ one (`opt + 96` vs `opt + 112`). Reading it from the wrong base
+    // misparses every 32-bit binary.
+    let data_dir = if is_pe32plus { opt + 112 } else { opt + 96 };
     let subsystem: &'static str = match read_u16(data, opt + 68)? {
         IMAGE_SUBSYSTEM_WINDOWS_GUI => "GUI",
         IMAGE_SUBSYSTEM_WINDOWS_CUI => "console",
@@ -154,7 +158,7 @@ pub fn analyze(data: &[u8]) -> Result<PeAudit, AuditError> {
     };
 
     let data_dir_rva =
-        |idx: usize| -> Result<u32, AuditError> { read_u32(data, opt + 112 + idx * 8) };
+        |idx: usize| -> Result<u32, AuditError> { read_u32(data, data_dir + idx * 8) };
 
     // Imports. The parser also reports the file ranges of the import-table
     // strings (DLL/function names), which are metadata rather than stub data.
@@ -178,7 +182,7 @@ pub fn analyze(data: &[u8]) -> Result<PeAudit, AuditError> {
 
     // Signature (the security directory's "RVA" field is actually a file offset).
     let security_off = data_dir_rva(DIR_SECURITY)?;
-    let security_size = read_u32(data, opt + 112 + DIR_SECURITY * 8 + 4)?;
+    let security_size = read_u32(data, data_dir + DIR_SECURITY * 8 + 4)?;
     let has_signature = security_off != 0
         && security_size >= 8
         && read_u16(data, security_off as usize + 6)? == WIN_CERT_TYPE_PKCS_SIGNED_DATA;
@@ -500,6 +504,77 @@ mod tests {
     #[test]
     fn rejects_non_pe_data() {
         assert!(analyze(b"this is definitely not a PE file").is_err());
+    }
+
+    /// Builds a minimal, valid PE32 (32-bit) image with one imported DLL.
+    ///
+    /// The data-directory array of a PE32 image starts 16 bytes earlier than a
+    /// PE32+'s (`opt + 96` vs `opt + 112`), so this exercises the offset that a
+    /// 32-bit binary used to be parsed with wrongly.
+    fn minimal_pe32_with_import() -> Vec<u8> {
+        let headers = 0x200usize; // SizeOfHeaders; section raw data starts here.
+        let mut b = vec![0u8; headers + 0x200];
+
+        b[0] = b'M';
+        b[1] = b'Z';
+        b[0x3C] = 0x40; // e_lfanew
+
+        let pe = 0x40usize;
+        b[pe..pe + 4].copy_from_slice(b"PE\0\0");
+        b[pe + 4..pe + 6].copy_from_slice(&0x014Cu16.to_le_bytes()); // i386
+        b[pe + 6..pe + 8].copy_from_slice(&1u16.to_le_bytes()); // one section
+        b[pe + 20..pe + 22].copy_from_slice(&224u16.to_le_bytes()); // PE32 SizeOfOptionalHeader
+
+        let opt = pe + 4 + 20;
+        b[opt..opt + 2].copy_from_slice(&0x10Bu16.to_le_bytes()); // PE32 magic
+        b[opt + 16..opt + 20].copy_from_slice(&0x1000u32.to_le_bytes()); // AddressOfEntryPoint
+        b[opt + 56..opt + 60].copy_from_slice(&0x2000u32.to_le_bytes()); // SizeOfImage
+        b[opt + 60..opt + 64].copy_from_slice(&(headers as u32).to_le_bytes()); // SizeOfHeaders
+        b[opt + 68..opt + 70].copy_from_slice(&3u16.to_le_bytes()); // Subsystem = console
+        b[opt + 92..opt + 96].copy_from_slice(&16u32.to_le_bytes()); // NumberOfRvaAndSizes
+                                                                     // Data directory at opt + 96: export (idx 0) stays zero, import (idx 1).
+        b[opt + 96 + 8..opt + 96 + 12].copy_from_slice(&0x1000u32.to_le_bytes());
+
+        // Section table.
+        let sec = opt + 224;
+        b[sec..sec + 8].copy_from_slice(b".idata\0\0");
+        b[sec + 8..sec + 12].copy_from_slice(&0x200u32.to_le_bytes()); // VirtualSize
+        b[sec + 12..sec + 16].copy_from_slice(&0x1000u32.to_le_bytes()); // VirtualAddress
+        b[sec + 16..sec + 20].copy_from_slice(&0x200u32.to_le_bytes()); // SizeOfRawData
+        b[sec + 20..sec + 24].copy_from_slice(&(headers as u32).to_le_bytes()); // PointerToRawData
+
+        // In-section data: file offset `headers`, RVA 0x1000.
+        let base = headers;
+        // Import descriptor (ILT RVA, timestamp, forwarder, name RVA, IAT RVA).
+        b[base..base + 4].copy_from_slice(&0x1040u32.to_le_bytes());
+        b[base + 12..base + 16].copy_from_slice(&0x1060u32.to_le_bytes());
+        b[base + 16..base + 20].copy_from_slice(&0x1050u32.to_le_bytes());
+        // ILT at RVA 0x1040 (offset 0x40): one 4-byte entry, then a zero.
+        b[base + 0x40..base + 0x44].copy_from_slice(&0x1070u32.to_le_bytes());
+        // IAT at RVA 0x1050 (offset 0x50).
+        b[base + 0x50..base + 0x54].copy_from_slice(&0x1070u32.to_le_bytes());
+        // DLL name at RVA 0x1060 (offset 0x60).
+        b[base + 0x60..base + 0x6C].copy_from_slice(b"KERNEL32.dll");
+        // IMAGE_IMPORT_BY_NAME at RVA 0x1070: 2-byte hint, then the name.
+        b[base + 0x72..base + 0x81].copy_from_slice(b"GetProcAddress\0");
+
+        b
+    }
+
+    /// A PE32 image must audit: its data directories are read at the 32-bit
+    /// offset, so imports/exports are parsed instead of garbage (regression).
+    #[test]
+    fn audits_a_pe32_image_with_imports() {
+        let pe = analyze(&minimal_pe32_with_import()).expect("a valid PE32 must audit");
+        assert_eq!(pe.arch, "x86");
+        assert_eq!(pe.subsystem, "console");
+        assert_eq!(pe.imports.len(), 1, "imports: {:?}", pe.imports);
+        assert_eq!(pe.imports[0].name, "KERNEL32.dll");
+        assert_eq!(
+            pe.imports[0].functions,
+            vec![ImportItem::Named("GetProcAddress".to_string())]
+        );
+        assert!(pe.exports.is_empty(), "no export directory is declared");
     }
 
     #[test]

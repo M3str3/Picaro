@@ -1,0 +1,16 @@
+schema: 4
+name: x86-arch
+build:
+  payload:
+    source: ./SharpHound.exe
+    format: dotnet
+    crypto:
+      algo: xchacha20poly1305
+      key: random
+  output:
+    path: ./dist/x86-arch.exe
+    arch: x86
+    strip: true
+    trim_paths: all
+runtime:
+  - technique: dotnet_hosting

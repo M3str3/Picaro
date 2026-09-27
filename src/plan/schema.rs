@@ -209,6 +209,11 @@ pub enum PayloadFormat {
     Shellcode,
     /// A PE library image (a DLL).
     Dll,
+    /// A managed (.NET) assembly: a PE image whose entry point calls
+    /// `mscoree.dll!_CorExeMain`. It is not mapped like a native payload; the
+    /// stub hosts the CLR and loads the assembly from memory
+    /// (`technique: dotnet_hosting`).
+    Dotnet,
 }
 
 impl PayloadFormat {
@@ -218,6 +223,7 @@ impl PayloadFormat {
             PayloadFormat::Pe => "pe",
             PayloadFormat::Shellcode => "shellcode",
             PayloadFormat::Dll => "dll",
+            PayloadFormat::Dotnet => "dotnet",
         }
     }
 
@@ -506,13 +512,24 @@ fn default_true() -> bool {
 }
 
 /// Target architectures.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Arch {
     /// x86-64 (PE32+).
+    #[default]
     X64,
     /// x86 (PE32).
     X86,
+}
+
+impl Arch {
+    /// Lowercase label used in messages and the build log.
+    pub fn label(self) -> &'static str {
+        match self {
+            Arch::X64 => "x64",
+            Arch::X86 => "x86",
+        }
+    }
 }
 
 /// Path-remapping policy for the final binary.

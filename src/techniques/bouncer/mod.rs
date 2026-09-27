@@ -152,7 +152,7 @@ pub const DEF: TechniqueDef = TechniqueDef {
     name: "bouncer",
     attck: &["T1497.001", "T1614.001"],
     stability: Stability::Experimental,
-    requires: &[Capability::WindowsX64],
+    requires: &[Capability::WindowsX64, Capability::WindowsX86],
     conflicts: &[],
     category: Category::Preparation,
     doc_path: "src/techniques/bouncer/README.md",

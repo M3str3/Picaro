@@ -68,8 +68,40 @@ const IMPORTS_BLOCK: &str = r##"mod imports {
 
     /// `IMAGE_ORDINAL_FLAG64`: an import thunk with this bit set is by ordinal.
     const IMAGE_ORDINAL_FLAG64: u64 = 0x8000_0000_0000_0000;
+    /// `IMAGE_ORDINAL_FLAG32`: the same flag for a 32-bit import thunk.
+    const IMAGE_ORDINAL_FLAG32: u64 = 0x8000_0000;
     /// Page size used when restoring the IAT page protections.
     const PAGE_SIZE: usize = 0x1000;
+
+    /// Reads the image's optional-header magic and reports whether it is PE32+
+    /// (`0x20B`, 64-bit) rather than PE32 (`0x10B`, 32-bit).
+    ///
+    /// The payload's architecture matches the stub's (the packer enforces it),
+    /// but the width of every import thunk, IAT slot and ordinal flag is a
+    /// property of the *image*, so the resolver reads it instead of assuming.
+    fn is_pe32plus_image(image: &[u8]) -> Result<bool, ImportError> {
+        let e_lfanew = read_u32(image, 0x3C)? as usize;
+        match read_u16(image, e_lfanew + 24)? {
+            0x20B => Ok(true),
+            0x10B => Ok(false),
+            magic => Err(ImportError::Malformed(format!(
+                "unknown optional-header magic 0x{magic:04x}"
+            ))),
+        }
+    }
+
+    /// What the loader does with one payload import slot, as returned by the
+    /// generated `resolution_policy`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[allow(dead_code)]
+    pub enum ImportPolicy {
+        /// Point the IAT slot at the generated proxy for this API.
+        Proxy(u64),
+        /// Resolve the real export and use it (no interposition).
+        Forward,
+        /// Refuse to load: `build.stub.api_resolution.unmatched: abort`.
+        Abort,
+    }
 
     #[derive(Debug, thiserror::Error)]
     pub enum ImportError {
@@ -81,6 +113,8 @@ const IMPORTS_BLOCK: &str = r##"mod imports {
         LoadFailed { dll: String },
         #[error("could not resolve '{func}' from '{dll}'")]
         ResolveFailed { dll: String, func: String },
+        #[error("'{func}' from '{dll}' is not in the interception catalogue (unmatched: abort)")]
+        Abort { dll: String, func: String },
         #[error("could not change the protection of the import table")]
         ProtectFailed,
     }
@@ -91,8 +125,10 @@ const IMPORTS_BLOCK: &str = r##"mod imports {
     /// lets the same code walk a file-layout image (process hollowing) and an
     /// already-mapped image whose RVAs are their own offsets (reflective
     /// loading). `policy` decides, per `(dll, function)`, whether the slot is
-    /// served by a generated proxy (`Some(address)`) or by the real resolution
-    /// (`None`). The caller writes each resulting value into its IAT slot.
+    /// served by a generated proxy (`ImportPolicy::Proxy`), by the real
+    /// resolution (`ImportPolicy::Forward`), or refused (`ImportPolicy::Abort`,
+    /// i.e. `build.stub.api_resolution.unmatched: abort`). The caller writes each
+    /// resulting value into its IAT slot.
     pub fn resolve_imports<F, P>(
         image: &[u8],
         import_dir_rva: u32,
@@ -102,12 +138,21 @@ const IMPORTS_BLOCK: &str = r##"mod imports {
     ) -> Result<Vec<(u32, u64)>, ImportError>
     where
         F: Fn(u32) -> Option<usize>,
-        P: Fn(&str, &str) -> Option<u64>,
+        P: Fn(&str, &str) -> ImportPolicy,
     {
         let mut resolved = Vec::new();
         if import_dir_rva == 0 || import_dir_size == 0 {
             return Ok(resolved);
         }
+
+        // Thunk width, ordinal flag and IAT stride all follow the image layout.
+        let pe32plus = is_pe32plus_image(image)?;
+        let thunk_size: u32 = if pe32plus { 8 } else { 4 };
+        let ordinal_flag = if pe32plus {
+            IMAGE_ORDINAL_FLAG64
+        } else {
+            IMAGE_ORDINAL_FLAG32
+        };
 
         let mut desc = rva_to_offset(import_dir_rva).ok_or(ImportError::DirectoryUnmapped {
             rva: import_dir_rva,
@@ -132,16 +177,20 @@ const IMPORTS_BLOCK: &str = r##"mod imports {
 
             let mut i = 0u32;
             loop {
-                let thunk_rva = original_thunk + i * 8;
+                let thunk_rva = original_thunk + i * thunk_size;
                 let thunk_off = rva_to_offset(thunk_rva).ok_or_else(|| {
                     ImportError::Malformed(format!("thunk RVA 0x{thunk_rva:08x} is not mapped"))
                 })?;
-                let value = read_u64(image, thunk_off)?;
+                let value = if pe32plus {
+                    read_u64(image, thunk_off)?
+                } else {
+                    u64::from(read_u32(image, thunk_off)?)
+                };
                 if value == 0 {
                     break;
                 }
 
-                let (address, func) = if value & IMAGE_ORDINAL_FLAG64 != 0 {
+                let (address, func) = if value & ordinal_flag != 0 {
                     let ordinal = value & 0xFFFF;
                     (
                         unsafe { GetProcAddress(module, PCSTR(ordinal as *const u8)) },
@@ -165,11 +214,24 @@ const IMPORTS_BLOCK: &str = r##"mod imports {
                     )
                 };
 
-                let proxied = policy(&dll, &func);
-                let real = address
-                    .ok_or_else(|| ImportError::ResolveFailed { dll: dll.clone(), func })?;
-                let value = proxied.unwrap_or(real as u64);
-                resolved.push((first_thunk + i * 8, value));
+                match policy(&dll, &func) {
+                    ImportPolicy::Proxy(proxy) => {
+                        resolved.push((first_thunk + i * thunk_size, proxy));
+                    }
+                    ImportPolicy::Forward => {
+                        let real = address.ok_or_else(|| ImportError::ResolveFailed {
+                            dll: dll.clone(),
+                            func,
+                        })?;
+                        resolved.push((first_thunk + i * thunk_size, real as u64));
+                    }
+                    ImportPolicy::Abort => {
+                        return Err(ImportError::Abort {
+                            dll: dll.clone(),
+                            func,
+                        });
+                    }
+                }
                 i += 1;
             }
 
@@ -194,7 +256,7 @@ const IMPORTS_BLOCK: &str = r##"mod imports {
         policy: P,
     ) -> Result<usize, ImportError>
     where
-        P: Fn(&str, &str) -> Option<u64>,
+        P: Fn(&str, &str) -> ImportPolicy,
     {
         let imports = resolve_imports(
             image,
@@ -208,12 +270,13 @@ const IMPORTS_BLOCK: &str = r##"mod imports {
         }
 
         let base = image.as_ptr() as usize;
+        let slot_size = if is_pe32plus_image(image)? { 8usize } else { 4usize };
         let mut lo = usize::MAX;
         let mut hi = 0usize;
         for (rva, _) in &imports {
             let at = base + *rva as usize;
             lo = lo.min(at);
-            hi = hi.max(at + 8);
+            hi = hi.max(at + slot_size);
         }
 
         // Record each page's original protection and make the range writable.
@@ -231,8 +294,13 @@ const IMPORTS_BLOCK: &str = r##"mod imports {
 
         let count = imports.len();
         for (iat_rva, address) in imports {
-            let slot = (base + iat_rva as usize) as *mut u64;
-            unsafe { *slot = address };
+            let slot = base + iat_rva as usize;
+            if slot_size == 8 {
+                unsafe { *(slot as *mut u64) = address };
+            } else {
+                // PE32: the IAT slot is 4 bytes wide.
+                unsafe { *(slot as *mut u32) = address as u32 };
+            }
         }
 
         // Restore the original protection, page by page.
@@ -283,6 +351,11 @@ const IMPORTS_BLOCK: &str = r##"mod imports {
         })
     }
 
+    fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, ImportError> {
+        let s = bytes.get(offset..offset.checked_add(2).ok_or_else(bounds)?).ok_or_else(bounds)?;
+        Ok(u16::from_le_bytes([s[0], s[1]]))
+    }
+
     fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, ImportError> {
         let s = bytes.get(offset..offset.checked_add(4).ok_or_else(bounds)?).ok_or_else(bounds)?;
         Ok(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
@@ -301,7 +374,7 @@ const IMPORTS_BLOCK: &str = r##"mod imports {
 }
 
 #[allow(unused_imports)]
-use imports::{patch_imports, resolve_imports, ImportError};
+use imports::{patch_imports, resolve_imports, ImportError, ImportPolicy};
 "##;
 
 #[cfg(test)]
@@ -343,7 +416,9 @@ mod tests {
         let block = render_block(&pipeline("technique: process_hollowing\n"), &xor_config());
         assert!(block.contains("pub fn resolve_imports"));
         assert!(block.contains("pub fn patch_imports"));
-        assert!(block.contains("use imports::{patch_imports, resolve_imports, ImportError};"));
+        assert!(block.contains("pub enum ImportPolicy"));
+        assert!(block
+            .contains("use imports::{patch_imports, resolve_imports, ImportError, ImportPolicy};"));
         // The IAT is made writable and its pages restored.
         assert!(block.contains("VirtualProtect"));
         assert!(block.contains("PAGE_READWRITE"));

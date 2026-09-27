@@ -174,6 +174,8 @@ struct Answers {
     strings_strategy: String,
     syscalls_mode: String,
     output_path: String,
+    /// `build.output.arch` as the wizard's answer string (`x64` / `x86`).
+    arch: String,
     strip: bool,
     trim_paths: TrimPaths,
 }
@@ -536,6 +538,25 @@ impl Wizard<'_> {
             previous.map_or(&[], |answers| answers.payload_args.as_slice()),
         )?;
 
+        // Asked before the techniques: the stub and the payload share an
+        // architecture, and `syscalls: indirect` is x64-only.
+        let arch = match self.ask_select(
+            "arch",
+            &[
+                ("x64", "64-bit stub and payload (the default)"),
+                (
+                    "x86",
+                    "32-bit stub and payload; runs under WOW64 on 64-bit Windows",
+                ),
+            ],
+            previous
+                .map(|answers| usize::from(answers.arch == "x86"))
+                .unwrap_or(0),
+        )? {
+            0 => "x64".to_string(),
+            _ => "x86".to_string(),
+        };
+
         self.section("TECHNIQUES")?;
         let execution = self.ask_execution(previous.map(|answers| &answers.execution))?;
         let preparations = self.ask_preparations(
@@ -556,21 +577,25 @@ impl Wizard<'_> {
             0 => "xor".to_string(),
             _ => "stack".to_string(),
         };
-        let default_syscalls = previous
-            .map(|answers| usize::from(answers.syscalls_mode == "indirect"))
-            .unwrap_or_else(|| {
-                usize::from(
-                    techniques::find(execution.name()).is_some_and(|def| !def.syscalls.is_empty()),
-                )
-            });
-        let syscalls_mode = match self.ask_select(
-            "syscalls",
-            &[
-                ("none", "call the Win32 APIs directly"),
-                ("indirect", "resolve SSNs and invoke the kernel directly"),
-            ],
-            default_syscalls,
-        )? {
+        // `indirect` needs the x64 trampoline, so an x86 plan never offers it
+        // (the wizard only produces plans the packer accepts).
+        let mut syscall_options: Vec<(&str, &str)> = vec![("none", "call the Win32 APIs directly")];
+        if arch != "x86" {
+            syscall_options.push(("indirect", "resolve SSNs and invoke the kernel directly"));
+        }
+        let default_syscalls = if arch == "x86" {
+            0
+        } else {
+            previous
+                .map(|answers| usize::from(answers.syscalls_mode == "indirect"))
+                .unwrap_or_else(|| {
+                    usize::from(
+                        techniques::find(execution.name())
+                            .is_some_and(|def| !def.syscalls.is_empty()),
+                    )
+                })
+        };
+        let syscalls_mode = match self.ask_select("syscalls", &syscall_options, default_syscalls)? {
             0 => "none".to_string(),
             _ => "indirect".to_string(),
         };
@@ -608,6 +633,7 @@ impl Wizard<'_> {
             strings_strategy,
             syscalls_mode,
             output_path,
+            arch,
             strip,
             trim_paths,
         })
@@ -977,8 +1003,11 @@ fn assemble(payload: &Path, answers: &Answers) -> Plan {
             },
             output: OutputPlan {
                 path: PathBuf::from(&answers.output_path),
-                // The stub is always compiled for x86-64.
-                arch: Arch::X64,
+                arch: if answers.arch == "x86" {
+                    Arch::X86
+                } else {
+                    Arch::X64
+                },
                 strip: answers.strip,
                 trim_paths: answers.trim_paths,
                 manifest: true,
@@ -1173,13 +1202,13 @@ mod tests {
         assert_eq!(default_name(Path::new("payload")), "payload");
     }
 
-    /// Nine blank first-pass answers plus a blank review selection (`build now`)
+    /// Ten blank first-pass answers plus a blank review selection (`build now`)
     /// produce a plan the packer accepts as-is.
     #[test]
     fn defaults_produce_a_valid_reflective_plan() {
         let dir = temp_dir("defaults");
         let plan_path = dir.join("out.yaml");
-        let answers = ["", "", "", "", "", "", "", "", "", ""];
+        let answers = ["", "", "", "", "", "", "", "", "", "", ""];
 
         let (written, transcript) = session("payload.exe", &answers, Some(&plan_path));
 
@@ -1191,6 +1220,7 @@ mod tests {
 
         let plan = load_plan(&plan_path, &BTreeMap::new()).expect("valid plan");
         assert_eq!(plan.name, "payload");
+        assert_eq!(plan.build.output.arch, Arch::X64, "the default arch is x64");
         assert_eq!(plan.build.payload.source, "payload.exe");
         assert!(plan.build.payload.args.is_none());
         assert_eq!(
@@ -1221,6 +1251,7 @@ mod tests {
         let answers = [
             "demo",              // name
             "a,b",               // payload args
+            "2",                 // arch -> x86
             "process_hollowing", // execution
             "",                  // target -> default
             "1",                 // preparation: bouncer
@@ -1229,7 +1260,7 @@ mod tests {
             "1,6",               // checks: hostname + not_in_vm
             "WORKSTATION-*",     // hostname
             "",                  // strings -> xor
-            "",                  // syscalls -> indirect (hollowing needs it)
+            "",                  // syscalls -> none (indirect is x64-only)
             "",                  // output path
             "",                  // strip
             "",                  // trim paths
@@ -1263,9 +1294,13 @@ mod tests {
         };
         assert_eq!(params.target, process_hollowing::default_target());
 
-        let syscalls = plan.build.stub.syscalls.expect("indirect syscalls");
-        assert_eq!(syscalls.mode, "indirect");
-        assert_eq!(syscalls.resolver, "hells_gate");
+        // The wizard can produce an x86 plan (`x86` was chosen above), and for
+        // x86 it does not offer `syscalls: indirect` at all.
+        assert_eq!(plan.build.output.arch, Arch::X86);
+        assert!(
+            plan.build.stub.syscalls.is_none(),
+            "an x86 plan must not select indirect syscalls"
+        );
     }
 
     /// Choosing `edit answers` at the review re-asks the questions with the
@@ -1277,6 +1312,7 @@ mod tests {
         let answers = [
             "first",  // name
             "",       // payload args
+            "",       // arch
             "",       // execution
             "",       // preparation
             "",       // strings
@@ -1287,6 +1323,7 @@ mod tests {
             "2",      // review -> edit answers
             "second", // name (corrected)
             "",       // payload args
+            "",       // arch
             "",       // execution
             "",       // preparation
             "",       // strings
@@ -1309,7 +1346,7 @@ mod tests {
     fn quitting_the_review_writes_nothing() {
         let dir = temp_dir("aborted");
         let plan_path = dir.join("out.yaml");
-        let answers = ["", "", "", "", "", "", "", "", "", "3"];
+        let answers = ["", "", "", "", "", "", "", "", "", "", "3"];
 
         let (written, _) = session("payload.exe", &answers, Some(&plan_path));
 

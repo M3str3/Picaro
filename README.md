@@ -32,8 +32,9 @@ Requirements:
 - **`rustc` on `PATH`** (the stub is compiled with bare `rustc`, not cargo).
 - Workspace dependencies already built: run `cargo build` once at the repo
   root so the stub can link the `.rlib` files out of `target/`.
-- Windows (x64). On Linux/WSL the stub is cross-compiled to
-  `x86_64-pc-windows-gnu` (see [`docs/architecture.md`](docs/architecture.md)).
+- Windows. The stub is built for `arch: x64` or `arch: x86`; on Linux/WSL it is
+  cross-compiled to the matching `-pc-windows-gnu` target (see
+  [`docs/architecture.md`](docs/architecture.md)).
 
 ```bash
 # Pack the bundled test payload: hollow it into a suspended svchost.exe.
@@ -57,8 +58,9 @@ automatically when output is redirected.
 ## Docker (no local toolchain)
 
 No Rust, MinGW-w64 or Windows target installed? The bundled image ships the
-whole toolchain (rustc, cargo, the `x86_64-pc-windows-gnu` target, the MinGW
-linker) plus the prebuilt workspace `.rlib` files, so one command is enough. It
+whole toolchain (rustc, cargo, the `x86_64-pc-windows-gnu` and
+`i686-pc-windows-gnu` targets, the MinGW linkers) plus the prebuilt workspace
+`.rlib` files for both architectures, so one command is enough. It
 also carries `osslsigncode` and `openssl`, so it can sign the artifact itself
 (see [Signing](#signing)); only `mode: store` needs Windows, because it reads the
 certificate store.
@@ -107,7 +109,8 @@ How it works:
   reads the Windows certificate store.
 
 > The container only *builds* the packed Windows PE (it cross-compiles the stub
-> to `x86_64-pc-windows-gnu`). Run the resulting `.exe` on a Windows host.
+> to the `-pc-windows-gnu` target matching `arch`). Run the resulting `.exe` on a
+> Windows host.
 
 <!-- --8<-- [start:plan] -->
 ## Plan
@@ -122,7 +125,10 @@ name: mimikatz-basic
 build:
   payload:
     source: ./payload.exe # a local path, or an http(s):// URL (fetched in memory)
-    format: pe            # pe | shellcode | dll
+    format: pe            # pe | shellcode | dll | dotnet
+    export: null          # format: dll only: the exported function to call
+    args: []              # fixed args for the payload, before the runtime ones
+    args_mode: join       # join | override
     sha256: null          # optional: pin the input's SHA-256 (64 hex chars)
     crypto:
       algo: xchacha20poly1305
@@ -132,12 +138,17 @@ build:
     syscalls:
       mode: indirect      # none | indirect
       resolver: hells_gate  # hells_gate | tartarus_gate | api_hash
+    api_resolution:       # optional: serve selected payload imports from the loader
+      mode: none          # none | proxy (proxy needs syscalls: indirect + pe/dll)
+      apis: []            # catalogue entries, e.g. "kernel32!ReadProcessMemory"
+      unmatched: forward  # forward | abort
     strings:
       strategy: xor       # xor | stack
       key: random         # random | literal:<64 hex chars>
+    debug: false          # compile a debuggable, non-evasive stub for the lab
   output:
     path: ./dist/mimikatz_packed.exe
-    arch: x64
+    arch: x64             # x64 | x86 (the stub and the payload must match)
     strip: true
     trim_paths: all       # all | none | relative
     manifest: true        # write <stem>.manifest.json (provenance)
@@ -163,13 +174,16 @@ runtime:                  # 0..N preparation, then exactly one execution
 | Block | What it decides |
 | --- | --- |
 | `build.payload.source` | The input to pack: a local path, or an `http(s)://` or `file://` URL (`http(s)` is fetched in memory, never written to disk). |
-| `build.payload.format` | `pe` (default), `dll` or `shellcode`. Decides how the input is validated and how the Execution technique runs it. |
+| `build.payload.format` | `pe` (default), `dll`, `shellcode` or `dotnet` (a managed assembly). Decides how the input is validated and how the Execution technique runs it. |
 | `build.payload.export` | For `format: dll`, the exported function to call (e.g. `Run`). Without it only `DllMain(DLL_PROCESS_ATTACH)` runs. |
+| `build.payload.args` / `args_mode` | Fixed arguments handed to the payload (`join` = YAML args then the packed binary's own; `override` = runtime args replace the YAML ones). |
 | `build.payload.sha256` | Optional SHA-256 of the input. A mismatch aborts before anything is encrypted, so a URL (or a swapped file) cannot silently change what gets packed. |
 | `build.payload.crypto` | Payload encryption. XChaCha20-Poly1305, 24-byte nonce, fresh random key per build. |
 | `build.stub.strings` | How every runtime literal in the stub is obfuscated (`xor` or `stack`). Defaults to `xor` + random key, with a warning. |
-| `build.stub` | The stub itself: a custom template (`path`, `null` = builtin), the syscall layer (`syscalls`) and string obfuscation (`strings`). |
-| `build.output` | Where the packed PE goes and how it is finalized. `arch` is `x64`; `x86` is recognized but rejected as not integrated yet. `manifest` writes the provenance file. |
+| `build.stub.api_resolution` | Serve selected payload imports (`apis`) from proxies generated in the loader instead of the real exports (`mode: proxy`). Needs `syscalls.mode: indirect` and a `pe`/`dll` payload; not usable with `process_hollowing`. |
+| `build.stub.debug` | Compile a debuggable stub: no hardening, source paths kept, techniques log to stderr. Markedly less evasive — for the lab, never for delivery. |
+| `build.stub` | The stub itself: a custom template (`path`, `null` = builtin), the syscall layer (`syscalls`), API resolution (`api_resolution`) and string obfuscation (`strings`). |
+| `build.output` | Where the packed PE goes and how it is finalized. `arch` selects the stub's architecture (`x64` or `x86`) and the payload must match it. `manifest` writes the provenance file. |
 | `build.output.subsystem` | `console` (default) or `windows` (GUI, no console window). |
 | `build.output.resources` | Optional PE resources embedded into the artifact: `icon`, `version_info` and `manifest` (Windows app manifest / UAC). Built in Rust and written into a `.rsrc` section. |
 | `build.output.sign` | Optional Authenticode signing: `lab` (self-signed), `store` (an existing cert, Windows only) or `file` (a `.pfx`). Uses `signtool` on Windows and `osslsigncode` elsewhere. |
@@ -289,6 +303,41 @@ requirements. Details and measurements:
 [`docs/techniques/indirect_syscalls.md`](docs/techniques/indirect_syscalls.md),
 [`docs/measurements.md`](docs/measurements.md).
 
+### API resolution
+
+`build.stub.api_resolution` decides *who serves the payload's imports*. In
+`mode: proxy`, the packer rewrites the payload's IAT so the selected calls land
+on proxies generated inside the loader; the intercepted DLL and function names
+never enter the loader's own import table.
+
+```yaml
+build:
+  stub:
+    syscalls:
+      mode: indirect        # required by api_resolution.mode: proxy
+    api_resolution:
+      mode: proxy
+      apis:
+        - "kernel32!ReadProcessMemory"
+        - "kernel32!OpenProcess"
+        - "kernel32!GetProcAddress"
+        - "ntdll!NtReadVirtualMemory"
+        - "ntdll!NtOpenProcess"
+      unmatched: forward    # forward | abort
+```
+
+The catalogue is deliberately small (`src/engine/api_resolution.rs`) — the
+`lsass` critical path of a mimikatz-style payload. `ReadProcessMemory` and
+`OpenProcess` are rebuilt on their `Nt*` calls through the syscall layer
+(`GetLastError`/partial-copy semantics preserved), the two `ntdll!Nt*` entries
+route 1:1, and `GetProcAddress` becomes a handler that answers catalogue hits
+with the matching proxy. `mode: proxy` requires `syscalls.mode: indirect` and a
+`pe`/`dll` payload, and is rejected with `process_hollowing` — a hollowed payload
+has none of the loader's image. `unmatched` decides what an import outside the
+catalogue does: `forward` (default) resolves it normally, `abort` fails the load.
+Design, phases and limitations:
+[`docs/api-resolution.md`](docs/api-resolution.md).
+
 ### Custom stubs
 
 Need a loader shape the builtin stub doesn't have? Point `build.stub.path` at
@@ -301,7 +350,8 @@ build:
 ```
 
 `$PAYLOAD_BYTES$`, `$PAYLOAD_LEN$`, `$PAYLOAD_NONCE_DEF$`, `$PAYLOAD_KEY_DEF$`,
-`$PREPARATION_BLOCKS$`, `$EXECUTION_BLOCK$`, `$SYSCALLS_BLOCK$`, `$ARG_<n>$`.
+`$PREPARATION_BLOCKS$`, `$EXECUTION_BLOCK$`, `$SYSCALLS_BLOCK$`, `$ARGS_BLOCK$`,
+`$IMPORTS_BLOCK$`, `$API_RESOLUTION_BLOCK$`, `$ARG_<n>$`.
 Your template must define `fn main()`; ignoring a technique block is a warning,
 not an error. Full contract and examples:
 [`docs/custom-stubs.md`](docs/custom-stubs.md).
@@ -486,9 +536,10 @@ user-facing output goes through `src/ui.rs`. The full list is in
 | 3 | done | Rust stub generation + `rustc` compilation |
 | 4 | done | Process hollowing (in-memory execution) |
 | 5 | done | Static measurement infrastructure (`audit`) |
-| 6 | done | Indirect syscalls (Hell's Gate + Tartarus Gate) |
+| 6 | done | Indirect syscalls (Hell's Gate, Tartarus Gate, API hashing) |
 | 7 | done | AMSI patching (`patch_amsi`), technique categories |
 | 8 | done | Environment gate (`bouncer`) |
+| 9 | done | x86 (32-bit) support: M0–M5 — both execution techniques, the four preparations, i686 stubs, WOW64 targets and CLR hosting for managed payloads (`docs/x86.md`); M4 (x86 indirect syscalls) is parked with its reason |
 | — | done | Payload formats (`pe`/`shellcode`/`dll`), interactive wizard, custom stubs |
 | — | done | PE resources (icon, version info, manifest) and Authenticode signing (`signtool` on Windows, `osslsigncode` elsewhere) |
 
@@ -507,19 +558,26 @@ Planned:
 - Close the remaining wizard gaps (`strings.key`, `build.stub.path`,
   `args_mode: override`, non-default `sleep_obfuscation` regions) and add
   `picaro plan validate <file>`.
+- The parked x86 workstream (`docs/x86.md`): a Heaven's Gate syscall layer, if
+  ever wanted (`syscalls.mode: indirect` and `api_resolution` are x64-only).
 
 ## Known limitations
 
-- **`arch: x86` is not integrated yet.** The value is recognized (so the enum
-  is complete) but rejected at validation time; the stub toolchain only
-  produces x64 today. Adding x86 needs a 32-bit stub variant and a
-  per-architecture fragment for every technique — more work than the enum value
-  suggests.
+- **`arch: x86` is supported, with one parked workstream.** Both execution
+  techniques, `anti_debug`, `patch_amsi`, `patch_etw`, `bouncer` and
+  `dotnet_hosting` accept `arch: x86`; the stub, the payload and (for hollowing)
+  the target must share the architecture, and the packer checks all three.
+  `sleep_obfuscation` stays x64-only, and `syscalls.mode: indirect` (and
+  therefore `api_resolution`) is x64-only until a Heaven's Gate layer exists. A
+  managed assembly runs through `format: dotnet` + `dotnet_hosting` (the stub
+  hosts the CLR), so a 32-bit .NET assembly such as `SharpHound.exe` packs and
+  runs with `arch: x86`. See [`docs/x86.md`](docs/x86.md) and the example
+  `examples/plans/x86.yaml`.
 - **Process hollowing runs a full PE, but not its TLS callbacks.** The loader
-  state is now provisioned (imported DLLs, a real TLS index, the per-thread
-  `.tls` template, the main thread's TLS slot, and a `Rip` hand-off), and the
-  Rust test payload completes with exit `0`. A payload that needs its
-  `DLL_PROCESS_ATTACH` TLS callback still loses that init: a thread that has
+  state is provisioned (imported DLLs, a real TLS index, the per-thread `.tls`
+  template, the main thread's TLS slot, and a `Rip`/`Eip` hand-off), and the Rust
+  test payload completes with the payload's own exit code. A payload that needs
+  its `DLL_PROCESS_ATTACH` TLS callback still loses that init: a thread that has
   never started has no TLS array to point at. Evidence:
   [`docs/techniques/process_hollowing.md`](docs/techniques/process_hollowing.md).
 - **The syscall layer carries the whole hollowing flow.** The eleven-argument
@@ -528,6 +586,12 @@ Planned:
   `CreateRemoteThread`, `WaitForSingleObject`, `GetExitCodeProcess`,
   `Get`/`SetThreadContext` and `CloseHandle` out of the import table;
   `reflective_loading` no longer creates a thread at all.
+- **`build.stub.api_resolution` is `reflective_loading`-only.** In `mode: proxy`
+  the loader serves selected payload imports from proxies generated in its own
+  image, so it only works when the payload runs in that process. With
+  `process_hollowing` it is rejected at validation time (the target has none of
+  the loader's state); making it work needs a position-independent proxy emitter
+  written into the target.
 - **Custom stubs do not obfuscate the key/nonce** when they reference
   `$PAYLOAD_KEY_DEF$` / `$PAYLOAD_NONCE_DEF$`; prefer reading the key at run
   time ([`examples/stubs/runtime-key.rs`](examples/stubs/runtime-key.rs)).

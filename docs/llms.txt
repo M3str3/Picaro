@@ -21,6 +21,7 @@
 - [bouncer](techniques/ref/bouncer.html)
 - [process_hollowing](techniques/ref/process_hollowing.html)
 - [reflective_loading](techniques/ref/reflective_loading.html)
+- [dotnet_hosting](techniques/ref/dotnet_hosting.html)
 - [Syscall layer](techniques/indirect_syscalls.html): none / Hell's Gate / Tartarus Gate / API hashing.
 - [Payload arguments](techniques/process_argument_spoofing.html): build.payload.args and PEB command-line patching.
 - [String obfuscation](techniques/string_obfuscation.html): build.stub.strings (xor / stack).
@@ -30,6 +31,8 @@
 
 - [How it fits together](architecture.html): the packer pipeline and repo layout.
 - [Custom stubs](custom-stubs.html): replacing the builtin loader template.
+- [API resolution](api-resolution.html): the payload import proxy (catalogue, phases, limitations).
+- [x86 support](x86.html): `build.output.arch`, what is ported and what is still x64-only.
 
 ## Reference
 
