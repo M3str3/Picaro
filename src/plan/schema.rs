@@ -18,6 +18,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::engine::api_resolution::YamlApiResolutionPlan;
 use crate::engine::args::ArgsMode;
 use crate::engine::obfuscation::YamlStringsPlan;
 use crate::engine::syscalls::YamlSyscallsPlan;
@@ -172,6 +173,11 @@ pub struct StubPlan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub syscalls: Option<YamlSyscallsPlan>,
 
+    /// API-resolution configuration (how the loader resolves the payload's
+    /// imports). `None` means the default (`mode: none`, no behaviour change).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_resolution: Option<YamlApiResolutionPlan>,
+
     /// Optional string-obfuscation configuration.
     ///
     /// Applies to every stub literal (template, technique fragments and anything
@@ -291,11 +297,12 @@ pub struct OutputPlan {
 
     /// Optional Authenticode signing (`output.sign`).
     ///
-    /// The packer signs the artifact with `signtool`, either with a self-signed
-    /// lab certificate (`mode: lab`), one already in the user's store
-    /// (`mode: store`) or a `.pfx` (`mode: file`). A self-signed signature is
-    /// for integrity and lab verification only; it does not buy SmartScreen
-    /// reputation.
+    /// The packer signs the artifact, either with a self-signed lab certificate
+    /// (`mode: lab`), one already in the user's store (`mode: store`, Windows
+    /// only) or a `.pfx` (`mode: file`). It uses `signtool` on Windows and
+    /// `osslsigncode` elsewhere, so the same plan also signs inside the Docker
+    /// image. A self-signed signature is for integrity and lab verification only;
+    /// it does not buy SmartScreen reputation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sign: Option<SignPlan>,
 }
@@ -338,7 +345,8 @@ impl Subsystem {
 ///   (`<stem>.ca.cer`) so it can be trusted on the lab machine; nothing is
 ///   added to the local trust stores.
 /// - `store` — use a certificate already in the current user's store, matched by
-///   `thumbprint` or `subject`.
+///   `thumbprint` or `subject`. This is the *Windows* certificate store, so the
+///   mode is Windows only; inside a container use `file` or `lab`.
 /// - `file` — sign with a `.pfx`/`.p12` file; the password is read from the
 ///   environment variable named by `password_env` (never from the YAML).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -587,6 +595,7 @@ runtime:
         assert_eq!(plan.build.payload.crypto.key, KeySource::Random);
         assert_eq!(plan.build.stub.path, None);
         assert_eq!(plan.build.stub.syscalls, None);
+        assert_eq!(plan.build.stub.api_resolution, None);
         assert_eq!(plan.build.stub.strings, None);
         assert_eq!(
             plan.runtime,
@@ -632,6 +641,23 @@ runtime:
     fn strings_block_is_optional() {
         let plan: Plan = serde_yml::from_str(VALID_YAML).expect("valid YAML should parse");
         assert_eq!(plan.build.stub.strings, None);
+    }
+
+    #[test]
+    fn parses_stub_api_resolution_block() {
+        let yaml = VALID_YAML.replace(
+            "  output:\n",
+            "  stub:\n    api_resolution:\n      mode: proxy\n      apis:\n        - \"kernel32!ReadProcessMemory\"\n      unmatched: abort\n\n  output:\n",
+        );
+        let plan: Plan = serde_yml::from_str(&yaml).expect("api_resolution block should parse");
+        let api = plan
+            .build
+            .stub
+            .api_resolution
+            .expect("api_resolution should be present");
+        assert_eq!(api.mode, "proxy");
+        assert_eq!(api.unmatched, "abort");
+        assert_eq!(api.apis, vec!["kernel32!ReadProcessMemory".to_string()]);
     }
 
     #[test]

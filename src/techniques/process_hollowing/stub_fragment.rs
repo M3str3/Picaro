@@ -229,9 +229,16 @@ fn apply_relocations(image: &mut [u8], pe: &Pe, delta: isize) -> Result<(), Stri
 /// be resolved abort here, before the thread is redirected (the payload must
 /// never start with a half-filled IAT).
 fn resolve_and_patch_imports(image: &mut [u8], pe: &Pe) -> Result<usize, String> {
-    let imports = crate::resolve_imports(image, pe.import_rva, pe.import_size, |rva| {
-        rva_to_offset(pe, rva)
-    })
+    let imports = crate::resolve_imports(
+        image,
+        pe.import_rva,
+        pe.import_size,
+        |rva| rva_to_offset(pe, rva),
+        // Process hollowing writes into a file-layout buffer, not a mapped image,
+        // and the proxies live in this (loader) process, not in the target, so no
+        // API resolution is wired here yet (phase E).
+        |_, _| None,
+    )
     .map_err(|e| format!("{}: {e}", $MSG_RESOLVE_IMPORTS$))?;
 
     let count = imports.len();

@@ -106,5 +106,8 @@ $ARGS_BLOCK$
 // --- Payload import resolution (injected; shared by the execution techniques) ---
 $IMPORTS_BLOCK$
 
+// --- API resolution proxies (injected; from build.stub.api_resolution) ---
+$API_RESOLUTION_BLOCK$
+
 // --- Execution technique (injected) ---
 $EXECUTION_BLOCK$

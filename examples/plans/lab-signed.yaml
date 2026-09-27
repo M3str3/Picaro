@@ -1,0 +1,39 @@
+# A lab-signed build: packs the test payload, embeds a VERSIONINFO and signs the
+# artifact with an automatically generated self-signed certificate chain.
+#
+#   cargo run -- build examples/plans/lab-signed.yaml
+#
+# The CA's public certificate is written next to the artifact as
+# `dist/lab_signed.ca.cer`; install it in a lab machine's *Trusted Root
+# Certification Authorities* to make the signature verify there. Nothing is
+# added to this machine's trust stores.
+#
+# Signing works with `signtool` (Windows) and `osslsigncode` (Linux, including
+# the Docker image), so the same plan signs on either platform.
+
+schema: 4
+name: lab-signed
+
+build:
+  payload:
+    source: ./examples/payloads/test_payload.exe
+    crypto:
+      algo: xchacha20poly1305
+      key: random
+
+  output:
+    path: ./dist/lab_signed.exe
+    arch: x64
+    strip: true
+    trim_paths: all
+    resources:
+      version_info:
+        company: "Contoso Ltd"
+        product: "Widget"
+        description: "Widget Helper"
+        file_version: "1.0.0.0"
+    sign:
+      mode: lab
+
+runtime:
+  - technique: reflective_loading

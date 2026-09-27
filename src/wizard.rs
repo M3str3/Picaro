@@ -965,6 +965,8 @@ fn assemble(payload: &Path, answers: &Answers) -> Plan {
                     mode: answers.syscalls_mode.clone(),
                     resolver: "hells_gate".to_string(),
                 }),
+                // API resolution is an advanced loader setting; edit it in the YAML.
+                api_resolution: None,
                 strings: Some(YamlStringsPlan {
                     strategy: answers.strings_strategy.clone(),
                     // A literal key is an advanced setting; edit it in the YAML.

@@ -4,8 +4,9 @@
 //! business rules that cannot be expressed naturally with `serde`: empty
 //! values, invalid combinations, supported architectures, etc.
 
+use crate::engine::api_resolution::{ApiResolutionConfig, ApiResolutionMode};
 use crate::engine::obfuscation::StringsConfig;
-use crate::engine::syscalls::SyscallsConfig;
+use crate::engine::syscalls::{SyscallsConfig, SyscallsMode};
 use crate::error::{PackerError, Result};
 use crate::techniques::{category_of, Category, RuntimeStep};
 
@@ -42,6 +43,7 @@ pub fn validate(plan: &Plan) -> Result<()> {
     validate_conflicts(&plan.runtime)?;
     validate_sleep_obfuscation(&plan.runtime)?;
     validate_stub(&plan.build.stub)?;
+    validate_api_resolution(plan)?;
 
     Ok(())
 }
@@ -86,6 +88,16 @@ pub fn advisories(plan: &Plan) -> Vec<String> {
             );
         }
     }
+
+    if let Ok(config) = ApiResolutionConfig::from_yaml(plan.build.stub.api_resolution.as_ref()) {
+        if config.mode == ApiResolutionMode::Proxy && config.is_noop() {
+            warnings.push(
+                "build.stub.api_resolution.mode is 'proxy' but no 'apis' are declared, so it is a \
+                 no-op"
+                    .to_string(),
+            );
+        }
+    }
     warnings
 }
 
@@ -97,6 +109,60 @@ pub fn advisories(plan: &Plan) -> Vec<String> {
 fn validate_stub(stub: &StubPlan) -> Result<()> {
     SyscallsConfig::from_yaml(stub.syscalls.as_ref())?;
     StringsConfig::from_yaml(stub.strings.as_ref())?;
+    Ok(())
+}
+
+/// Validates `build.stub.api_resolution` and its coupling with the syscall layer
+/// and the payload format.
+///
+/// `mode: proxy` is only meaningful when intercepted calls can be re-routed
+/// through the syscall layer (so the imports leave the stub's IAT) and when the
+/// payload has an import table to rewrite. No separate "an Execution technique is
+/// active" check is needed: the pipeline contract already enforces exactly one
+/// Execution technique, and both execution techniques resolve imports.
+fn validate_api_resolution(plan: &Plan) -> Result<()> {
+    let config = ApiResolutionConfig::from_yaml(plan.build.stub.api_resolution.as_ref())?;
+    if config.mode != ApiResolutionMode::Proxy {
+        return Ok(());
+    }
+
+    let syscalls = SyscallsConfig::from_yaml(plan.build.stub.syscalls.as_ref())?;
+    if syscalls.mode != SyscallsMode::Indirect {
+        return Err(PackerError::Validation(
+            "build.stub.api_resolution.mode 'proxy' requires 'build.stub.syscalls.mode: indirect': \
+             the re-routed calls would otherwise fall back to the Win32 APIs and the intercepted \
+             imports would reappear in the stub's IAT"
+                .to_string(),
+        ));
+    }
+
+    if !plan.build.payload.format.is_pe_image() {
+        return Err(PackerError::Validation(format!(
+            "build.stub.api_resolution.mode 'proxy' requires a payload with an import table \
+             (format: pe or dll), not '{}'",
+            plan.build.payload.format.label()
+        )));
+    }
+
+    // The generated proxies are ordinary functions in the loader image, with
+    // their own data (obfuscated names, the SSN table, the syscall trampoline).
+    // A hollowed payload runs in a *different* process, which has none of that,
+    // so its IAT there can only point at the real exports: the mode cannot apply.
+    // Failing loudly beats silently not proxying. See Phase E in the doc.
+    if plan
+        .runtime
+        .iter()
+        .any(|step| step.name() == "process_hollowing")
+    {
+        return Err(PackerError::Validation(
+            "build.stub.api_resolution.mode 'proxy' is not supported with process_hollowing: the \
+             proxies live in the loader image, which is not mapped in the target process, so the \
+             payload's IAT there can only point at the real exports. Use reflective_loading (the \
+             payload runs in the loader's process). See docs/FUTURE_API_RESOLUTION.md (Phase E)."
+                .to_string(),
+        ));
+    }
+
     Ok(())
 }
 
@@ -686,6 +752,101 @@ runtime:
         assert!(
             err.to_string().contains("build.stub.syscalls.resolver"),
             "unclear error: {err}"
+        );
+    }
+
+    // --- api_resolution block ---
+
+    #[test]
+    fn accepts_api_resolution_none() {
+        let yaml = VALID.replace(
+            "  output:\n",
+            "  stub:\n    api_resolution:\n      mode: none\n  output:\n",
+        );
+        validate(&parse(&yaml)).expect("mode none must be valid");
+    }
+
+    #[test]
+    fn accepts_proxy_with_indirect_syscalls() {
+        let yaml = VALID.replace(
+            "  output:\n",
+            "  stub:\n    syscalls:\n      mode: indirect\n    api_resolution:\n      mode: proxy\n      apis:\n        - \"kernel32!ReadProcessMemory\"\n  output:\n",
+        );
+        validate(&parse(&yaml)).expect("proxy with indirect syscalls must be valid");
+    }
+
+    #[test]
+    fn proxy_requires_indirect_syscalls() {
+        let yaml = VALID.replace(
+            "  output:\n",
+            "  stub:\n    api_resolution:\n      mode: proxy\n      apis:\n        - \"kernel32!ReadProcessMemory\"\n  output:\n",
+        );
+        let err = validate(&parse(&yaml)).expect_err("proxy without indirect syscalls must fail");
+        assert!(
+            err.to_string().contains("syscalls.mode: indirect"),
+            "unclear error: {err}"
+        );
+    }
+
+    #[test]
+    fn proxy_rejects_a_shellcode_payload() {
+        let yaml = VALID
+            .replace(
+                "    source: ./payload.exe\n",
+                "    source: ./payload.bin\n    format: shellcode\n",
+            )
+            .replace(
+                "  output:\n",
+                "  stub:\n    syscalls:\n      mode: indirect\n    api_resolution:\n      mode: proxy\n      apis:\n        - \"kernel32!ReadProcessMemory\"\n  output:\n",
+            );
+        let err = validate(&parse(&yaml)).expect_err("proxy with shellcode must fail");
+        assert!(
+            err.to_string().contains("import table"),
+            "unclear error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_an_unknown_api_resolution_api() {
+        let yaml = VALID.replace(
+            "  output:\n",
+            "  stub:\n    api_resolution:\n      mode: proxy\n      apis:\n        - \"kernel32!Nope\"\n  output:\n",
+        );
+        let err = validate(&parse(&yaml)).expect_err("an unknown api must fail");
+        assert!(
+            err.to_string().contains("api_resolution.apis"),
+            "unclear error: {err}"
+        );
+    }
+
+    #[test]
+    fn proxy_rejects_process_hollowing() {
+        let yaml = NO_RUNTIME
+            .replace(
+                "  output:\n",
+                "  stub:\n    syscalls:\n      mode: indirect\n    api_resolution:\n      mode: proxy\n      apis:\n        - \"kernel32!ReadProcessMemory\"\n  output:\n",
+            )
+            .to_string()
+            + "runtime:\n  - technique: process_hollowing\n";
+        let err = validate(&parse(&yaml)).expect_err("proxy with hollowing must fail");
+        assert!(
+            err.to_string().contains("process_hollowing"),
+            "unclear error: {err}"
+        );
+    }
+
+    #[test]
+    fn advises_on_a_noop_proxy_with_no_apis() {
+        let yaml = VALID.replace(
+            "  output:\n",
+            "  stub:\n    syscalls:\n      mode: indirect\n    api_resolution:\n      mode: proxy\n  output:\n",
+        );
+        let plan = parse(&yaml);
+        validate(&plan).expect("a proxy with no apis is valid, only advised against");
+        let warnings = advisories(&plan);
+        assert!(
+            warnings.iter().any(|w| w.contains("api_resolution")),
+            "expected an advisory: {warnings:?}"
         );
     }
 

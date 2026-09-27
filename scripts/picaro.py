@@ -33,6 +33,11 @@ IMAGE = os.environ.get("PICARO_IMAGE", "picaro:latest")
 WINDOWS_ABSOLUTE = re.compile(r"(?i)^[a-z]:/|^//")
 
 
+def is_tty(stream: object) -> bool:
+    """Whether `stream` is a real terminal (and not `None`, e.g. closed stdio)."""
+    return stream is not None and getattr(stream, "isatty", lambda: False)()
+
+
 def translate_arg(arg: str, workdir: Path) -> str:
     """Rewrite a Windows path argument into the form the Linux container sees.
 
@@ -98,9 +103,11 @@ def main(argv: list[str]) -> int:
     if os.name == "nt":
         args = [translate_arg(arg, workdir) for arg in args]
 
-    # Allocate a TTY only when stdout is a real console, so color auto-detection
-    # keeps working and piping still succeeds.
-    interactive = sys.stdout.isatty()
+    # Allocate a TTY only when both streams are real terminals, so color
+    # auto-detection keeps working, piping still succeeds, and a terminal with
+    # no readable stdin (some Windows consoles) does not trip docker's
+    # "the input device is not a TTY".
+    interactive = is_tty(sys.stdout) and is_tty(sys.stdin)
 
     if os.environ.get("PICARO_PRINT"):
         print(" ".join(build_command(args, workdir, interactive)))

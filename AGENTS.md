@@ -309,27 +309,32 @@ Note the name clash: `build.output.manifest` (bool) is the provenance JSON;
 `build.output.manifest` is **not** the embedded manifest — that is
 `build.output.resources.manifest`.
 
-**Signing + subsystem (done).** `build.output.sign` signs the artifact with
-`signtool.exe` (`src/engine/signing.rs`) after resources are embedded and before
-the manifest, in three modes: `lab` (an automatic CA + leaf — a self-signed
-`<subject> Root CA` in `Cert:\CurrentUser\My` via PowerShell, plus a
-code-signing leaf signed by it; the CA's public cert is exported next to the
-artifact as `<stem>.ca.cer` and **no trust store is modified**: the lab installs
-that file in its own Trusted Root), `store` (an existing cert by
-`thumbprint`/`subject`) and `file` (a `.pfx`; password from `password_env`, never
-the YAML). `signtool` is discovered in PATH → `PICARO_SIGNTOOL` → Windows Kits
-(`...\Windows Kits\10\bin\<ver>\x64`) → `output.sign.signtool`. Optional
-`timestamp_url` (RFC 3161). `src/engine/identity.rs` generates plausible metadata
-when `output.resources.version_info.randomize: true` (company/product/
-description/versions/copyright; explicit fields win), and the generated company
-becomes the lab certificate subject when none is set, so the artifact and the
-signature agree. The manifest records `signature.{mode,subject,issuer,thumbprint,
+**Signing + subsystem (done).** `build.output.sign` signs the artifact after
+resources are embedded and before the manifest. Two backends are selected by
+availability (`src/engine/signing.rs::locate_signer`): **`signtool.exe`** on
+Windows (PATH → `PICARO_SIGNTOOL` → Windows Kits → `output.sign.signtool`) and
+**`osslsigncode`** everywhere else, so the Docker image signs too. Three modes:
+`lab` (an automatic CA + leaf — on Windows via PowerShell in
+`Cert:\CurrentUser\My`, on other platforms via `openssl` under
+`<artifact dir>/.picaro/lab/<subject>/`, overridable with `PICARO_SIGN_DIR`; the
+CA's public cert is exported next to the artifact as `<stem>.ca.cer` and **no
+trust store is modified**), `store` (an existing cert by `thumbprint`/`subject`;
+**Windows only**, it reads the certificate store) and `file` (a `.pfx`; password
+from `password_env`, never the YAML). Optional `timestamp_url` (RFC 3161:
+signtool `/tr`, osslsigncode `-ts`). The Dockerfile ships `osslsigncode` +
+`openssl` and its smoke test builds a lab-signed artifact and extracts the
+signature. `src/engine/identity.rs` generates plausible metadata when
+`output.resources.version_info.randomize: true` (company/product/description/
+versions/copyright; explicit fields win), and the generated company becomes the
+lab certificate subject when none is set, so the artifact and the signature
+agree. The manifest records `signature.{mode,subject,issuer,thumbprint,
 ca_file}` and the resolved `version_info`. `build.output.subsystem`
 (`console`|`windows`) prepends `#![windows_subsystem = "windows"]` to the
 rendered stub (skipped if the stub sets its own). A lab signature verifies only
 where its CA is trusted; it gives no SmartScreen reputation.
-`.pfx`/`.p12`/`.pem`/`.key` are gitignored. Example:
-`examples/plans/mimikatz.yaml` (randomized identity + lab signature).
+`.pfx`/`.p12`/`.pem`/`.key` and `**/.picaro/` are gitignored. Examples:
+`examples/plans/mimikatz.yaml` (randomized identity + lab signature) and
+`examples/plans/lab-signed.yaml` (a backend-agnostic lab signature).
 
 ## Known limitations
 
@@ -366,6 +371,10 @@ where its CA is trusted; it gives no SmartScreen reputation.
   currently shuffles.
 - Windows Defender flags the packed artifacts (unavoidable); the dev machine
   had it disabled during the 6a runtime tests.
+- **The container cannot `sign.mode: store`, and cannot run the Defender scan.**
+  Both read Windows-only state: the certificate store and `MpCmdRun.exe`. The
+  image ships `osslsigncode` + `openssl`, so `lab` and `file` signing work there
+  (`audit` still runs; its Defender line reports `unavailable`).
 
 ## Session workflow
 

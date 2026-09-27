@@ -11,6 +11,10 @@
 #   * MinGW-w64 linker     (gcc-mingw-w64-x86-64)
 #   * prebuilt workspace .rlib files for the stub's Windows target
 #
+# Signing needs no Windows SDK either: `osslsigncode` signs the artifact and
+# `openssl` generates the `mode: lab` certificate chain, so every signing mode
+# except `store` (which reads the Windows certificate store) works in here.
+#
 # Usage (see README.md, "Docker"):
 #   docker build -t picaro .
 #   docker run --rm -it -v "$PWD:/work" -w /work picaro build plan.yaml
@@ -18,10 +22,13 @@
 FROM rust:1-bookworm
 
 # MinGW-w64 provides `x86_64-w64-mingw32-gcc`, the linker `rustc --target
-# x86_64-pc-windows-gnu` uses to link the stub into a PE.
+# x86_64-pc-windows-gnu` uses to link the stub into a PE. `osslsigncode` is the
+# portable Authenticode signer and `openssl` builds the lab certificate chain.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         gcc-mingw-w64-x86-64 \
+        openssl \
+        osslsigncode \
     && rm -rf /var/lib/apt/lists/*
 
 # Standard library for the Windows GNU cross-compilation target.
@@ -52,6 +59,14 @@ RUN cargo build --target x86_64-pc-windows-gnu --release
 # correctly. Fails the image build if anything is misconfigured.
 RUN ./target/release/picaro --quiet build examples/plans/reflective-loading.yaml \
     && test -s dist/test_packed_reflective.exe
+
+# Second smoke test: the portable signer. Builds a lab-signed artifact (the
+# certificate chain is generated with `openssl`) and proves the artifact carries
+# a signature, so a missing/broken signer fails the image build.
+RUN ./target/release/picaro --quiet build examples/plans/lab-signed.yaml \
+    && test -s dist/lab_signed.exe \
+    && osslsigncode extract-signature -pem -in dist/lab_signed.exe -out /tmp/lab_signed.pem \
+    && test -s /tmp/lab_signed.pem
 
 # The user mounts a directory with plans/payloads here; outputs land back on
 # the host through the same mount.

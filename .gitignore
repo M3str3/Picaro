@@ -22,6 +22,9 @@ code_examples/
 *.pem
 *.key
 
+# Lab signing identity (CA + leaf) generated for `output.sign.mode: lab`.
+**/.picaro/
+
 # Keep the checked-in test payload and the PE parser fixture.
 !examples/payloads/test_payload.exe
 !tests/fixtures/minimal_x64.exe

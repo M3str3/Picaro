@@ -22,6 +22,7 @@ use std::sync::OnceLock;
 use rand::RngCore;
 use regex::Regex;
 
+use super::api_resolution::{self, ApiResolutionConfig, ApiResolutionMode};
 use super::args::{self, ArgsMode};
 use super::debug;
 use super::obfuscation::{byte_array_literal, StringsConfig};
@@ -90,6 +91,7 @@ const BUILTIN_REQUIRED: &[&str] = &[
     "$SYSCALLS_BLOCK$",
     "$ARGS_BLOCK$",
     "$IMPORTS_BLOCK$",
+    "$API_RESOLUTION_BLOCK$",
     "$EXECUTION_BLOCK$",
 ];
 
@@ -109,12 +111,34 @@ pub fn generate_stub_marker() -> String {
 ///
 /// Returns an error if a required placeholder is missing from the template or
 /// if any `$...$` is left unsubstituted.
+/// Convenience wrapper around [`render_main_rs_with`] using the default (no-op)
+/// API-resolution config. Kept for tests and third-party callers of the engine.
+#[allow(dead_code)]
 pub fn render_main_rs(
     template: &str,
     params: &StubParams,
     pipeline: &[RuntimeStep],
     strings: &StringsConfig,
     syscalls: &SyscallsConfig,
+) -> Result<String> {
+    render_main_rs_with(
+        template,
+        params,
+        pipeline,
+        strings,
+        syscalls,
+        &ApiResolutionConfig::default(),
+    )
+}
+
+/// Like [`render_main_rs`], with a resolved `build.stub.api_resolution` config.
+pub fn render_main_rs_with(
+    template: &str,
+    params: &StubParams,
+    pipeline: &[RuntimeStep],
+    strings: &StringsConfig,
+    syscalls: &SyscallsConfig,
+    api_resolution: &ApiResolutionConfig,
 ) -> Result<String> {
     for required in BUILTIN_REQUIRED {
         if !template.contains(required) {
@@ -123,7 +147,14 @@ pub fn render_main_rs(
             )));
         }
     }
-    render_common(template, params, pipeline, strings, syscalls)
+    render_common(
+        template,
+        params,
+        pipeline,
+        strings,
+        syscalls,
+        api_resolution,
+    )
 }
 
 /// Renders a custom loader stub template.
@@ -132,12 +163,34 @@ pub fn render_main_rs(
 /// requirement (enforced separately by [`validate_custom_stub_template`]) is a
 /// `fn main()`. When the template ignores the technique blocks while the YAML
 /// declares techniques, a non-fatal warning is returned for each ignored block.
+/// Convenience wrapper around [`render_custom_stub_with`] using the default
+/// (no-op) API-resolution config.
+#[allow(dead_code)]
 pub fn render_custom_stub(
     template: &str,
     params: &StubParams,
     pipeline: &[RuntimeStep],
     strings: &StringsConfig,
     syscalls: &SyscallsConfig,
+) -> Result<RenderedStub> {
+    render_custom_stub_with(
+        template,
+        params,
+        pipeline,
+        strings,
+        syscalls,
+        &ApiResolutionConfig::default(),
+    )
+}
+
+/// Like [`render_custom_stub`], with a resolved `build.stub.api_resolution`.
+pub fn render_custom_stub_with(
+    template: &str,
+    params: &StubParams,
+    pipeline: &[RuntimeStep],
+    strings: &StringsConfig,
+    syscalls: &SyscallsConfig,
+    api_resolution: &ApiResolutionConfig,
 ) -> Result<RenderedStub> {
     let mut warnings = Vec::new();
     if has_preparation(pipeline) && !template.contains("$PREPARATION_BLOCKS$") {
@@ -178,8 +231,26 @@ pub fn render_custom_stub(
                 .to_string(),
         );
     }
+    if api_resolution.mode == ApiResolutionMode::Proxy
+        && !api_resolution.apis.is_empty()
+        && imports::needed(pipeline)
+        && !template.contains("$API_RESOLUTION_BLOCK$")
+    {
+        warnings.push(
+            "loader stub does not reference $API_RESOLUTION_BLOCK$; the declared API resolution \
+             proxies will not be installed"
+                .to_string(),
+        );
+    }
 
-    let source = render_common(template, params, pipeline, strings, syscalls)?;
+    let source = render_common(
+        template,
+        params,
+        pipeline,
+        strings,
+        syscalls,
+        api_resolution,
+    )?;
     Ok(RenderedStub { source, warnings })
 }
 
@@ -204,8 +275,16 @@ fn render_common(
     pipeline: &[RuntimeStep],
     strings: &StringsConfig,
     syscalls: &SyscallsConfig,
+    api_resolution: &ApiResolutionConfig,
 ) -> Result<String> {
-    let values = placeholder_values(template, params, pipeline, strings, syscalls);
+    let values = placeholder_values(
+        template,
+        params,
+        pipeline,
+        strings,
+        syscalls,
+        api_resolution,
+    );
     let mut source = substitute_template(template, &values)?;
     // The technique fragments embed `crate::tech_dbg!` calls, so the macro must
     // exist in the generated stub. It is appended instead of being a template
@@ -228,6 +307,7 @@ fn placeholder_values(
     pipeline: &[RuntimeStep],
     strings: &StringsConfig,
     syscalls: &SyscallsConfig,
+    api_resolution: &ApiResolutionConfig,
 ) -> BTreeMap<String, String> {
     let (preparation_blocks, execution_block) = render_blocks(
         pipeline,
@@ -263,7 +343,12 @@ fn placeholder_values(
     values.insert("$PREPARATION_BLOCKS$".to_string(), preparation_blocks);
     values.insert(
         "$SYSCALLS_BLOCK$".to_string(),
-        syscalls::render_block(syscalls, pipeline, strings),
+        syscalls::render_block_with(
+            syscalls,
+            pipeline,
+            strings,
+            &api_resolution.required_syscalls(),
+        ),
     );
     values.insert(
         "$ARGS_BLOCK$".to_string(),
@@ -272,6 +357,14 @@ fn placeholder_values(
     values.insert(
         "$IMPORTS_BLOCK$".to_string(),
         imports::render_block(pipeline, strings),
+    );
+    values.insert(
+        "$API_RESOLUTION_BLOCK$".to_string(),
+        if imports::needed(pipeline) {
+            api_resolution::render_block(api_resolution, strings)
+        } else {
+            String::new()
+        },
     );
     values.insert("$EXECUTION_BLOCK$".to_string(), execution_block);
     if template.contains("$PAYLOAD_BYTES$") {
@@ -432,6 +525,7 @@ $PREPARATION_BLOCKS$
 $SYSCALLS_BLOCK$
 $ARGS_BLOCK$
 $IMPORTS_BLOCK$
+$API_RESOLUTION_BLOCK$
 $EXECUTION_BLOCK$
 "#;
 

@@ -4,6 +4,7 @@ use super::{Params, DEF, SHELLCODE_FRAGMENT};
 use crate::engine::obfuscation::StringsConfig;
 use crate::plan::schema::PayloadFormat;
 use crate::techniques::RuntimeStep;
+use std::process::Command;
 
 #[test]
 fn parses_params_from_empty_yaml() {
@@ -234,4 +235,198 @@ fn compiles_reflective_loading_stub_to_pe() {
     .unwrap();
 
     let _ = std::fs::remove_dir_all(&build_dir);
+}
+
+/// Builds the `api_resolution` probe payload, packs it with an indirect-syscall
+/// `reflective_loading` stub and the given `apis:` selection (debug build, so the
+/// proxies emit `tech_dbg!` traces), runs it and returns `(stdout, stderr)`.
+fn run_proxy_case(name: &str, apis_yaml: &str) -> (String, String) {
+    use std::path::Path;
+
+    let build_dir =
+        std::env::temp_dir().join(format!("picaro_api_res_{}_{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&build_dir);
+    std::fs::create_dir_all(&build_dir).unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    // 1. Compile the probe payload with a single `rustc`.
+    let rustc = crate::engine::compiler::find_rustc().unwrap();
+    let probe_exe = build_dir.join("probe.exe");
+    let status = Command::new(&rustc)
+        .arg(root.join("tests").join("fixtures").join("api_probe.rs"))
+        .args(["-O", "-C", "strip=symbols", "-o"])
+        .arg(&probe_exe)
+        .status()
+        .unwrap();
+    assert!(status.success(), "probe compilation failed");
+    let plaintext = std::fs::read(&probe_exe).unwrap();
+
+    // 2. Encrypt it as the payload the stub embeds.
+    let key = crate::engine::crypto::generate_key();
+    let encrypted = crate::engine::crypto::encrypt_payload(&plaintext, &key).unwrap();
+    std::fs::write(build_dir.join("payload.bin"), &encrypted.ciphertext).unwrap();
+
+    // 3. Resolve the loader configs.
+    let syscalls = crate::engine::syscalls::SyscallsConfig {
+        mode: crate::engine::syscalls::SyscallsMode::Indirect,
+        resolver: crate::engine::syscalls::Resolver::HellsGate,
+    };
+    let yaml = format!("mode: proxy\napis:\n{apis_yaml}");
+    let yaml: crate::engine::api_resolution::YamlApiResolutionPlan =
+        serde_yml::from_str(&yaml).unwrap();
+    let api_resolution =
+        crate::engine::api_resolution::ApiResolutionConfig::from_yaml(Some(&yaml)).unwrap();
+
+    // 4. Render (debug) and compile the stub.
+    let template =
+        std::fs::read_to_string(root.join("templates").join("stub").join("main.rs.tpl")).unwrap();
+    let params = crate::engine::stub::StubParams {
+        nonce: encrypted.nonce,
+        key: encrypted.key,
+        ciphertext: encrypted.ciphertext.clone(),
+        plaintext_len: encrypted.plaintext_len,
+        payload_format: PayloadFormat::Pe,
+        payload_export: None,
+        stub_marker: crate::engine::stub::generate_stub_marker(),
+        payload_path: "payload.bin".to_string(),
+        build_args: std::collections::BTreeMap::new(),
+        payload_args: Vec::new(),
+        args_mode: crate::engine::args::ArgsMode::Join,
+        debug: true,
+        windows_subsystem: false,
+    };
+    let pipeline = vec![RuntimeStep::ReflectiveLoading { params: Params {} }];
+    let strings = StringsConfig::from_yaml(None).unwrap();
+    let stub_src = crate::engine::stub::render_main_rs_with(
+        &template,
+        &params,
+        &pipeline,
+        &strings,
+        &syscalls,
+        &api_resolution,
+    )
+    .unwrap();
+    let stub_path = build_dir.join("main.rs");
+    std::fs::write(&stub_path, stub_src).unwrap();
+
+    let deps = crate::engine::compiler::locate_stub_deps().unwrap();
+    let out = build_dir.join("out.exe");
+    crate::engine::compiler::compile_stub(
+        &stub_path,
+        &out,
+        &deps,
+        crate::engine::compiler::CompileOptions::default(),
+    )
+    .unwrap();
+
+    // 5. Run the artifact and capture both streams.
+    let output = Command::new(&out).output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let _ = std::fs::remove_dir_all(&build_dir);
+    (stdout, stderr)
+}
+
+/// Strategy `route_to_nt` (rebuild): `kernel32!OpenProcess` is rebuilt on
+/// `NtOpenProcess` and the returned handle must be valid and usable.
+#[test]
+#[ignore = "requires rustc and the compiled dependencies"]
+fn api_resolution_rebuilds_openprocess() {
+    let (stdout, stderr) = run_proxy_case("rebuild", "  - \"kernel32!OpenProcess\"\n");
+    assert!(
+        stderr.contains("routed to the syscall layer"),
+        "no route trace:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("open=0x0 via_handle"),
+        "null handle:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("via_handle=1 bytes=[88, 77, 66, 55, 44, 33, 22, 11]"),
+        "the rebuilt handle was not usable:\n{stdout}"
+    );
+}
+
+/// Strategy `route_to_nt` (direct): the `ntdll!NtOpenProcess` entry routes
+/// through the syscall layer.
+#[test]
+#[ignore = "requires rustc and the compiled dependencies"]
+fn api_resolution_routes_ntopenprocess() {
+    let (stdout, stderr) = run_proxy_case("ntopen", "  - \"ntdll!NtOpenProcess\"\n");
+    assert!(
+        stderr.contains("routed to the syscall layer"),
+        "no route trace:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("forwarded to the original"),
+        "unexpected forward trace:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("ntopen=0x00000000 handle=0x"),
+        "wrong status:\n{stdout}"
+    );
+    assert!(!stdout.contains("handle=0x0\n"), "null handle:\n{stdout}");
+}
+
+/// The `GetProcAddress` handler: a catalogue name gets its proxy, an ordinal is
+/// forwarded to the original resolver.
+#[test]
+#[ignore = "requires rustc and the compiled dependencies"]
+fn api_resolution_handler_returns_proxies() {
+    let (stdout, stderr) = run_proxy_case(
+        "handler",
+        "  - \"kernel32!GetProcAddress\"\n  - \"kernel32!ReadProcessMemory\"\n",
+    );
+    assert!(
+        stderr.contains("returned a proxy"),
+        "the handler did not return a proxy:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("forwarded to the original"),
+        "the ordinal was not forwarded:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("rc=1 bytes=[88, 77, 66, 55, 44, 33, 22, 11]"),
+        "the dynamically resolved proxy returned wrong data:\n{stdout}"
+    );
+}
+
+/// Strategy `route_to_nt` (direct): the `ntdll!Nt*` entry routes through the
+/// syscall layer.
+#[test]
+#[ignore = "requires rustc and the compiled dependencies"]
+fn api_resolution_routes_ntreadvirtualmemory() {
+    let (stdout, stderr) = run_proxy_case("direct", "  - \"ntdll!NtReadVirtualMemory\"\n");
+    assert!(
+        stderr.contains("routed to the syscall layer"),
+        "no route trace:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("forwarded to the original"),
+        "unexpected forward trace:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("API_PROBE ntrvm=0x00000000 read=8 bytes=[88, 77, 66, 55, 44, 33, 22, 11]"),
+        "wrong data or status:\n{stdout}"
+    );
+}
+
+/// Strategy `route_to_nt` (wrapper): `kernel32!ReadProcessMemory` is
+/// re-implemented on `NtReadVirtualMemory` (NTSTATUS -> BOOL).
+#[test]
+#[ignore = "requires rustc and the compiled dependencies"]
+fn api_resolution_wraps_readprocessmemory() {
+    let (stdout, stderr) = run_proxy_case("wrapper", "  - \"kernel32!ReadProcessMemory\"\n");
+    assert!(
+        stderr.contains("routed to the syscall layer"),
+        "no route trace:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("forwarded to the original"),
+        "unexpected forward trace:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("API_PROBE rpm=1 read=8 bytes=[88, 77, 66, 55, 44, 33, 22, 11]"),
+        "wrong data:\n{stdout}"
+    );
 }

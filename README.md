@@ -58,7 +58,10 @@ automatically when output is redirected.
 
 No Rust, MinGW-w64 or Windows target installed? The bundled image ships the
 whole toolchain (rustc, cargo, the `x86_64-pc-windows-gnu` target, the MinGW
-linker) plus the prebuilt workspace `.rlib` files, so one command is enough.
+linker) plus the prebuilt workspace `.rlib` files, so one command is enough. It
+also carries `osslsigncode` and `openssl`, so it can sign the artifact itself
+(see [Signing](#signing)); only `mode: store` needs Windows, because it reads the
+certificate store.
 
 ```bash
 # One-time build (a few minutes the first time).
@@ -98,6 +101,10 @@ How it works:
   it; outputs (`dist/…`) land on your host through the mount.
 - Subcommands and flags pass through unchanged (`build`, `audit`,
   `techniques …`, plus `-q`/`-v`/`--no-color`).
+- Signing works in the container: `mode: lab` and `mode: file` use
+  `osslsigncode` (the `lab` chain is generated with `openssl`), so a single
+  command produces a signed artifact. `mode: store` is the one exception — it
+  reads the Windows certificate store.
 
 > The container only *builds* the packed Windows PE (it cross-compiles the stub
 > to `x86_64-pc-windows-gnu`). Run the resulting `.exe` on a Windows host.
@@ -165,7 +172,7 @@ runtime:                  # 0..N preparation, then exactly one execution
 | `build.output` | Where the packed PE goes and how it is finalized. `arch` is `x64`; `x86` is recognized but rejected as not integrated yet. `manifest` writes the provenance file. |
 | `build.output.subsystem` | `console` (default) or `windows` (GUI, no console window). |
 | `build.output.resources` | Optional PE resources embedded into the artifact: `icon`, `version_info` and `manifest` (Windows app manifest / UAC). Built in Rust and written into a `.rsrc` section. |
-| `build.output.sign` | Optional Authenticode signing via `signtool`: `lab` (self-signed), `store` (an existing cert) or `file` (a `.pfx`). |
+| `build.output.sign` | Optional Authenticode signing: `lab` (self-signed), `store` (an existing cert, Windows only) or `file` (a `.pfx`). Uses `signtool` on Windows and `osslsigncode` elsewhere. |
 | `runtime` | The techniques to apply, in order. `0..N` Preparation followed by exactly one Execution. A technique's parameters go under a nested `params:` mapping. |
 
 **Build arguments.** Positional args after the plan path are substituted in
@@ -386,10 +393,12 @@ build:
 
 ### Signing
 
-`build.output.sign` signs the finished artifact with `signtool.exe` (Windows SDK;
-found in `PATH`, then `PICARO_SIGNTOOL`, then the Windows Kits directories, or
-set `signtool` explicitly). Signing runs last, so the signature covers the
-resources, and the manifest records the certificate and thumbprint.
+`build.output.sign` signs the finished artifact with **`signtool.exe`** on
+Windows (found in `PATH`, then `PICARO_SIGNTOOL`, then the Windows Kits
+directories, or set `signtool` explicitly) and with **`osslsigncode`**
+everywhere else, including the Docker image. The same plan signs on either
+platform; signing runs last, so the signature covers the resources, and the
+manifest records the certificate and thumbprint.
 
 ```yaml
 output:
@@ -401,21 +410,26 @@ output:
 
 - `mode: lab` builds a small certificate chain automatically: it creates (once)
   a self-signed CA (`<subject> Root CA`) and a code-signing certificate signed by
-  it, in the current user's store. It does **not** change this machine's trust:
-  instead it exports the CA's public certificate next to the artifact as
-  `<stem>.ca.cer`, which you install in the lab's *Trusted Root Certification
-  Authorities*. If no `subject` is set and the metadata is randomized, the
-  generated company is used as the subject, so the certificate and the
-  `VERSIONINFO` agree. **It is for integrity and lab verification only** — a
-  lab-trusted identity gives no SmartScreen reputation.
+  it. It does **not** change this machine's trust: instead it exports the CA's
+  public certificate next to the artifact as `<stem>.ca.cer`, which you install
+  in the lab's *Trusted Root Certification Authorities*. On Windows the pair
+  lives in the current user's store; with `osslsigncode` it lives under
+  `<artifact dir>/.picaro/lab/<subject>/` (override with `PICARO_SIGN_DIR`), so
+  the CA is reused across builds — including through the Docker mount. If no
+  `subject` is set and the metadata is randomized, the generated company is used
+  as the subject, so the certificate and the `VERSIONINFO` agree. **It is for
+  integrity and lab verification only** — a lab-trusted identity gives no
+  SmartScreen reputation.
 - `mode: store` uses a certificate already in the current user's store, matched
-  by `thumbprint` or `subject`.
+  by `thumbprint` or `subject`. This is the *Windows* certificate store, so the
+  mode is Windows only; inside a container use `file` or `lab`.
 - `mode: file` uses a `.pfx`/`.p12`; the password comes from the environment
   variable named by `password_env`, never from the YAML.
 
-See [`examples/plans/mimikatz.yaml`](examples/plans/mimikatz.yaml) — a
-complete example that combines a randomized identity with an automatic lab
-signature.
+See [`examples/plans/mimikatz.yaml`](examples/plans/mimikatz.yaml) (randomized
+identity + lab signature) and
+[`examples/plans/lab-signed.yaml`](examples/plans/lab-signed.yaml) (a
+self-contained lab signature that works on either backend, including Docker).
 
 A signed build produces three files next to each other (all named after the
 artifact): `<stem>.exe`, `<stem>.manifest.json` and `<stem>.ca.cer`. The last one
@@ -476,7 +490,7 @@ user-facing output goes through `src/ui.rs`. The full list is in
 | 7 | done | AMSI patching (`patch_amsi`), technique categories |
 | 8 | done | Environment gate (`bouncer`) |
 | — | done | Payload formats (`pe`/`shellcode`/`dll`), interactive wizard, custom stubs |
-| — | done | PE resources (icon, version info, manifest) and `signtool` signing |
+| — | done | PE resources (icon, version info, manifest) and Authenticode signing (`signtool` on Windows, `osslsigncode` elsewhere) |
 
 Planned:
 

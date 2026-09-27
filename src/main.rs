@@ -22,7 +22,7 @@ use std::time::Instant;
 
 use clap::{CommandFactory, Parser, Subcommand};
 
-use engine::{compiler, crypto, obfuscation, pe, stub, syscalls};
+use engine::{api_resolution, compiler, crypto, obfuscation, pe, stub, syscalls};
 use error::Result;
 use plan::schema::{
     Arch, CryptoAlgorithm, KeySource, PayloadFormat, PayloadPlan, Subsystem, TrimPaths,
@@ -449,6 +449,8 @@ fn build(
     }
     let strings = obfuscation::StringsConfig::from_yaml(plan.build.stub.strings.as_ref())?;
     let syscalls = syscalls::SyscallsConfig::from_yaml(plan.build.stub.syscalls.as_ref())?;
+    let api_resolution =
+        api_resolution::ApiResolutionConfig::from_yaml(plan.build.stub.api_resolution.as_ref())?;
     if syscalls.mode == syscalls::SyscallsMode::Indirect
         && syscalls::required(&plan.runtime).is_empty()
     {
@@ -490,8 +492,14 @@ fn build(
         None => {
             let relative = "templates/stub/main.rs.tpl";
             let template_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+            let source = std::fs::read_to_string(&template_path).map_err(|source| {
+                error::PackerError::ReadLoader {
+                    path: template_path.clone(),
+                    source,
+                }
+            })?;
             let display = format!("builtin {} {relative}", glyph::DOT);
-            (std::fs::read_to_string(&template_path)?, display, false)
+            (source, display, false)
         }
     };
 
@@ -513,14 +521,27 @@ fn build(
 
     let stub_src = if is_custom {
         stub::validate_custom_stub_template(&template)?;
-        let rendered =
-            stub::render_custom_stub(&template, &params, &plan.runtime, &strings, &syscalls)?;
+        let rendered = stub::render_custom_stub_with(
+            &template,
+            &params,
+            &plan.runtime,
+            &strings,
+            &syscalls,
+            &api_resolution,
+        )?;
         for warning in &rendered.warnings {
             anstream::eprintln!("  {} {}", ui.bang(), ui.warn(format!("warning: {warning}")));
         }
         rendered.source
     } else {
-        stub::render_main_rs(&template, &params, &plan.runtime, &strings, &syscalls)?
+        stub::render_main_rs_with(
+            &template,
+            &params,
+            &plan.runtime,
+            &strings,
+            &syscalls,
+            &api_resolution,
+        )?
     };
     let stub_src = apply_subsystem(stub_src, plan.build.output.subsystem);
     let stub_path = build_dir.join("main.rs");
@@ -587,6 +608,9 @@ fn build(
         debug,
     };
     compiler::compile_stub(&stub_path, &out, &deps, options)?;
+    // D-21: a proxy must never import the API it intercepts, or the signature
+    // would simply move from the payload's IAT into the stub's.
+    verify_no_intercepted_imports(&out, &api_resolution)?;
     let compile_time = timer.elapsed();
 
     anstream::println!(
@@ -767,12 +791,12 @@ fn dry_run(plan: &plan::Plan, plan_path: &Path, ui: &Palette) -> Result<()> {
     }
     anstream::println!("{}", ui.done("payload", dotted(ui, &parts)));
 
-    // Signing is validated without signing: locate `signtool` and check the
-    // configured .pfx exists (the certificate itself is resolved at build time).
+    // Signing is validated without signing: the configured inputs are checked
+    // (a missing .pfx fails without needing a tool) and a backend is located
+    // (the certificate itself is resolved at build time).
     let sign = resolve_sign(plan, resources.as_ref());
     if let Some(sign) = &sign {
         if sign.mode != "none" {
-            let tool = engine::signing::signtool_path(sign)?;
             if let Some(file) = &sign.file {
                 if !file.is_file() {
                     return Err(error::PackerError::Validation(format!(
@@ -781,10 +805,11 @@ fn dry_run(plan: &plan::Plan, plan_path: &Path, ui: &Palette) -> Result<()> {
                     )));
                 }
             }
+            let signer = engine::signing::locate_signer(sign)?;
             anstream::println!("{}", ui.detail("sign", ui.dim(sign_label(sign))));
             anstream::println!(
                 "{}",
-                ui.detail("signtool", ui.dim(tool.display().to_string()))
+                ui.detail(signer.label, ui.dim(signer.path.display().to_string()))
             );
         }
     }
@@ -1004,6 +1029,49 @@ fn stub_mode_label(plan: &plan::Plan) -> &'static str {
 ///
 /// Runs on the rendered source (builtin or custom) so `rustc` links a GUI
 /// binary. A source that already sets `windows_subsystem` is left untouched.
+/// Verifies that the compiled stub does not import any API that
+/// `build.stub.api_resolution` routes or forwards (D-21).
+///
+/// The whole point of the feature is that the intercepted calls leave the IAT; a
+/// proxy that imported the very API it intercepts would move the signature from
+/// the payload's IAT into the stub's instead of removing it.
+///
+/// `Strategy::Handler` entries are exempt: `GetProcAddress` is imported by the
+/// loader itself (the import resolver and the syscall resolvers use it), so its
+/// presence is not a regression and cannot be told apart from the handler's own
+/// dynamic resolver.
+fn verify_no_intercepted_imports(
+    artifact: &Path,
+    config: &api_resolution::ApiResolutionConfig,
+) -> Result<()> {
+    if config.mode != api_resolution::ApiResolutionMode::Proxy || config.apis.is_empty() {
+        return Ok(());
+    }
+    let bytes = std::fs::read(artifact)?;
+    let audit = audit::pe_info::analyze(&bytes).map_err(|e| {
+        error::PackerError::Validation(format!("could not audit the compiled stub: {e}"))
+    })?;
+    for entry in &config.apis {
+        if entry.strategy == api_resolution::Strategy::Handler {
+            continue;
+        }
+        for dll in &audit.imports {
+            let hit = dll
+                .functions
+                .iter()
+                .any(|f| matches!(f, audit::pe_info::ImportItem::Named(n) if n == entry.func));
+            if hit {
+                return Err(error::PackerError::Validation(format!(
+                    "the stub imports '{}' (from '{}') while build.stub.api_resolution proxies it: a \
+                     proxy must not import the API it intercepts",
+                    entry.func, dll.name
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn apply_subsystem(source: String, subsystem: Subsystem) -> String {
     if subsystem == Subsystem::Windows && !source.contains("windows_subsystem") {
         let mut out = String::with_capacity(source.len() + 40);

@@ -262,22 +262,20 @@ fn fix_imports(
             return Ok(());
         }
 
-        // The mapped image has RVA == offset from `image_base`, so the shared
-        // file-image walker can read it directly with an identity mapping.
-        let view = std::slice::from_raw_parts(
-            image_base as *const u8,
+        // The mapped image has RVA == offset from `image_base`. `patch_imports`
+        // resolves the table, serves catalogue hits from `resolution_policy`,
+        // and makes the IAT writable only while it writes (the loader maps it
+        // read-only).
+        let view = std::slice::from_raw_parts_mut(
+            image_base as *mut u8,
             (*nt).OptionalHeader.SizeOfImage as usize,
         );
-        let imports =
-            crate::resolve_imports(view, import_dir.VirtualAddress, import_dir.Size, |rva| {
-                Some(rva as usize)
-            })?;
-
-        let count = imports.len();
-        for (iat_rva, address) in imports {
-            let slot = (image_base as usize + iat_rva as usize) as *mut u64;
-            *slot = address;
-        }
+        let count = crate::patch_imports(
+            view,
+            import_dir.VirtualAddress,
+            import_dir.Size,
+            crate::resolution_policy,
+        )?;
         crate::tech_dbg!("reflective_loading", "IAT patched ({count} import(s))");
     }
     Ok(())
