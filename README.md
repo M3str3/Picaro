@@ -70,12 +70,15 @@ certificate store.
 docker build -t picaro .
 
 # Pack, mounting the current directory as /work: plans + payloads in, dist/ out.
-docker run --rm -it -v "$PWD:/work" -w /work picaro build examples/plans/reflective-loading.yaml
+# On Linux, run as yourself so the outputs are not root-owned, and point the
+# scratch directory somewhere writable (the baked-in source is not).
+docker run --rm -it --user "$(id -u):$(id -g)" -e PICARO_BUILD_DIR=/tmp/picaro-build \
+  -v "$PWD:/work" -w /work picaro build examples/plans/reflective-loading.yaml
 ```
 
-Or use the wrapper, which builds the image on first use and passes every
-argument through unchanged. It is one standard-library-only Python script, the
-same on Linux, macOS and Windows:
+Or use the wrapper, which builds the image on first use, handles the flags
+above, and passes every argument through unchanged. It is one
+standard-library-only Python script, the same on Linux, macOS and Windows:
 
 ```bash
 python scripts/picaro.py build examples/plans/reflective-loading.yaml
@@ -83,8 +86,14 @@ python scripts/picaro.py audit dist/test_packed_reflective.exe
 python scripts/picaro.py techniques list
 ```
 
-Pass `--build` first to force a rebuild of the image, and set `PICARO_IMAGE`
-to use a different tag.
+Pass `--rebuild` (or `--build`) anywhere in the arguments to force a rebuild of
+the image, and set `PICARO_IMAGE` to use a different tag.
+
+On Linux the container runs as your user (`--user "$(id -u):$(id -g)"`), so the
+artifacts it writes through the mount stay yours instead of becoming
+root-owned. Docker Desktop (macOS, Windows) and rootless Docker already map
+ownership to your user, so nothing is passed there; `PICARO_USER=<uid>:<gid>`
+overrides the choice and `PICARO_USER=` runs as the image user (root).
 
 On Windows, arguments are translated for the Linux container: relative paths
 (`.\examples\x.yaml`, `dist\y.exe`) become POSIX paths, an absolute path under
@@ -100,7 +109,10 @@ How it works:
   `.rlib`s under `/usr/src/picaro/target`.
 - Your working directory is mounted at `/work`. Run from the repo root (or any
   directory holding your `plan.yaml` and payload) and use paths relative to
-  it; outputs (`dist/…`) land on your host through the mount.
+  it; outputs (`dist/…`) land on your host through the mount, owned by you.
+- The packer's scratch directory (`build/` next to its source, read-only here)
+  is redirected into the container with `PICARO_BUILD_DIR=/tmp/picaro-build`,
+  so a non-root user can still write the intermediate files.
 - Subcommands and flags pass through unchanged (`build`, `audit`,
   `techniques …`, plus `-q`/`-v`/`--no-color`).
 - Signing works in the container: `mode: lab` and `mode: file` use

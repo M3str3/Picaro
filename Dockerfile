@@ -17,7 +17,12 @@
 #
 # Usage (see README.md, "Docker"):
 #   docker build -t picaro .
-#   docker run --rm -it -v "$PWD:/work" -w /work picaro build plan.yaml
+#   docker run --rm -it --user "$(id -u):$(id -g)" -e PICARO_BUILD_DIR=/tmp/picaro-build \
+#     -v "$PWD:/work" -w /work picaro build plan.yaml
+#
+# `--user` keeps the artifacts you write through the mount yours instead of
+# root-owned; `PICARO_BUILD_DIR` moves the packer's scratch files off the
+# read-only source tree. scripts/picaro.py sets both for you.
 
 FROM rust:1-bookworm
 

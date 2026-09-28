@@ -475,9 +475,10 @@ fn build(
         anstream::eprintln!("  {} {}", ui.bang(), ui.warn(format!("warning: {warning}")));
     }
 
-    // 4. Prepare `build/` and write the ciphertext the builtin template embeds.
+    // 4. Prepare the scratch dir and write the ciphertext the builtin template
+    //    embeds.
     let timer = Instant::now();
-    let build_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("build");
+    let build_dir = scratch_dir();
     prepare_build_dir(&build_dir)?;
     std::fs::write(build_dir.join("payload.bin"), &encrypted.ciphertext)?;
 
@@ -788,7 +789,7 @@ fn build_multistage(
         anstream::eprintln!("  {} {}", ui.bang(), ui.warn(format!("warning: {warning}")));
     }
 
-    let build_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("build");
+    let build_dir = scratch_dir();
     prepare_build_dir(&build_dir)?;
 
     // 1. Encrypt every payload and collect the renderer's stage list.
@@ -1693,6 +1694,30 @@ fn prepare_build_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The scratch directory for intermediate artifacts (`payload.bin`, the rendered
+/// stub, the compiled `out.exe`).
+///
+/// Defaults to `build/` next to the manifest, which suits a checkout but not a
+/// read-only installation or a different user than the one that installed the
+/// packer (the Docker image runs as the invoking user, and only the mount is
+/// writable there) — hence the `PICARO_BUILD_DIR` override.
+fn scratch_dir() -> PathBuf {
+    scratch_dir_in(
+        std::env::var_os("PICARO_BUILD_DIR").map(PathBuf::from),
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+    )
+}
+
+/// Resolves [`scratch_dir`] from an explicit `PICARO_BUILD_DIR` value (when set
+/// and non-empty) and the manifest directory. Split out so both branches are
+/// testable without touching the process environment.
+fn scratch_dir_in(override_dir: Option<PathBuf>, manifest_dir: &Path) -> PathBuf {
+    match override_dir {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => manifest_dir.join("build"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1721,5 +1746,26 @@ mod tests {
     #[test]
     fn short_thumbprint_keeps_the_first_16_digits() {
         assert_eq!(short_thumbprint("DEADBEEF00112233AABB"), "DEADBEEF00112233");
+    }
+
+    #[test]
+    fn scratch_dir_defaults_to_build_next_to_the_manifest() {
+        let dir = scratch_dir_in(None, Path::new("/usr/src/picaro"));
+        assert_eq!(dir, Path::new("/usr/src/picaro/build"));
+    }
+
+    #[test]
+    fn scratch_dir_honors_the_picaro_build_dir_override() {
+        let dir = scratch_dir_in(
+            Some(PathBuf::from("/tmp/picaro-build")),
+            Path::new("/usr/src/picaro"),
+        );
+        assert_eq!(dir, Path::new("/tmp/picaro-build"));
+    }
+
+    #[test]
+    fn an_empty_scratch_override_falls_back_to_the_default() {
+        let dir = scratch_dir_in(Some(PathBuf::new()), Path::new("/usr/src/picaro"));
+        assert_eq!(dir, Path::new("/usr/src/picaro/build"));
     }
 }

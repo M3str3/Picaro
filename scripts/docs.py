@@ -36,6 +36,7 @@ def build_command(args: list[str]) -> list[str]:
     every platform; the default action is a live server on 0.0.0.0 so the
     published port is reachable from the host.
     """
+    print("http://localhost:8000")
     action = args or ["serve", f"--dev-addr=0.0.0.0:{PORT}"]
 
     command = ["docker", "run", "--rm"]
