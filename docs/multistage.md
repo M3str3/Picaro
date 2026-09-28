@@ -16,6 +16,12 @@ A schema-4 document is still accepted: it is the single-payload shorthand and is
 normalized internally to one `technique` stage, so nothing changes for existing
 plans. Only a plan that declares `stages:` uses the multi-stage build path.
 
+Two runnable examples: [`examples/plans/multistage.yaml`](https://github.com/M3str3/Picaro/blob/main/examples/plans/multistage.yaml)
+(two shellcodes + a living-off-the-land command) and the richer
+[`examples/plans/multistage-advanced.yaml`](https://github.com/M3str3/Picaro/blob/main/examples/plans/multistage-advanced.yaml)
+(a `bouncer` gate with indirect syscalls, a `certutil` download stage, a hollowed
+EXE, a sleep, a detached `rundll32` proxy and a terminal reflective stage).
+
 ## The rule that shapes everything: which stages return control
 
 A chain only continues if the loader gets control back after a stage. That is a
