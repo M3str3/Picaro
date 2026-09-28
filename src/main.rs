@@ -360,23 +360,26 @@ fn build(
         print_plan(plan, plan_path, ui);
     }
 
+    // A multi-stage plan has its own build flow (several payloads, per-stage
+    // modules, the stage runner). The single-payload path below is unchanged.
+    if plan::stages::is_multistage(plan) {
+        return build_multistage(plan, build_args, plan_path, ui, verbose, debug);
+    }
+    let payload = plan::stages::single_payload(plan)?;
+
     // 1. Read the input payload and validate it against its declared format
     //    (fail early, before encrypting or compiling).
     let timer = Instant::now();
-    let plaintext = load_source(&plan.build.payload.source)?;
-    verify_payload_hash(&plaintext, plan.build.payload.sha256.as_deref())?;
-    let summary = inspect_payload(
-        plan.build.payload.format,
-        &plaintext,
-        plan.build.output.arch,
-    )?;
+    let plaintext = load_source(&payload.source)?;
+    verify_payload_hash(&plaintext, payload.sha256.as_deref())?;
+    let summary = inspect_payload(payload.format, &plaintext, plan.build.output.arch)?;
     let read_time = timer.elapsed();
     let mut read_parts = vec![
-        ui.target(describe_source(&plan.build.payload.source)),
+        ui.target(describe_source(&payload.source)),
         ui.dim(summary.label),
         human_size(plaintext.len()),
     ];
-    if let Some(export) = &plan.build.payload.export {
+    if let Some(export) = &payload.export {
         read_parts.push(ui.dim(format!("export {export}")));
     }
     anstream::println!("{}", ui.done("read", dotted(ui, &read_parts)));
@@ -396,7 +399,7 @@ fn build(
 
     // 2. Derive the key and encrypt the payload with XChaCha20-Poly1305.
     let timer = Instant::now();
-    let key = match plan.build.payload.crypto.key {
+    let key = match payload.crypto.key {
         KeySource::Random => crypto::generate_key(),
     };
     let encrypted = crypto::encrypt_payload(&plaintext, &key)?;
@@ -408,7 +411,7 @@ fn build(
             dotted(
                 ui,
                 &[
-                    ui.brand(crypto_label(plan.build.payload.crypto.algo)),
+                    ui.brand(crypto_label(payload.crypto.algo)),
                     format!(
                         "{} {} {}",
                         human_size(plaintext.len()),
@@ -512,13 +515,13 @@ fn build(
         key: encrypted.key,
         ciphertext: encrypted.ciphertext.clone(),
         plaintext_len: encrypted.plaintext_len,
-        payload_format: plan.build.payload.format,
-        payload_export: plan.build.payload.export.clone(),
+        payload_format: payload.format,
+        payload_export: payload.export.clone(),
         stub_marker: stub_marker.clone(),
         payload_path: "payload.bin".to_string(),
         build_args: build_args.clone(),
-        payload_args: plan.build.payload.args.clone().unwrap_or_default(),
-        args_mode: plan.build.payload.args_mode,
+        payload_args: payload.args.clone().unwrap_or_default(),
+        args_mode: payload.args_mode,
         debug,
         windows_subsystem: plan.build.output.subsystem == Subsystem::Windows,
     };
@@ -556,14 +559,14 @@ fn build(
         pipeline_chain(ui, &plan.runtime),
         format!("{} {}", ui.dim("strings"), strings.strategy.label()),
         format!("{} {}", ui.dim("syscalls"), syscalls.mode.label()),
-        format!("{} {}", ui.dim("format"), plan.build.payload.format.label()),
+        format!("{} {}", ui.dim("format"), payload.format.label()),
     ];
     if !params.payload_args.is_empty() {
         stub_parts.push(format!(
             "{} {} ({})",
             ui.dim("args"),
             params.payload_args.len(),
-            plan.build.payload.args_mode.label()
+            payload.args_mode.label()
         ));
     }
     if debug {
@@ -579,10 +582,7 @@ fn build(
         );
         anstream::println!(
             "{}",
-            ui.detail(
-                "payload args",
-                ui.dim(payload_args_label(&plan.build.payload))
-            )
+            ui.detail("payload args", ui.dim(payload_args_label(payload)))
         );
         anstream::println!(
             "{}",
@@ -757,6 +757,314 @@ fn build(
     Ok(())
 }
 
+/// Builds a multi-stage plan (schema 5): every payload is encrypted and embedded,
+/// each stage's pipeline is wrapped in its own module, and the generated runner
+/// walks the stages in order.
+///
+/// The provenance manifest records the first payload's hash and nonce; a
+/// stages-aware manifest is a follow-up.
+fn build_multistage(
+    plan: &plan::Plan,
+    build_args: &BTreeMap<String, String>,
+    plan_path: &Path,
+    ui: &Palette,
+    verbose: bool,
+    debug: bool,
+) -> Result<()> {
+    let started = Instant::now();
+    let stages = plan::stages::resolve(plan)?;
+
+    if plan.build.stub.strings.is_none() {
+        anstream::eprintln!(
+            "  {} {}",
+            ui.bang(),
+            ui.warn("build.stub.strings not specified, defaulting to xor+random")
+        );
+    }
+    let strings = obfuscation::StringsConfig::from_yaml(plan.build.stub.strings.as_ref())?;
+    let syscalls = syscalls::SyscallsConfig::from_yaml(plan.build.stub.syscalls.as_ref())?;
+    let api_resolution =
+        api_resolution::ApiResolutionConfig::from_yaml(plan.build.stub.api_resolution.as_ref())?;
+    for warning in plan::validate::advisories(plan) {
+        anstream::eprintln!("  {} {}", ui.bang(), ui.warn(format!("warning: {warning}")));
+    }
+
+    let build_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("build");
+    prepare_build_dir(&build_dir)?;
+
+    // 1. Encrypt every payload and collect the renderer's stage list.
+    let mut payloads = Vec::new();
+    let mut first_plaintext: Vec<u8> = Vec::new();
+    let mut first_nonce = [0u8; 24];
+    for stage in &stages {
+        let label = ui.brand(stage.label.clone());
+        match stage.action {
+            plan::schema::StageAction::Technique => {
+                let payload = stage.payload.as_ref().ok_or_else(|| {
+                    error::PackerError::Validation(format!(
+                        "stage '{}': missing payload",
+                        stage.label
+                    ))
+                })?;
+                let plaintext = load_source(&payload.source)?;
+                verify_payload_hash(&plaintext, payload.sha256.as_deref())?;
+                let summary = inspect_payload(payload.format, &plaintext, plan.build.output.arch)?;
+                let key = match payload.crypto.key {
+                    KeySource::Random => crypto::generate_key(),
+                };
+                let encrypted = crypto::encrypt_payload(&plaintext, &key)?;
+                let path = format!("payload_{}.bin", stage.index);
+                std::fs::write(build_dir.join(&path), &encrypted.ciphertext)?;
+                if first_plaintext.is_empty() {
+                    first_plaintext = plaintext.clone();
+                    first_nonce = encrypted.nonce;
+                }
+                let mut parts = vec![
+                    ui.target(describe_source(&payload.source)),
+                    ui.dim(summary.label),
+                    human_size(plaintext.len()),
+                ];
+                if let Some(export) = &payload.export {
+                    parts.push(ui.dim(format!("export {export}")));
+                }
+                anstream::println!(
+                    "{}",
+                    ui.done(
+                        &format!("stage {} {}", stage.index, label),
+                        dotted(ui, &parts)
+                    )
+                );
+                payloads.push(engine::stages::StagePayload {
+                    index: stage.index,
+                    label: stage.label.clone(),
+                    action: stage.action,
+                    nonce: encrypted.nonce,
+                    key: encrypted.key,
+                    plaintext_len: encrypted.plaintext_len,
+                    payload_path: Some(path),
+                    format: payload.format,
+                    export: payload.export.clone(),
+                    runtime: stage.runtime.clone(),
+                    exec: None,
+                    sleep_ms: 0,
+                    marker: stub::generate_stub_marker(),
+                    on_success: stage.on_success,
+                    on_fail: stage.on_fail,
+                    delay_ms: stage.delay_ms,
+                });
+            }
+            plan::schema::StageAction::Exec => {
+                let exec = stage.exec.clone().ok_or_else(|| {
+                    error::PackerError::Validation(format!(
+                        "stage '{}': missing binary",
+                        stage.label
+                    ))
+                })?;
+                anstream::println!(
+                    "{}",
+                    ui.done(
+                        &format!("stage {} {}", stage.index, label),
+                        dotted(
+                            ui,
+                            &[
+                                ui.target(exec.binary.clone()),
+                                ui.dim(if exec.wait { "wait" } else { "detach" }),
+                            ]
+                        )
+                    )
+                );
+                payloads.push(engine::stages::StagePayload {
+                    index: stage.index,
+                    label: stage.label.clone(),
+                    action: stage.action,
+                    nonce: [0u8; 24],
+                    key: [0u8; 32],
+                    plaintext_len: 0,
+                    payload_path: None,
+                    format: PayloadFormat::Pe,
+                    export: None,
+                    runtime: Vec::new(),
+                    exec: Some(engine::stages::ExecParams {
+                        binary: exec.binary,
+                        args: exec.args,
+                        wait: exec.wait,
+                        window: exec.window,
+                        timeout_s: exec.timeout_s,
+                    }),
+                    sleep_ms: 0,
+                    marker: String::new(),
+                    on_success: stage.on_success,
+                    on_fail: stage.on_fail,
+                    delay_ms: stage.delay_ms,
+                });
+            }
+            plan::schema::StageAction::Sleep => {
+                payloads.push(engine::stages::StagePayload {
+                    index: stage.index,
+                    label: stage.label.clone(),
+                    action: stage.action,
+                    nonce: [0u8; 24],
+                    key: [0u8; 32],
+                    plaintext_len: 0,
+                    payload_path: None,
+                    format: PayloadFormat::Pe,
+                    export: None,
+                    runtime: Vec::new(),
+                    exec: None,
+                    sleep_ms: stage.sleep_ms,
+                    marker: String::new(),
+                    on_success: stage.on_success,
+                    on_fail: stage.on_fail,
+                    delay_ms: stage.delay_ms,
+                });
+            }
+        }
+    }
+
+    // 2. Render the multi-stage stub from the dedicated template.
+    let relative = "templates/stub/main_stages.rs.tpl";
+    let template_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+    let template = std::fs::read_to_string(&template_path).map_err(|source| {
+        error::PackerError::ReadLoader {
+            path: template_path.clone(),
+            source,
+        }
+    })?;
+    let params = engine::stages::StagesParams {
+        stages: payloads,
+        build_args: build_args.clone(),
+        debug,
+        windows_subsystem: plan.build.output.subsystem == Subsystem::Windows,
+    };
+    let stub_src = engine::stages::render_stages_main_rs(
+        &template,
+        &params,
+        &strings,
+        &syscalls,
+        &api_resolution,
+    )?;
+    let stub_src = apply_subsystem(stub_src, plan.build.output.subsystem);
+    let stub_path = build_dir.join("main.rs");
+    std::fs::write(&stub_path, &stub_src)?;
+
+    anstream::println!(
+        "{}",
+        ui.done(
+            "stub",
+            dotted(
+                ui,
+                &[
+                    format!("{} {} stages", ui.dim("stages"), stages.len()),
+                    format!("{} {}", ui.dim("strings"), strings.strategy.label()),
+                    format!("{} {}", ui.dim("syscalls"), syscalls.mode.label()),
+                ]
+            )
+        )
+    );
+    if verbose {
+        anstream::println!(
+            "{}",
+            ui.detail(
+                "template",
+                ui.dim(format!("builtin {} {relative}", glyph::DOT))
+            )
+        );
+        anstream::println!(
+            "{}",
+            ui.detail(
+                "source",
+                ui.dim(format!("build/main.rs {} lines", stub_src.lines().count()))
+            )
+        );
+    }
+
+    // 3. Compile, embed resources, copy, sign, manifest.
+    let arch = plan.build.output.arch;
+    let deps = compiler::locate_stub_deps(arch)?;
+    let out = build_dir.join("out.exe");
+    let options = compiler::CompileOptions {
+        strip: plan.build.output.strip,
+        trim_paths: match plan.build.output.trim_paths {
+            TrimPaths::None => compiler::PathTrim::None,
+            TrimPaths::Relative => compiler::PathTrim::Relative,
+            TrimPaths::All => compiler::PathTrim::All,
+        },
+        debug,
+        arch,
+    };
+    compiler::compile_stub(&stub_path, &out, &deps, options)?;
+    verify_no_intercepted_imports(&out, &api_resolution)?;
+    anstream::println!(
+        "{}",
+        ui.done(
+            "compile",
+            dotted(
+                ui,
+                &["rustc".to_string(), ui.dim(compiler::stub_target(arch))]
+            )
+        )
+    );
+
+    let resources = resolve_resources(plan);
+    if let Some(resources) = &resources {
+        let pe = std::fs::read(&out)?;
+        let injected = engine::resources::embed(&pe, resources)?;
+        if injected.len() != pe.len() {
+            std::fs::write(&out, &injected)?;
+        }
+    }
+
+    if let Some(parent) = plan.build.output.path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    std::fs::copy(&out, &plan.build.output.path)?;
+    let out_size = std::fs::metadata(&plan.build.output.path)?.len() as usize;
+
+    let sign_plan = resolve_sign(plan, resources.as_ref());
+    let signature = engine::signing::sign(&plan.build.output.path, sign_plan.as_ref())?;
+    if let Some(sig) = &signature {
+        let mut parts = vec![ui.brand(sig.mode.clone())];
+        if let Some(thumbprint) = &sig.thumbprint {
+            parts.push(ui.dim(short_thumbprint(thumbprint)));
+        }
+        anstream::println!("{}", ui.done("sign", dotted(ui, &parts)));
+    }
+
+    if plan.build.output.manifest && !first_plaintext.is_empty() {
+        let manifest_path = engine::manifest::manifest_path(&plan.build.output.path);
+        let mut manifest = engine::manifest::BuildManifest::new(
+            plan,
+            plan_path,
+            &plan.build.output.path,
+            &first_plaintext,
+            first_nonce,
+        )?;
+        manifest.signature = signature;
+        manifest.version_info = resources.as_ref().and_then(|r| r.version_info.clone());
+        manifest.write(&manifest_path)?;
+    }
+
+    let total = started.elapsed();
+    anstream::println!();
+    anstream::println!(
+        "{}",
+        ui.result(
+            "packed",
+            dotted(
+                ui,
+                &[
+                    ui.target(plan.build.output.path.display().to_string()),
+                    human_size(out_size),
+                    ui.dim(format_elapsed(total)),
+                ]
+            )
+        )
+    );
+    Ok(())
+}
+
 /// Resolves and validates a build without encrypting, compiling or writing.
 ///
 /// `build --dry-run` is a pre-flight check: it loads the payload (fetching a URL
@@ -768,34 +1076,62 @@ fn dry_run(plan: &plan::Plan, plan_path: &Path, ui: &Palette) -> Result<()> {
     anstream::println!();
     print_plan(plan, plan_path, ui);
 
-    let payload = load_source(&plan.build.payload.source)?;
-    verify_payload_hash(&payload, plan.build.payload.sha256.as_deref())?;
-    let summary = inspect_payload(plan.build.payload.format, &payload, plan.build.output.arch)?;
-
-    let mut parts = vec![
-        ui.target(describe_source(&plan.build.payload.source)),
-        ui.dim(summary.label),
-        human_size(payload.len()),
-    ];
-    if let Some(export) = &plan.build.payload.export {
-        parts.push(ui.dim(format!("export {export}")));
-    }
-    if plan.build.output.subsystem == Subsystem::Windows {
-        parts.push(ui.dim("windows subsystem"));
-    }
-    if plan.build.payload.sha256.is_some() {
-        parts.push(ui.ok("sha256 verified"));
-    }
     // Resource building is cheap and validates the icon/versions, so a dry run
     // can check it without touching the compiled stub.
     let resources = resolve_resources(plan);
-    if let Some(resources) = &resources {
-        let blob = engine::resources::build(resources, 0)?;
-        if !blob.is_empty() {
-            parts.push(ui.ok(format!("{} B resources", blob.len())));
+
+    if plan::stages::is_multistage(plan) {
+        for stage in plan::stages::resolve(plan)? {
+            let Some(payload) = &stage.payload else {
+                continue;
+            };
+            let bytes = load_source(&payload.source)?;
+            verify_payload_hash(&bytes, payload.sha256.as_deref())?;
+            let summary = inspect_payload(payload.format, &bytes, plan.build.output.arch)?;
+            let mut parts = vec![
+                ui.target(describe_source(&payload.source)),
+                ui.dim(summary.label),
+                human_size(bytes.len()),
+            ];
+            if let Some(export) = &payload.export {
+                parts.push(ui.dim(format!("export {export}")));
+            }
+            if payload.sha256.is_some() {
+                parts.push(ui.ok("sha256 verified"));
+            }
+            anstream::println!(
+                "{}",
+                ui.done(&format!("stage {}", stage.label), dotted(ui, &parts))
+            );
         }
+    } else {
+        let payload = plan::stages::single_payload(plan)?;
+        let bytes = load_source(&payload.source)?;
+        verify_payload_hash(&bytes, payload.sha256.as_deref())?;
+        let summary = inspect_payload(payload.format, &bytes, plan.build.output.arch)?;
+
+        let mut parts = vec![
+            ui.target(describe_source(&payload.source)),
+            ui.dim(summary.label),
+            human_size(bytes.len()),
+        ];
+        if let Some(export) = &payload.export {
+            parts.push(ui.dim(format!("export {export}")));
+        }
+        if plan.build.output.subsystem == Subsystem::Windows {
+            parts.push(ui.dim("windows subsystem"));
+        }
+        if payload.sha256.is_some() {
+            parts.push(ui.ok("sha256 verified"));
+        }
+        if let Some(resources) = &resources {
+            let blob = engine::resources::build(resources, 0)?;
+            if !blob.is_empty() {
+                parts.push(ui.ok(format!("{} B resources", blob.len())));
+            }
+        }
+        anstream::println!("{}", ui.done("payload", dotted(ui, &parts)));
     }
-    anstream::println!("{}", ui.done("payload", dotted(ui, &parts)));
 
     // Signing is validated without signing: the configured inputs are checked
     // (a missing .pfx fails without needing a tool) and a backend is located
@@ -979,17 +1315,13 @@ fn print_plan(plan: &plan::Plan, plan_path: &Path, ui: &Palette) {
     anstream::println!("{}", ui.heading("PLAN"));
     anstream::println!("{}", ui.field("name", &plan.name));
     anstream::println!("{}", ui.field("plan", ui.target(plan_path.display())));
-    anstream::println!(
-        "{}",
-        ui.field(
-            "source",
-            ui.target(describe_source(&plan.build.payload.source))
-        )
-    );
-    anstream::println!(
-        "{}",
-        ui.field("payload args", payload_args_label(&plan.build.payload))
-    );
+    if let Some(payload) = plan.build.payload.as_ref() {
+        anstream::println!(
+            "{}",
+            ui.field("source", ui.target(describe_source(&payload.source)))
+        );
+        anstream::println!("{}", ui.field("payload args", payload_args_label(payload)));
+    }
     anstream::println!(
         "{}",
         ui.field("output", ui.target(plan.build.output.path.display()))
@@ -1041,7 +1373,11 @@ fn print_plan(plan: &plan::Plan, plan_path: &Path, ui: &Palette) {
         };
         anstream::println!("{}", ui.field("sign", label));
     }
-    anstream::println!("{}", ui.field("runtime", pipeline_chain(ui, &plan.runtime)));
+    if plan::stages::is_multistage(plan) {
+        anstream::println!("{}", ui.field("stages", stages_chain(ui, plan)));
+    } else {
+        anstream::println!("{}", ui.field("runtime", pipeline_chain(ui, &plan.runtime)));
+    }
     anstream::println!("{}", ui.field("schema", plan.schema));
     anstream::println!();
 }
@@ -1054,6 +1390,22 @@ fn pipeline_chain(ui: &Palette, pipeline: &[RuntimeStep]) -> String {
     pipeline
         .iter()
         .map(|step| ui.brand(step.name()))
+        .collect::<Vec<_>>()
+        .join(&format!(" {} ", ui.dim(glyph::ARROW)))
+}
+
+/// `dropper → fetch → implant`, the resolved stage labels.
+fn stages_chain(ui: &Palette, plan: &plan::Plan) -> String {
+    let Ok(stages) = plan::stages::resolve(plan) else {
+        return ui.dim("invalid stages");
+    };
+    stages
+        .iter()
+        .map(|stage| match stage.action {
+            plan::schema::StageAction::Technique => ui.brand(stage.label.clone()),
+            plan::schema::StageAction::Exec => ui.target(stage.label.clone()),
+            plan::schema::StageAction::Sleep => ui.dim(stage.label.clone()),
+        })
         .collect::<Vec<_>>()
         .join(&format!(" {} ", ui.dim(glyph::ARROW)))
 }

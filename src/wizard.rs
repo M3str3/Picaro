@@ -969,7 +969,7 @@ fn assemble(payload: &Path, answers: &Answers) -> Plan {
         schema: SUPPORTED_SCHEMA,
         name: answers.name.clone(),
         build: BuildPlan {
-            payload: PayloadPlan {
+            payload: Some(PayloadPlan {
                 source: payload.display().to_string(),
                 // Payload formats are an advanced setting; edit them in the YAML.
                 format: PayloadFormat::Pe,
@@ -982,7 +982,7 @@ fn assemble(payload: &Path, answers: &Answers) -> Plan {
                 },
                 // Integrity pinning is an advanced setting; edit it in the YAML.
                 sha256: None,
-            },
+            }),
             stub: StubPlan {
                 // The wizard always renders the builtin stub.
                 path: None,
@@ -1019,6 +1019,7 @@ fn assemble(payload: &Path, answers: &Answers) -> Plan {
             },
         },
         runtime,
+        stages: Vec::new(),
     }
 }
 
@@ -1221,8 +1222,8 @@ mod tests {
         let plan = load_plan(&plan_path, &BTreeMap::new()).expect("valid plan");
         assert_eq!(plan.name, "payload");
         assert_eq!(plan.build.output.arch, Arch::X64, "the default arch is x64");
-        assert_eq!(plan.build.payload.source, "payload.exe");
-        assert!(plan.build.payload.args.is_none());
+        assert_eq!(plan.build.payload.as_ref().unwrap().source, "payload.exe");
+        assert!(plan.build.payload.as_ref().unwrap().args.is_none());
         assert_eq!(
             plan.build.output.path,
             PathBuf::from("./dist/payload_packed.exe")
@@ -1273,7 +1274,7 @@ mod tests {
         let plan = load_plan(&plan_path, &BTreeMap::new()).expect("valid plan");
         assert_eq!(plan.name, "demo");
         assert_eq!(
-            plan.build.payload.args,
+            plan.build.payload.as_ref().unwrap().args,
             Some(vec!["a".to_string(), "b".to_string()])
         );
 

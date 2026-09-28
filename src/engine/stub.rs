@@ -384,7 +384,7 @@ fn placeholder_values(
 ///
 /// The payload format and export reach the Execution technique so it can render
 /// the fragment that matches the input (a PE mapper, a shellcode runner, ...).
-fn render_blocks(
+pub(crate) fn render_blocks(
     pipeline: &[RuntimeStep],
     strings: &StringsConfig,
     format: PayloadFormat,
@@ -435,7 +435,10 @@ fn render_blocks(
 ///
 /// A `$` that is not part of a `$NAME$` token (e.g. inside a string literal or a
 /// macro body) is kept literally.
-fn substitute_template(template: &str, values: &BTreeMap<String, String>) -> Result<String> {
+pub(crate) fn substitute_template(
+    template: &str,
+    values: &BTreeMap<String, String>,
+) -> Result<String> {
     if let Some(legacy) = find_legacy_placeholder(template) {
         return Err(BuildError::InvalidTemplate(format!(
             "placeholder '{legacy}' uses the old `{{{{...}}}}` syntax; use `$...$` instead (e.g. `$PAYLOAD_BYTES$`)"

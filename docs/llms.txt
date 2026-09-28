@@ -30,6 +30,7 @@
 ## Architecture
 
 - [How it fits together](architecture.html): the packer pipeline and repo layout.
+- [Multi-stage plans](multistage.html): schema 5 `stages:` — several payloads and living-off-the-land commands in one artifact.
 - [Custom stubs](custom-stubs.html): replacing the builtin loader template.
 - [API resolution](api-resolution.html): the payload import proxy (catalogue, phases, limitations).
 - [x86 support](x86.html): `build.output.arch`, what is ported and what is still x64-only.

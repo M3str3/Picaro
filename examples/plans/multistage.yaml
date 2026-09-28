@@ -1,0 +1,59 @@
+# Multi-stage plan (schema 5): several payloads in one artifact.
+#
+# `stages:` is an ordered chain of actions:
+#   - `technique`: run an embedded payload with a pipeline (here a shellcode via
+#     `reflective_loading`). The shellcode is `demo_shellcode.bin` (x64
+#     `mov eax, 42; ret`), so it returns control and the chain continues.
+#   - `exec`: launch a process (a living-off-the-land binary or any command).
+#     Here `cmd /c echo` stands in for a real LOLBin such as `certutil`/`rundll32`.
+#
+#   cargo run -- build examples/plans/multistage.yaml
+#   .\dist\multistage.exe ; echo $LASTEXITCODE   # the last stage's code (42)
+#
+# A `reflective_loading` stage that runs a PE *executable* would be terminal (a
+# normal EXE calls `ExitProcess`); it is rejected unless it is the last stage.
+# Use `process_hollowing` or an `exec` stage to chain more work after it.
+
+schema: 5
+name: multistage
+
+build:
+  output:
+    path: ./dist/multistage.exe
+    arch: x64
+    strip: true
+    trim_paths: all
+  stub:
+    strings:
+      strategy: xor
+      key: random
+
+stages:
+  - name: first
+    action: technique
+    payload:
+      source: ./examples/payloads/demo_shellcode.bin
+      format: shellcode
+      crypto:
+        algo: xchacha20poly1305
+        key: random
+    runtime:
+      - technique: reflective_loading
+
+  - name: drop
+    action: exec
+    binary: cmd.exe
+    args: ["/c", "echo", "picaro multistage"]
+    wait: true
+    window: hidden
+
+  - name: second
+    action: technique
+    payload:
+      source: ./examples/payloads/demo_shellcode.bin
+      format: shellcode
+      crypto:
+        algo: xchacha20poly1305
+        key: random
+    runtime:
+      - technique: reflective_loading

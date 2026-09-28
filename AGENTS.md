@@ -79,6 +79,29 @@ tests). The registry (`src/techniques/mod.rs`) is metadata-only; inspect it with
 
 ## Current state
 
+**Multi-stage plans (schema 5, done).** `schema: 5` adds an ordered top-level
+`stages:` list so one artifact delivers several payloads. A stage is an action:
+`technique` (an embedded payload + its own pipeline, the single-payload shape
+generalized), `exec` (launch a process — a living-off-the-land binary or any
+command) or `sleep`. `build.payload` is now **optional**: a schema-4 document
+(accepted unchanged) is the single-payload shorthand and normalizes to one
+`technique` stage (`src/plan/stages.rs`); a stages-only plan omits it. The
+multi-stage build path renders `templates/stub/main_stages.rs.tpl` via
+`src/engine/stages.rs`: each payload is embedded and encrypted with its own
+key/nonce, each stage's pipeline is wrapped in `mod stage_<index>` (so two
+stages can reuse a technique without colliding), and a generated runner walks
+the stages with the declared gating (`on_success`/`on_fail`/`delay_ms`). The
+single-payload path is **unchanged** (still `main.rs.tpl`, byte-identical
+output). **The rule that shapes it:** a chain only continues if the loader gets
+control back, so `reflective_loading` of a PE *executable* and `dotnet_hosting`
+are *terminal* and must be the last stage (`plan::validate` rejects them
+otherwise); `exec`, `process_hollowing` and `reflective_loading` of a DLL
+always return. `api_resolution.mode: proxy` is rejected on multi-stage (it is
+loader-wide). Known limits: per-stage payload args and a stages-aware manifest
+are follow-ups; two reflectively loaded EXEs cannot chain without an
+`ExitProcess` interceptor. Docs: `docs/multistage.md`; example:
+`examples/plans/multistage.yaml`.
+
 **YAML schema 4 (done).** The plan document is schema 4; a document that
 declares `schema: 3` (or the retired `schema: 1`/`schema: 2`) is rejected at
 parse time with a migration hint (mappings in `docs/migration-v1-v3.md`,

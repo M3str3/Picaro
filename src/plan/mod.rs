@@ -10,6 +10,7 @@
 
 pub mod build_args;
 pub mod schema;
+pub mod stages;
 pub mod validate;
 
 use std::collections::BTreeMap;

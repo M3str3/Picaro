@@ -542,6 +542,7 @@ user-facing output goes through `src/ui.rs`. The full list is in
 | 9 | done | x86 (32-bit) support: M0–M5 — both execution techniques, the four preparations, i686 stubs, WOW64 targets and CLR hosting for managed payloads (`docs/x86.md`); M4 (x86 indirect syscalls) is parked with its reason |
 | — | done | Payload formats (`pe`/`shellcode`/`dll`), interactive wizard, custom stubs |
 | — | done | PE resources (icon, version info, manifest) and Authenticode signing (`signtool` on Windows, `osslsigncode` elsewhere) |
+| — | done | Multi-stage plans (schema 5): `stages:` chains several payloads and `exec` living-off-the-land commands in one artifact ([docs/multistage.md](docs/multistage.md)) |
 
 Planned:
 
@@ -606,6 +607,8 @@ Planned:
   writes the static site to `site/`.
 - [`docs/architecture.md`](docs/architecture.md) — how the pieces fit together
   and why.
+- [`docs/multistage.md`](docs/multistage.md) — schema 5 `stages:`: several
+  payloads and `exec` commands in one artifact, and the control-return rule.
 - [`docs/custom-stubs.md`](docs/custom-stubs.md) — the custom-stub contract.
 - [`docs/techniques/`](docs/techniques/) — per-technique deep dives with
   measured evidence.

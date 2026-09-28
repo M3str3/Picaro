@@ -24,8 +24,15 @@ use crate::engine::obfuscation::YamlStringsPlan;
 use crate::engine::syscalls::YamlSyscallsPlan;
 use crate::techniques::RuntimeStep;
 
-/// The only schema version we accept.
-pub const SUPPORTED_SCHEMA: u32 = 4;
+/// The schema version this packer writes.
+pub const SUPPORTED_SCHEMA: u32 = 5;
+
+/// The previous schema version, still accepted: the single-payload shape.
+///
+/// A schema-4 document is a schema-5 document whose `build.payload`/`runtime`
+/// are normalized into one stage (see [`crate::plan::stages`]), so existing
+/// plans keep working unchanged.
+pub const LEGACY_SCHEMA: u32 = 4;
 
 /// Migration hint shown when a plan still declares `schema: 1`.
 const SCHEMA_1_MIGRATION: &str = "\
@@ -85,9 +92,18 @@ pub struct Plan {
     /// Execution techniques the stub applies, in order.
     ///
     /// It is optional: an empty runtime produces a stub with no extra
-    /// techniques.
+    /// techniques. Ignored when `stages` is non-empty (the single-payload
+    /// shorthand of schema 5).
     #[serde(default)]
     pub runtime: Vec<RuntimeStep>,
+
+    /// Ordered multi-payload chain (schema 5).
+    ///
+    /// Each entry is an action (`technique`, `exec` or `sleep`). When empty, the
+    /// document is the single-payload shorthand and one `technique` stage is
+    /// synthesized from `build.payload` + `runtime`.
+    #[serde(default)]
+    pub stages: Vec<StagePlan>,
 }
 
 /// `build` block: everything needed to produce the packed PE.
@@ -95,7 +111,11 @@ pub struct Plan {
 #[serde(deny_unknown_fields)]
 pub struct BuildPlan {
     /// Payload block: where the input PE comes from and how it is encrypted.
-    pub payload: PayloadPlan,
+    ///
+    /// Required for the single-payload shorthand (no `stages`); absent in a
+    /// multi-stage plan, where every payload is declared inline per stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<PayloadPlan>,
 
     /// Stub configuration: builtin or custom, the syscall layer and the
     /// string obfuscation applied to the stub's literals.
@@ -548,22 +568,160 @@ pub enum TrimPaths {
     Relative,
 }
 
+/// One entry of the top-level `stages:` list (schema 5).
+///
+/// A stage is an *action*: run an embedded payload with a technique pipeline
+/// (`action: technique`), launch a process such as a living-off-the-land binary
+/// (`action: exec`), or wait (`action: sleep`). The list order is the order the
+/// generated stub runs them in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StagePlan {
+    /// Optional label, used in messages and the generated stub's module names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// What the stage does (default: `technique`).
+    #[serde(default)]
+    pub action: StageAction,
+
+    /// `technique`: the payload to run (inline; each stage carries its own).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<PayloadPlan>,
+
+    /// `technique`: preparation + execution techniques, in order.
+    #[serde(default)]
+    pub runtime: Vec<RuntimeStep>,
+
+    /// `exec`: the process to launch. A bare name (no path separator) is
+    /// resolved against `System32` at run time; an absolute path is used as is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary: Option<String>,
+
+    /// `exec`: arguments passed to `binary`.
+    #[serde(default)]
+    pub args: Vec<String>,
+
+    /// `exec`: wait for the child and capture its exit code (default: true).
+    #[serde(default = "default_true")]
+    pub wait: bool,
+
+    /// `exec`: window visibility (default: hidden).
+    #[serde(default)]
+    pub window: WindowMode,
+
+    /// `exec`: seconds to wait for the child before terminating it (0 = no
+    /// limit). Only meaningful with `wait: true`.
+    #[serde(default)]
+    pub timeout_s: u64,
+
+    /// `sleep`: milliseconds to wait.
+    #[serde(default)]
+    pub sleep_ms: u64,
+
+    /// What to do when the stage runs to completion (default: continue).
+    #[serde(default)]
+    pub on_success: StageOutcome,
+
+    /// What to do when the stage fails (default: stop, i.e. propagate the
+    /// error and exit 1).
+    #[serde(default)]
+    pub on_fail: StageFailure,
+
+    /// Wait this long before starting the stage.
+    #[serde(default)]
+    pub delay_ms: u64,
+}
+
+impl StagePlan {
+    /// A human label for the stage: its `name`, or `<action><index>`.
+    pub fn label(&self, index: usize) -> String {
+        match &self.name {
+            Some(name) => name.clone(),
+            None => format!("{}{index}", self.action.label()),
+        }
+    }
+}
+
+/// What a stage does (`stages[].action`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StageAction {
+    /// Run an embedded payload with a technique pipeline (the single-payload
+    /// shape, generalized).
+    #[default]
+    Technique,
+    /// Launch a process: a living-off-the-land binary or any command (T1218).
+    Exec,
+    /// Wait a number of milliseconds.
+    Sleep,
+}
+
+impl StageAction {
+    /// Lowercase label used in messages and the build log.
+    pub fn label(self) -> &'static str {
+        match self {
+            StageAction::Technique => "technique",
+            StageAction::Exec => "exec",
+            StageAction::Sleep => "sleep",
+        }
+    }
+}
+
+/// Window visibility for an `exec` stage.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WindowMode {
+    /// No console window (`CREATE_NO_WINDOW` + `SW_HIDE`). The default.
+    #[default]
+    Hidden,
+    /// Inherit the parent's console/window state.
+    Normal,
+}
+
+/// What to do after a stage completes (`stages[].on_success`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StageOutcome {
+    /// Run the next stage (default).
+    #[default]
+    Continue,
+    /// Stop the chain, exiting with this stage's code.
+    Stop,
+    /// Stop the chain and exit `0` immediately.
+    Exit,
+}
+
+/// What to do when a stage fails (`stages[].on_fail`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StageFailure {
+    /// Propagate the failure: the stub reports it and exits `1` (default).
+    #[default]
+    Stop,
+    /// Log the failure and run the next stage.
+    Continue,
+    /// Report the failure and exit `0`.
+    Exit,
+}
+
 /// Validates the schema version during deserialization.
 ///
-/// Gives a clear error at parse time (not later): a specific migration hint for
-/// the retired schema 1 and a generic message for anything unknown.
+/// Accepts the current schema ([`SUPPORTED_SCHEMA`], 5) and the legacy 4
+/// (single-payload). Gives a clear migration hint for the retired 1/2/3 and a
+/// generic message for anything unknown.
 fn deserialize_schema_version<'de, D>(deserializer: D) -> std::result::Result<u32, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let version = u32::deserialize(deserializer)?;
     match version {
-        SUPPORTED_SCHEMA => Ok(version),
+        SUPPORTED_SCHEMA | LEGACY_SCHEMA => Ok(version),
         1 => Err(serde::de::Error::custom(SCHEMA_1_MIGRATION)),
         2 => Err(serde::de::Error::custom(SCHEMA_2_MIGRATION)),
         3 => Err(serde::de::Error::custom(SCHEMA_3_MIGRATION)),
         other => Err(serde::de::Error::custom(format!(
-            "unsupported schema version: {other} (only {SUPPORTED_SCHEMA} is accepted)"
+            "unsupported schema version: {other} (schema {SUPPORTED_SCHEMA} is current; schema {LEGACY_SCHEMA} is accepted for single-payload plans)"
         ))),
     }
 }
@@ -604,12 +762,18 @@ runtime:
 
         assert_eq!(plan.schema, 4);
         assert_eq!(plan.name, "mimikatz-basic");
-        assert_eq!(plan.build.payload.source, "./mimikatz.exe");
         assert_eq!(
-            plan.build.payload.crypto.algo,
+            plan.build.payload.as_ref().unwrap().source,
+            "./mimikatz.exe"
+        );
+        assert_eq!(
+            plan.build.payload.as_ref().unwrap().crypto.algo,
             CryptoAlgorithm::XChaCha20Poly1305
         );
-        assert_eq!(plan.build.payload.crypto.key, KeySource::Random);
+        assert_eq!(
+            plan.build.payload.as_ref().unwrap().crypto.key,
+            KeySource::Random
+        );
         assert_eq!(plan.build.stub.path, None);
         assert_eq!(plan.build.stub.syscalls, None);
         assert_eq!(plan.build.stub.api_resolution, None);
@@ -752,7 +916,7 @@ runtime:
         let plan: Plan = serde_yml::from_str(&yaml).expect("a url source should parse");
 
         assert_eq!(
-            plan.build.payload.source,
+            plan.build.payload.as_ref().unwrap().source,
             "https://example.com/mimikatz.exe"
         );
     }
@@ -778,8 +942,11 @@ runtime:
     #[test]
     fn payload_args_default_to_join() {
         let plan: Plan = serde_yml::from_str(VALID_YAML).expect("valid YAML should parse");
-        assert_eq!(plan.build.payload.args, None);
-        assert_eq!(plan.build.payload.args_mode, ArgsMode::Join);
+        assert_eq!(plan.build.payload.as_ref().unwrap().args, None);
+        assert_eq!(
+            plan.build.payload.as_ref().unwrap().args_mode,
+            ArgsMode::Join
+        );
     }
 
     /// Locks in the documented migration hazard: unknown keys inside a runtime
@@ -811,14 +978,17 @@ runtime:
         );
         let plan: Plan = serde_yml::from_str(&yaml).expect("args should parse");
         assert_eq!(
-            plan.build.payload.args,
+            plan.build.payload.as_ref().unwrap().args,
             Some(vec![
                 "privilege::debug".to_string(),
                 "log".to_string(),
                 r"C:\temp\out.log".to_string(),
             ])
         );
-        assert_eq!(plan.build.payload.args_mode, ArgsMode::Override);
+        assert_eq!(
+            plan.build.payload.as_ref().unwrap().args_mode,
+            ArgsMode::Override
+        );
     }
 
     #[test]
@@ -828,8 +998,11 @@ runtime:
             "    source: ./mimikatz.exe\n    args: []\n",
         );
         let plan: Plan = serde_yml::from_str(&yaml).expect("empty args should parse");
-        assert_eq!(plan.build.payload.args, Some(vec![]));
-        assert_eq!(plan.build.payload.args_mode, ArgsMode::Join);
+        assert_eq!(plan.build.payload.as_ref().unwrap().args, Some(vec![]));
+        assert_eq!(
+            plan.build.payload.as_ref().unwrap().args_mode,
+            ArgsMode::Join
+        );
     }
 
     #[test]
@@ -840,7 +1013,7 @@ runtime:
         );
         let plan: Plan = serde_yml::from_str(&yaml).expect("special args should parse");
         assert_eq!(
-            plan.build.payload.args,
+            plan.build.payload.as_ref().unwrap().args,
             Some(vec![
                 "hello world".to_string(),
                 "say \"hi\"".to_string(),
@@ -864,8 +1037,11 @@ runtime:
     #[test]
     fn payload_format_defaults_to_pe() {
         let plan: Plan = serde_yml::from_str(VALID_YAML).expect("valid YAML should parse");
-        assert_eq!(plan.build.payload.format, PayloadFormat::Pe);
-        assert_eq!(plan.build.payload.export, None);
+        assert_eq!(
+            plan.build.payload.as_ref().unwrap().format,
+            PayloadFormat::Pe
+        );
+        assert_eq!(plan.build.payload.as_ref().unwrap().export, None);
     }
 
     #[test]
@@ -875,8 +1051,11 @@ runtime:
             "    source: ./beacon.bin\n    format: shellcode\n",
         );
         let plan: Plan = serde_yml::from_str(&yaml).expect("shellcode format should parse");
-        assert_eq!(plan.build.payload.format, PayloadFormat::Shellcode);
-        assert!(!plan.build.payload.format.is_pe_image());
+        assert_eq!(
+            plan.build.payload.as_ref().unwrap().format,
+            PayloadFormat::Shellcode
+        );
+        assert!(!plan.build.payload.as_ref().unwrap().format.is_pe_image());
     }
 
     #[test]
@@ -886,9 +1065,15 @@ runtime:
             "    source: ./payload.dll\n    format: dll\n    export: Run\n",
         );
         let plan: Plan = serde_yml::from_str(&yaml).expect("dll format should parse");
-        assert_eq!(plan.build.payload.format, PayloadFormat::Dll);
-        assert_eq!(plan.build.payload.export.as_deref(), Some("Run"));
-        assert!(plan.build.payload.format.is_pe_image());
+        assert_eq!(
+            plan.build.payload.as_ref().unwrap().format,
+            PayloadFormat::Dll
+        );
+        assert_eq!(
+            plan.build.payload.as_ref().unwrap().export.as_deref(),
+            Some("Run")
+        );
+        assert!(plan.build.payload.as_ref().unwrap().format.is_pe_image());
     }
 
     #[test]
@@ -957,13 +1142,24 @@ runtime:
 
     #[test]
     fn rejects_unknown_schema_version() {
-        let yaml = VALID_YAML.replace("schema: 4", "schema: 5");
-        let err = serde_yml::from_str::<Plan>(&yaml).expect_err("schema 5 should fail");
+        let yaml = VALID_YAML.replace("schema: 4", "schema: 6");
+        let err = serde_yml::from_str::<Plan>(&yaml).expect_err("schema 6 should fail");
         let msg = err.to_string();
         assert!(
             msg.contains("unsupported schema version"),
             "unclear error message: {msg}"
         );
+    }
+
+    #[test]
+    fn accepts_the_current_and_legacy_schemas() {
+        for version in [4, 5] {
+            let yaml = VALID_YAML.replace("schema: 4", &format!("schema: {version}"));
+            assert!(
+                serde_yml::from_str::<Plan>(&yaml).is_ok(),
+                "schema {version} should parse"
+            );
+        }
     }
 
     #[test]

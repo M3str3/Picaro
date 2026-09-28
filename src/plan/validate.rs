@@ -10,7 +10,8 @@ use crate::engine::syscalls::{SyscallsConfig, SyscallsMode};
 use crate::error::{PackerError, Result};
 use crate::techniques::{category_of, Capability, Category, RuntimeStep};
 
-use super::schema::{Arch, PayloadFormat, Plan, StubPlan};
+use super::schema::{Arch, PayloadFormat, Plan, StageAction, StubPlan};
+use super::stages::{self, Stage};
 
 /// Checks the business invariants of a [`Plan`].
 ///
@@ -23,30 +24,128 @@ pub fn validate(plan: &Plan) -> Result<()> {
         ));
     }
 
-    if plan.build.payload.source.trim().is_empty() {
-        return Err(PackerError::Validation(
-            "'build.payload.source' must not be empty".to_string(),
-        ));
-    }
-
     if plan.build.output.path.as_os_str().is_empty() {
         return Err(PackerError::Validation(
             "'build.output.path' must not be empty".to_string(),
         ));
     }
 
-    validate_capabilities(plan)?;
-    validate_hollowing_target(plan)?;
-    validate_payload_format(plan)?;
-    validate_payload_sha256(plan)?;
     validate_sign(plan)?;
-    validate_runtime(&plan.runtime)?;
-    validate_conflicts(&plan.runtime)?;
-    validate_sleep_obfuscation(&plan.runtime)?;
     validate_stub(&plan.build.stub)?;
     validate_syscalls_arch(plan)?;
-    validate_api_resolution(plan)?;
 
+    // Resolve the plan into stages (a single-payload document becomes one
+    // `technique` stage), then check every stage and the chain between them.
+    let stages = stages::resolve(plan)?;
+    validate_chain(&stages)?;
+
+    for stage in &stages {
+        match stage.action {
+            StageAction::Technique => {
+                let Some(payload) = &stage.payload else {
+                    return Err(PackerError::Validation(format!(
+                        "stage '{}': a 'technique' stage needs a 'payload' block",
+                        stage.label
+                    )));
+                };
+                if payload.source.trim().is_empty() {
+                    return Err(PackerError::Validation(
+                        "'build.payload.source' must not be empty".to_string(),
+                    ));
+                }
+                validate_payload_format(payload, &stage.runtime)?;
+                validate_payload_sha256(payload)?;
+                validate_runtime(&stage.runtime)?;
+                validate_conflicts(&stage.runtime)?;
+                validate_sleep_obfuscation(&stage.runtime)?;
+                validate_capabilities(plan, &stage.runtime)?;
+                validate_hollowing_target(plan, &stage.runtime)?;
+            }
+            StageAction::Exec => validate_exec(stage)?,
+            StageAction::Sleep => {}
+        }
+    }
+
+    validate_api_resolution(plan, &stages)?;
+
+    Ok(())
+}
+
+/// Chain-level rules across the resolved stages.
+///
+/// The important one is the *terminal-stage* rule: `reflective_loading` of a PE
+/// executable and `dotnet_hosting` hand the whole process to the payload (a
+/// normal `mainCRTStartup` calls `ExitProcess`), so a stage that uses them can
+/// only be the last one — otherwise the following stages would never run.
+fn validate_chain(stages: &[Stage]) -> Result<()> {
+    for (index, stage) in stages.iter().enumerate() {
+        if index + 1 == stages.len() {
+            break;
+        }
+        if let Some(technique) = terminal_technique(stage) {
+            return Err(PackerError::Validation(format!(
+                "stage '{}' runs '{technique}', which does not return control to the loader, so the
+                 later stage(s) would never run. Move it to the end of 'stages:', or use
+                 'process_hollowing' (a separate process) or address it as a cooperative payload.",
+                stage.label
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The execution technique that makes a stage terminal, if any.
+///
+/// `reflective_loading` is terminal only for a PE *executable* (`format: pe`): a
+/// reflectively loaded DLL returns (its entry point is `DllMain`), and raw
+/// shellcode returns if it is cooperative. `dotnet_hosting` hosts the CLR in the
+/// stub's process, so a managed `Main` that exits ends the process.
+fn terminal_technique(stage: &Stage) -> Option<&'static str> {
+    let execution = stage
+        .runtime
+        .iter()
+        .find(|step| category_of(step.name()) == Some(Category::Execution))?;
+    match execution.name() {
+        "dotnet_hosting" => Some("dotnet_hosting"),
+        "reflective_loading" => {
+            let format = stage
+                .payload
+                .as_ref()
+                .map_or(PayloadFormat::Pe, |payload| payload.format);
+            (format == PayloadFormat::Pe).then_some("reflective_loading (a PE executable)")
+        }
+        _ => None,
+    }
+}
+
+/// Validates an `exec` stage: it needs a `binary` and carries no payload or
+/// runtime.
+fn validate_exec(stage: &Stage) -> Result<()> {
+    let Some(exec) = &stage.exec else {
+        return Err(PackerError::Validation(format!(
+            "stage '{}': action 'exec' needs a 'binary'",
+            stage.label
+        )));
+    };
+    if exec.binary.trim().is_empty() {
+        return Err(PackerError::Validation(format!(
+            "stage '{}': 'binary' must not be empty",
+            stage.label
+        )));
+    }
+    if !stage.runtime.is_empty() {
+        return Err(PackerError::Validation(format!(
+            "stage '{}': an 'exec' stage must not declare a 'runtime' (techniques run in a
+             'technique' stage)",
+            stage.label
+        )));
+    }
+    if stage.payload.is_some() {
+        return Err(PackerError::Validation(format!(
+            "stage '{}': an 'exec' stage must not declare a 'payload'",
+            stage.label
+        )));
+    }
     Ok(())
 }
 
@@ -60,7 +159,12 @@ pub fn validate(plan: &Plan) -> Result<()> {
 /// fails the load on the first import outside the catalogue.
 pub fn advisories(plan: &Plan) -> Vec<String> {
     let mut warnings = Vec::new();
-    for step in &plan.runtime {
+    // Flatten every stage's pipeline (a single-payload plan resolves to one
+    // stage, so this is exactly the old `plan.runtime`).
+    let runtimes: Vec<RuntimeStep> = stages::resolve(plan)
+        .map(|stages| stages.into_iter().flat_map(|stage| stage.runtime).collect())
+        .unwrap_or_default();
+    for step in &runtimes {
         if let RuntimeStep::Bouncer { params } = step {
             if params.is_noop() {
                 warnings.push(
@@ -79,8 +183,7 @@ pub fn advisories(plan: &Plan) -> Vec<String> {
              must not be delivered"
                 .to_string(),
         );
-        if plan
-            .runtime
+        if runtimes
             .iter()
             .any(|step| matches!(step, RuntimeStep::AntiDebug { .. }))
         {
@@ -130,11 +233,22 @@ fn validate_stub(stub: &StubPlan) -> Result<()> {
 /// payload has an import table to rewrite. No separate "an Execution technique is
 /// active" check is needed: the pipeline contract already enforces exactly one
 /// Execution technique, and both execution techniques resolve imports.
-fn validate_api_resolution(plan: &Plan) -> Result<()> {
+fn validate_api_resolution(plan: &Plan, stages: &[Stage]) -> Result<()> {
     let config = ApiResolutionConfig::from_yaml(plan.build.stub.api_resolution.as_ref())?;
     if config.mode != ApiResolutionMode::Proxy {
         return Ok(());
     }
+
+    // The proxies are functions in the loader image with loader-wide state, so
+    // the mode is meaningful for exactly one stage.
+    if stages.len() != 1 {
+        return Err(PackerError::Validation(
+            "build.stub.api_resolution.mode 'proxy' is loader-wide (it rewrites the loader's own
+             IAT), so it is not supported with a multi-stage plan: use a single-payload plan"
+                .to_string(),
+        ));
+    }
+    let stage = &stages[0];
 
     let syscalls = SyscallsConfig::from_yaml(plan.build.stub.syscalls.as_ref())?;
     if syscalls.mode != SyscallsMode::Indirect {
@@ -146,11 +260,19 @@ fn validate_api_resolution(plan: &Plan) -> Result<()> {
         ));
     }
 
-    if !plan.build.payload.format.is_pe_image() {
+    let format = stage.payload.as_ref().map(|payload| payload.format);
+    let Some(format) = format else {
+        return Err(PackerError::Validation(
+            "build.stub.api_resolution.mode 'proxy' needs a payload with an import table
+             (format: pe or dll)"
+                .to_string(),
+        ));
+    };
+    if !format.is_pe_image() {
         return Err(PackerError::Validation(format!(
             "build.stub.api_resolution.mode 'proxy' requires a payload with an import table \
              (format: pe or dll), not '{}'",
-            plan.build.payload.format.label()
+            format.label()
         )));
     }
 
@@ -159,7 +281,7 @@ fn validate_api_resolution(plan: &Plan) -> Result<()> {
     // A hollowed payload runs in a *different* process, which has none of that,
     // so its IAT there can only point at the real exports: the mode cannot apply.
     // Failing loudly beats silently not proxying. See Phase E in the doc.
-    if plan
+    if stage
         .runtime
         .iter()
         .any(|step| step.name() == "process_hollowing")
@@ -183,9 +305,10 @@ fn validate_api_resolution(plan: &Plan) -> Result<()> {
 /// suspended process's image; a DLL has no process entry point to run and raw
 /// shellcode has no image at all). Shellcode and DLL payloads are run in-process
 /// by `reflective_loading`.
-fn validate_payload_format(plan: &Plan) -> Result<()> {
-    let payload = &plan.build.payload;
-
+fn validate_payload_format(
+    payload: &crate::plan::schema::PayloadPlan,
+    runtime: &[RuntimeStep],
+) -> Result<()> {
     if let Some(export) = &payload.export {
         if payload.format != PayloadFormat::Dll {
             return Err(PackerError::Validation(format!(
@@ -203,8 +326,7 @@ fn validate_payload_format(plan: &Plan) -> Result<()> {
 
     // A managed assembly is neither mapped nor hollowed: the stub hosts the CLR
     // and loads the assembly's bytes, which only `dotnet_hosting` does.
-    let execution = plan
-        .runtime
+    let execution = runtime
         .iter()
         .find(|step| category_of(step.name()) == Some(Category::Execution));
     let hosts_the_clr = execution.is_some_and(|step| step.name() == "dotnet_hosting");
@@ -237,8 +359,8 @@ fn validate_payload_format(plan: &Plan) -> Result<()> {
 ///
 /// Catching a malformed pin here gives a clear message instead of a confusing
 /// "payload mismatch" at build time.
-fn validate_payload_sha256(plan: &Plan) -> Result<()> {
-    let Some(hash) = plan.build.payload.sha256.as_deref() else {
+fn validate_payload_sha256(payload: &crate::plan::schema::PayloadPlan) -> Result<()> {
+    let Some(hash) = payload.sha256.as_deref() else {
         return Ok(());
     };
     let hash = hash.trim();
@@ -298,13 +420,13 @@ fn validate_sign(plan: &Plan) -> Result<()> {
 /// Its architecture capability (`WindowsX64` / `WindowsX86`) must match
 /// `build.output.arch`: the stub and the payload share one address space, so an
 /// x64-only fragment cannot be linked into an i686 stub (nor the reverse).
-fn validate_capabilities(plan: &Plan) -> Result<()> {
+fn validate_capabilities(plan: &Plan, runtime: &[RuntimeStep]) -> Result<()> {
     let arch = plan.build.output.arch;
     let required = match arch {
         Arch::X64 => Capability::WindowsX64,
         Arch::X86 => Capability::WindowsX86,
     };
-    for step in &plan.runtime {
+    for step in runtime {
         // An unknown technique name is rejected by `validate_runtime`.
         let Some(def) = crate::techniques::find(step.name()) else {
             continue;
@@ -336,9 +458,9 @@ fn validate_capabilities(plan: &Plan) -> Result<()> {
 /// the path is mapped the way WOW64 would resolve it before the file is read —
 /// the default `System32\svchost.exe` is a 64-bit image on a 64-bit host but
 /// the x86 stub actually gets the 32-bit one.
-fn validate_hollowing_target(plan: &Plan) -> Result<()> {
+fn validate_hollowing_target(plan: &Plan, runtime: &[RuntimeStep]) -> Result<()> {
     let arch = plan.build.output.arch;
-    for step in &plan.runtime {
+    for step in runtime {
         let RuntimeStep::ProcessHollowing { params } = step else {
             continue;
         };
@@ -1313,5 +1435,56 @@ runtime:
         ))
         .expect_err("a non-http timestamp url must fail");
         assert!(err.to_string().contains("timestamp_url"), "{err}");
+    }
+
+    const MULTISTAGE: &str = r#"
+schema: 5
+name: multi
+build:
+  output: { path: ./o.exe, arch: x64, strip: true, trim_paths: all }
+stages:
+  - name: a
+    action: technique
+    payload: { source: ./a.bin, format: shellcode, crypto: { algo: xchacha20poly1305, key: random } }
+    runtime: [{ technique: reflective_loading }]
+  - name: b
+    action: technique
+    payload: { source: ./b.bin, format: shellcode, crypto: { algo: xchacha20poly1305, key: random } }
+    runtime: [{ technique: reflective_loading }]
+"#;
+
+    #[test]
+    fn accepts_a_two_shellcode_chain() {
+        assert!(validate(&parse(MULTISTAGE)).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_terminal_stage_before_the_last_one() {
+        let yaml = MULTISTAGE.replace("format: shellcode", "format: pe");
+        let err = validate(&parse(&yaml)).expect_err("a terminal stage must be rejected");
+        assert!(err.to_string().contains("does not return control"), "{err}");
+    }
+
+    #[test]
+    fn rejects_an_exec_stage_with_a_runtime() {
+        let yaml = MULTISTAGE.replace(
+            "    action: technique\n    payload: { source: ./b.bin, format: shellcode, crypto: { algo: xchacha20poly1305, key: random } }\n    runtime: [{ technique: reflective_loading }]",
+            "    action: exec\n    binary: cmd.exe\n    runtime: [{ technique: reflective_loading }]",
+        );
+        let err = validate(&parse(&yaml)).expect_err("an exec stage with a runtime must fail");
+        assert!(
+            err.to_string().contains("must not declare a 'runtime'"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn rejects_proxy_api_resolution_on_a_multi_stage_plan() {
+        let yaml = MULTISTAGE.replace(
+            "  output: { path: ./o.exe, arch: x64, strip: true, trim_paths: all }",
+            "  output: { path: ./o.exe, arch: x64, strip: true, trim_paths: all }\n  stub:\n    syscalls: { mode: indirect }\n    api_resolution: { mode: proxy, apis: [\"ntdll!NtOpenProcess\"] }",
+        );
+        let err = validate(&parse(&yaml)).expect_err("proxy on multi-stage must fail");
+        assert!(err.to_string().contains("multi-stage"), "{err}");
     }
 }
