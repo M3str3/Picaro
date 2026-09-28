@@ -61,6 +61,32 @@ pub struct BuildManifest {
     pub toolchain: Toolchain,
     /// The plan after build-arg substitution and defaults.
     pub resolved_plan: Plan,
+    /// Per-stage provenance for a multi-stage plan (empty for a single payload).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stages: Vec<StageRecord>,
+}
+
+/// Per-stage provenance record (multi-stage plans).
+#[derive(Debug, Serialize)]
+pub struct StageRecord {
+    /// Position in the chain (0-based).
+    pub index: usize,
+    /// Stage label (its `name`, or `<action><index>`).
+    pub label: String,
+    /// `technique`, `exec` or `sleep`.
+    pub action: String,
+    /// SHA-256 of the stage's input payload, before encryption.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload_sha256: Option<String>,
+    /// Size of the stage's input payload, in bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload_size: Option<u64>,
+    /// Public nonce (hex) used for this stage's payload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nonce: Option<String>,
+    /// The stage's technique names, in order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub techniques: Vec<String>,
 }
 
 /// The compiler that produced the stub.
@@ -103,6 +129,36 @@ impl BuildManifest {
                 target: compiler::stub_target(plan.build.output.arch).to_string(),
             },
             resolved_plan: plan.clone(),
+            stages: Vec::new(),
+        })
+    }
+
+    /// Builds the manifest for a **multi-stage** artifact.
+    ///
+    /// There is no single payload, so `payload_sha256`/`payload_size`/`nonce`
+    /// are left empty and every stage is recorded in [`BuildManifest::stages`]
+    /// (filled by the caller as it encrypts each payload).
+    pub fn multistage(plan: &Plan, plan_path: &Path, artifact: &Path) -> Result<Self> {
+        let artifact_bytes = std::fs::read(artifact)?;
+        Ok(Self {
+            manifest_schema: MANIFEST_SCHEMA,
+            name: plan.name.clone(),
+            artifact: artifact.display().to_string(),
+            artifact_sha256: sha256_hex(&artifact_bytes),
+            artifact_size: artifact_bytes.len() as u64,
+            plan_path: plan_path.display().to_string(),
+            plan_sha256: plan_hash(plan)?,
+            payload_sha256: String::new(),
+            payload_size: 0,
+            nonce: String::new(),
+            signature: None,
+            version_info: None,
+            toolchain: Toolchain {
+                rustc: compiler::rustc_version()?,
+                target: compiler::stub_target(plan.build.output.arch).to_string(),
+            },
+            resolved_plan: plan.clone(),
+            stages: Vec::new(),
         })
     }
 

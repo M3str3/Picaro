@@ -761,8 +761,7 @@ fn build(
 /// each stage's pipeline is wrapped in its own module, and the generated runner
 /// walks the stages in order.
 ///
-/// The provenance manifest records the first payload's hash and nonce; a
-/// stages-aware manifest is a follow-up.
+/// The provenance manifest records one entry per stage.
 fn build_multistage(
     plan: &plan::Plan,
     build_args: &BTreeMap<String, String>,
@@ -794,8 +793,7 @@ fn build_multistage(
 
     // 1. Encrypt every payload and collect the renderer's stage list.
     let mut payloads = Vec::new();
-    let mut first_plaintext: Vec<u8> = Vec::new();
-    let mut first_nonce = [0u8; 24];
+    let mut stage_records = Vec::new();
     for stage in &stages {
         let label = ui.brand(stage.label.clone());
         match stage.action {
@@ -815,10 +813,15 @@ fn build_multistage(
                 let encrypted = crypto::encrypt_payload(&plaintext, &key)?;
                 let path = format!("payload_{}.bin", stage.index);
                 std::fs::write(build_dir.join(&path), &encrypted.ciphertext)?;
-                if first_plaintext.is_empty() {
-                    first_plaintext = plaintext.clone();
-                    first_nonce = encrypted.nonce;
-                }
+                stage_records.push(engine::manifest::StageRecord {
+                    index: stage.index,
+                    label: stage.label.clone(),
+                    action: stage.action.label().to_string(),
+                    payload_sha256: Some(engine::hash::sha256_hex(&plaintext)),
+                    payload_size: Some(plaintext.len() as u64),
+                    nonce: Some(hex::encode(encrypted.nonce)),
+                    techniques: stage.runtime.iter().map(|s| s.name().to_string()).collect(),
+                });
                 let mut parts = vec![
                     ui.target(describe_source(&payload.source)),
                     ui.dim(summary.label),
@@ -847,6 +850,8 @@ fn build_multistage(
                     runtime: stage.runtime.clone(),
                     exec: None,
                     sleep_ms: 0,
+                    payload_args: payload.args.clone().unwrap_or_default(),
+                    args_override: payload.args_mode == engine::args::ArgsMode::Override,
                     marker: stub::generate_stub_marker(),
                     on_success: stage.on_success,
                     on_fail: stage.on_fail,
@@ -873,6 +878,15 @@ fn build_multistage(
                         )
                     )
                 );
+                stage_records.push(engine::manifest::StageRecord {
+                    index: stage.index,
+                    label: stage.label.clone(),
+                    action: stage.action.label().to_string(),
+                    payload_sha256: None,
+                    payload_size: None,
+                    nonce: None,
+                    techniques: Vec::new(),
+                });
                 payloads.push(engine::stages::StagePayload {
                     index: stage.index,
                     label: stage.label.clone(),
@@ -892,6 +906,8 @@ fn build_multistage(
                         timeout_s: exec.timeout_s,
                     }),
                     sleep_ms: 0,
+                    payload_args: Vec::new(),
+                    args_override: false,
                     marker: String::new(),
                     on_success: stage.on_success,
                     on_fail: stage.on_fail,
@@ -899,6 +915,15 @@ fn build_multistage(
                 });
             }
             plan::schema::StageAction::Sleep => {
+                stage_records.push(engine::manifest::StageRecord {
+                    index: stage.index,
+                    label: stage.label.clone(),
+                    action: stage.action.label().to_string(),
+                    payload_sha256: None,
+                    payload_size: None,
+                    nonce: None,
+                    techniques: Vec::new(),
+                });
                 payloads.push(engine::stages::StagePayload {
                     index: stage.index,
                     label: stage.label.clone(),
@@ -912,6 +937,8 @@ fn build_multistage(
                     runtime: Vec::new(),
                     exec: None,
                     sleep_ms: stage.sleep_ms,
+                    payload_args: Vec::new(),
+                    args_override: false,
                     marker: String::new(),
                     on_success: stage.on_success,
                     on_fail: stage.on_fail,
@@ -1032,17 +1059,13 @@ fn build_multistage(
         anstream::println!("{}", ui.done("sign", dotted(ui, &parts)));
     }
 
-    if plan.build.output.manifest && !first_plaintext.is_empty() {
+    if plan.build.output.manifest {
         let manifest_path = engine::manifest::manifest_path(&plan.build.output.path);
-        let mut manifest = engine::manifest::BuildManifest::new(
-            plan,
-            plan_path,
-            &plan.build.output.path,
-            &first_plaintext,
-            first_nonce,
-        )?;
+        let mut manifest =
+            engine::manifest::BuildManifest::multistage(plan, plan_path, &plan.build.output.path)?;
         manifest.signature = signature;
         manifest.version_info = resources.as_ref().and_then(|r| r.version_info.clone());
+        manifest.stages = stage_records;
         manifest.write(&manifest_path)?;
     }
 

@@ -161,9 +161,11 @@ pub fn advisories(plan: &Plan) -> Vec<String> {
     let mut warnings = Vec::new();
     // Flatten every stage's pipeline (a single-payload plan resolves to one
     // stage, so this is exactly the old `plan.runtime`).
-    let runtimes: Vec<RuntimeStep> = stages::resolve(plan)
-        .map(|stages| stages.into_iter().flat_map(|stage| stage.runtime).collect())
-        .unwrap_or_default();
+    let resolved = stages::resolve(plan).unwrap_or_default();
+    let runtimes: Vec<RuntimeStep> = resolved
+        .iter()
+        .flat_map(|stage| stage.runtime.iter().cloned())
+        .collect();
     for step in &runtimes {
         if let RuntimeStep::Bouncer { params } = step {
             if params.is_noop() {
@@ -172,6 +174,21 @@ pub fn advisories(plan: &Plan) -> Vec<String> {
                      never abort the pipeline"
                         .to_string(),
                 );
+            }
+        }
+    }
+
+    // An `exec` stage whose binary is outside the living-off-the-land catalogue
+    // still works, but it is worth flagging.
+    for stage in &resolved {
+        if let Some(exec) = &stage.exec {
+            if !stages::is_known_lolbin(&exec.binary) {
+                warnings.push(format!(
+                    "stage '{}': '{}' is not a known living-off-the-land binary; the exec stage \
+                     still runs it, but a signed system binary (certutil, rundll32, ...) is the \
+                     usual choice for proxy execution",
+                    stage.label, exec.binary
+                ));
             }
         }
     }

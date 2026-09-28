@@ -102,6 +102,73 @@ pub fn is_multistage(plan: &Plan) -> bool {
     !plan.stages.is_empty()
 }
 
+/// Known living-off-the-land binaries (LOLBAS), matched by file stem.
+///
+/// The list is advisory only: an `exec` stage whose `binary` is outside it still
+/// works, it just draws a build warning. A signed Microsoft binary is the usual
+/// choice for proxy execution (T1218) or download (T1105).
+const LOLBINS: &[&str] = &[
+    "at",
+    "atbroker",
+    "bitsadmin",
+    "certutil",
+    "cmd",
+    "cmstp",
+    "conhost",
+    "cscript",
+    "curl",
+    "dfshim",
+    "expand",
+    "extrac32",
+    "finger",
+    "forfiles",
+    "gpscript",
+    "ieexec",
+    "installutil",
+    "makecab",
+    "mavinject",
+    "msbuild",
+    "msconfig",
+    "msdt",
+    "mshta",
+    "msiexec",
+    "netsh",
+    "odbcconf",
+    "pcalua",
+    "pnputil",
+    "powershell",
+    "presentationhost",
+    "print",
+    "pwsh",
+    "reg",
+    "regasm",
+    "regsvr32",
+    "replace",
+    "rundll32",
+    "runonce",
+    "schtasks",
+    "ssh",
+    "syncappv",
+    "tar",
+    "utilman",
+    "verclsid",
+    "wmic",
+    "wscript",
+    "wsl",
+    "xcopy",
+    "xwizard",
+];
+
+/// Whether `name` is a known living-off-the-land binary (by file stem).
+pub fn is_known_lolbin(name: &str) -> bool {
+    let file = name.rsplit(['\\', '/']).next().unwrap_or(name);
+    let stem = file
+        .strip_suffix(".exe")
+        .or_else(|| file.strip_suffix(".EXE"))
+        .unwrap_or(file);
+    LOLBINS.iter().any(|known| known.eq_ignore_ascii_case(stem))
+}
+
 fn from_explicit(index: usize, stage: &StagePlan) -> Stage {
     Stage {
         index,
@@ -204,5 +271,13 @@ stages:
         let yaml = "schema: 5\nname: empty\nbuild:\n  output: { path: ./o.exe, arch: x64, strip: true, trim_paths: all }\n";
         let plan = parse(yaml);
         assert!(resolve(&plan).is_err());
+    }
+
+    #[test]
+    fn known_lolbins_are_recognized_by_stem() {
+        assert!(is_known_lolbin("certutil.exe"));
+        assert!(is_known_lolbin(r"C:\Windows\System32\RUNDLL32.exe"));
+        assert!(is_known_lolbin("cmd"));
+        assert!(!is_known_lolbin("my_implant.exe"));
     }
 }

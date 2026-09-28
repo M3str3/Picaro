@@ -136,6 +136,15 @@ Common:
 | --- | --- |
 | `sleep_ms` | Milliseconds to wait. |
 
+Each `technique` stage's `build.payload.args` and `build.payload.args_mode` are
+applied to that stage only: the generated runner sets a thread-local context
+before the stage, so two stages can pass different arguments to their payloads.
+
+An `exec` `binary` outside a curated living-off-the-land catalogue (`certutil`,
+`bitsadmin`, `rundll32`, `regsvr32`, `mshta`, `wmic`, `msbuild`, `curl`, `cmd`,
+`powershell`, ...) draws a **build warning**. It is advisory only: the stage
+still runs the binary.
+
 ## How it is built
 
 The multi-stage path renders a dedicated template
@@ -179,8 +188,6 @@ identical.
   `ExitProcess`/`TerminateProcess` (future work).
 - **`exec` spawns a visible child** (PPID = the stub, command line observable);
   `window: hidden` hides the window only. `ppid_spoofing` is the follow-up.
-- **Per-stage payload arguments** (`build.payload.args` on a stage payload) are
-  not supported yet; the payload still receives the packed binary's runtime args.
 - The provenance manifest records the **first** payload's hash and nonce; a
   stages-aware manifest is a follow-up.
 
@@ -189,5 +196,5 @@ identical.
 - Returning techniques (cooperative payloads, an `ExitProcess` interceptor) so
   more stages can chain in-process.
 - A run-time network stager (`payload.source: http(s)://` resolved in the stub).
-- Per-stage payload arguments and a stages-aware manifest.
+- A stages-aware manifest (one record per stage).
 - A wizard flow for building `stages:` interactively.

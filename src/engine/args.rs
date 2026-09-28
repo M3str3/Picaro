@@ -100,6 +100,34 @@ pub fn render_block(
         .replace("$ARGS_MODE_DEF$", mode_def)
 }
 
+/// Renders the multi-stage `$ARGS_BLOCK$`.
+///
+/// Identical to [`render_block`], except the YAML args and the mode are read
+/// from a **thread-local stage context** the generated runner sets before each
+/// `technique` stage (`crate::set_stage_args`). That lets every stage deliver
+/// its own `build.payload.args` while the technique fragments keep calling
+/// `crate::patch_command_line` / `crate::build_command_line` unchanged.
+///
+/// The single-payload path keeps the baked-constant block, so its output is
+/// unchanged.
+pub fn render_block_multistage(pipeline: &[RuntimeStep], strings: &StringsConfig) -> String {
+    let _ = strings;
+    if !needed(pipeline) {
+        return String::new();
+    }
+
+    ARGS_BLOCK
+        .replace(
+            "    /// The resolved `build.payload.args_mode`.\n    const ARGS_MODE: ArgsMode = $ARGS_MODE_DEF$;\n\n    /// The `build.payload.args` from the YAML, rebuilt at runtime.\n    fn yaml_args() -> Vec<String> {\n        $YAML_ARGS_DEF$\n    }",
+            "    thread_local! {\n        static STAGE_ARGS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };\n        static STAGE_MODE: std::cell::Cell<ArgsMode> = const { std::cell::Cell::new(ArgsMode::Join) };\n    }\n\n    /// Sets the current stage's YAML args and mode (called by the generated runner).\n    pub fn set_stage_args(args: Vec<String>, override_mode: bool) {\n        STAGE_ARGS.with(|cell| *cell.borrow_mut() = args);\n        STAGE_MODE.with(|cell| cell.set(if override_mode { ArgsMode::Override } else { ArgsMode::Join }));\n    }\n\n    /// The current stage's `build.payload.args`, set by the runner.\n    fn yaml_args() -> Vec<String> {\n        STAGE_ARGS.with(|cell| cell.borrow().clone())\n    }",
+        )
+        .replace("match ARGS_MODE {", "match STAGE_MODE.with(|cell| cell.get()) {")
+        .replace(
+            "use payload_args::{build_command_line, patch_command_line, payload_arguments};",
+            "use payload_args::{build_command_line, patch_command_line, payload_arguments, set_stage_args};",
+        )
+}
+
 /// The block body. It is wrapped in `mod payload_args` so its `use`/items
 /// cannot collide with the technique fragments injected into the same file, and
 /// the two entry points are re-exported so the fragments call
