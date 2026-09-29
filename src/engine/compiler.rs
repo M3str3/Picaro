@@ -616,6 +616,7 @@ mod tests {
     use super::*;
 
     use crate::plan::schema::PayloadFormat;
+    use crate::techniques::{RuntimeStep, TechniqueKind};
 
     #[test]
     fn find_executable_in_empty_path_is_none() {
@@ -853,31 +854,30 @@ dependencies = [
             .join("stub")
             .join("main.rs.tpl");
         let template = std::fs::read_to_string(tpl_path).unwrap();
-        let params = crate::engine::stub::StubParams {
-            nonce: encrypted.nonce,
-            key: encrypted.key,
-            ciphertext: encrypted.ciphertext.clone(),
-            plaintext_len: encrypted.plaintext_len,
-            payload_format: PayloadFormat::Pe,
-            payload_export: None,
-            stub_marker: crate::engine::stub::generate_stub_marker(),
-            payload_path: "payload.bin".to_string(),
-            build_args: std::collections::BTreeMap::new(),
-            payload_args: Vec::new(),
-            args_mode: crate::engine::args::ArgsMode::Join,
-            debug: false,
-            windows_subsystem: false,
-        };
-        let pipeline = vec![crate::techniques::RuntimeStep::ProcessHollowing {
+        let pipeline = vec![RuntimeStep::new(TechniqueKind::ProcessHollowing {
             params: crate::techniques::process_hollowing::Params {
+                payload: None,
                 target: r"C:\Windows\System32\svchost.exe".to_string(),
             },
-        }];
+        })];
+        let params = crate::engine::steps::test_params(
+            &pipeline,
+            &encrypted,
+            "payload.bin",
+            PayloadFormat::Pe,
+            None,
+            false,
+        );
         let strings = crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap();
         let syscalls = crate::engine::syscalls::SyscallsConfig::default();
-        let stub_src =
-            crate::engine::stub::render_main_rs(&template, &params, &pipeline, &strings, &syscalls)
-                .unwrap();
+        let stub_src = crate::engine::steps::render_builtin(
+            &template,
+            &params,
+            &strings,
+            &syscalls,
+            &crate::engine::api_resolution::ApiResolutionConfig::default(),
+        )
+        .unwrap();
         let stub_path = build_dir.join("main.rs");
         std::fs::write(&stub_path, stub_src).unwrap();
 
@@ -924,7 +924,6 @@ dependencies = [
 
         let deps = locate_stub_deps(Arch::X64).unwrap();
 
-        let marker = "STUB_MARKER_test00000000".to_string();
         let target = r"C:\Windows\System32\svchost.exe".to_string();
 
         let strategies = [
@@ -945,32 +944,26 @@ dependencies = [
         ];
 
         for (name, strings) in strategies {
-            let params = crate::engine::stub::StubParams {
-                nonce: encrypted.nonce,
-                key: encrypted.key,
-                ciphertext: encrypted.ciphertext.clone(),
-                plaintext_len: encrypted.plaintext_len,
-                payload_format: PayloadFormat::Pe,
-                payload_export: None,
-                stub_marker: marker.clone(),
-                payload_path: "payload.bin".to_string(),
-                build_args: std::collections::BTreeMap::new(),
-                payload_args: Vec::new(),
-                args_mode: crate::engine::args::ArgsMode::Join,
-                debug: false,
-                windows_subsystem: false,
-            };
-            let pipeline = vec![crate::techniques::RuntimeStep::ProcessHollowing {
+            let pipeline = vec![RuntimeStep::new(TechniqueKind::ProcessHollowing {
                 params: crate::techniques::process_hollowing::Params {
+                    payload: None,
                     target: target.clone(),
                 },
-            }];
-            let stub_src = crate::engine::stub::render_main_rs(
+            })];
+            let params = crate::engine::steps::test_params(
+                &pipeline,
+                &encrypted,
+                "payload.bin",
+                PayloadFormat::Pe,
+                None,
+                false,
+            );
+            let stub_src = crate::engine::steps::render_builtin(
                 &template,
                 &params,
-                &pipeline,
                 &strings,
                 &crate::engine::syscalls::SyscallsConfig::default(),
+                &crate::engine::api_resolution::ApiResolutionConfig::default(),
             )
             .unwrap();
             let stub_path = build_dir.join(format!("main_{name}.rs"));
@@ -980,10 +973,6 @@ dependencies = [
             compile_stub(&stub_path, &out, &deps, CompileOptions::default()).unwrap();
 
             let binary = std::fs::read(&out).unwrap();
-            assert!(
-                !binary.windows(marker.len()).any(|w| w == marker.as_bytes()),
-                "{name}: marker leaked into the binary"
-            );
             assert!(
                 !binary.windows(target.len()).any(|w| w == target.as_bytes()),
                 "{name}: hollowing target leaked into the binary"
@@ -1040,27 +1029,20 @@ dependencies = [
                 vec![step]
             };
 
-            let params = crate::engine::stub::StubParams {
-                nonce: encrypted.nonce,
-                key: encrypted.key,
-                ciphertext: encrypted.ciphertext.clone(),
-                plaintext_len: encrypted.plaintext_len,
-                payload_format: PayloadFormat::Pe,
-                payload_export: None,
-                stub_marker: crate::engine::stub::generate_stub_marker(),
-                payload_path: "payload.bin".to_string(),
-                build_args: std::collections::BTreeMap::new(),
-                payload_args: Vec::new(),
-                args_mode: crate::engine::args::ArgsMode::Join,
-                debug: false,
-                windows_subsystem: false,
-            };
-            let stub_src = crate::engine::stub::render_main_rs(
+            let params = crate::engine::steps::test_params(
+                &pipeline,
+                &encrypted,
+                "payload.bin",
+                PayloadFormat::Pe,
+                None,
+                false,
+            );
+            let stub_src = crate::engine::steps::render_builtin(
                 &template,
                 &params,
-                &pipeline,
                 &strings,
                 &crate::engine::syscalls::SyscallsConfig::default(),
+                &crate::engine::api_resolution::ApiResolutionConfig::default(),
             )
             .unwrap();
             let stub_path = build_dir.join(format!("main_{}.rs", def.name));
@@ -1108,28 +1090,26 @@ dependencies = [
         )
         .unwrap();
 
-        let params = crate::engine::stub::StubParams {
-            nonce: [0u8; 24],
-            key: [0u8; 32],
-            ciphertext: vec![0xAA, 0xBB, 0xCC, 0xDD],
-            plaintext_len: 4,
-            payload_format: PayloadFormat::Pe,
-            payload_export: None,
-            stub_marker: crate::engine::stub::generate_stub_marker(),
-            payload_path: "payload.bin".to_string(),
-            build_args: std::collections::BTreeMap::new(),
-            payload_args: Vec::new(),
-            args_mode: crate::engine::args::ArgsMode::Join,
-            debug: false,
-            windows_subsystem: false,
-        };
+        let params = crate::engine::steps::test_params(
+            &[],
+            &crate::engine::crypto::EncryptedPayload {
+                nonce: [0u8; 24],
+                key: [0u8; 32],
+                ciphertext: vec![0xAA, 0xBB, 0xCC, 0xDD],
+                plaintext_len: 4,
+            },
+            "payload.bin",
+            PayloadFormat::Pe,
+            None,
+            false,
+        );
         let strings = crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap();
-        let rendered = crate::engine::stub::render_custom_stub(
+        let rendered = crate::engine::steps::render_custom(
             &template,
             &params,
-            &[],
             &strings,
             &crate::engine::syscalls::SyscallsConfig::default(),
+            &crate::engine::api_resolution::ApiResolutionConfig::default(),
         )
         .unwrap();
         assert!(rendered.warnings.is_empty(), "no techniques declared");
@@ -1172,30 +1152,29 @@ dependencies = [
                 .join("main.rs.tpl"),
         )
         .unwrap();
-        let pipeline = vec![crate::techniques::RuntimeStep::ProcessHollowing {
+        let pipeline = vec![RuntimeStep::new(TechniqueKind::ProcessHollowing {
             params: crate::techniques::process_hollowing::Params {
+                payload: None,
                 target: r"C:\Windows\System32\svchost.exe".to_string(),
             },
-        }];
-        let params = crate::engine::stub::StubParams {
-            nonce: encrypted.nonce,
-            key: encrypted.key,
-            ciphertext: encrypted.ciphertext.clone(),
-            plaintext_len: encrypted.plaintext_len,
-            payload_format: PayloadFormat::Pe,
-            payload_export: None,
-            stub_marker: crate::engine::stub::generate_stub_marker(),
-            payload_path: "payload.bin".to_string(),
-            build_args: std::collections::BTreeMap::new(),
-            payload_args: Vec::new(),
-            args_mode: crate::engine::args::ArgsMode::Join,
-            debug: false,
-            windows_subsystem: false,
-        };
+        })];
+        let params = crate::engine::steps::test_params(
+            &pipeline,
+            &encrypted,
+            "payload.bin",
+            PayloadFormat::Pe,
+            None,
+            false,
+        );
         let strings = crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap();
-        let stub_src =
-            crate::engine::stub::render_main_rs(&template, &params, &pipeline, &strings, syscalls)
-                .unwrap();
+        let stub_src = crate::engine::steps::render_builtin(
+            &template,
+            &params,
+            &strings,
+            syscalls,
+            &crate::engine::api_resolution::ApiResolutionConfig::default(),
+        )
+        .unwrap();
         let stub_path = build_dir.join(format!("main_{name}.rs"));
         std::fs::write(&stub_path, stub_src).unwrap();
 
@@ -1453,32 +1432,24 @@ dependencies = [
     /// Renders a custom stub template with a fresh key and a small payload.
     ///
     /// The pipeline only drives the shared blocks (args/imports/syscalls); a
-    /// custom template that ignores `$EXECUTION_BLOCK$` never pulls in a
-    /// technique fragment, which is what lets the x86 toolchain be tested while
-    /// every fragment is still x64-only.
+    /// custom template that ignores `$STEP_MODULES$` never pulls in a technique
+    /// fragment, which is what lets the x86 toolchain be tested while every
+    /// fragment is still x64-only.
     fn render_custom(template: &str, pipeline: &[crate::techniques::RuntimeStep]) -> String {
         let plaintext: Vec<u8> = (0..64u32).map(|i| i as u8).collect();
         let key = crate::engine::crypto::generate_key();
         let encrypted = crate::engine::crypto::encrypt_payload(&plaintext, &key).unwrap();
-        let params = crate::engine::stub::StubParams {
-            nonce: encrypted.nonce,
-            key: encrypted.key,
-            ciphertext: encrypted.ciphertext.clone(),
-            plaintext_len: encrypted.plaintext_len,
-            payload_format: PayloadFormat::Pe,
-            payload_export: None,
-            stub_marker: crate::engine::stub::generate_stub_marker(),
-            payload_path: "payload.bin".to_string(),
-            build_args: std::collections::BTreeMap::new(),
-            payload_args: Vec::new(),
-            args_mode: crate::engine::args::ArgsMode::Join,
-            debug: false,
-            windows_subsystem: false,
-        };
-        crate::engine::stub::render_custom_stub_with(
+        let params = crate::engine::steps::test_params(
+            pipeline,
+            &encrypted,
+            "payload.bin",
+            PayloadFormat::Pe,
+            None,
+            false,
+        );
+        crate::engine::steps::render_custom(
             template,
             &params,
-            pipeline,
             &crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap(),
             &crate::engine::syscalls::SyscallsConfig::default(),
             &crate::engine::api_resolution::ApiResolutionConfig::default(),
@@ -1502,25 +1473,17 @@ dependencies = [
         let plaintext: Vec<u8> = (0..256u32).map(|i| i as u8).collect();
         let key = crate::engine::crypto::generate_key();
         let encrypted = crate::engine::crypto::encrypt_payload(&plaintext, &key).unwrap();
-        let params = crate::engine::stub::StubParams {
-            nonce: encrypted.nonce,
-            key: encrypted.key,
-            ciphertext: encrypted.ciphertext.clone(),
-            plaintext_len: encrypted.plaintext_len,
-            payload_format: PayloadFormat::Pe,
-            payload_export: None,
-            stub_marker: crate::engine::stub::generate_stub_marker(),
-            payload_path: "payload.bin".to_string(),
-            build_args: std::collections::BTreeMap::new(),
-            payload_args: Vec::new(),
-            args_mode: crate::engine::args::ArgsMode::Join,
-            debug: false,
-            windows_subsystem: false,
-        };
-        let source = crate::engine::stub::render_main_rs_with(
+        let params = crate::engine::steps::test_params(
+            pipeline,
+            &encrypted,
+            "payload.bin",
+            PayloadFormat::Pe,
+            None,
+            false,
+        );
+        let source = crate::engine::steps::render_builtin(
             &template,
             &params,
-            pipeline,
             &crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap(),
             &crate::engine::syscalls::SyscallsConfig::default(),
             &crate::engine::api_resolution::ApiResolutionConfig::default(),
@@ -1592,7 +1555,7 @@ dependencies = [
     /// offsets, 4-byte thunks and `IMAGE_ORDINAL_FLAG32`).
     ///
     /// The pipeline is only there to make the renderer emit `$ARGS_BLOCK$` /
-    /// `$IMPORTS_BLOCK$`; the template ignores `$EXECUTION_BLOCK$`, so no x64
+    /// `$IMPORTS_BLOCK$`; the template ignores `$STEP_MODULES$`, so no x64
     /// technique fragment is linked in.
     #[test]
     #[ignore = "requires rustc and the workspace built for the i686 target"]
@@ -1610,19 +1573,16 @@ fn dec_xor(bytes: &[u8], key: &[u8; 32]) -> Vec<u8> {
     out
 }
 
-fn main() {
-    let len = $PAYLOAD_LEN$;
-    println!("{len}");
-}
+fn main() {}
 
 $SYSCALLS_BLOCK$
 $ARGS_BLOCK$
 $IMPORTS_BLOCK$
 "#;
 
-        let pipeline = vec![crate::techniques::RuntimeStep::ReflectiveLoading {
-            params: crate::techniques::reflective_loading::Params {},
-        }];
+        let pipeline = vec![RuntimeStep::new(TechniqueKind::ReflectiveLoading {
+            params: crate::techniques::reflective_loading::Params::default(),
+        })];
         let source = render_custom(TEMPLATE, &pipeline);
         assert!(source.contains("fs:[0x30]"), "the x86 PEB read is missing");
         assert!(
@@ -1639,9 +1599,9 @@ $IMPORTS_BLOCK$
     #[test]
     #[ignore = "requires rustc and the workspace built for the i686 target"]
     fn compiles_a_reflective_stub_for_i686() {
-        let pipeline = vec![crate::techniques::RuntimeStep::ReflectiveLoading {
-            params: crate::techniques::reflective_loading::Params {},
-        }];
+        let pipeline = vec![RuntimeStep::new(TechniqueKind::ReflectiveLoading {
+            params: crate::techniques::reflective_loading::Params::default(),
+        })];
         let (source, ciphertext) = render_builtin(&pipeline);
 
         let info = compile_i686(&source, Some(&ciphertext), "reflective");
@@ -1654,9 +1614,9 @@ $IMPORTS_BLOCK$
     #[test]
     #[ignore = "requires rustc and the workspace built for the i686 target"]
     fn compiles_a_hollowing_stub_for_i686() {
-        let pipeline = vec![crate::techniques::RuntimeStep::ProcessHollowing {
+        let pipeline = vec![RuntimeStep::new(TechniqueKind::ProcessHollowing {
             params: crate::techniques::process_hollowing::Params::default(),
-        }];
+        })];
         let (source, ciphertext) = render_builtin(&pipeline);
 
         let info = compile_i686(&source, Some(&ciphertext), "hollowing");
@@ -1670,30 +1630,28 @@ $IMPORTS_BLOCK$
     #[test]
     #[ignore = "requires rustc and the workspace built for the i686 target"]
     fn compiles_the_x86_preparations_for_i686() {
-        use crate::techniques::{
-            anti_debug, bouncer, patch_amsi, patch_etw, reflective_loading, RuntimeStep,
-        };
+        use crate::techniques::{anti_debug, bouncer, patch_amsi, patch_etw, reflective_loading};
         let pipeline = vec![
-            RuntimeStep::AntiDebug {
+            RuntimeStep::new(TechniqueKind::AntiDebug {
                 params: anti_debug::Params::default(),
-            },
-            RuntimeStep::PatchAmsi {
+            }),
+            RuntimeStep::new(TechniqueKind::PatchAmsi {
                 params: patch_amsi::Params::default(),
-            },
-            RuntimeStep::PatchEtw {
+            }),
+            RuntimeStep::new(TechniqueKind::PatchEtw {
                 params: patch_etw::Params::default(),
-            },
-            RuntimeStep::Bouncer {
+            }),
+            RuntimeStep::new(TechniqueKind::Bouncer {
                 params: bouncer::Params {
                     hostname: Some("WORKSTATION-*".to_string()),
                     not_in_vm: Some(true),
                     min_ram_mb: Some(2048),
                     ..bouncer::Params::default()
                 },
-            },
-            RuntimeStep::ReflectiveLoading {
+            }),
+            RuntimeStep::new(TechniqueKind::ReflectiveLoading {
                 params: reflective_loading::Params::default(),
-            },
+            }),
         ];
         let (source, ciphertext) = render_builtin(&pipeline);
 
@@ -1708,9 +1666,9 @@ $IMPORTS_BLOCK$
     #[test]
     #[ignore = "requires rustc and the workspace built for the i686 target"]
     fn compiles_a_dotnet_hosting_stub_for_i686() {
-        let pipeline = vec![crate::techniques::RuntimeStep::DotnetHosting {
-            params: crate::techniques::dotnet_hosting::Params {},
-        }];
+        let pipeline = vec![RuntimeStep::new(TechniqueKind::DotnetHosting {
+            params: crate::techniques::dotnet_hosting::Params::default(),
+        })];
         let (source, ciphertext) = render_builtin(&pipeline);
 
         let info = compile_i686(&source, Some(&ciphertext), "dotnet_hosting");

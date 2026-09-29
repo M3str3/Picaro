@@ -19,6 +19,7 @@
 //! for redirected or scripted input. That keeps the whole session testable: the
 //! same wizard logic runs against `Cursor`/`Vec` in the unit tests.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
@@ -35,7 +36,7 @@ use crate::plan::schema::{
 use crate::plan::validate;
 use crate::techniques::{
     self, anti_debug, bouncer, patch_amsi, patch_etw, process_hollowing, sleep_obfuscation,
-    Category, RuntimeStep, TechniqueDef,
+    Category, RuntimeStep, TechniqueDef, TechniqueKind,
 };
 use crate::ui::Palette;
 
@@ -169,8 +170,8 @@ fn write_plan(plan: &Plan, yaml: &str, plan_out: Option<&Path>) -> Result<PathBu
 struct Answers {
     name: String,
     payload_args: Vec<String>,
-    execution: RuntimeStep,
-    preparations: Vec<RuntimeStep>,
+    execution: TechniqueKind,
+    preparations: Vec<TechniqueKind>,
     strings_strategy: String,
     syscalls_mode: String,
     output_path: String,
@@ -649,7 +650,7 @@ impl Wizard<'_> {
     }
 
     /// Asks for the execution technique and its parameters.
-    fn ask_execution(&mut self, previous: Option<&RuntimeStep>) -> Result<RuntimeStep> {
+    fn ask_execution(&mut self, previous: Option<&TechniqueKind>) -> Result<TechniqueKind> {
         let choices = execution_defs();
         let options = describe(&choices);
         let default = previous
@@ -667,12 +668,15 @@ impl Wizard<'_> {
         match def.name {
             "process_hollowing" => {
                 let default_target = match previous {
-                    Some(RuntimeStep::ProcessHollowing { params }) => params.target.clone(),
+                    Some(TechniqueKind::ProcessHollowing { params }) => params.target.clone(),
                     _ => process_hollowing::default_target(),
                 };
                 let target = self.ask_text("target", &default_target)?;
-                Ok(RuntimeStep::ProcessHollowing {
-                    params: process_hollowing::Params { target },
+                Ok(TechniqueKind::ProcessHollowing {
+                    params: process_hollowing::Params {
+                        payload: None,
+                        target,
+                    },
                 })
             }
             _ => default_step(def),
@@ -680,7 +684,7 @@ impl Wizard<'_> {
     }
 
     /// Asks which preparations to apply, then each one's parameters.
-    fn ask_preparations(&mut self, previous: &[RuntimeStep]) -> Result<Vec<RuntimeStep>> {
+    fn ask_preparations(&mut self, previous: &[TechniqueKind]) -> Result<Vec<TechniqueKind>> {
         let choices = preparation_defs();
         let options = describe(&choices);
         let default: Vec<usize> = choices
@@ -706,8 +710,8 @@ impl Wizard<'_> {
     fn ask_preparation(
         &mut self,
         def: &TechniqueDef,
-        previous: Option<&RuntimeStep>,
-    ) -> Result<RuntimeStep> {
+        previous: Option<&TechniqueKind>,
+    ) -> Result<TechniqueKind> {
         self.blank()?;
         let heading = self.ui.heading(def.name);
         let subtitle = self.ui.dim(techniques::summary(def));
@@ -716,16 +720,16 @@ impl Wizard<'_> {
         match def.name {
             "bouncer" => {
                 let previous = previous.and_then(|step| match step {
-                    RuntimeStep::Bouncer { params } => Some(params),
+                    TechniqueKind::Bouncer { params } => Some(params),
                     _ => None,
                 });
-                Ok(RuntimeStep::Bouncer {
+                Ok(TechniqueKind::Bouncer {
                     params: self.ask_bouncer(previous)?,
                 })
             }
             "anti_debug" => {
                 let previous = previous.and_then(|step| match step {
-                    RuntimeStep::AntiDebug { params } => Some(params.action),
+                    TechniqueKind::AntiDebug { params } => Some(params.action),
                     _ => None,
                 });
                 let action = match self.ask_select(
@@ -739,35 +743,35 @@ impl Wizard<'_> {
                     0 => anti_debug::Action::Abort,
                     _ => anti_debug::Action::Continue,
                 };
-                Ok(RuntimeStep::AntiDebug {
+                Ok(TechniqueKind::AntiDebug {
                     params: anti_debug::Params { action },
                 })
             }
-            "patch_amsi" => Ok(RuntimeStep::PatchAmsi {
+            "patch_amsi" => Ok(TechniqueKind::PatchAmsi {
                 params: patch_amsi::Params {},
             }),
             "patch_etw" => {
                 let previous = previous.and_then(|step| match step {
-                    RuntimeStep::PatchEtw { params } => Some(params.full),
+                    TechniqueKind::PatchEtw { params } => Some(params.full),
                     _ => None,
                 });
                 let full = self
                     .prompts
                     .confirm("also patch EtwEventWriteFull", previous.unwrap_or(true))?;
-                Ok(RuntimeStep::PatchEtw {
+                Ok(TechniqueKind::PatchEtw {
                     params: patch_etw::Params { full },
                 })
             }
             "sleep_obfuscation" => {
                 let previous = previous.and_then(|step| match step {
-                    RuntimeStep::SleepObfuscation { params } => Some(params.sleep_ms),
+                    TechniqueKind::SleepObfuscation { params } => Some(params.sleep_ms),
                     _ => None,
                 });
                 // Only `ekko` and `[payload]` are implemented, so the variant and
                 // the encrypted regions are not questions yet.
                 let sleep_ms =
                     self.ask_number("sleep_ms", previous.unwrap_or(5000), 1, u32::MAX as u64)?;
-                Ok(RuntimeStep::SleepObfuscation {
+                Ok(TechniqueKind::SleepObfuscation {
                     params: sleep_obfuscation::Params {
                         variant: sleep_obfuscation::Variant::Ekko,
                         sleep_ms,
@@ -961,28 +965,47 @@ fn describe(defs: &[&'static TechniqueDef]) -> Vec<(&'static str, &'static str)>
 }
 
 /// Assembles the [`Plan`] from the answered questions.
+///
+/// The wizard builds a single-payload plan: the payload's key is the file stem,
+/// and the crypto lives on `build.crypto` (no per-payload block).
 fn assemble(payload: &Path, answers: &Answers) -> Plan {
-    let mut runtime = answers.preparations.clone();
-    runtime.push(answers.execution.clone());
+    let mut runtime: Vec<RuntimeStep> = answers
+        .preparations
+        .iter()
+        .cloned()
+        .map(RuntimeStep::new)
+        .collect();
+    runtime.push(RuntimeStep::new(answers.execution.clone()));
+
+    let payload_name = default_name(payload);
+    let mut payloads = BTreeMap::new();
+    payloads.insert(
+        payload_name,
+        PayloadPlan {
+            source: payload.display().to_string(),
+            // The wizard writes one payload and never asks for its format, so it
+            // must pick one the chosen technique runs (see `default_format`);
+            // anything else is an advanced setting edited in the YAML.
+            format: default_format(&answers.execution),
+            export: None,
+            args: (!answers.payload_args.is_empty()).then(|| answers.payload_args.clone()),
+            args_mode: ArgsMode::Join,
+            // The crypto lives on `build.crypto`; inherited by the payload.
+            crypto: None,
+            // Integrity pinning is an advanced setting; edit it in the YAML.
+            sha256: None,
+        },
+    );
 
     Plan {
         schema: SUPPORTED_SCHEMA,
         name: answers.name.clone(),
         build: BuildPlan {
-            payload: Some(PayloadPlan {
-                source: payload.display().to_string(),
-                // Payload formats are an advanced setting; edit them in the YAML.
-                format: PayloadFormat::Pe,
-                export: None,
-                args: (!answers.payload_args.is_empty()).then(|| answers.payload_args.clone()),
-                args_mode: ArgsMode::Join,
-                crypto: CryptoPlan {
-                    algo: CryptoAlgorithm::XChaCha20Poly1305,
-                    key: KeySource::Random,
-                },
-                // Integrity pinning is an advanced setting; edit it in the YAML.
-                sha256: None,
+            crypto: Some(CryptoPlan {
+                algo: CryptoAlgorithm::XChaCha20Poly1305,
+                key: KeySource::Random,
             }),
+            payloads,
             stub: StubPlan {
                 // The wizard always renders the builtin stub.
                 path: None,
@@ -1019,7 +1042,23 @@ fn assemble(payload: &Path, answers: &Answers) -> Plan {
             },
         },
         runtime,
-        stages: Vec::new(),
+    }
+}
+
+/// The payload format the wizard writes for an execution technique.
+///
+/// `plan::validate` rejects a plan whose payload format the technique cannot
+/// run, and the wizard never asks for the format, so the default has to be one
+/// the chosen technique accepts. Formats the wizard cannot infer (a DLL export,
+/// or shellcode for `reflective_loading`) are edited in the YAML afterwards.
+fn default_format(technique: &TechniqueKind) -> PayloadFormat {
+    match technique {
+        TechniqueKind::DotnetHosting { .. } => PayloadFormat::Dotnet,
+        TechniqueKind::ExecutionCallbacks { .. }
+        | TechniqueKind::ModuleStomping { .. }
+        | TechniqueKind::EarlyBird { .. }
+        | TechniqueKind::Fibers { .. } => PayloadFormat::Shellcode,
+        _ => PayloadFormat::Pe,
     }
 }
 
@@ -1028,7 +1067,7 @@ fn assemble(payload: &Path, answers: &Answers) -> Plan {
 /// Used for techniques the wizard has no tailored questions for yet: the
 /// registry guarantees the snippet parses, so a newly registered technique
 /// arrives with its YAML defaults instead of being unreachable.
-fn default_step(def: &TechniqueDef) -> Result<RuntimeStep> {
+fn default_step(def: &TechniqueDef) -> Result<TechniqueKind> {
     serde_yml::from_str(def.params_example).map_err(|source| {
         PackerError::Validation(format!(
             "technique '{}' has unparsable default params: {source}",
@@ -1222,8 +1261,10 @@ mod tests {
         let plan = load_plan(&plan_path, &BTreeMap::new()).expect("valid plan");
         assert_eq!(plan.name, "payload");
         assert_eq!(plan.build.output.arch, Arch::X64, "the default arch is x64");
-        assert_eq!(plan.build.payload.as_ref().unwrap().source, "payload.exe");
-        assert!(plan.build.payload.as_ref().unwrap().args.is_none());
+        let payload = plan.build.payloads.get("payload").expect("the payload");
+        assert_eq!(payload.source, "payload.exe");
+        assert!(payload.args.is_none());
+        assert!(plan.build.crypto.is_some(), "build.crypto is the default");
         assert_eq!(
             plan.build.output.path,
             PathBuf::from("./dist/payload_packed.exe")
@@ -1231,7 +1272,10 @@ mod tests {
         assert!(plan.build.output.strip);
         assert_eq!(plan.runtime.len(), 1);
         assert!(
-            matches!(plan.runtime[0], RuntimeStep::ReflectiveLoading { .. }),
+            matches!(
+                plan.runtime[0].technique,
+                TechniqueKind::ReflectiveLoading { .. }
+            ),
             "got {:?}",
             plan.runtime[0]
         );
@@ -1241,6 +1285,60 @@ mod tests {
         assert_eq!(syscalls.mode, "indirect");
         assert_eq!(syscalls.resolver, "hells_gate");
         assert!(plan.build.stub.strings.is_some());
+    }
+
+    /// Every Execution technique must assemble a plan the packer accepts.
+    ///
+    /// The wizard writes a single payload and never asks for its format, so the
+    /// assembled plan must use a format the chosen technique runs
+    /// (`dotnet_hosting` hosts a managed assembly; the in-process shellcode
+    /// runners execute raw code) and the step's `params_example` must not name
+    /// a payload the plan does not declare.
+    #[test]
+    fn every_execution_technique_assembles_a_valid_plan() {
+        use crate::plan::validate;
+
+        for def in execution_defs() {
+            let answers = Answers {
+                name: "demo".to_string(),
+                payload_args: Vec::new(),
+                execution: default_step(def).expect("params_example parses"),
+                preparations: Vec::new(),
+                strings_strategy: "xor".to_string(),
+                syscalls_mode: "none".to_string(),
+                output_path: "./dist/demo_packed.exe".to_string(),
+                arch: "x64".to_string(),
+                strip: true,
+                trim_paths: TrimPaths::All,
+            };
+
+            let plan = assemble(Path::new("payload.exe"), &answers);
+            let payload = plan.build.payloads.get("payload").expect("the payload");
+            assert_eq!(
+                payload.format,
+                default_format(&answers.execution),
+                "{}: the payload format must be one the technique runs",
+                def.name
+            );
+            validate::validate(&plan).unwrap_or_else(|e| panic!("{}: {e}", def.name));
+        }
+    }
+
+    /// The wizard names its payload after the input file, so an Execution
+    /// technique's `params_example` must not name one: the default step would
+    /// reference a payload the plan never declares.
+    #[test]
+    fn execution_params_examples_do_not_name_a_payload() {
+        for def in execution_defs() {
+            let step: RuntimeStep =
+                serde_yml::from_str(def.params_example).expect("params_example parses");
+            assert!(
+                step.technique.payload_name().is_none(),
+                "{}: params_example names a payload; the wizard's payload is named after the input \
+                 file",
+                def.name
+            );
+        }
     }
 
     /// A full script exercises the execution choice, a preparation with several
@@ -1274,12 +1372,12 @@ mod tests {
         let plan = load_plan(&plan_path, &BTreeMap::new()).expect("valid plan");
         assert_eq!(plan.name, "demo");
         assert_eq!(
-            plan.build.payload.as_ref().unwrap().args,
+            plan.build.payloads.get("mimikatz").expect("payload").args,
             Some(vec!["a".to_string(), "b".to_string()])
         );
 
         assert_eq!(plan.runtime.len(), 2);
-        let RuntimeStep::Bouncer { params } = &plan.runtime[0] else {
+        let TechniqueKind::Bouncer { params } = &plan.runtime[0].technique else {
             panic!("expected a bouncer first, got {:?}", plan.runtime[0]);
         };
         assert_eq!(params.mode, bouncer::Mode::All);
@@ -1287,7 +1385,7 @@ mod tests {
         assert_eq!(params.hostname.as_deref(), Some("WORKSTATION-*"));
         assert_eq!(params.not_in_vm, Some(true));
 
-        let RuntimeStep::ProcessHollowing { params } = &plan.runtime[1] else {
+        let TechniqueKind::ProcessHollowing { params } = &plan.runtime[1].technique else {
             panic!(
                 "expected process_hollowing second, got {:?}",
                 plan.runtime[1]

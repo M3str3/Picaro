@@ -13,7 +13,7 @@ Runs a managed (.NET) assembly from memory. The stub hosts the CLR **in its own
 process** (`CLRCreateInstance` → `ICLRMetaHost` → `ICLRRuntimeInfo` →
 `ICorRuntimeHost`), loads the payload's bytes as an assembly
 (`_AppDomain.Load_3(byte[])`) and invokes its entry point
-(`Assembly.GetEntryPoint` → `MethodInfo.Invoke_3`) with `build.payload.args` plus
+(`Assembly.GetEntryPoint` → `MethodInfo.Invoke_3`) with `build.payloads.<name>.args` plus
 the runtime arguments as a `string[]`.
 
 This is not reflective loading: a managed assembly's entry point is a stub that

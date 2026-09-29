@@ -76,7 +76,7 @@ fn build_with_invalid_order_fails() {
     assert!(!output.status.success(), "invalid order must fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("appears after the Execution technique"),
+        stderr.contains("does not return control"),
         "unclear error: {stderr}"
     );
 }
@@ -277,16 +277,17 @@ fn pack_args_payload(name: &str, payload: &Path, args: &[&str], mode: &str) -> P
         .collect::<String>();
     let source = payload.display().to_string().replace('\\', "/");
     let plan = format!(
-        r#"schema: 4
+        r#"schema: 6
 name: {name}
 build:
-  payload:
-    source: "{source}"
-    args:
-{yaml_args}    args_mode: {mode}
-    crypto:
-      algo: xchacha20poly1305
-      key: random
+  crypto:
+    algo: xchacha20poly1305
+    key: random
+  payloads:
+    payload:
+      source: "{source}"
+      args:
+{yaml_args}      args_mode: {mode}
   output:
     path: ./dist/{name}.exe
     arch: x64
@@ -294,6 +295,7 @@ build:
     trim_paths: all
 runtime:
   - technique: reflective_loading
+    params: {{ payload: payload }}
 "#
     );
 
@@ -476,31 +478,33 @@ fn audit_baseline_gates_a_regression() {
     assert!(String::from_utf8_lossy(&regressed.stdout).contains("regression"));
 }
 
-// --- build --dry-run / build.payload.sha256 ---
+// --- build --dry-run / build.payloads.<name>.sha256 ---
 
 /// A minimal build plan (reflective loading, builtin stub) for `out`.
 fn minimal_build_plan(out: &Path, sha256: Option<&str>) -> String {
     let sha_line = match sha256 {
-        Some(hash) => format!("    sha256: \"{hash}\"\n"),
+        Some(hash) => format!("      sha256: \"{hash}\"\n"),
         None => String::new(),
     };
     let out = out.display().to_string().replace('\\', "/");
     format!(
-        r#"schema: 4
+        r#"schema: 6
 name: cli-dry-run
 build:
-  payload:
-    source: examples/payloads/test_payload.exe
-{sha_line}    crypto:
-      algo: xchacha20poly1305
-      key: random
-  output:
+  crypto:
+    algo: xchacha20poly1305
+    key: random
+  payloads:
+    payload:
+      source: examples/payloads/test_payload.exe
+{sha_line}  output:
     path: "{out}"
     arch: x64
     strip: true
     trim_paths: all
 runtime:
   - technique: reflective_loading
+    params: {{ payload: payload }}
 "#
     )
 }
@@ -538,7 +542,7 @@ fn build_dry_run_validates_without_writing() {
     assert!(!manifest.exists(), "a dry run must not write a manifest");
 }
 
-/// A `build.payload.sha256` that does not match the payload aborts the build
+/// A `build.payloads.<name>.sha256` that does not match the payload aborts the build
 /// with a clear message, before anything is compiled.
 #[test]
 fn build_rejects_a_payload_sha256_mismatch() {
@@ -739,14 +743,15 @@ fn packs_and_runs_an_x86_reflective_payload() {
     // 2. Pack it with `arch: x86`.
     let source = payload.display().to_string().replace('\\', "/");
     let plan = format!(
-        r#"schema: 4
+        r#"schema: 6
 name: x86_reflective
 build:
-  payload:
-    source: "{source}"
-    crypto:
-      algo: xchacha20poly1305
-      key: random
+  crypto:
+    algo: xchacha20poly1305
+    key: random
+  payloads:
+    payload:
+      source: "{source}"
   output:
     path: ./dist/x86_reflective.exe
     arch: x86
@@ -754,6 +759,7 @@ build:
     trim_paths: all
 runtime:
   - technique: reflective_loading
+    params: {{ payload: payload }}
 "#
     );
     let plan_path = std::env::temp_dir().join(format!("picaro_x86_{}.yaml", std::process::id()));
@@ -822,16 +828,17 @@ fn build_hollow_payload(target: Option<&str>) -> PathBuf {
 fn pack_hollowing_payload(name: &str, payload: &Path, arch: &str) -> PathBuf {
     let source = payload.display().to_string().replace('\\', "/");
     let plan = format!(
-        r#"schema: 4
+        r#"schema: 6
 name: {name}
 build:
-  payload:
-    source: "{source}"
-    args:
-      - "dist/{name}.marker"
-    crypto:
-      algo: xchacha20poly1305
-      key: random
+  crypto:
+    algo: xchacha20poly1305
+    key: random
+  payloads:
+    payload:
+      source: "{source}"
+      args:
+        - "dist/{name}.marker"
   output:
     path: ./dist/{name}.exe
     arch: {arch}
@@ -840,6 +847,7 @@ build:
 runtime:
   - technique: process_hollowing
     params:
+      payload: payload
       target: "C:\\Windows\\System32\\svchost.exe"
 "#
     );
@@ -954,14 +962,15 @@ fn x86_preparations_run_before_the_payload() {
     assert!(status.success(), "the 32-bit payload must compile");
     let source = payload.display().to_string().replace('\\', "/");
     let plan = format!(
-        r#"schema: 4
+        r#"schema: 6
 name: x86_preparations
 build:
-  payload:
-    source: "{source}"
-    crypto:
-      algo: xchacha20poly1305
-      key: random
+  crypto:
+    algo: xchacha20poly1305
+    key: random
+  payloads:
+    payload:
+      source: "{source}"
   output:
     path: ./dist/x86_preparations.exe
     arch: x86
@@ -975,6 +984,7 @@ runtime:
     params:
       min_ram_mb: 1
   - technique: reflective_loading
+    params: {{ payload: payload }}
 "#
     );
     let plan_path =
@@ -1010,15 +1020,16 @@ runtime:
 /// point of these tests is the coupling between them.
 fn managed_plan(name: &str, source: &str, format: &str, arch: &str, technique: &str) -> String {
     format!(
-        r#"schema: 4
+        r#"schema: 6
 name: {name}
 build:
-  payload:
-    source: {source}
-    format: {format}
-    crypto:
-      algo: xchacha20poly1305
-      key: random
+  crypto:
+    algo: xchacha20poly1305
+    key: random
+  payloads:
+    payload:
+      source: {source}
+      format: {format}
   output:
     path: ./dist/{name}.exe
     arch: {arch}
@@ -1026,6 +1037,7 @@ build:
     trim_paths: all
 runtime:
   - technique: {technique}
+    params: {{ payload: payload }}
 "#
     )
 }
@@ -1121,13 +1133,8 @@ fn packs_and_runs_a_managed_payload() {
             "dotnet_hosting",
         )
         .replace(
-            "    format: dotnet
-",
-            "    format: dotnet
-    args:
-      - one
-      - two
-",
+            "      format: dotnet\n",
+            "      format: dotnet\n      args:\n        - one\n        - two\n",
         ),
     );
 

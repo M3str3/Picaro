@@ -11,21 +11,16 @@
 # Signing works with `signtool` (Windows) and `osslsigncode` (Linux, including
 # the Docker image), so the same plan signs on either platform.
 
-schema: 4
+schema: 6
 name: lab-signed
 
 build:
-  payload:
-    source: ./examples/payloads/test_payload.exe
-    crypto:
-      algo: xchacha20poly1305
-      key: random
+  payloads:
+    payload:
+      source: ./examples/payloads/test_payload.exe
 
   output:
     path: ./dist/lab_signed.exe
-    arch: x64
-    strip: true
-    trim_paths: all
     resources:
       version_info:
         company: "Contoso Ltd"

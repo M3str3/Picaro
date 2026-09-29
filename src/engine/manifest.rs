@@ -23,10 +23,7 @@ use super::signing::Signature;
 use super::{BuildError, Result};
 
 /// Version of the manifest document itself.
-pub const MANIFEST_SCHEMA: u32 = 2;
-
-/// Length of the XChaCha20-Poly1305 nonce, in bytes.
-const NONCE_LEN: usize = 24;
+pub const MANIFEST_SCHEMA: u32 = 3;
 
 /// Provenance record for one build.
 #[derive(Debug, Serialize)]
@@ -45,12 +42,6 @@ pub struct BuildManifest {
     pub plan_path: String,
     /// SHA-256 of the resolved plan, re-serialized as YAML.
     pub plan_sha256: String,
-    /// SHA-256 of the input payload, before encryption.
-    pub payload_sha256: String,
-    /// Size of the input payload, in bytes.
-    pub payload_size: u64,
-    /// Public nonce (hex) used for this build.
-    pub nonce: String,
     /// Authenticode signature applied to the artifact, when signing ran.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signature: Option<Signature>,
@@ -61,32 +52,32 @@ pub struct BuildManifest {
     pub toolchain: Toolchain,
     /// The plan after build-arg substitution and defaults.
     pub resolved_plan: Plan,
-    /// Per-stage provenance for a multi-stage plan (empty for a single payload).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub stages: Vec<StageRecord>,
+    /// Per-step provenance (one record per runtime step).
+    pub steps: Vec<StepRecord>,
 }
 
-/// Per-stage provenance record (multi-stage plans).
+/// Per-step provenance record.
 #[derive(Debug, Serialize)]
-pub struct StageRecord {
-    /// Position in the chain (0-based).
+pub struct StepRecord {
+    /// Position in the runtime list (0-based).
     pub index: usize,
-    /// Stage label (its `name`, or `<action><index>`).
+    /// Step label (the technique name, plus the payload name for an Execution
+    /// step).
     pub label: String,
-    /// `technique`, `exec` or `sleep`.
-    pub action: String,
-    /// SHA-256 of the stage's input payload, before encryption.
+    /// The technique that runs in this step.
+    pub technique: String,
+    /// Name of the payload the step loads, for an Execution step.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload: Option<String>,
+    /// SHA-256 of the step's input payload, before encryption.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload_sha256: Option<String>,
-    /// Size of the stage's input payload, in bytes.
+    /// Size of the step's input payload, in bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload_size: Option<u64>,
-    /// Public nonce (hex) used for this stage's payload.
+    /// Public nonce (hex) used for this step's payload.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nonce: Option<String>,
-    /// The stage's technique names, in order.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub techniques: Vec<String>,
 }
 
 /// The compiler that produced the stub.
@@ -101,15 +92,9 @@ pub struct Toolchain {
 impl BuildManifest {
     /// Builds the manifest for `artifact`, reading it back to hash it.
     ///
-    /// `payload` is the plaintext input, before encryption; `nonce` is the
-    /// public per-build nonce.
-    pub fn new(
-        plan: &Plan,
-        plan_path: &Path,
-        artifact: &Path,
-        payload: &[u8],
-        nonce: [u8; NONCE_LEN],
-    ) -> Result<Self> {
+    /// The per-step provenance is filled by the caller as it encrypts each
+    /// payload; the keys are never recorded, only the public nonces.
+    pub fn new(plan: &Plan, plan_path: &Path, artifact: &Path) -> Result<Self> {
         let artifact_bytes = std::fs::read(artifact)?;
         Ok(Self {
             manifest_schema: MANIFEST_SCHEMA,
@@ -119,9 +104,6 @@ impl BuildManifest {
             artifact_size: artifact_bytes.len() as u64,
             plan_path: plan_path.display().to_string(),
             plan_sha256: plan_hash(plan)?,
-            payload_sha256: sha256_hex(payload),
-            payload_size: payload.len() as u64,
-            nonce: hex::encode(nonce),
             signature: None,
             version_info: None,
             toolchain: Toolchain {
@@ -129,36 +111,7 @@ impl BuildManifest {
                 target: compiler::stub_target(plan.build.output.arch).to_string(),
             },
             resolved_plan: plan.clone(),
-            stages: Vec::new(),
-        })
-    }
-
-    /// Builds the manifest for a **multi-stage** artifact.
-    ///
-    /// There is no single payload, so `payload_sha256`/`payload_size`/`nonce`
-    /// are left empty and every stage is recorded in [`BuildManifest::stages`]
-    /// (filled by the caller as it encrypts each payload).
-    pub fn multistage(plan: &Plan, plan_path: &Path, artifact: &Path) -> Result<Self> {
-        let artifact_bytes = std::fs::read(artifact)?;
-        Ok(Self {
-            manifest_schema: MANIFEST_SCHEMA,
-            name: plan.name.clone(),
-            artifact: artifact.display().to_string(),
-            artifact_sha256: sha256_hex(&artifact_bytes),
-            artifact_size: artifact_bytes.len() as u64,
-            plan_path: plan_path.display().to_string(),
-            plan_sha256: plan_hash(plan)?,
-            payload_sha256: String::new(),
-            payload_size: 0,
-            nonce: String::new(),
-            signature: None,
-            version_info: None,
-            toolchain: Toolchain {
-                rustc: compiler::rustc_version()?,
-                target: compiler::stub_target(plan.build.output.arch).to_string(),
-            },
-            resolved_plan: plan.clone(),
-            stages: Vec::new(),
+            steps: Vec::new(),
         })
     }
 
@@ -202,14 +155,16 @@ mod tests {
     use super::*;
 
     const VALID_YAML: &str = r#"
-schema: 4
+schema: 6
 name: manifest-test
 build:
-  payload:
-    source: ./payload.exe
-    crypto:
-      algo: xchacha20poly1305
-      key: random
+  crypto:
+    algo: xchacha20poly1305
+    key: random
+  payloads:
+    implant:
+      source: ./payload.exe
+      format: pe
   output:
     path: ./dist/out.exe
     arch: x64

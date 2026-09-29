@@ -1,0 +1,55 @@
+# The three in-process shellcode runners, chained in one artifact.
+#
+# Each step takes `format: shellcode` and *returns* control to the loader, so
+# they compose in a single `runtime:` list:
+#
+#   fibers               runs the payload on a fiber of the loader's own thread
+#   module_stomping      overwrites a signed DLL's `.text` and calls it there
+#   execution_callbacks  runs the payload as a callback of an enumeration API
+#
+# `demo_shellcode.bin` is 6 hand-written bytes (`mov eax, 42; ret`), so every
+# step runs the same blob and the packed binary exits with the payload's code
+# (42).
+#
+#   cargo run -- build examples/plans/in-process-runners.yaml
+#   .\dist\test_in_process.exe ; echo $LASTEXITCODE
+#
+# Each step names its own payload entry: every payload is embedded and encrypted
+# with its own key and nonce, and `params.payload` is what pins a step to one.
+# To use a single technique, delete the other two steps and their payloads.
+
+schema: 6
+name: in-process-runners
+
+build:
+  payloads:
+    fiber_payload:
+      source: ./examples/payloads/demo_shellcode.bin
+      format: shellcode
+    stomp_payload:
+      source: ./examples/payloads/demo_shellcode.bin
+      format: shellcode
+    callback_payload:
+      source: ./examples/payloads/demo_shellcode.bin
+      format: shellcode
+  output:
+    path: ./dist/test_in_process.exe
+
+runtime:
+  - technique: fibers
+    params:
+      payload: fiber_payload
+
+  # `module` defaults to wininet.dll; the payload must fit the module's `.text`
+  # (about 1.9 MB there), and naming a module another step patches (amsi.dll,
+  # for `patch_amsi`) would undo that step.
+  - technique: module_stomping
+    params:
+      payload: stomp_payload
+      module: wininet.dll
+
+  # The callback returns FALSE after the payload, so the enumeration stops and
+  # the loader keeps control for any later step.
+  - technique: execution_callbacks
+    params:
+      payload: callback_payload

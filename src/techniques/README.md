@@ -49,7 +49,7 @@ copied files.
   `$PLACEHOLDER$` values into `DEF.stub_fragment`.
 
 An **Execution** technique also gets the payload's binary format
-(`build.payload.format`) and export (`build.payload.export`) through
+(`build.payloads.<name>.format`) and export (`build.payloads.<name>.export`) through
 `RuntimeStep::render_fragment`. A technique that runs more than one payload
 format exposes `Params::render_fragment_for(&self, strings, format, export)` and
 picks the fragment or substitutes the format-specific values there (see
@@ -157,7 +157,12 @@ not — route it through `StringsConfig`.
 ## 9. Conventions
 
 - **Names**: snake_case, matching the YAML key.
-- **Stability**: `Stable` once the technique is complete and verified (a measurement baseline or passing runtime checks); `Experimental` while gaps remain; `Deprecated` for techniques superseded by a better one.
+- **Stability**: `Stable` once the technique is complete and verified (a
+  measurement baseline or passing runtime checks); `Experimental` while gaps
+  remain; `Unimplemented` while the technique is registered but its
+  implementation is not finished (a placeholder fragment, or a missing part of
+  the loader contract) — the listing shows it in red and a build that selects it
+  warns; `Deprecated` for techniques superseded by a better one.
 - **ATT&CK**: use the specific sub-technique ID when available (e.g.
   `T1055.012`).
 - Keep `stub_fragment.rs` self-contained; prefer reusing the stub skeleton's

@@ -20,7 +20,7 @@ powershell -ExecutionPolicy Bypass -File examples/payloads/build_msgbox.ps1
 Its source (`msgbox.rs`) is a single `rustc` compile with no Cargo project, like
 the other payloads, and links `user32.lib` for `MessageBoxW`.
 
-Packing it needs no dedicated plan: point `build.payload.source` at it (the
+Packing it needs no dedicated plan: point `build.payloads.<name>.source` at it (the
 default `format: pe` applies) and build as usual.
 
 ```yaml
@@ -119,10 +119,26 @@ strings dist/test_packed_reflective.exe | grep -i svchost   # should print nothi
 strings dist/test_packed_reflective.exe | grep PAYLOAD_MARKER # should print nothing
 ```
 
+## In-process shellcode runners
+
+The three runners added for `format: shellcode` (`fibers`, `module_stomping`,
+`execution_callbacks`) return control to the loader, so several can run in one
+artifact. The example chains all three with the demo blob and exits `42`:
+
+```sh
+cargo run -- build examples/plans/in-process-runners.yaml
+.\dist\test_in_process.exe ; echo $LASTEXITCODE
+```
+
+Each step needs its own `build.payloads` entry (pinned with `params.payload`).
+Delete the steps you do not want: a single technique needs one step and one
+payload. See the per-technique READMEs for what each one evades and what
+detects it.
+
 ## Payload arguments
 
-The payload's arguments come from `build.payload.args` (fixed, YAML) plus the
-args you pass to the packed binary, combined by `build.payload.args_mode`
+The payload's arguments come from `build.payloads.<name>.args` (fixed, YAML) plus the
+args you pass to the packed binary, combined by `build.payloads.<name>.args_mode`
 (`join` = YAML first, then runtime; `override` = runtime args replace the YAML
 ones). See `docs/techniques/process_argument_spoofing.md`.
 

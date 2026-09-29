@@ -11,24 +11,18 @@
 # `args_mode: override` instead makes the runtime args replace the YAML args
 # entirely (with no runtime argument, the YAML args still apply).
 
-schema: 4
+schema: 6
 name: args
 
 build:
-  payload:
-    source: ./examples/payloads/test_args_payload.exe
+  payloads:
     args:
-      - "yaml-a"
-      - "yaml-b"
-    args_mode: join
-    crypto:
-      algo: xchacha20poly1305
-      key: random
+      source: ./examples/payloads/test_args_payload.exe
+      args:
+        - "yaml-a"
+        - "yaml-b"
   output:
     path: ./dist/test_args_join.exe
-    arch: x64
-    strip: true
-    trim_paths: all
 
 runtime:
   - technique: reflective_loading

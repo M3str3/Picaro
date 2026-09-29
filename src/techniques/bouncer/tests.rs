@@ -6,13 +6,13 @@ use super::{
 };
 use crate::audit::strings::{find_sensitive_literals_in_source, strip_comments};
 use crate::engine::obfuscation::{StringStrategy, StringsConfig};
-use crate::techniques::RuntimeStep;
+use crate::techniques::TechniqueKind;
 
 /// A fully-populated parameter set, extracted from `DEF.params_example`.
 fn full_params() -> Params {
-    let step: RuntimeStep =
+    let step: TechniqueKind =
         serde_yml::from_str(DEF.params_example).expect("the params example must parse");
-    let RuntimeStep::Bouncer { params } = step else {
+    let TechniqueKind::Bouncer { params } = step else {
         panic!("the params example must be a bouncer step");
     };
     params
@@ -42,9 +42,9 @@ fn def_is_well_formed() {
 
 #[test]
 fn defaults_are_all_and_silent() {
-    let step: RuntimeStep =
+    let step: TechniqueKind =
         serde_yml::from_str("technique: bouncer\n").expect("bouncer should parse");
-    let RuntimeStep::Bouncer { params } = step else {
+    let TechniqueKind::Bouncer { params } = step else {
         panic!("expected a bouncer step");
     };
     assert_eq!(params, Params::default());
@@ -72,11 +72,11 @@ fn parses_every_documented_field() {
 
 #[test]
 fn a_false_vote_disables_the_check() {
-    let step: RuntimeStep = serde_yml::from_str(
+    let step: TechniqueKind = serde_yml::from_str(
         "technique: bouncer\nparams:\n  not_in_vm: false\n  not_in_sandbox: false\n",
     )
     .expect("bouncer should parse");
-    let RuntimeStep::Bouncer { params } = step else {
+    let TechniqueKind::Bouncer { params } = step else {
         panic!("expected a bouncer step");
     };
     assert!(!params.requires_not_in_vm());
@@ -136,11 +136,11 @@ fn render_fragment_substitutes_every_placeholder() {
 
 #[test]
 fn render_fragment_bakes_in_mode_and_on_fail() {
-    let step: RuntimeStep = serde_yml::from_str(
+    let step: TechniqueKind = serde_yml::from_str(
         "technique: bouncer\nparams:\n  mode: any\n  on_fail: exit\n  hostname: \"h\"\n",
     )
     .expect("bouncer should parse");
-    let RuntimeStep::Bouncer { params } = step else {
+    let TechniqueKind::Bouncer { params } = step else {
         panic!("expected a bouncer step");
     };
     let fragment = params.render_fragment(&xor_strings());

@@ -1,12 +1,13 @@
-schema: 4
+schema: 6
 name: test-invalid-order
 
 build:
-  payload:
-    source: ./examples/payloads/test_payload.exe
-    crypto:
-      algo: xchacha20poly1305
-      key: random
+  crypto:
+    algo: xchacha20poly1305
+    key: random
+  payloads:
+    payload:
+      source: ./examples/payloads/test_payload.exe
   stub:
     strings:
       strategy: xor
@@ -17,7 +18,9 @@ build:
     strip: true
     trim_paths: all
 
-# Preparation after Execution is invalid: patch_amsi must come first.
+# `reflective_loading` of a PE executable is terminal, so it can only be the
+# last step; validation rejects this plan.
 runtime:
   - technique: reflective_loading
+    params: { payload: payload }
   - technique: patch_amsi

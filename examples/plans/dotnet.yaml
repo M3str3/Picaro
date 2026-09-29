@@ -12,16 +12,14 @@
 # `arch: x86`. The fixture is committed under `tests/fixtures/`; regenerate it
 # with `csc -nologo -target:exe -platform:x86 tests/fixtures/managed_marker.cs`.
 
-schema: 4
+schema: 6
 name: dotnet-managed
 
 build:
-  payload:
-    source: ./tests/fixtures/managed_x86.exe
-    format: dotnet
-    crypto:
-      algo: xchacha20poly1305
-      key: random
+  payloads:
+    managed:
+      source: ./tests/fixtures/managed_x86.exe
+      format: dotnet
   stub:
     strings:
       strategy: xor
@@ -29,8 +27,6 @@ build:
   output:
     path: ./dist/dotnet_managed.exe
     arch: x86
-    strip: true
-    trim_paths: all
 
 runtime:
   - technique: dotnet_hosting

@@ -1,6 +1,6 @@
 // --- Reflective loading, raw shellcode variant (technique fragment) ---
 //
-// Rendered instead of the PE mapper when `build.payload.format: shellcode`.
+// Rendered instead of the PE mapper when `build.payloads.<name>.format: shellcode`.
 // There is no image to map: the decrypted bytes are position-independent code,
 // so they are copied into a fresh executable allocation and run on a thread.
 
@@ -119,7 +119,7 @@ fn execute_payload(image: &mut [u8]) -> Result<i32, String> {
     // Shellcode has no PE entry point that reads a command line, but it runs in
     // *this* process: repoint the PEB command line at `<exe> <yaml args>
     // <runtime args>` first, so shellcode that reads it (via `GetCommandLineW`)
-    // sees the configured `build.payload.args`.
+    // sees the configured `build.payloads.<name>.args`.
     crate::patch_command_line()?;
     run_shellcode(image).map_err(|e| e.to_string())
 }

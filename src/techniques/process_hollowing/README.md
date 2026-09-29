@@ -90,9 +90,9 @@ family-based fallback for the CRT contracts).
 
 ### Payload arguments
 
-The command line passed to `CreateProcessA` is built from `build.payload.args`
+The command line passed to `CreateProcessA` is built from `build.payloads.<name>.args`
 plus the args the operator passes to the packed binary, combined by
-`build.payload.args_mode` (`join`/`override`). The shared helper lives in
+`build.payloads.<name>.args_mode` (`join`/`override`). The shared helper lives in
 `src/engine/args.rs` (`$ARGS_BLOCK$`); see
 `docs/techniques/process_argument_spoofing.md`.
 

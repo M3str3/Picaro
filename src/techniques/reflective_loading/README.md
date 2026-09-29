@@ -22,8 +22,8 @@ are copied into an executable allocation and run on a thread instead (see
 ## YAML parameters
 
 None. The payload format and, for a DLL, its exported entry point come from
-`build.payload` (`format`, `export`), and the command-line arguments from
-`build.payload.args` / `build.payload.args_mode`.
+`build.payloads.<name>` (`format`, `export`), and the command-line arguments from
+`build.payloads.<name>.args` / `build.payloads.<name>.args_mode`.
 
 ## YAML example
 
@@ -68,7 +68,7 @@ runtime:
 8. Run the entry point (`DllMain` for a DLL, `mainCRTStartup`-style for an EXE)
    on a new thread and return its exit code.
 
-With `build.payload.export` (DLLs only), step 8 changes: the entry point is
+With `build.payloads.<name>.export` (DLLs only), step 8 changes: the entry point is
 called once with `DLL_PROCESS_ATTACH` — the loader step a mapped DLL needs so
 its CRT and global constructors initialize — and then the named export is called
 with no arguments instead of running the entry point on a thread. The process
@@ -76,7 +76,7 @@ exits 0 once the export returns.
 
 ## Payload formats
 
-The technique renders a different fragment per `build.payload.format`:
+The technique renders a different fragment per `build.payloads.<name>.format`:
 
 - `pe` and `dll` map the image as above; the `is_dll` flag is read from the
   file-header characteristics.
@@ -93,7 +93,7 @@ The technique renders a different fragment per `build.payload.format`:
 Before mapping, `execute_payload` calls `patch_command_line()` (shared, in
 `src/engine/args.rs`, rendered as `$ARGS_BLOCK$`). The payload runs in *this*
 process, so the stub's own command line has to be replaced with
-`<exe> <yaml args> <runtime args>` (combined by `build.payload.args_mode`).
+`<exe> <yaml args> <runtime args>` (combined by `build.payloads.<name>.args_mode`).
 
 Two places are updated (see `docs/techniques/process_argument_spoofing.md`):
 
@@ -167,7 +167,7 @@ index.
   whole stub process (and its thread).
 - Payload arguments are rewritten into the PEB and `kernelbase`'s cached
   command-line pointer before the payload runs, so the payload's `argv` is what
-  the operator configured (`build.payload.args` + runtime args).
+  the operator configured (`build.payloads.<name>.args` + runtime args).
 - Allocation and page protection go through the syscall layer
   (`nt_alloc_vm`/`nt_protect_vm`); `CreateThread` stays Win32 because
   `NtCreateThreadEx` takes eleven arguments, more stack arguments than the

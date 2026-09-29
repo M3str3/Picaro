@@ -14,6 +14,11 @@ use super::{Capability, Category, Stability, TechniqueDef};
 /// Parameters for process hollowing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Params {
+    /// Name of the payload in `build.payloads` to run. Optional when the plan
+    /// declares exactly one payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<String>,
+
     /// Path of the process to create, suspend and hollow.
     #[serde(default = "default_target")]
     pub target: String,
@@ -28,6 +33,7 @@ impl Default for Params {
     /// Defaults to hollowing `svchost.exe` (see [`default_target`]).
     fn default() -> Self {
         Self {
+            payload: None,
             target: default_target(),
         }
     }

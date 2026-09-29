@@ -34,7 +34,7 @@ pub mod obfuscation;
 pub mod pe;
 pub mod resources;
 pub mod signing;
-pub mod stages;
+pub mod steps;
 pub mod stub;
 pub mod syscalls;
 

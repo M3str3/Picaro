@@ -11,15 +11,13 @@
 # `rustc examples/payloads/test_payload.rs --target i686-pc-windows-msvc -O
 #  -C strip=symbols -o examples/payloads/test_payload_x86.exe`.
 
-schema: 4
+schema: 6
 name: x86-reflective
 
 build:
-  payload:
-    source: ./examples/payloads/test_payload_x86.exe
-    crypto:
-      algo: xchacha20poly1305
-      key: random
+  payloads:
+    payload:
+      source: ./examples/payloads/test_payload_x86.exe
   stub:
     strings:
       strategy: xor
@@ -27,8 +25,6 @@ build:
   output:
     path: ./dist/x86_reflective.exe
     arch: x86
-    strip: true
-    trim_paths: all
 
 runtime:
   - technique: reflective_loading

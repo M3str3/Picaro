@@ -26,8 +26,8 @@ fn def_is_well_formed() {
 /// surface when a stub is compiled.
 #[test]
 fn every_placeholder_is_substituted() {
-    let rendered =
-        Params {}.render_fragment(&StringsConfig::from_yaml(None).expect("default strings"));
+    let rendered = Params::default()
+        .render_fragment(&StringsConfig::from_yaml(None).expect("default strings"));
     assert!(
         !rendered.contains('$'),
         "unsubstituted placeholder in the rendered fragment"
@@ -39,8 +39,8 @@ fn every_placeholder_is_substituted() {
 /// configuration, so neither appears in cleartext in the generated stub.
 #[test]
 fn the_runtime_strings_are_obfuscated() {
-    let rendered =
-        Params {}.render_fragment(&StringsConfig::from_yaml(None).expect("default strings"));
+    let rendered = Params::default()
+        .render_fragment(&StringsConfig::from_yaml(None).expect("default strings"));
     assert!(!rendered.contains("v4.0.30319"));
     assert!(!rendered.contains("COMPLUS_Version"));
     assert!(!rendered.contains("could not create the runtime host"));
@@ -66,15 +66,16 @@ fn format_and_technique_imply_each_other() {
     let managed = |format: &str, technique: &str| {
         format!(
             r#"
-schema: 4
+schema: 6
 name: managed-test
 build:
-  payload:
-    source: ./payload.exe
-    format: {format}
-    crypto:
-      algo: xchacha20poly1305
-      key: random
+  crypto:
+    algo: xchacha20poly1305
+    key: random
+  payloads:
+    implant:
+      source: ./payload.exe
+      format: {format}
   output:
     path: ./dist/out.exe
     arch: x64

