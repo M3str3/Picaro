@@ -39,6 +39,9 @@ pub const SENSITIVE_LITERALS: &[&str] = &[
     "NtQueryInformationProcess",
     "NtGetContextThread",
     "NtQueueApcThread",
+    "NtClose",
+    // Self-deletion: the file-information call that unlinks the running image.
+    "NtSetInformationFile",
     // Sleep obfuscation (ekko): resolved dynamically, must stay obfuscated.
     "SystemFunction032",
     "RtlCaptureContext",

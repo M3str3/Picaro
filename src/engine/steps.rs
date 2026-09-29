@@ -294,6 +294,13 @@ fn render_step_module(step: &StepPayload, strings: &StringsConfig) -> Result<Str
         // A sleep is a single line, not a module.
         return Ok(String::new());
     }
+    if let TechniqueKind::StackSpoofing { .. } = &step.technique {
+        // Stack spoofing is not a step module either: its block replaces the
+        // syscall layer's trampoline, so it is injected into `$SYSCALLS_BLOCK$`
+        // (a symbol can only exist once). Nothing runs when the runner reaches
+        // it.
+        return Ok(String::new());
+    }
 
     let format = step
         .payload
@@ -347,6 +354,10 @@ fn render_runner_body(steps: &[StepPayload], strings: &StringsConfig) -> Result<
         match &step.technique {
             TechniqueKind::Sleep { params } => {
                 body.push_str(&sleep_line(params.ms));
+            }
+            TechniqueKind::StackSpoofing { .. } => {
+                // Installed with the syscall layer at startup: there is nothing
+                // to run, and nothing to report.
             }
             technique => match technique.category() {
                 Category::Preparation => {

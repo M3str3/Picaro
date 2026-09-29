@@ -150,6 +150,21 @@ pub fn advisories(plan: &Plan) -> Vec<String> {
                 }
             }
             TechniqueKind::AntiDebug { .. } => has_anti_debug = true,
+            // Stack spoofing rewrites the trampoline the `mode: indirect` layer
+            // emits; under `mode: none` that trampoline does not exist, so the
+            // technique silently does nothing.
+            TechniqueKind::StackSpoofing { .. }
+                if SyscallsConfig::from_yaml(plan.build.stub.syscalls.as_ref())
+                    .map(|config| config.mode != SyscallsMode::Indirect)
+                    .unwrap_or(true) =>
+            {
+                warnings.push(format!(
+                    "step {}: 'stack_spoofing' only affects the indirect syscall layer, but \
+                     build.stub.syscalls.mode is not 'indirect' (or the runtime uses no syscalls at \
+                     all), so it is a no-op",
+                    step.index
+                ));
+            }
             _ => {}
         }
     }
@@ -360,6 +375,7 @@ fn validate_payload_format(step: &ResolvedStep, payload: &ResolvedPayload) -> Re
         TechniqueKind::ModuleStomping { .. } => Some("module_stomping"),
         TechniqueKind::EarlyBird { .. } => Some("early_bird"),
         TechniqueKind::Fibers { .. } => Some("fibers"),
+        TechniqueKind::ThreadHijacking { .. } => Some("thread_hijacking"),
         _ => None,
     };
     if let Some(technique) = shellcode_only {
@@ -514,6 +530,12 @@ fn injection_target(step: &ResolvedStep) -> Option<(&'static str, &str)> {
         TechniqueKind::ProcessHollowing { params } => Some(("process_hollowing", &params.target)),
         TechniqueKind::EarlyBird { params } => Some(("early_bird", &params.target)),
         TechniqueKind::PeInjection { params } => Some(("pe_injection", &params.target)),
+        // The hijack target is an image name of a *running* process (or an
+        // explicit pid), so the architecture check only applies when it names a
+        // local file.
+        TechniqueKind::ThreadHijacking { params } if params.pid.is_none() => {
+            Some(("thread_hijacking", &params.target))
+        }
         _ => None,
     }
 }

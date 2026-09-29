@@ -20,8 +20,11 @@ pub mod pe_injection;
 pub mod ppid_spoofing;
 pub mod process_hollowing;
 pub mod reflective_loading;
+pub mod self_deletion;
 pub mod sleep;
 pub mod sleep_obfuscation;
+pub mod stack_spoofing;
+pub mod thread_hijacking;
 pub mod unhook_ntdll;
 
 use std::path::Path;
@@ -179,6 +182,27 @@ pub enum TechniqueKind {
         #[serde(default)]
         params: pe_injection::Params,
     },
+    /// Thread hijacking: suspend a thread that already exists in the target
+    /// process, point it at the payload and resume it.
+    ThreadHijacking {
+        /// Technique parameters (`payload`, `target`, `pid`,
+        /// `dedicated_stack`, `wait_ms`).
+        #[serde(default)]
+        params: thread_hijacking::Params,
+    },
+    /// Self-deletion: unlink the running artifact's own image (preparation).
+    SelfDeletion {
+        /// Technique parameters (`mode`).
+        #[serde(default)]
+        params: self_deletion::Params,
+    },
+    /// Stack spoofing: fabricate the top of the stack for every syscall
+    /// (preparation).
+    StackSpoofing {
+        /// Technique parameters (`decoy_bytes`).
+        #[serde(default)]
+        params: stack_spoofing::Params,
+    },
     /// Sleep obfuscation: encrypt the image region during a timer-driven
     /// sleep (preparation).
     SleepObfuscation {
@@ -248,6 +272,11 @@ impl TechniqueKind {
             TechniqueKind::PeInjection { params } => {
                 params.render_fragment_for(strings, format, export)
             }
+            TechniqueKind::ThreadHijacking { params } => {
+                params.render_fragment_for(strings, format, export)
+            }
+            TechniqueKind::SelfDeletion { params } => params.render_fragment(strings),
+            TechniqueKind::StackSpoofing { params } => params.render_fragment(strings),
             TechniqueKind::PpidSpoofing { params } => params.render_fragment(strings),
             TechniqueKind::LivingOffTheLand { params } => params.render_fragment(strings),
             TechniqueKind::Sleep { params } => params.render_fragment(strings),
@@ -269,6 +298,9 @@ impl TechniqueKind {
             TechniqueKind::ModuleStomping { .. } => module_stomping::DEF.name,
             TechniqueKind::EarlyBird { .. } => early_bird::DEF.name,
             TechniqueKind::PeInjection { .. } => pe_injection::DEF.name,
+            TechniqueKind::ThreadHijacking { .. } => thread_hijacking::DEF.name,
+            TechniqueKind::SelfDeletion { .. } => self_deletion::DEF.name,
+            TechniqueKind::StackSpoofing { .. } => stack_spoofing::DEF.name,
             TechniqueKind::PpidSpoofing { .. } => ppid_spoofing::DEF.name,
             TechniqueKind::UnhookNtdll { .. } => unhook_ntdll::DEF.name,
             TechniqueKind::SleepObfuscation { .. } => sleep_obfuscation::DEF.name,
@@ -291,6 +323,7 @@ impl TechniqueKind {
             TechniqueKind::ModuleStomping { params } => params.payload.as_deref(),
             TechniqueKind::EarlyBird { params } => params.payload.as_deref(),
             TechniqueKind::PeInjection { params } => params.payload.as_deref(),
+            TechniqueKind::ThreadHijacking { params } => params.payload.as_deref(),
             _ => None,
         }
     }
@@ -313,6 +346,9 @@ impl TechniqueKind {
             TechniqueKind::ModuleStomping { .. } => module_stomping::DEF.category,
             TechniqueKind::EarlyBird { .. } => early_bird::DEF.category,
             TechniqueKind::PeInjection { .. } => pe_injection::DEF.category,
+            TechniqueKind::ThreadHijacking { .. } => thread_hijacking::DEF.category,
+            TechniqueKind::SelfDeletion { .. } => self_deletion::DEF.category,
+            TechniqueKind::StackSpoofing { .. } => stack_spoofing::DEF.category,
             TechniqueKind::PpidSpoofing { .. } => ppid_spoofing::DEF.category,
             TechniqueKind::UnhookNtdll { .. } => unhook_ntdll::DEF.category,
             TechniqueKind::SleepObfuscation { .. } => sleep_obfuscation::DEF.category,
@@ -458,7 +494,10 @@ pub fn all() -> &'static [TechniqueDef] {
         module_stomping::DEF,
         early_bird::DEF,
         pe_injection::DEF,
+        thread_hijacking::DEF,
         ppid_spoofing::DEF,
+        self_deletion::DEF,
+        stack_spoofing::DEF,
         unhook_ntdll::DEF,
         patch_amsi::DEF,
         anti_debug::DEF,

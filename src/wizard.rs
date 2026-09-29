@@ -1110,6 +1110,7 @@ fn default_format(technique: &TechniqueKind) -> PayloadFormat {
         TechniqueKind::ExecutionCallbacks { .. }
         | TechniqueKind::ModuleStomping { .. }
         | TechniqueKind::EarlyBird { .. }
+        | TechniqueKind::ThreadHijacking { .. }
         | TechniqueKind::Fibers { .. } => PayloadFormat::Shellcode,
         _ => PayloadFormat::Pe,
     }
