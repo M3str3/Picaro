@@ -36,6 +36,10 @@ anstyle = "1"
 # for `picaro build interactive`. Used only when stdin/stdout is a terminal;
 # scripted/redirected input falls back to a plain line reader.
 inquire = "0.7"
+# Terminal control for the built-in pager used by `techniques show`. Reuses the
+# version already in the tree via `inquire`'s crossterm dependency instead of
+# pulling a second copy.
+crossterm = "0.25"
 # Windows FFI (windows-rs). Only the generated stub uses it, but it is declared
 # here so its .rlib is available under target/ for `rustc --extern`.
 windows = { version = "0.58", features = [

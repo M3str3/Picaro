@@ -28,7 +28,7 @@ fn techniques_list_lists_all_techniques() {
 }
 
 #[test]
-fn techniques_show_prints_readme() {
+fn techniques_show_renders_readme_by_default() {
     let output = Command::new(env!("CARGO_BIN_EXE_picaro"))
         .args(["techniques", "show", "process_hollowing"])
         .output()
@@ -37,8 +37,37 @@ fn techniques_show_prints_readme() {
     assert!(output.status.success(), "show must exit 0");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("# Process hollowing"),
+        stdout.contains("Process hollowing"),
         "show output: {stdout}"
+    );
+    assert!(stdout.contains("T1055"), "show output: {stdout}");
+    // Stdout is captured (not a TTY), so the pager must not engage and the
+    // styled page must not leak escape codes.
+    assert!(!stdout.contains('\u{1b}'), "escapes leaked: {stdout:?}");
+    assert!(
+        !stdout.contains("## Metadata"),
+        "the metadata header should supersede the raw section: {stdout}"
+    );
+}
+
+#[test]
+fn techniques_show_raw_prints_verbatim_readme() {
+    let output = Command::new(env!("CARGO_BIN_EXE_picaro"))
+        .args([
+            "techniques",
+            "show",
+            "process_hollowing",
+            "--raw",
+            "--no-pager",
+        ])
+        .output()
+        .expect("run picaro techniques show --raw");
+
+    assert!(output.status.success(), "show --raw must exit 0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("# Process hollowing"),
+        "raw output: {stdout}"
     );
 }
 

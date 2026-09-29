@@ -29,8 +29,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::engine::obfuscation::StringsConfig;
-use crate::error::{PackerError, Result};
-use crate::ui::{glyph, Palette};
+use crate::error::Result;
+use crate::ui::{glyph, markdown, Meta, Palette, Tone};
 
 use crate::plan::schema::{PayloadFormat, StepControl};
 
@@ -399,6 +399,18 @@ pub enum Capability {
     AdminRequired,
 }
 
+impl Capability {
+    /// Lowercase label used by `picaro techniques show`.
+    pub fn label(self) -> &'static str {
+        match self {
+            Capability::WindowsX64 => "windows-x64",
+            Capability::WindowsX86 => "windows-x86",
+            Capability::KernelAccess => "kernel-access",
+            Capability::AdminRequired => "admin-required",
+        }
+    }
+}
+
 /// Static metadata describing one technique.
 ///
 /// No logic here — only data consumed by the `techniques` CLI, the `validate`
@@ -483,7 +495,7 @@ const REQUIRED_SECTIONS: &[&str] = &[
 /// The table is measured instead of fixed: a technique name or an ATT&CK list
 /// longer than the rest must not push the remaining columns of its own row out
 /// of line.
-fn column_width(header: &str, values: impl Iterator<Item = String>) -> usize {
+pub(crate) fn column_width(header: &str, values: impl Iterator<Item = String>) -> usize {
     values
         .map(|value| value.chars().count())
         .chain(std::iter::once(header.chars().count()))
@@ -496,7 +508,7 @@ fn column_width(header: &str, values: impl Iterator<Item = String>) -> usize {
 /// The padding happens before the cell is styled: padding an already-colored
 /// string would count the escape codes and misalign the row (see
 /// [`stability_label`], which pads for the same reason).
-fn pad(text: &str, width: usize) -> String {
+pub(crate) fn pad(text: &str, width: usize) -> String {
     format!("{text:<width$}")
 }
 
@@ -552,6 +564,28 @@ pub fn list(ui: &Palette) -> String {
             count(Category::Control),
         ))
     ));
+
+    // Legend: two dim lines. Their first token is never a technique name, so
+    // the table-shape tests keep matching only real rows.
+    out.push_str(&format!(
+        "  {} {}  {}  {}  {}\n",
+        ui.dim("stability:"),
+        ui.ok(Stability::Stable.label()),
+        ui.warn(Stability::Experimental.label()),
+        ui.error(Stability::Unimplemented.label()),
+        ui.error(Stability::Deprecated.label()),
+    ));
+    out.push_str(&format!(
+        "  {} {}\n",
+        ui.dim("show:"),
+        ui.dim("picaro techniques show <name> for the full README"),
+    ));
+
+    // Loader features (`syscalls`, `api_resolution`, `strings`, `args`) are not
+    // runtime steps; they are listed in their own table so the registry view is
+    // complete.
+    out.push('\n');
+    out.push_str(&crate::features::list(ui));
     out
 }
 
@@ -570,11 +604,127 @@ fn stability_label(def: &TechniqueDef, ui: &Palette, width: usize) -> String {
     }
 }
 
-/// Returns the README of `name` for `picaro techniques show`.
-pub fn show(name: &str) -> Result<String> {
-    find(name)
-        .map(|def| def.readme.to_string())
-        .ok_or_else(|| PackerError::Validation(format!("unknown technique '{name}'")))
+/// The technique's README as embedded Markdown, verbatim.
+pub fn readme(name: &str) -> Result<&'static str> {
+    if let Some(def) = find(name) {
+        return Ok(def.readme);
+    }
+    // Not a technique: it may be a loader feature.
+    crate::features::readme(name)
+}
+
+/// Renders `picaro techniques show <name>`: a styled header built from the
+/// technique's metadata, followed by its README rendered as Markdown.
+pub fn show(name: &str, ui: &Palette) -> Result<String> {
+    let Some(def) = find(name) else {
+        // Not a technique: it may be a loader feature (`syscalls`, `strings`, …).
+        return crate::features::show(name, ui);
+    };
+    let width = crate::ui::term_width();
+
+    let mut out = String::new();
+    out.push_str(&ui.heading(readme_title(def.readme).unwrap_or(def.name)));
+    out.push_str("\n\n");
+
+    out.push_str(&ui.meta_bar(&[
+        Meta {
+            key: "CATEGORY",
+            value: def.category.label().to_string(),
+            tone: Tone::Value,
+        },
+        Meta {
+            key: "STABILITY",
+            value: def.stability.label().to_string(),
+            tone: stability_tone(def.stability),
+        },
+        Meta {
+            key: "ATT&CK",
+            value: def.attck.join(", "),
+            tone: Tone::Value,
+        },
+    ]));
+    out.push('\n');
+
+    out.push_str(&ui.field("yaml key", def.name));
+    out.push('\n');
+    out.push_str(&ui.field_wrapped("requires", capabilities(def.requires), width));
+    out.push('\n');
+    if !def.conflicts.is_empty() {
+        out.push_str(&ui.field_wrapped("conflicts", def.conflicts.join(", "), width));
+        out.push('\n');
+    }
+    if !def.syscalls.is_empty() {
+        out.push_str(&ui.field_wrapped("syscalls", def.syscalls.join(", "), width));
+        out.push('\n');
+    }
+    if def.resolves_imports {
+        out.push_str(&ui.field("imports", "shared resolver"));
+        out.push('\n');
+    }
+
+    out.push('\n');
+    out.push_str(&ui.rule(width));
+    out.push_str("\n\n");
+
+    // The styled header replaces the README's title and Metadata section.
+    out.push_str(&markdown::render(&strip_header(def.readme), ui, width));
+
+    out.push('\n');
+    out.push_str(&ui.dim(format!("{} {}", glyph::DOT, def.doc_path)));
+    out.push('\n');
+    Ok(out)
+}
+
+/// The README's `# ` title, when it has one.
+pub(crate) fn readme_title(readme: &str) -> Option<&str> {
+    readme
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("# "))
+}
+
+/// The color role of a maturity (shared with [`stability_label`]).
+fn stability_tone(stability: Stability) -> Tone {
+    match stability {
+        Stability::Stable => Tone::Ok,
+        Stability::Experimental => Tone::Warn,
+        Stability::Unimplemented | Stability::Deprecated => Tone::Bad,
+    }
+}
+
+/// Comma-joined capability labels for the `requires` field.
+fn capabilities(requires: &[Capability]) -> String {
+    requires
+        .iter()
+        .map(|capability| capability.label())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Drops the README's leading `# ` title and its `## Metadata` section, which
+/// the styled header supersedes.
+pub(crate) fn strip_header(readme: &str) -> String {
+    let mut out = String::new();
+    let mut in_metadata = false;
+    for line in readme.lines() {
+        if in_metadata {
+            if line.starts_with("## ") {
+                in_metadata = false;
+            } else {
+                continue;
+            }
+        }
+        if out.is_empty() && line.starts_with("# ") {
+            continue;
+        }
+        if line.trim() == "## Metadata" {
+            in_metadata = true;
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 /// Validates the registry. Returns a list of problems; empty means all good.
@@ -645,6 +795,8 @@ pub fn validate() -> Vec<String> {
             )),
         }
     }
+    // Loader features live in a parallel registry; validate them too.
+    problems.extend(crate::features::validate());
     problems
 }
 
@@ -667,7 +819,7 @@ pub fn summary(def: &TechniqueDef) -> &str {
 
 /// Extracts the one-line summary of a technique README (the first non-empty
 /// line under `## What it does`).
-fn short_description(readme: &str) -> &str {
+pub(crate) fn short_description(readme: &str) -> &str {
     let marker = "## What it does";
     let start = readme.find(marker).map(|i| i + marker.len()).unwrap_or(0);
     for line in readme[start..].lines() {
@@ -680,7 +832,7 @@ fn short_description(readme: &str) -> &str {
 }
 
 /// Shortens a summary to at most `max` characters, appending an ellipsis.
-fn truncate(text: &str, max: usize) -> String {
+pub(crate) fn truncate(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
     }
@@ -709,6 +861,37 @@ mod tests {
                 readme_path.is_file(),
                 "doc_path does not exist: {}",
                 readme_path.display()
+            );
+        }
+    }
+
+    /// Every registered technique must be reachable from the documentation: a
+    /// page under `docs/techniques/ref/`, a link in the overview table and a
+    /// nav entry in `mkdocs.yml`. Adding a technique without updating the docs
+    /// is the recurring drift this guards against.
+    #[test]
+    fn every_technique_is_documented() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let overview = std::fs::read_to_string(root.join("docs/techniques/index.md"))
+            .expect("docs/techniques/index.md must exist");
+        let nav = std::fs::read_to_string(root.join("mkdocs.yml")).expect("mkdocs.yml must exist");
+
+        for def in all() {
+            let docs_page = format!("docs/techniques/ref/{}.md", def.name);
+            assert!(
+                root.join(&docs_page).is_file(),
+                "{}: missing docs page '{docs_page}'",
+                def.name
+            );
+            assert!(
+                overview.contains(&format!("(ref/{}.md)", def.name)),
+                "{}: no link to the technique in docs/techniques/index.md",
+                def.name
+            );
+            assert!(
+                nav.contains(&format!("techniques/ref/{}.md", def.name)),
+                "{}: no nav entry in mkdocs.yml",
+                def.name
             );
         }
     }
@@ -805,8 +988,42 @@ mod tests {
     }
 
     #[test]
-    fn show_returns_readme() {
-        let readme = show("process_hollowing").expect("known technique");
-        assert!(readme.contains("# Process hollowing"));
+    fn show_renders_metadata_and_readme() {
+        let page = show("process_hollowing", &Palette::plain()).expect("known technique");
+        assert!(page.contains("Process hollowing"), "page: {page}");
+        assert!(page.contains("T1055"), "page: {page}");
+        // The README body is rendered, not dumped raw.
+        assert!(page.contains("What it does"), "page: {page}");
+        assert!(!page.contains("## Metadata"), "page: {page}");
+        assert!(!page.contains('\u{1b}'), "escapes leaked: {page:?}");
+    }
+
+    #[test]
+    fn readme_is_verbatim() {
+        let raw = readme("process_hollowing").expect("known technique");
+        assert!(raw.contains("# Process hollowing"));
+        assert!(raw.contains("## Metadata"));
+    }
+
+    #[test]
+    fn unknown_technique_is_an_error() {
+        assert!(show("does_not_exist", &Palette::plain()).is_err());
+        assert!(readme("does_not_exist").is_err());
+    }
+
+    /// Smoke test: the renderer survives every real README and keeps its
+    /// required section.
+    #[test]
+    fn show_pages_every_technique() {
+        for def in all() {
+            let page = show(def.name, &Palette::plain())
+                .unwrap_or_else(|error| panic!("{}: {error}", def.name));
+            assert!(!page.is_empty(), "{}: empty page", def.name);
+            assert!(
+                page.contains("What it does"),
+                "{}: missing section: {page}",
+                def.name
+            );
+        }
     }
 }

@@ -1,0 +1,84 @@
+# String obfuscation
+
+- ATT&CK: T1027 (Obfuscated Files or Information)
+- YAML: `build.stub.strings`
+- Scope: loader-wide (configures the generated stub)
+
+## What it does
+
+Obfuscates every sensitive string literal the packer embeds into the generated
+stub and emits code that rebuilds the string at runtime, so the literals do not
+sit in cleartext in `.rdata`.
+
+## YAML parameters
+
+```yaml
+build:
+  stub:
+    strings:          # optional; omitted => xor + random key (with a warning)
+      strategy: xor   # xor | stack
+      key: random     # random | literal:<64 hex chars>  (xor only)
+```
+
+- `strategy` — `xor` (default) or `stack`.
+- `key` — `random` (default) or `literal:<hex>` for a fixed 32-byte XOR key.
+
+An unknown strategy, or a `literal:` key that is not valid hex or not exactly 32
+bytes, is a clear error.
+
+## YAML example
+
+```yaml
+build:
+  stub:
+    strings:
+      strategy: stack
+```
+
+## How it works
+
+The packer intercepts each literal, obfuscates it according to the configured
+strategy and substitutes the result into a placeholder
+(e.g. `$STUB_MARKER_DEF$`, `HOLLOW_TARGET_DEF`) as a Rust expression; the stub
+binds it at runtime and uses the reconstructed `String` normally. All
+obfuscation flows through `src/engine/obfuscation.rs`.
+
+- **`xor`** — each literal is XORed with a repeating 32-byte key and embedded as
+  a byte-array literal plus the key; the stub decodes it with a small runtime
+  loop (`dec_xor`).
+- **`stack`** — the literal is emitted as one byte store per character into a
+  local stack array, then converted to a `String` at the point of use. No
+  decoder, no key.
+
+## What it evades
+
+- Static `strings` scans for the per-build marker and, for process hollowing, the
+  target path (`system32`, `svchost.exe`, …).
+
+## What detects it
+
+- Entropy anomalies: `xor` raises `.rdata` entropy in theory, but the embedded
+  XChaCha20 ciphertext already dominates it, so the marginal effect is
+  negligible (`docs/measurements.md`).
+- Decoder patterns: `xor`'s `dec_xor` loop (byte array XORed with a key) is a
+  classic tell a heuristic or ML classifier can flag. `stack` has no decoder, at
+  the cost of more code.
+- Runtime reconstruction: both strategies must materialize the string before
+  use, so a hook on `LoadLibraryA`/`CreateProcessA` or a memory scan still sees
+  it.
+
+## Implementation notes
+
+- Every literal that reaches the generated stub goes through
+  `StringsConfig::obfuscate`; the `no_sensitive_literals_in_generated_stubs`
+  guardrail fails the build when a runtime literal leaks.
+- `stack` wraps each byte store in `std::hint::black_box` so LLVM does not fold
+  the stores back into a constant.
+- The `key` is per-build (`random`) by default; a fixed `literal:` key is
+  reproducible but shared across builds.
+
+## References
+
+- `docs/measurements.md` — phase 6 string-obfuscation baseline.
+- litcrypt / litcrypt2 — Rust crates that encrypt string literals at compile time
+  and decrypt them lazily.

@@ -35,8 +35,8 @@ use crate::plan::schema::{
 };
 use crate::plan::validate;
 use crate::techniques::{
-    self, anti_debug, bouncer, patch_amsi, patch_etw, process_hollowing, sleep_obfuscation,
-    Category, RuntimeStep, TechniqueDef, TechniqueKind,
+    self, anti_debug, bouncer, early_bird, module_stomping, patch_amsi, patch_etw, pe_injection,
+    process_hollowing, sleep_obfuscation, Category, RuntimeStep, TechniqueDef, TechniqueKind,
 };
 use crate::ui::Palette;
 
@@ -679,6 +679,59 @@ impl Wizard<'_> {
                     },
                 })
             }
+            "module_stomping" => {
+                let default_module = match previous {
+                    Some(TechniqueKind::ModuleStomping { params }) => params.module.clone(),
+                    _ => module_stomping::default_module(),
+                };
+                let module = self.ask_text("module", &default_module)?;
+                Ok(TechniqueKind::ModuleStomping {
+                    params: module_stomping::Params {
+                        payload: None,
+                        module,
+                    },
+                })
+            }
+            "early_bird" => {
+                let (default_target, default_wait) = match previous {
+                    Some(TechniqueKind::EarlyBird { params }) => {
+                        (params.target.clone(), params.wait_ms)
+                    }
+                    _ => (early_bird::default_target(), 0),
+                };
+                let target = self.ask_text("target", &default_target)?;
+                let wait_ms =
+                    self.ask_number("wait_ms (0 = do not wait)", default_wait, 0, u64::MAX)?;
+                Ok(TechniqueKind::EarlyBird {
+                    params: early_bird::Params {
+                        payload: None,
+                        target,
+                        wait_ms,
+                    },
+                })
+            }
+            "pe_injection" => {
+                let (default_target, default_timeout) = match previous {
+                    Some(TechniqueKind::PeInjection { params }) => {
+                        (params.target.clone(), u64::from(params.timeout_ms))
+                    }
+                    _ => (pe_injection::default_target(), 0),
+                };
+                let target = self.ask_text("target", &default_target)?;
+                let timeout_ms = self.ask_number(
+                    "timeout_ms (0 = wait forever)",
+                    default_timeout,
+                    0,
+                    u64::from(u32::MAX),
+                )? as u32;
+                Ok(TechniqueKind::PeInjection {
+                    params: pe_injection::Params {
+                        payload: None,
+                        target,
+                        timeout_ms,
+                    },
+                })
+            }
             _ => default_step(def),
         }
     }
@@ -1285,6 +1338,71 @@ mod tests {
         assert_eq!(syscalls.mode, "indirect");
         assert_eq!(syscalls.resolver, "hells_gate");
         assert!(plan.build.stub.strings.is_some());
+    }
+
+    /// The execution techniques the wizard has tailored questions for must
+    /// honour the answers instead of silently keeping the `params_example`
+    /// defaults.
+    #[test]
+    fn prompts_the_execution_technique_params() {
+        // module_stomping: which module to stomp.
+        let dir = temp_dir("exec_params_module");
+        let plan_path = dir.join("out.yaml");
+        let answers = [
+            "demo",
+            "",
+            "",
+            "module_stomping",
+            "dbghelp.dll",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+        ];
+        let (written, _) = session("payload.exe", &answers, Some(&plan_path));
+        assert_eq!(written.as_deref(), Some(plan_path.as_path()));
+        let plan = load_plan(&plan_path, &BTreeMap::new()).expect("valid plan");
+        match &plan.runtime[0].technique {
+            TechniqueKind::ModuleStomping { params } => {
+                assert_eq!(params.module, "dbghelp.dll");
+                assert_eq!(params.payload, None);
+            }
+            other => panic!("expected module_stomping, got {other:?}"),
+        }
+
+        // early_bird: the target and the bounded wait.
+        let dir = temp_dir("exec_params_early_bird");
+        let plan_path = dir.join("out.yaml");
+        let answers = [
+            "demo",
+            "",
+            "",
+            "early_bird",
+            "C:\\Windows\\System32\\notepad.exe",
+            "1500",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+        ];
+        let (written, _) = session("payload.exe", &answers, Some(&plan_path));
+        assert_eq!(written.as_deref(), Some(plan_path.as_path()));
+        let plan = load_plan(&plan_path, &BTreeMap::new()).expect("valid plan");
+        match &plan.runtime[0].technique {
+            TechniqueKind::EarlyBird { params } => {
+                assert_eq!(params.target, "C:\\Windows\\System32\\notepad.exe");
+                assert_eq!(params.wait_ms, 1500);
+            }
+            other => panic!("expected early_bird, got {other:?}"),
+        }
+        let payload = plan.build.payloads.get("payload").expect("the payload");
+        assert_eq!(payload.format, PayloadFormat::Shellcode);
     }
 
     /// Every Execution technique must assemble a plan the packer accepts.

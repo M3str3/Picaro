@@ -11,6 +11,7 @@
 mod audit;
 mod engine;
 mod error;
+mod features;
 mod plan;
 mod techniques;
 mod ui;
@@ -41,11 +42,14 @@ Examples:
   picaro audit dist/out.exe --json > baseline.json
   picaro audit dist/out.exe --baseline baseline.json
   picaro techniques list
+  picaro techniques show process_hollowing
 
 Colors are disabled automatically when the output is not a terminal; set
 NO_COLOR=1 (or pass --no-color) to disable them explicitly. Pass -q (or
 --quiet) to skip the banner, and -v (or --verbose) to print per-step build
-detail (paths, sizes, timings).
+detail (paths, sizes, timings). `techniques show` renders the README as styled
+Markdown and pages it full-screen when it is taller than the terminal; pass
+--raw for the verbatim Markdown or --no-pager to always print it inline.
 
 audit --baseline exits 3 when it finds a regression, so it can gate a CI
 job; every other failure exits 1.";
@@ -156,6 +160,14 @@ enum TechniquesCommand {
         /// Technique YAML key (e.g. `process_hollowing`).
         #[arg(value_name = "NAME")]
         name: String,
+
+        /// Print the README verbatim instead of rendering it.
+        #[arg(long)]
+        raw: bool,
+
+        /// Never page the output, even when it is longer than the terminal.
+        #[arg(long)]
+        no_pager: bool,
     },
 
     /// Validate the technique registry (CI helper; never fails).
@@ -280,7 +292,25 @@ fn run() -> Result<()> {
                 anstream::println!();
                 anstream::print!("{}", techniques::list(&ui));
             }
-            TechniquesCommand::Show { name } => anstream::print!("{}", techniques::show(&name)?),
+            TechniquesCommand::Show {
+                name,
+                raw,
+                no_pager,
+            } => {
+                anstream::println!("{}", ui.command_line("techniques", &name));
+                anstream::println!();
+                let content = if raw {
+                    techniques::readme(&name)?.to_string()
+                } else {
+                    techniques::show(&name, &ui)?
+                };
+                if !no_pager && ui::pager::page(&content, &ui) {
+                    // The pager displayed it full-screen and restored the
+                    // terminal already.
+                } else {
+                    anstream::print!("{content}");
+                }
+            }
             TechniquesCommand::Validate => validate_techniques(&ui),
         },
     }
@@ -312,7 +342,11 @@ fn validate_techniques(ui: &Palette) {
         anstream::println!(
             "{} {}",
             ui.check(),
-            ui.ok(format!("all {} techniques OK", techniques::all().len()))
+            ui.ok(format!(
+                "all {} techniques and {} loader features OK",
+                techniques::all().len(),
+                features::all().len(),
+            ))
         );
         return;
     }

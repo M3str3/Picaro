@@ -15,7 +15,7 @@
 //! `mode: proxy` rewrites the payload's IAT so catalogue hits land on the
 //! generated proxies; every other import is forwarded, or refused when
 //! `unmatched: abort`. The catalogue docs, phases and limitations live in
-//! `docs/api-resolution.md`.
+//! `docs/design/api-resolution.md`.
 
 use serde::{Deserialize, Serialize};
 
@@ -76,7 +76,7 @@ pub enum Strategy {
     /// Call the original function (resolved dynamically, never imported).
     ///
     /// No shipped catalogue entry uses it today (see
-    /// `docs/api-resolution.md`): it stays available for "thick" APIs
+    /// `docs/design/api-resolution.md`): it stays available for "thick" APIs
     /// that cannot be re-implemented on a syscall.
     #[allow(dead_code)]
     Forward,
@@ -109,7 +109,7 @@ impl ApiEntry {
 
 /// The catalogue of APIs an operator may select.
 ///
-/// Minimal on purpose (see `docs/api-resolution.md`): the critical path of
+/// Minimal on purpose (see `docs/design/api-resolution.md`): the critical path of
 /// a mimikatz-style payload to LSASS. `NtReadVirtualMemory` already exists in the
 /// syscall layer; `NtOpenProcess` is added alongside it.
 pub const CATALOGUE: &[ApiEntry] = &[
