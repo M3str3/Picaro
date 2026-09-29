@@ -275,7 +275,8 @@ The registry is metadata-only. Inspect it, don't guess:
 
 ```bash
 picaro techniques list                 # colored table: category, ATT&CK, stability
-picaro techniques show process_hollowing   # the technique's full README
+picaro techniques show process_hollowing   # styled README: metadata header + Markdown
+picaro techniques show process_hollowing --raw   # the README verbatim
 picaro techniques validate             # CI helper: registry well-formedness
 ```
 
@@ -315,7 +316,7 @@ Technique fragments always call the same `nt_*` helpers, so a technique is
 written once and works under either mode. Each technique declares its `Nt*`
 requirements; the packer only resolves the union of the active pipeline's
 requirements. Details and measurements:
-[`docs/techniques/indirect_syscalls.md`](docs/techniques/indirect_syscalls.md),
+[`docs/features/ref/syscalls.md`](docs/features/ref/syscalls.md),
 [`docs/measurements.md`](docs/measurements.md).
 
 ### API resolution
@@ -351,7 +352,7 @@ with the matching proxy. `mode: proxy` requires `syscalls.mode: indirect` and a
 has none of the loader's image. `unmatched` decides what an import outside the
 catalogue does: `forward` (default) resolves it normally, `abort` fails the load.
 Design, phases and limitations:
-[`docs/api-resolution.md`](docs/api-resolution.md).
+[`docs/design/api-resolution.md`](docs/design/api-resolution.md).
 
 ### Custom stubs
 
@@ -559,11 +560,11 @@ user-facing output goes through `src/ui.rs`. The full list is in
 | — | done | Runtime steps (schema 6): `build.payloads` + a flat `runtime:` list chain several payloads, preparations and living-off-the-land steps in one artifact ([docs/multistage.md](docs/multistage.md)) |
 | — | done | Three in-process Execution techniques for `format: shellcode`, chainable (each relays the payload's exit code): `execution_callbacks` (T1106/T1620), `module_stomping` (T1055) and `fibers` (T1055) — see [docs/measurements.md](docs/measurements.md) |
 | — | done | Four more techniques, each verified end to end: `unhook_ntdll` (T1562.001, preparation), `early_bird` (T1055.004, APC injection), `pe_injection` (T1055.002) and `ppid_spoofing` (T1134.004, control) — see [docs/measurements.md](docs/measurements.md) |
+| — | done | Three more techniques, each verified end to end: `thread_hijacking` (T1055.003, hijacks a thread the target already has), `stack_spoofing` (T1036, fabricates the top of the stack for every indirect syscall) and `self_deletion` (T1070.004, moves the running image into an alternate data stream or deletes it through a helper) — see [docs/measurements.md](docs/measurements.md) |
 
 Planned:
 
 - `process_doppelganging` / transacted hollowing (T1055.013).
-- Stack spoofing, which closes the gap the syscall notes acknowledge.
 - Fuzz `src/engine/pe.rs` and the plan parser (both take untrusted input).
 - `cargo deny` / `cargo audit` in CI.
 - Reproducible builds: a deterministic key or `--seed` (today the random key

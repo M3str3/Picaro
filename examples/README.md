@@ -140,7 +140,7 @@ detects it.
 The payload's arguments come from `build.payloads.<name>.args` (fixed, YAML) plus the
 args you pass to the packed binary, combined by `build.payloads.<name>.args_mode`
 (`join` = YAML first, then runtime; `override` = runtime args replace the YAML
-ones). See `docs/techniques/process_argument_spoofing.md`.
+ones). See `docs/features/ref/args.md`.
 
 ### 1. Compile the argument-printing payload
 

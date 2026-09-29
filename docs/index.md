@@ -22,15 +22,17 @@ in memory at run time.
 - **[Plan](plan.md)** — every block of a schema-6 document,
   plus the interactive wizard that writes one.
 - **[Examples](examples/index.md)** — the runnable plans and recipes.
-- **[Techniques](techniques/index.md)** — the Preparation/Execution model, one
-  page per technique, and the cross-cutting layers (syscalls, payload
-  arguments, string obfuscation).
+- **[Techniques](techniques/index.md)** — the Preparation/Execution model and
+  one page per runtime technique.
+- **[Loader features](features/index.md)** — the cross-cutting stub
+  configuration (syscall layer, API resolution, string obfuscation, payload
+  arguments).
 - **[Architecture](architecture.md)** / **[Custom stubs](custom-stubs.md)** —
   how the packer and the stub fit together.
 - **[Reference](measurements.md)** — phase measurements, hollowing evidence and
   the schema migration guides.
 
-The Markdown under `docs/` is the single source of truth. The per-technique
-pages, the plan reference and the examples page are pulled from
-`src/techniques/<name>/README.md`, `README.md` and `examples/README.md` at build
-time, so they never drift.
+The Markdown under `docs/` is the single source of truth. The per-technique and
+per-feature pages, the plan reference and the examples page are pulled from
+`src/techniques/<name>/README.md`, `src/features/<name>/README.md`, `README.md`
+and `examples/README.md` at build time, so they never drift.

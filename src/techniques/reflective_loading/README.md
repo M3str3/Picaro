@@ -95,7 +95,7 @@ Before mapping, `execute_payload` calls `patch_command_line()` (shared, in
 process, so the stub's own command line has to be replaced with
 `<exe> <yaml args> <runtime args>` (combined by `build.payloads.<name>.args_mode`).
 
-Two places are updated (see `docs/techniques/process_argument_spoofing.md`):
+Two places are updated (see `src/features/args/README.md`):
 
 1. `PEB->ProcessParameters->CommandLine` (the `UNICODE_STRING` PEB-reading tools
    see), repointed at a new leaked UTF-16 buffer; and

@@ -408,7 +408,7 @@ Declared, not hidden:
 
 - Spike evidence: `code_examples/spike_iat_proxy/REPORT.md` (gitignored scratch;
   summary reproduced in section 1).
-- Syscall layer: `docs/techniques/indirect_syscalls.md` (Hell's Gate / Tartarus
+- Syscall layer: `src/features/syscalls/README.md` (Hell's Gate / Tartarus
   Gate / API hashing; the `nt_*` helpers).
 - Shared import resolver: `src/engine/imports.rs`.
 - Sibling loader config: `build.stub.syscalls` (`src/engine/syscalls.rs`).

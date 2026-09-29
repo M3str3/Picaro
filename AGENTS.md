@@ -232,7 +232,12 @@ path/size detail and a green result line, while `-v`/`--verbose` adds a
 resolved-plan block plus per-step detail (template, marker, rustc path,
 timings); `audit` renders the redesigned report (metadata bar, entropy gauges,
 uppercase headings, colored `LOW/MEDIUM/HIGH RISK`); `techniques list` is a
-colored table.
+colored table with a short legend (stability colors + a pointer to `show`).
+`techniques show` renders the README as styled Markdown behind a metadata header
+and pages a document taller than the terminal in an alternate-screen viewer that
+restores the terminal on quit; `--raw` prints the Markdown verbatim and
+`--no-pager` always prints inline. `ui` gained `markdown` (the renderer) and
+`pager` submodules.
 
 **Phase 6 done.** Indirect syscalls (see the “Phase 6” entry above).
 
@@ -397,6 +402,34 @@ for the three spawn-a-target techniques, `advisories` warns when `unhook_ntdll`
 follows `patch_etw` (the restore would silently undo it), and `nt_queue_apc`
 (`NtQueueApcThread`) was added to the syscall layer for `early_bird`.
 
+**Batch 3 (done): `thread_hijacking`, `stack_spoofing`, `self_deletion`.** Three
+techniques, all verified end to end on Windows (numbers in
+`docs/measurements.md`). `thread_hijacking` (T1055.003, Execution,
+shellcode-only) finds a running process by image name (`target`) or `pid`, places
+the payload and redirects the target's *first* thread: `nt_suspend_thread` →
+`nt_get_context_thread` → `Rip`/`Eip` (plus `Rsp`/`Esp` on the private stack
+`dedicated_stack: true` asks for) → `nt_set_context_thread` → `nt_resume_thread`;
+no thread is ever created, and `wait_ms` relays the *target's* exit code.
+`self_deletion` (T1070.004, Preparation, x86+x64) reads its own path and either
+renames the image into an alternate data stream of itself
+(`mode: rename_ads`, the default — the only variant that works on a *mapped*
+image: four `FileDispositionInformation*` combinations measured
+`ERROR_ACCESS_DENIED`, `FileRenameInformation` succeeded) or spawns a detached
+`cmd.exe` that deletes the file after the loader exits (`mode: helper`); the
+stream name is random per build. `stack_spoofing` (T1036, Preparation, x64 only)
+is the syscall layer's stack half: it *replaces* the trampoline
+(`nt_invoke` becomes its own asm, the raw one is renamed `nt_invoke_raw`), shifts
+`Rsp` down by `decoy_bytes` on every call, copies the nine stack arguments so the
+kernel still reads them at `[rsp+0x28]..[rsp+0x70)`, fills the gap with ntdll
+`ret` sites discovered from the live ntdll at `init_syscalls` time, and unwinds
+through a five-slot fabricated chain back to a restore label that puts `Rsp` and
+`Rbx` where they were. `decoy_bytes` is clamped to `0x80..=0x8000` because
+`0x70` — the structural minimum — faults in the first spoofed syscall on the
+verification host (sweep script: `code_examples/stack_spoofing/bisect.py`). The
+step is skipped by the renderer (nothing runs at pipeline time) and
+`advisories` warns when `syscalls.mode` is not `indirect`. The wizard's
+`default_format` maps `thread_hijacking` to shellcode.
+
 **`Stability::Unimplemented` (new state).** The registry's maturity enum is
 `Stable | Experimental | Unimplemented | Deprecated`. `Unimplemented` means the
 technique is registered and wired (metadata, docs, tests) but its implementation
@@ -472,7 +505,7 @@ where its CA is trusted; it gives no SmartScreen reputation.
   `tests/fixtures/minimal_x86.exe` (`scripts/build_test_fixture.sh x86`); the
   example plan is `examples/plans/x86.yaml` (payload
   `examples/payloads/test_payload_x86.exe`). Plan and checklist: `.plan.md`
-  (repo root; not tracked yet — add it to the commit if you want it kept).
+  (repo root, tracked).
 - **A managed (.NET) payload needs `format: dotnet` + `dotnet_hosting`.** A
   managed assembly's entry point calls `mscoree.dll!_CorExeMain`, which starts
   the CLR for the *stub*, not the mapped payload, so `format: pe`/`dll` on a
@@ -518,11 +551,13 @@ where its CA is trusted; it gives no SmartScreen reputation.
   at the real exports; `plan::validate` rejects the combination. Closing it needs
   a position-independent proxy emitter written into the target
   (`docs/api-resolution.md`, Phase E).
-- **`unhook_ntdll`, `early_bird`, `pe_injection` and `ppid_spoofing` are
-  registered but not implemented.** They exist so their directories are wired
-  into the registry, the validator and the stub renderer; a build that selects
-  one produces an artifact that exits `1` with an obfuscated "not implemented
-  yet" message. Remove the placeholder (and this note) as each lands.
+- **`pe_injection` is the only technique still marked
+  `Stability::Unimplemented`.** Its payload TLS is not provisioned, so a payload
+  that relies on dynamic TLS can misbehave; the rest of the loader contract
+  (image mapping, relocations, imports resolved against the target's bases, the
+  entry thread, the exit code) is in place and verified for TLS-free payloads.
+  `plan::validate::advisories` warns on every build that selects it. Flip it to
+  `Experimental` when TLS lands.
 - **`unhook_ntdll` silently undoes `patch_etw` if it runs after it** (both
   rewrite ntdll's `.text`); `plan::validate::advisories` warns about the order.
 - **`early_bird` needs a real target image.** The 32-bit `notepad.exe` of recent
@@ -543,6 +578,27 @@ where its CA is trusted; it gives no SmartScreen reputation.
   Both read Windows-only state: the certificate store and `MpCmdRun.exe`. The
   image ships `osslsigncode` + `openssl`, so `lab` and `file` signing work there
   (`audit` still runs; its Defender line reports `unavailable`).
+
+- **`stack_spoofing` fabricates the top of the stack, not the whole of it.** The
+decoy region and the five-slot return chain sit above the loader's real frames,
+so a check that reads the *whole* thread stack still reaches them; it is the
+cheap checks (the immediate return address, the first frames) that stop looking
+like the loader. `decoy_bytes`'s floor is `0x80`, measured — `0x70` is the
+structural minimum and faults. The save slots are process-global statics, so a
+payload driving the loader's `nt_*` helpers from two threads at once can corrupt
+them.
+- **`self_deletion` cannot delete a *running* image on current Windows**
+  (`FileDispositionInformation*` is refused with `ERROR_ACCESS_DENIED`; measured
+  four ways — see `docs/measurements.md`). The default `rename_ads` mode moves the
+  image's bytes into an alternate data stream and leaves a 0-byte file at the
+  path; only `mode: helper` removes the file, and its two-second sleep is a budget
+  the loader has to meet by exiting.
+- **`thread_hijacking` takes the first thread the ToolHelp snapshot returns** (a
+  thread parked in a wait would be a safer choice, but reading per-thread state
+  needs more access than the hijack itself) and with the default
+  `dedicated_stack: true` a payload that *returns* jumps to a null return address
+  and takes the target down. The hijacked target's crash code depends on the
+  payload: `ud2` gives `0xC000001D`, a `ret` gives `0xC0000005`.
 
 ## Session workflow
 

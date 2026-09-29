@@ -74,6 +74,6 @@ path"; the marker itself still needs Process Explorer, because the hollowed
 - `src/engine/imports.rs` — the shared import resolver.
 - `src/techniques/process_hollowing/stub_fragment.rs` — relocations, TLS
   provisioning and the entry-point hand-off.
-- [Syscall layer](indirect_syscalls.md) — the syscall layer the hollowing
+- [Syscall layer](../features/ref/syscalls.md) — the syscall layer the hollowing
   fragment calls through (`nt_create_thread_ex` is what replaced
   `CreateRemoteThread`).

@@ -267,6 +267,60 @@ plan under `code_examples/<name>/` and **run end to end**, not just compiled.
   missing parent fails loudly (`exit 1`) and a detached child outlives the
   loader.
 
+## Batch 3 — thread hijacking, stack spoofing, self-deletion (2026-09-29)
+
+Host: `x86_64-pc-windows-msvc` (rustc 1.90), release stub unless noted, Windows 11.
+
+- **`thread_hijacking`** (T1055.003, execution, shellcode only): a throwaway
+  `ping.exe -t 127.0.0.1` started by hand, payload `ud2` (`0f 0b`, two bytes).
+  The target's thread was redirected and died with `0xC000001D`
+  (`STATUS_ILLEGAL_INSTRUCTION`); the loader — `wait_ms: 4000` — relayed exactly
+  that code as its own exit status, which is the proof the redirection happened.
+  No thread was created in the target. Running it against `notepad.exe` produced
+  `0xC0000005` events instead: the *crash code* of a hijacked thread depends on
+  what the payload does with the (private) stack, so `ud2` is the payload to use
+  when the point is the proof. The target's own exit code can only be relayed
+  when `wait_ms` covers its death.
+
+- **`stack_spoofing`** (T1036, preparation, x64): indirect syscalls with
+  `resolver: tartarus_gate`, a shellcode payload through `reflective_loading`.
+  The payload's exit code (`42`) is relayed, so every syscall in the chain ran
+  with the stack shifted by 4 KB and its arguments copied — the copy is the part
+  that could silently corrupt a wide call. `init_stack_spoofing` resolves 16
+  fabricated return sites from the live ntdll. Two findings worth keeping:
+  - The decoy fill loop originally wrote a full 128-byte block whenever its
+    cursor was below the caller's `rsp`, which could run up to 124 bytes *past*
+    that pointer and overwrite the caller's real return address. With the
+    argument copy in place the syscall itself still succeeded, so the symptom was
+    a hang in the *first* spoofed syscall (`NtAllocateVirtualMemory`), not a
+    crash. The loop bound is now one block below `rsp`.
+  - The structural minimum for `decoy_bytes` is `0x70` (the fabricated frames
+    plus the nine copied argument slots), but every value below `0x80` faults in
+    the first spoofed syscall on this host (`0xC0000005`) while `0x80` and above
+    work. The clamp is `0x80` and the sweep is committed as
+    `code_examples/stack_spoofing/bisect.py`, so the floor can be re-measured
+    instead of trusted.
+
+- **`self_deletion`** (T1070.004, preparation): the artifact's own path, three
+  variants, measured with a stand-in process that opens *its own* image
+  (`code_examples/self_deletion/probe.cs`):
+
+  | Variant | Result |
+  |---------|--------|
+  | `FileDispositionInformationEx` (64) `DELETE|POSIX_SEMANTICS`, share `RW+DELETE` | `FALSE`, `ERROR_ACCESS_DENIED` |
+  | `FileDispositionInformation` (13), share `RW+DELETE` | `FALSE`, `ERROR_ACCESS_DENIED` |
+  | `FileDispositionInformation` (13), share `READ` | `FALSE`, `ERROR_ACCESS_DENIED` |
+  | `FileDispositionInformationEx` (64) `DELETE`, share `READ` | `FALSE`, `ERROR_ACCESS_DENIED` |
+  | `FileRenameInformation` (10) to `:stream`, share `READ` | **`TRUE`** |
+
+  A mapped image cannot be deleted on this build, which is why the default is the
+  rename: after `mode: rename_ads` the path is a 0-byte file and the loader's
+  386,560 bytes live in a randomly named alternate data stream (verified with
+  `Get-Item -Stream *`), with the payload still running from the mapped section
+  and relaying exit code `42`. `mode: helper` — a detached `cmd.exe` that sleeps
+  two seconds and deletes — removes the file outright: verified by listing the
+  directory after the run.
+
 ## CrowdStrike Falcon — process hollowing (partial)
 
 - The stub prints its own marker, but the payload never runs inside `svchost.exe`:

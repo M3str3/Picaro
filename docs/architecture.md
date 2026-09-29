@@ -79,7 +79,7 @@ The stub template renders the layer into `$SYSCALLS_BLOCK$` (a no-op
   only resolves the union of the active pipeline's requirements.
 - All Nt*/DLL names go through `StringsConfig` (or are replaced by hash
   constants), so they never appear in the binary. See
-  [Syscall layer](techniques/indirect_syscalls.md) and
+  [Syscall layer](features/ref/syscalls.md) and
   [Measurements](measurements.md).
 
 ## API resolution (`build.stub.api_resolution`)
@@ -102,7 +102,7 @@ payload (there is no IAT to rewrite otherwise). It is rejected with
 `process_hollowing`, because the proxies live in the loader image, which is not
 mapped in the target. `unmatched` decides what a non-catalogue import does:
 `forward` (default) resolves it normally, `abort` fails the load. Design, phases
-and limitations: [API resolution](api-resolution.md).
+and limitations: [API resolution design](design/api-resolution.md).
 
 ## Payload formats (`build.payloads.<name>.format`)
 
@@ -148,7 +148,7 @@ execution techniques use it: `process_hollowing` passes the line as
 `lpCommandLine` to `CreateProcessA`, while `reflective_loading` calls
 `patch_command_line()` before mapping. Token 0 is always the executable name, so
 the payload's `argv[0]` is the exe and its args start at `argv[1]`. See
-[Payload arguments](techniques/process_argument_spoofing.md).
+[Payload arguments](features/ref/args.md).
 
 ## Pipeline (audit)
 

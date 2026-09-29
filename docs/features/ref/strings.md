@@ -1,0 +1,1 @@
+--8<-- "src/features/strings/README.md"

@@ -176,5 +176,7 @@ offline Defender scan.
 
 - [Plan](plan.md) — every block and field, plus the wizard.
 - [Examples](examples/index.md) — the runnable plans.
-- [Techniques](techniques/index.md) — what each technique does and what it
-  costs.
+- [Techniques](techniques/index.md) — what each runtime technique does and what
+  it costs.
+- [Loader features](features/index.md) — the stub-level configuration (syscall
+  layer, API resolution, string obfuscation, payload arguments).

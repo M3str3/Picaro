@@ -1,0 +1,1 @@
+--8<-- "src/techniques/self_deletion/README.md"

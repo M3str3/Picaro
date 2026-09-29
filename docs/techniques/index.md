@@ -16,10 +16,11 @@ Every technique fragment calls the stub's `nt_*` helpers (`src/engine/syscalls.r
 `nt_alloc_vm`, `nt_write_vm`, `nt_read_vm`, `nt_protect_vm`,
 `nt_create_thread_ex`, `nt_wait_for_single_object`, `nt_get_context_thread`,
 …) and never the Win32 APIs directly. See
-[Syscall layer](indirect_syscalls.md).
+[Syscall layer](../features/ref/syscalls.md).
 
 The registry (`src/techniques/mod.rs`) is metadata-only; inspect it with
-`picaro techniques list`, `picaro techniques show <name>` and
+`picaro techniques list`, `picaro techniques show <name>` (a styled page that
+pages long documents full-screen; `--raw` prints the Markdown verbatim) and
 `picaro techniques validate`. Adding one:
 [Adding a technique](adding-a-technique.md).
 
@@ -41,6 +42,9 @@ The registry (`src/techniques/mod.rs`) is metadata-only; inspect it with
 | [fibers](ref/fibers.md) | execution | T1055 | experimental | Runs the payload on a fiber of the loader's own thread; control returns to the loader when it does. |
 | [early_bird](ref/early_bird.md) | execution | T1055.004 | experimental | Creates the target suspended, writes the payload and queues an APC before the target's loader runs, so the payload executes first. |
 | [pe_injection](ref/pe_injection.md) | execution | T1055.002 | unimplemented | Maps a full PE image into a freshly created suspended process and starts it at its entry point, without unmapping the target's own image. Not finished: the payload's TLS is not provisioned. |
+| [thread_hijacking](ref/thread_hijacking.md) | execution | T1055.003 | experimental | Suspends a thread that already exists in a running process, points its instruction pointer at the payload and resumes it — no thread is ever created. |
 | [living_off_the_land](ref/living_off_the_land.md) | control | T1218, T1105 | experimental | Launches a signed Microsoft binary (or any command) as a chain step, with signed/unsigned modes and detached/orphaned children. |
 | [sleep](ref/sleep.md) | control | T1497 | stable | Waits a number of milliseconds between two steps of a runtime chain. |
+| [self_deletion](ref/self_deletion.md) | preparation | T1070.004 | experimental | Unlinks the running artifact's own image while it executes, with `FileDispositionInformationEx` (POSIX semantics) by default. |
+| [stack_spoofing](ref/stack_spoofing.md) | preparation | T1036 | experimental | Fabricates the top of the stack for every syscall, so a stack walk during the call sees ntdll code addresses instead of the loader. |
 | [ppid_spoofing](ref/ppid_spoofing.md) | control | T1134.004 | experimental | Launches a process whose recorded parent is a different, legitimate process. |

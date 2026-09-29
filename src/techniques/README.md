@@ -75,7 +75,7 @@ built through `StringsConfig::obfuscate` (the `TODO`/`docs` convention; the
  provides the helpers with two implementations — direct Win32 calls when
  `build.stub.syscalls.mode` is `none`, indirect syscalls when it is `indirect` — so
  the fragment must not care which mode is active. See
- `docs/techniques/indirect_syscalls.md`.
+ `src/features/syscalls/README.md`.
 
 A Preparation fragment must expose a `pub fn <name>() -> Result<bool, E>` entry
 point (where `<name>` is the technique key); the stub wraps each Preparation

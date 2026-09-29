@@ -94,7 +94,7 @@ The command line passed to `CreateProcessA` is built from `build.payloads.<name>
 plus the args the operator passes to the packed binary, combined by
 `build.payloads.<name>.args_mode` (`join`/`override`). The shared helper lives in
 `src/engine/args.rs` (`$ARGS_BLOCK$`); see
-`docs/techniques/process_argument_spoofing.md`.
+`src/features/args/README.md`.
 
 The line is `<target exe name> <args>`: **token 0 is the executable name, never
 an argument**, so the payload's `argv[0]` is `svchost.exe` and the payload args

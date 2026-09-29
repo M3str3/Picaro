@@ -1,0 +1,1 @@
+--8<-- "src/techniques/thread_hijacking/README.md"
