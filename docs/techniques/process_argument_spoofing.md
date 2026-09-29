@@ -1,7 +1,7 @@
 # Payload arguments
 
 - ATT&CK: T1036 (Masquerading), T1055 (Process Injection) context
-- YAML: `build.payload.args`, `build.payload.args_mode`
+- YAML: `build.payloads.<name>.args`, `build.payloads.<name>.args_mode`
 
 ## What it does
 
@@ -90,7 +90,7 @@ so the same `patch_command_line()` step runs before they start:
   still patches the PEB, so shellcode that calls `GetCommandLineW` sees
   `<exe> <yaml args> <runtime args>`. A blob that expects a bespoke hand-off
   struct is out of scope.
-- **DLL**: after `DllMain(DLL_PROCESS_ATTACH)`, `build.payload.export` names the
+- **DLL**: after `DllMain(DLL_PROCESS_ATTACH)`, the payload's `export` names the
   exported function to call; it is invoked with no arguments, so an export that
   wants the command line reads it from the PEB.
 

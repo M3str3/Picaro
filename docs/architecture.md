@@ -13,7 +13,7 @@ picaro build plan.yaml
     │
     ├─ 1. Parse YAML, substitute build args, validate   (src/plan)
     ├─ 2. Read (file or URL) + validate the payload     (src/engine/pe, src/engine/fetch)
-    │      + verify build.payload.sha256 when pinned
+    │      + verify the payload's sha256 when pinned
     ├─ 3. Encrypt payload              (src/engine/crypto, XChaCha20-Poly1305)
     ├─ 4. Render Rust stub             (src/engine/stub, templates/stub/main.rs.tpl)
     ├─ 5. Compile stub with rustc      (src/engine/compiler, --extern from target/)
@@ -31,27 +31,31 @@ payload touches disk.
 
 ## Technique pipeline model
 
-Each technique is Preparation or Execution (`src/techniques/mod.rs`):
+Each technique is Preparation, Execution or Control (`src/techniques/mod.rs`):
 
 - **Preparation** — modifies the current process state (e.g. `patch_amsi`) but
   never runs the payload.
-- **Execution** — runs the decrypted payload (`process_hollowing`,
-  `reflective_loading`, `dotnet_hosting`).
+- **Execution** — runs a payload (`process_hollowing`, `reflective_loading`,
+  `dotnet_hosting`, `execution_callbacks`, `module_stomping`, `fibers`).
+- **Control** — orchestrates the chain without touching the payload
+  (`living_off_the_land`, `sleep`).
 
-A valid pipeline is `0..N` Preparation techniques followed by exactly one
-Execution technique; `src/plan/validate.rs` rejects anything else, including a
-Preparation placed after the Execution technique.
+The plan is a flat `runtime:` list of steps; `src/plan/steps.rs` resolves it and
+`src/plan/validate.rs` checks the per-step rules (the terminal-step rule above
+all, plus format/arch/capability checks).
 
-The stub renders the pipeline into two placeholders:
+The stub renders the steps into three placeholders:
 
-- `$PREPARATION_BLOCKS$` — the Preparation fragments, each wrapped in its own
-  module (so their `use` statements cannot collide), plus a generated
-  `run_preparations()` dispatcher that calls each one in order.
-- `$EXECUTION_BLOCK$` — the single Execution fragment, injected at the top level
-  (it provides `execute_payload`).
+- `$STEP_MODULES$` — one `mod step_<i>` per step (a Preparation exposes
+  `run() -> Result<bool, _>`, an Execution `payload(image)`, a Control
+  `run() -> Result<i32, _>`), so two steps can reuse a technique without
+  colliding on top-level names.
+- `$STEP_RUNNER_BODY$` — the generated straight-line runner that walks the steps
+  in order, decrypting each payload and applying the declared gating.
+- `$STUB_HELPERS$` — the shared `dec_xor` / `decrypt_step` helpers.
 
-`run()` calls `init_syscalls()?`, then `run_preparations()?`, then
-`execute_payload(&mut image)`.
+`run()` calls `init_syscalls()?`, then the runner. A terminal step
+(`reflective_loading` of a PE executable, `dotnet_hosting`) must be last.
 
 ## Syscall layer (`build.stub.syscalls`)
 
@@ -100,14 +104,14 @@ mapped in the target. `unmatched` decides what a non-catalogue import does:
 `forward` (default) resolves it normally, `abort` fails the load. Design, phases
 and limitations: [API resolution](api-resolution.md).
 
-## Payload formats (`build.payload.format`)
+## Payload formats (`build.payloads.<name>.format`)
 
 `format` describes the input: `pe` (default), `shellcode`, `dll` or `dotnet`.
 
 - `pe` — a PE32/PE32+ executable. Validated as such; run by either native
   execution technique.
 - `dll` — a PE32/PE32+ library (`IMAGE_FILE_DLL`). The packer rejects a DLL
-  declared as `pe` and vice versa. `build.payload.export` optionally names an
+  declared as `pe` and vice versa. The payload's `export` optionally names an
   exported function to call after `DllMain(DLL_PROCESS_ATTACH)`.
 - `shellcode` — a raw, position-independent code blob with no PE headers. The
   packer only checks that it is non-empty; `reflective_loading` copies the bytes
@@ -122,10 +126,10 @@ and limitations: [API resolution](api-resolution.md).
 `process_hollowing` replaces a suspended process's image, so it only runs
 `format: pe` today and `plan::validate` rejects the other formats with a
 pointer to `reflective_loading`. The format reaches the Execution fragment
-through `RuntimeStep::render_fragment`, which selects the technique's
+through `TechniqueKind::render_fragment`, which selects the technique's
 format-specific fragment.
 
-## Payload arguments (`build.payload.args`)
+## Payload arguments (`build.payloads.<name>.args`)
 
 A packed binary is a stub, so the payload does not inherit the operator's command
 line by itself. `args` fixes arguments at build time; `args_mode` is `join`

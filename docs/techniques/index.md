@@ -1,15 +1,16 @@
 # Techniques overview
 
-A pipeline is a list of techniques applied in order. Techniques are split into
-two categories (`TechniqueDef.category`):
+A runtime is a list of technique steps applied in order. Techniques are split
+into three categories (`TechniqueDef.category`):
 
 - **Preparation** — modifies the current process state (e.g. patches AMSI) but
-  never runs the payload. The stub runs each one in YAML order.
-- **Execution** — runs the decrypted payload. The stub runs exactly one of
-  these, after every Preparation technique.
+  never runs a payload.
+- **Execution** — runs a decrypted payload; only these take `params.payload`.
+- **Control** — orchestrates the chain (`living_off_the_land`, `sleep`).
 
-A valid pipeline is `0..N` Preparation techniques followed by **exactly one**
-Execution technique; the order is enforced by `src/plan/validate.rs`.
+A step only continues if the loader gets control back, so a **terminal** step
+(`reflective_loading` of a PE executable, `dotnet_hosting`) must be the last one;
+`src/plan/validate.rs` enforces it. Everything else chains.
 
 Every technique fragment calls the stub's `nt_*` helpers (`src/engine/syscalls.rs`:
 `nt_alloc_vm`, `nt_write_vm`, `nt_read_vm`, `nt_protect_vm`,
@@ -31,6 +32,15 @@ The registry (`src/techniques/mod.rs`) is metadata-only; inspect it with
 | [anti_debug](ref/anti_debug.md) | preparation | T1622 | stable | Checks the current process for signs of a debugger and, by default, aborts so the payload never runs. |
 | [sleep_obfuscation](ref/sleep_obfuscation.md) | preparation | T1027 | experimental | Encrypts the executable image region for the duration of a sleep (ekko variant), so a memory scanner sees RC4 ciphertext. |
 | [bouncer](ref/bouncer.md) | preparation | T1497.001, T1614.001 | experimental | Gates the payload on declared host checks (hostname, locale, uptime, RAM, VM/sandbox) and aborts the pipeline when they fail. |
+| [unhook_ntdll](ref/unhook_ntdll.md) | preparation | T1562.001 | experimental | Restores the loaded `ntdll.dll`'s code section from a clean on-disk copy (base fixups applied on x86), removing userland hooks. |
 | [process_hollowing](ref/process_hollowing.md) | execution | T1055.012 | experimental | Runs the payload inside a suspended, legitimate process (`svchost.exe` by default). |
 | [reflective_loading](ref/reflective_loading.md) | execution | T1620 | experimental | Maps the payload into the current process (manual mapping), resolves imports and relocations, and runs its entry point. |
 | [dotnet_hosting](ref/dotnet_hosting.md) | execution | T1620 | experimental | Hosts the CLR in the stub and runs a managed (`format: dotnet`) assembly from memory. |
+| [execution_callbacks](ref/execution_callbacks.md) | execution | T1106, T1620 | experimental | Runs the payload as the callback of a legitimate Windows enumeration API (`CertEnumSystemStoreLocation`) in the current process, from no dedicated thread. |
+| [module_stomping](ref/module_stomping.md) | execution | T1055 | experimental | Overwrites a legitimate signed DLL's code section with the payload and runs it from there. |
+| [fibers](ref/fibers.md) | execution | T1055 | experimental | Runs the payload on a fiber of the loader's own thread; control returns to the loader when it does. |
+| [early_bird](ref/early_bird.md) | execution | T1055.004 | experimental | Creates the target suspended, writes the payload and queues an APC before the target's loader runs, so the payload executes first. |
+| [pe_injection](ref/pe_injection.md) | execution | T1055.002 | unimplemented | Maps a full PE image into a freshly created suspended process and starts it at its entry point, without unmapping the target's own image. Not finished: the payload's TLS is not provisioned. |
+| [living_off_the_land](ref/living_off_the_land.md) | control | T1218, T1105 | experimental | Launches a signed Microsoft binary (or any command) as a chain step, with signed/unsigned modes and detached/orphaned children. |
+| [sleep](ref/sleep.md) | control | T1497 | stable | Waits a number of milliseconds between two steps of a runtime chain. |
+| [ppid_spoofing](ref/ppid_spoofing.md) | control | T1134.004 | experimental | Launches a process whose recorded parent is a different, legitimate process. |

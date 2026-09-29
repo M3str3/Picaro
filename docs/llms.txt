@@ -22,15 +22,24 @@
 - [process_hollowing](techniques/ref/process_hollowing.html)
 - [reflective_loading](techniques/ref/reflective_loading.html)
 - [dotnet_hosting](techniques/ref/dotnet_hosting.html)
+- [execution_callbacks](techniques/ref/execution_callbacks.html)
+- [module_stomping](techniques/ref/module_stomping.html)
+- [fibers](techniques/ref/fibers.html)
+- [unhook_ntdll](techniques/ref/unhook_ntdll.html)
+- [early_bird](techniques/ref/early_bird.html)
+- [pe_injection](techniques/ref/pe_injection.html)
+- [living_off_the_land](techniques/ref/living_off_the_land.html)
+- [sleep](techniques/ref/sleep.html)
+- [ppid_spoofing](techniques/ref/ppid_spoofing.html)
 - [Syscall layer](techniques/indirect_syscalls.html): none / Hell's Gate / Tartarus Gate / API hashing.
-- [Payload arguments](techniques/process_argument_spoofing.html): build.payload.args and PEB command-line patching.
+- [Payload arguments](techniques/process_argument_spoofing.html): build.payloads.<name>.args and PEB command-line patching.
 - [String obfuscation](techniques/string_obfuscation.html): build.stub.strings (xor / stack).
 - [Adding a technique](techniques/adding-a-technique.html): the four-file ritual.
 
 ## Architecture
 
 - [How it fits together](architecture.html): the packer pipeline and repo layout.
-- [Multi-stage plans](multistage.html): schema 5 `stages:` — several payloads and living-off-the-land commands in one artifact.
+- [Multi-stage plans](multistage.html): schema 6 `runtime:` — several payloads and living-off-the-land steps in one artifact.
 - [Custom stubs](custom-stubs.html): replacing the builtin loader template.
 - [API resolution](api-resolution.html): the payload import proxy (catalogue, phases, limitations).
 - [x86 support](x86.html): `build.output.arch`, what is ported and what is still x64-only.
@@ -39,9 +48,6 @@
 
 - [Measurements](measurements.html): phase-by-phase static/dynamic results and the EDR report.
 - [Process hollowing evidence](techniques/process_hollowing.html): measured behaviour and remaining work.
-- [Migration: v1 to v3](migration-v1-v3.html)
-- [Migration: v2 to v3](migration-v2-v3.html)
-- [Migration: v3 to v4](migration-v3-v4.html)
 
 ## Notes
 

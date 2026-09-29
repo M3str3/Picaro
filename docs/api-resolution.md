@@ -233,7 +233,7 @@ In `src/plan/validate.rs` (mirroring the existing technique checks):
    (needs a build-time parse of the payload's import table) → warn that it will
    never be hit by the IAT path (it may still be hit via `GetProcAddress`).
 6. **`api_resolution.mode: proxy` requires a payload with an import table** —
-   `build.payload.format: pe` or `dll`. With `format: shellcode` there is no IAT to
+   `build.payloads.<name>.format: pe` or `dll`. With `format: shellcode` there is no IAT to
    rewrite, so the mode can never apply; that is an **error**, not a silent no-op.
    (`process_hollowing` is already `pe`-only, so this only concerns
    `reflective_loading`.)
@@ -397,7 +397,7 @@ Declared, not hidden:
 | D-17 | Ordinals are forwarded unchanged, never resolved | The catalogue is name-keyed; ordinal→name needs an export walk | accepted |
 | D-18 | Phase B renders not-yet-implemented entries (`NtOpenProcess`, `OpenProcess`, `GetProcAddress`) as `forward` | Forwarding is exact and keeps selections valid until Phases C/D | superseded (C/D implemented; no entry uses `forward`) |
 | D-19 | `forward` proxies re-resolve the original at first call (`GetModuleHandleA`+`GetProcAddress`, cached in a `OnceLock`) | Self-contained; the intercepted name stays dynamic (never a static import) | accepted |
-| D-20 | Test-only convenience wrappers (`render_main_rs`, `render_custom_stub`, `syscalls::render_block`) kept with `#[allow(dead_code)]`; the build calls the `_with` variants | Avoids churning ~15 call sites | accepted |
+| D-20 | Test-only convenience wrappers (`render_main_rs`, `render_custom_stub`, `syscalls::render_block`) kept with `#[allow(dead_code)]`; the build calls the `_with` variants | Avoids churning ~15 call sites | retired (schema 6 deleted the single-payload path and its wrappers) |
 | D-21 | The `audit` "the stub's IAT must not gain the intercepted names" check is deferred to Phase C | `audit` is plan-agnostic; the render tests cover the structural guarantee for now | accepted (implemented in C, `verify_no_intercepted_imports`) |
 | D-22 | The audit check exempts `Strategy::Handler` entries | The loader itself imports `GetProcAddress` (import resolver, SSN resolvers), so its presence cannot be told apart from the handler's resolver and is not a regression | accepted |
 | D-23 | `mode: proxy` with `process_hollowing` is a validation error, and Phase E is parked | The proxies are Rust functions bound to the loader image (statics, obfuscated data, CRT); the target has none of it. Closing it needs a position-independent proxy emitter written into the target | accepted (E parked) |

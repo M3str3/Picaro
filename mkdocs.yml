@@ -61,26 +61,31 @@ nav:
       - anti_debug: techniques/ref/anti_debug.md
       - sleep_obfuscation: techniques/ref/sleep_obfuscation.md
       - bouncer: techniques/ref/bouncer.md
+      - unhook_ntdll: techniques/ref/unhook_ntdll.md
       - process_hollowing: techniques/ref/process_hollowing.md
       - reflective_loading: techniques/ref/reflective_loading.md
       - dotnet_hosting: techniques/ref/dotnet_hosting.md
+      - execution_callbacks: techniques/ref/execution_callbacks.md
+      - module_stomping: techniques/ref/module_stomping.md
+      - fibers: techniques/ref/fibers.md
+      - early_bird: techniques/ref/early_bird.md
+      - pe_injection: techniques/ref/pe_injection.md
+      - living_off_the_land: techniques/ref/living_off_the_land.md
+      - sleep: techniques/ref/sleep.md
+      - ppid_spoofing: techniques/ref/ppid_spoofing.md
       - Syscall layer: techniques/indirect_syscalls.md
       - Payload arguments: techniques/process_argument_spoofing.md
       - String obfuscation: techniques/string_obfuscation.md
       - Adding a technique: techniques/adding-a-technique.md
   - Architecture:
       - How it fits together: architecture.md
-      - Multi-stage plans: multistage.md
+      - Runtime steps: multistage.md
       - Custom stubs: custom-stubs.md
       - API resolution: api-resolution.md
       - x86 support: x86.md
   - Reference:
       - Measurements: measurements.md
       - Process hollowing evidence: techniques/process_hollowing.md
-      - Migrations:
-          - v1 to v3: migration-v1-v3.md
-          - v2 to v3: migration-v2-v3.md
-          - v3 to v4: migration-v3-v4.md
 
 markdown_extensions:
   - admonition

@@ -131,20 +131,22 @@ A build is one YAML document. Strict by design: unknown keys are an error, so
 typos surface immediately instead of silently doing nothing.
 
 ```yaml
-schema: 4                 # only version 4 is accepted
+schema: 6                 # only version 6 is accepted
 name: mimikatz-basic
 
 build:
-  payload:
-    source: ./payload.exe # a local path, or an http(s):// URL (fetched in memory)
-    format: pe            # pe | shellcode | dll | dotnet
-    export: null          # format: dll only: the exported function to call
-    args: []              # fixed args for the payload, before the runtime ones
-    args_mode: join       # join | override
-    sha256: null          # optional: pin the input's SHA-256 (64 hex chars)
-    crypto:
-      algo: xchacha20poly1305
-      key: random
+  crypto:                 # default crypto for every payload
+    algo: xchacha20poly1305
+    key: random
+  payloads:               # named payloads, loaded by an execution step
+    mimikatz:
+      source: ./payload.exe # a local path, or an http(s):// URL (fetched in memory)
+      format: pe            # pe | shellcode | dll | dotnet
+      export: null          # format: dll only: the exported function to call
+      args: []              # fixed args for the payload, before the runtime ones
+      args_mode: join       # join | override
+      sha256: null          # optional: pin the input's SHA-256 (64 hex chars)
+      # crypto: { ... }       # optional: override build.crypto for this payload
   stub:
     path: null            # null = builtin stub; or a path to a custom .rs
     syscalls:
@@ -160,9 +162,9 @@ build:
     debug: false          # compile a debuggable, non-evasive stub for the lab
   output:
     path: ./dist/mimikatz_packed.exe
-    arch: x64             # x64 | x86 (the stub and the payload must match)
-    strip: true
-    trim_paths: all       # all | none | relative
+    arch: x64             # x64 | x86 (default x64; the stub and the payload must match)
+    strip: true           # default true: drop the symbol/debug tables
+    trim_paths: all       # all | none | relative (default all: scrub absolute build paths)
     manifest: true        # write <stem>.manifest.json (provenance)
     subsystem: console    # console | windows (GUI; no console window)
     resources:            # optional PE resources (no rc.exe/windres needed)
@@ -176,21 +178,22 @@ build:
     sign:                 # optional Authenticode signing
       mode: lab           # none | lab | store | file
 
-runtime:                  # 0..N preparation, then exactly one execution
+runtime:                  # ordered technique steps
   - technique: patch_amsi
   - technique: process_hollowing
     params:
+      payload: mimikatz   # which payload to run (implicit when there is one)
       target: "C:\\Windows\\System32\\svchost.exe"
 ```
 
 | Block | What it decides |
 | --- | --- |
-| `build.payload.source` | The input to pack: a local path, or an `http(s)://` or `file://` URL (`http(s)` is fetched in memory, never written to disk). |
-| `build.payload.format` | `pe` (default), `dll`, `shellcode` or `dotnet` (a managed assembly). Decides how the input is validated and how the Execution technique runs it. |
-| `build.payload.export` | For `format: dll`, the exported function to call (e.g. `Run`). Without it only `DllMain(DLL_PROCESS_ATTACH)` runs. |
-| `build.payload.args` / `args_mode` | Fixed arguments handed to the payload (`join` = YAML args then the packed binary's own; `override` = runtime args replace the YAML ones). |
-| `build.payload.sha256` | Optional SHA-256 of the input. A mismatch aborts before anything is encrypted, so a URL (or a swapped file) cannot silently change what gets packed. |
-| `build.payload.crypto` | Payload encryption. XChaCha20-Poly1305, 24-byte nonce, fresh random key per build. |
+| `build.crypto` | Default payload encryption (XChaCha20-Poly1305, 24-byte nonce, fresh random key per build). A payload may override it with its own `crypto` block; with neither, encryption defaults to XChaCha20-Poly1305 with a random key. |
+| `build.payloads.<name>.source` | The input to pack: a local path, or an `http(s)://` or `file://` URL (`http(s)` is fetched in memory, never written to disk). |
+| `build.payloads.<name>.format` | `pe` (default), `dll`, `shellcode` or `dotnet` (a managed assembly). Decides how the input is validated and how the Execution technique runs it. |
+| `build.payloads.<name>.export` | For `format: dll`, the exported function to call (e.g. `Run`). Without it only `DllMain(DLL_PROCESS_ATTACH)` runs. |
+| `build.payloads.<name>.args` / `args_mode` | Fixed arguments handed to the payload (`join` = YAML args then the packed binary's own; `override` = runtime args replace the YAML ones). |
+| `build.payloads.<name>.sha256` | Optional SHA-256 of the input. A mismatch aborts before anything is encrypted, so a URL (or a swapped file) cannot silently change what gets packed. |
 | `build.stub.strings` | How every runtime literal in the stub is obfuscated (`xor` or `stack`). Defaults to `xor` + random key, with a warning. |
 | `build.stub.api_resolution` | Serve selected payload imports (`apis`) from proxies generated in the loader instead of the real exports (`mode: proxy`). Needs `syscalls.mode: indirect` and a `pe`/`dll` payload; not usable with `process_hollowing`. |
 | `build.stub.debug` | Compile a debuggable stub: no hardening, source paths kept, techniques log to stderr. Markedly less evasive — for the lab, never for delivery. |
@@ -199,7 +202,7 @@ runtime:                  # 0..N preparation, then exactly one execution
 | `build.output.subsystem` | `console` (default) or `windows` (GUI, no console window). |
 | `build.output.resources` | Optional PE resources embedded into the artifact: `icon`, `version_info` and `manifest` (Windows app manifest / UAC). Built in Rust and written into a `.rsrc` section. |
 | `build.output.sign` | Optional Authenticode signing: `lab` (self-signed), `store` (an existing cert, Windows only) or `file` (a `.pfx`). Uses `signtool` on Windows and `osslsigncode` elsewhere. |
-| `runtime` | The techniques to apply, in order. `0..N` Preparation followed by exactly one Execution. A technique's parameters go under a nested `params:` mapping. |
+| `runtime` | The ordered technique steps. Only Execution techniques (`reflective_loading`, `process_hollowing`, `dotnet_hosting`, `execution_callbacks`, `module_stomping`, `fibers`) take `params.payload` (optional with one payload, required with several); Preparation and Control steps never do. A technique's parameters go under a nested `params:` mapping, and each step carries the loader's own `on_success`/`on_fail`/`delay_ms`. See [Runtime steps](docs/multistage.md). |
 
 **Build arguments.** Positional args after the plan path are substituted in
 the YAML as `$arg.N$` (0-based); an arg of the form `name=value` is available
@@ -361,11 +364,10 @@ build:
     path: ./my_stub.rs
 ```
 
-`$PAYLOAD_BYTES$`, `$PAYLOAD_LEN$`, `$PAYLOAD_NONCE_DEF$`, `$PAYLOAD_KEY_DEF$`,
-`$PREPARATION_BLOCKS$`, `$EXECUTION_BLOCK$`, `$SYSCALLS_BLOCK$`, `$ARGS_BLOCK$`,
-`$IMPORTS_BLOCK$`, `$API_RESOLUTION_BLOCK$`, `$ARG_<n>$`.
-Your template must define `fn main()`; ignoring a technique block is a warning,
-not an error. Full contract and examples:
+`$STUB_HELPERS$`, `$STEP_MODULES$`, `$STEP_RUNNER_BODY$`, `$SYSCALLS_BLOCK$`,
+`$ARGS_BLOCK$`, `$IMPORTS_BLOCK$`, `$API_RESOLUTION_BLOCK$`, `$ARG_<n>$`.
+Your template must define `fn main()`; ignoring a step block is a warning, not an
+error. Full contract and examples:
 [`docs/custom-stubs.md`](docs/custom-stubs.md).
 
 ### Audit
@@ -415,7 +417,7 @@ Each build writes a provenance record next to the artifact, at
 
 It records the public nonce but never the payload key, so it is safe to archive
 alongside the artifact. `picaro build <plan> --dry-run` resolves, verifies
-`build.payload.sha256` and validates the payload without encrypting, compiling
+`build.payloads.<name>.sha256` and validates the payload without encrypting, compiling
 or writing anything — a pre-flight check for CI or for a plan review.
 
 ### PE resources
@@ -554,16 +556,14 @@ user-facing output goes through `src/ui.rs`. The full list is in
 | 9 | done | x86 (32-bit) support: M0–M5 — both execution techniques, the four preparations, i686 stubs, WOW64 targets and CLR hosting for managed payloads (`docs/x86.md`); M4 (x86 indirect syscalls) is parked with its reason |
 | — | done | Payload formats (`pe`/`shellcode`/`dll`), interactive wizard, custom stubs |
 | — | done | PE resources (icon, version info, manifest) and Authenticode signing (`signtool` on Windows, `osslsigncode` elsewhere) |
-| — | done | Multi-stage plans (schema 5): `stages:` chains several payloads and `exec` living-off-the-land commands in one artifact ([docs/multistage.md](docs/multistage.md)) |
+| — | done | Runtime steps (schema 6): `build.payloads` + a flat `runtime:` list chain several payloads, preparations and living-off-the-land steps in one artifact ([docs/multistage.md](docs/multistage.md)) |
+| — | done | Three in-process Execution techniques for `format: shellcode`, chainable (each relays the payload's exit code): `execution_callbacks` (T1106/T1620), `module_stomping` (T1055) and `fibers` (T1055) — see [docs/measurements.md](docs/measurements.md) |
+| — | done | Four more techniques, each verified end to end: `unhook_ntdll` (T1562.001, preparation), `early_bird` (T1055.004, APC injection), `pe_injection` (T1055.002) and `ppid_spoofing` (T1134.004, control) — see [docs/measurements.md](docs/measurements.md) |
 
 Planned:
 
-- `early_bird` (APC injection, T1055.012) — sidesteps the uninitialized-loader
-  problem of process hollowing entirely.
-- `process_doppelganging` / transacted hollowing (T1055.013), `module_stomping`
-  (T1055) and `ppid_spoofing` (T1134.004).
-- `unhook_ntdll` (Preparation) and stack spoofing, which closes the gap the
-  syscall notes acknowledge.
+- `process_doppelganging` / transacted hollowing (T1055.013).
+- Stack spoofing, which closes the gap the syscall notes acknowledge.
 - Fuzz `src/engine/pe.rs` and the plan parser (both take untrusted input).
 - `cargo deny` / `cargo audit` in CI.
 - Reproducible builds: a deterministic key or `--seed` (today the random key
@@ -576,10 +576,15 @@ Planned:
 
 ## Known limitations
 
-- **`arch: x86` is supported, with one parked workstream.** Both execution
-  techniques, `anti_debug`, `patch_amsi`, `patch_etw`, `bouncer` and
-  `dotnet_hosting` accept `arch: x86`; the stub, the payload and (for hollowing)
-  the target must share the architecture, and the packer checks all three.
+- **`unhook_ntdll` undoes `patch_etw` when it runs after it** (both rewrite
+  ntdll's `.text`); `plan::validate::advisories` warns about the order. And
+  `early_bird` needs a real target image: the 32-bit `notepad.exe` of recent
+  Windows builds is a launcher shim on which `QueueUserAPC` fails with
+  `ERROR_INVALID_HANDLE` (the default `svchost.exe` and `cmd.exe` are fine).
+- **`arch: x86` is supported, with one parked workstream.** Every technique
+except `sleep_obfuscation` accepts `arch: x86` (the stub, the payload and — for
+the techniques that spawn their own target — the target must share the
+architecture, which the packer checks).
   `sleep_obfuscation` stays x64-only, and `syscalls.mode: indirect` (and
   therefore `api_resolution`) is x64-only until a Heaven's Gate layer exists. A
   managed assembly runs through `format: dotnet` + `dotnet_hosting` (the stub
@@ -605,9 +610,11 @@ Planned:
   `process_hollowing` it is rejected at validation time (the target has none of
   the loader's state); making it work needs a position-independent proxy emitter
   written into the target.
-- **Custom stubs do not obfuscate the key/nonce** when they reference
-  `$PAYLOAD_KEY_DEF$` / `$PAYLOAD_NONCE_DEF$`; prefer reading the key at run
-  time ([`examples/stubs/runtime-key.rs`](examples/stubs/runtime-key.rs)).
+- **Custom stubs keep the per-step payload keys in the runner.** Each Execution
+  step's key and nonce live in the generated runner as hex literals; a custom
+  template that keeps the runner keeps that shape. Take the value from a build
+  argument instead when nothing derived from it should ship
+  ([`examples/stubs/runtime-key.rs`](examples/stubs/runtime-key.rs)).
 - **Windows Defender flags the packed artifacts.** That is the point of the
   exercise, not a bug.
 
@@ -619,8 +626,9 @@ Planned:
   writes the static site to `site/`.
 - [`docs/architecture.md`](docs/architecture.md) — how the pieces fit together
   and why.
-- [`docs/multistage.md`](docs/multistage.md) — schema 5 `stages:`: several
-  payloads and `exec` commands in one artifact, and the control-return rule.
+- [`docs/multistage.md`](docs/multistage.md) — schema 6 `runtime:` steps:
+  several payloads and living-off-the-land steps in one artifact, and the
+  control-return rule.
 - [`docs/custom-stubs.md`](docs/custom-stubs.md) — the custom-stub contract.
 - [`docs/techniques/`](docs/techniques/) — per-technique deep dives with
   measured evidence.

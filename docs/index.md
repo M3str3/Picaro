@@ -19,7 +19,7 @@ in memory at run time.
 
 - **[Getting started](getting-started.md)** — requirements, a first plan, and
   the commands to build, run and measure it.
-- **[Plan](plan.md)** — every block of a schema-4 document,
+- **[Plan](plan.md)** — every block of a schema-6 document,
   plus the interactive wizard that writes one.
 - **[Examples](examples/index.md)** — the runnable plans and recipes.
 - **[Techniques](techniques/index.md)** — the Preparation/Execution model, one

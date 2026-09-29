@@ -189,6 +189,84 @@ and the real-world `SharpHound.exe` (1.3 MB, 32-bit .NET).
   `42`; SharpHound's output is identical to running the original, line for line
   (modulo its own timestamps).
 
+## Parallel technique batch — callbacks, module stomping, fibers (2026-09-28)
+
+Three in-process Execution techniques added in one batch, each built from its own
+`code_examples/<name>/smoke.yaml` with the 6-byte demo shellcode
+(`examples/payloads/demo_shellcode.bin`), `strings: xor`, `syscalls: none`.
+
+| | `execution_callbacks` | `module_stomping` | `fibers` |
+| --- | --- | --- | --- |
+| Artifact | 376 KB | 378 KB (387,584 B) | 372 KB (380,416 B) |
+| Imports only this one has | `VirtualAllocEx`, `VirtualProtectEx` (both gone with `syscalls: indirect`, 95 → 93 imported functions) | `LoadLibraryA`, `GetCurrentProcess`, `VirtualProtectEx` | `ConvertThreadToFiber`, `CreateFiberEx`, `SwitchToFiber`, `DeleteFiber`, `ConvertFiberToThread`, `VirtualProtectEx`; no `CreateThread`/`GetExitCodeThread` (the reflective shellcode runner has them) |
+| Strings | sensitive 0, API names 0, technique names 0 | sensitive 0 | sensitive 0 |
+| `audit` | LOW RISK, "IAT looks minimal" | LOW RISK | LOW RISK |
+| Runtime | exit `42` (x64 and x86) | exit `42` (x64 and x86) | exit `42` (x64 and x86) |
+
+- The runtime row is the packed artifact itself (`code_examples/<name>/smoke.exe`,
+  produced by `picaro build` and executed on the Windows host): the demo
+  shellcode (`mov eax, 42; ret`) runs and the stub relays its exit code. The
+  artifacts are gitignored scratch and were not kept.
+- Every one of the three also builds and runs as an **i686** stub
+  (`code_examples/<name>/smoke-x86.yaml`), so the x86 claim in each DEF is
+  measured, not assumed.
+- They chain as documented: one artifact with `fibers` → `execution_callbacks` →
+  `module_stomping` (three shellcode payloads, `code_examples/chain/chain.yaml`)
+  runs all three steps in order and exits with the payload's code (`42`).
+- `execution_callbacks` resolves `crypt32.dll!CertEnumSystemStoreLocation`
+  dynamically (`LoadLibraryA` + `GetProcAddress`, both names obfuscated), so
+  neither the module nor the entry point appears in the IAT or in `.rdata`.
+- `module_stomping` keeps the stomped module's own `.text` mapping, so the added
+  static surface is `LoadLibraryA` + `GetCurrentProcess` + the protection change;
+  `.text` capacity was probed on live modules (`wininet.dll` 1,957,888 B,
+  `dbghelp.dll` 1,712,128 B, `amsi.dll` 53,248 B — a poor target for a staged
+  payload, besides the `patch_amsi` conflict).
+- `fibers` was also probed directly (`code_examples/fibers/harness/`): the
+  payload's `eax` returns as the step's exit code, a second `fibers` run on the
+  same thread works after `ConvertFiberToThread`, a fiber function that returns
+  ends the process silently (exit 0 — the explicit switch back is required), and
+  protecting the decrypted buffer's own heap pages hangs the switch when the
+  loader's fiber state shares the page (hence the dedicated region).
+
+## Batch 2 — ntdll unhooking, Early Bird, PE injection, PPID spoofing (2026-09-28)
+
+Four techniques added in a second parallel batch. Each was built from its own
+plan under `code_examples/<name>/` and **run end to end**, not just compiled.
+
+| | `unhook_ntdll` | `early_bird` | `pe_injection` | `ppid_spoofing` |
+| --- | --- | --- | --- | --- |
+| Category | preparation | execution | execution | control |
+| Artifact | 405 KB (x64) / 371 KB (x86) | 362 KB (x64) | 587 KB (x64) / 529 KB (x86) | 279 KB (x64) / 242 KB (x86) |
+| Payload | — | `shellcode` | `pe` | — |
+| `audit` | LOW RISK · sensitive 0 · technique names 0 · System32 paths 0 | LOW RISK · no suspicious strings | — | — |
+| Runtime proof | the following step still exits `42` | the APC kills the target (`0xC000001D`) | the payload's own exit code (`42`) returns | the child's exit code (`7`) returns |
+
+- **`unhook_ntdll`** restores 1,482,908 bytes of `.text` at the live ntdll base.
+  Two measured constraints: the write window must be `PAGE_EXECUTE_READWRITE`
+  (with `PAGE_READWRITE` the protection call faults on its return, because it
+  returns *through* an ntdll stub inside the region being rewritten), and on x86
+  the section's base relocations must be applied — the live 32-bit ntdll differs
+  from the file in 19,004 bytes (HIGHLOW fixups, delta `0x2bda0000`), so a raw
+  copy crashes the stub. With `syscalls.mode: indirect` the
+  `VirtualProtectEx`/`VirtualAllocEx` imports disappear (x64 artifacts).
+- **`early_bird`**'s proof is a two-byte `ud2` payload plus a bounded `wait_ms`:
+  the loader relays the target's `0xC000001D`
+  (`STATUS_ILLEGAL_INSTRUCTION`), which can only happen if the APC was
+  delivered. Verified on x64 and x86. **Target choice matters:** the 32-bit
+  `notepad.exe` of this Windows build is a launcher shim, so `QueueUserAPC` on
+  its thread fails with `ERROR_INVALID_HANDLE` (measured `0x80070006`), while the
+  64-bit one works and `cmd.exe` works on both architectures. The default target
+  is `svchost.exe`; check the target first when a run fails on an unusual image.
+- **`pe_injection`** returns the payload's own exit code (`42`) through the stub
+  on x64 and x86, for a minimal payload and for one with unusual section
+  alignment; a stack probe reports the same `rsp & 0xF` injected and direct, so
+  the thread starts with the same alignment as a normally created one.
+- **`ppid_spoofing`** relays the child's exit code (`7`) and the chain keeps
+  running; the spoof itself was verified from PowerShell (`Win32_Process`
+  reports the configured parent's PID while the real creator is the loader). A
+  missing parent fails loudly (`exit 1`) and a detached child outlives the
+  loader.
+
 ## CrowdStrike Falcon — process hollowing (partial)
 
 - The stub prints its own marker, but the payload never runs inside `svchost.exe`:

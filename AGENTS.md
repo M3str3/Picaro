@@ -79,55 +79,46 @@ tests). The registry (`src/techniques/mod.rs`) is metadata-only; inspect it with
 
 ## Current state
 
-**Multi-stage plans (schema 5, done).** `schema: 5` adds an ordered top-level
-`stages:` list so one artifact delivers several payloads. A stage is an action:
-`technique` (an embedded payload + its own pipeline, the single-payload shape
-generalized), `exec` (launch a process — a living-off-the-land binary or any
-command) or `sleep`. `build.payload` is now **optional**: a schema-4 document
-(accepted unchanged) is the single-payload shorthand and normalizes to one
-`technique` stage (`src/plan/stages.rs`); a stages-only plan omits it. The
-multi-stage build path renders `templates/stub/main_stages.rs.tpl` via
-`src/engine/stages.rs`: each payload is embedded and encrypted with its own
-key/nonce, each stage's pipeline is wrapped in `mod stage_<index>` (so two
-stages can reuse a technique without colliding), and a generated runner walks
-the stages with the declared gating (`on_success`/`on_fail`/`delay_ms`). The
-single-payload path is **unchanged** (still `main.rs.tpl`, byte-identical
-output). **The rule that shapes it:** a chain only continues if the loader gets
-control back, so `reflective_loading` of a PE *executable* and `dotnet_hosting`
-are *terminal* and must be the last stage (`plan::validate` rejects them
-otherwise); `exec`, `process_hollowing` and `reflective_loading` of a DLL
-always return. `api_resolution.mode: proxy` is rejected on multi-stage (it is
-loader-wide). Known limits: per-stage payload args and a stages-aware manifest
-are follow-ups; two reflectively loaded EXEs cannot chain without an
-`ExitProcess` interceptor. Docs: `docs/multistage.md`; example:
-`examples/plans/multistage.yaml`.
+**YAML schema 6 (done): a flat `runtime:` of technique steps.** The plan
+keeps everything the build needs under `build:` — `crypto` (the default crypto a
+payload inherits), `payloads` (a **named map**), `stub`
+(`path`/`syscalls`/`api_resolution`/`strings`/`debug`) and `output` — and
+expresses the loader as one ordered top-level `runtime:` list. A step is
+`technique:` + optional nested `params:` + the loader's own orchestration
+(`on_success`/`on_fail`/`delay_ms`, `StepControl`). There are no `stages`, no
+nested pipelines and no single `build.payload`: a document that declares any
+other schema version is rejected at parse time with one migration hint
+(`RETIRED_SCHEMA_MIGRATION` in `src/plan/schema.rs`). `src/plan/steps.rs`
+(`resolve`) pins each Execution step to a payload: `params.payload` is optional
+when exactly one payload is declared, required (and must exist) with two or
+more; only `reflective_loading`/`process_hollowing`/`dotnet_hosting` take one.
+`exec` is the technique `living_off_the_land` and `sleep` is the technique
+`sleep` (both `Category::Control`). `build.output.arch`/`strip`/`trim_paths`
+default to `x64`/`true`/`all`, and crypto defaults to `xchacha20poly1305` +
+`random`, so a plan needs no such block — only `output.path`.
 
-**YAML schema 4 (done).** The plan document is schema 4; a document that
-declares `schema: 3` (or the retired `schema: 1`/`schema: 2`) is rejected at
-parse time with a migration hint (mappings in `docs/migration-v1-v3.md`,
-`docs/migration-v2-v3.md` and `docs/migration-v3-v4.md`). A `runtime` entry is
-`technique: <name>` plus an optional nested `params:` mapping (schema 3 kept the
-parameters next to `technique:`); a technique with no parameters omits
-`params:`. Unknown keys inside a runtime entry are ignored by serde, so a
-half-migrated flat entry silently falls back to the technique's defaults
-(`process_hollowing` then hollows `svchost.exe`). `build` has exactly three
-blocks: `payload` (`source` + `crypto`), `stub`
-(`path`/`syscalls`/`api_resolution`/`strings`/`debug`) and `output`;
-`build.output.arch` is `x64` or `x86` and the stub, the payload and (for
-hollowing) the target must all share it; `x86` is fully supported for
-`reflective_loading`, `process_hollowing`, `anti_debug`, `patch_amsi`,
-`patch_etw` and `bouncer` (`sleep_obfuscation` stays x64-only, and an x86
-pipeline that uses it is rejected by the capability check with a message naming
-the technique). String
-obfuscation lives at
-`build.stub.strings` (it only ever affected stub literals). Build args move from
-`$build.N$` to `$arg.N$` (`$arg.0$`, `$arg.1$`, or a named `$arg.foo$` from a
-`foo=value` CLI arg); the stub still accesses already-resolved args as
-`$ARG_<key>$`. The old `InputConfig`/`LoaderConfig` are gone
-(`src/plan/schema.rs`); `PipelineStep` is renamed `RuntimeStep`
-(`src/techniques/mod.rs`). `build.payload.source` is a single string:
+`src/engine/steps.rs` renders a single template (`templates/stub/main.rs.tpl`):
+each Execution step's payload is embedded and encrypted with its own key/nonce,
+each step is wrapped in `mod step_<index>` (a Preparation exposes
+`run() -> Result<bool, _>`, an Execution `payload(image)`, `living_off_the_land`
+`run() -> Result<i32, _>`; `sleep` is one inline line), and a generated runner
+walks the steps in order with the declared gating. The shared blocks
+(`$SYSCALLS_BLOCK$`, `$ARGS_BLOCK$`, `$IMPORTS_BLOCK$`,
+`$API_RESOLUTION_BLOCK$`) come from the union of the steps' techniques. A custom
+stub (`build.stub.path`) renders through the same engine with
+`$STUB_HELPERS$`/`$STEP_MODULES$`/`$STEP_RUNNER_BODY$` (see
+`docs/custom-stubs.md`). `cargo`-level types: `TechniqueKind` (the tagged enum)
+and `RuntimeStep { technique, control }` (`src/techniques/mod.rs`). **The rule that
+shapes it:** a chain only continues if the loader gets control back, so
+`reflective_loading` of a PE *executable* and `dotnet_hosting` are *terminal* and
+must be the last step (`plan::validate` rejects them otherwise);
+`living_off_the_land`, `process_hollowing` and `reflective_loading` of a DLL
+always return. `api_resolution.mode: proxy` is loader-wide, so it is rejected
+unless the runtime declares exactly one Execution step, and never with
+`process_hollowing`. `build.payloads.<name>.source` is a single string:
 `http(s)://` is fetched in memory, `file://` is read from disk, `ftp://` is
-rejected, anything else is a local path.
+rejected, anything else is a local path. Docs: `docs/multistage.md`; examples:
+`examples/plans/multistage.yaml`, `examples/plans/multistage-advanced.yaml`.
 
 **Payload import resolution (done).** New `src/engine/imports.rs` renders
 `$IMPORTS_BLOCK$`: one `resolve_imports(image, import_rva, import_size,
@@ -211,9 +202,10 @@ at).
 **Technique categories + `patch_amsi` (done).** Techniques are now Preparation
 vs Execution (`TechniqueDef.category`); a pipeline is `0..N` Preparation followed
 by exactly one Execution. `patch_amsi` (T1562.001) is the first Preparation
-technique. Validation in `src/plan/validate.rs`; the stub renders into
-`$PREPARATION_BLOCKS$` / `$EXECUTION_BLOCK$` (Preparation fragments are
-wrapped in per-technique modules to avoid `use` collisions).
+technique. Validation in `src/plan/validate.rs`; the stub renderer gave each
+Preparation fragment its own module (to avoid `use` collisions). Schema 6
+superseded the "one Execution per pipeline" rule with the flat `runtime:` list
+above.
 
 **String-leak consolidation (done).** Every runtime literal in every stub
 fragment goes through `StringsConfig` (`patch_amsi`, `process_hollowing`
@@ -272,25 +264,24 @@ laboratory only, never for delivery.
 stub with a user `.rs` template rendered through the same substitution engine
 (see `docs/custom-stubs.md`); `build.stub` may be set for
 `syscalls`/`api_resolution`/`strings` alone.
-Placeholders use the `$X$` delimiter (`$PAYLOAD_BYTES$`, `$PAYLOAD_LEN$`,
-`$PAYLOAD_NONCE_DEF$`, `$PAYLOAD_KEY_DEF$` (embedded only when referenced),
-`$PREPARATION_BLOCKS$`, `$SYSCALLS_BLOCK$`, `$ARGS_BLOCK$`, `$IMPORTS_BLOCK$`,
-`$API_RESOLUTION_BLOCK$`, `$EXECUTION_BLOCK$`, `$ARG_<key>$`;
+Placeholders use the `$X$` delimiter (`$STUB_HELPERS$`, `$STEP_MODULES$`,
+`$STEP_RUNNER_BODY$`, `$SYSCALLS_BLOCK$`, `$ARGS_BLOCK$`, `$IMPORTS_BLOCK$`,
+`$API_RESOLUTION_BLOCK$`, `$ARG_<key>$`;
 YAML build args are `$arg.N$`). The stub must define `fn main()`; ignoring the
-technique blocks is a warning, not an error (a custom stub that skips
+step blocks is a warning, not an error (a custom stub that skips
 `$SYSCALLS_BLOCK$` while declaring syscall-using techniques also warns). Build
 args are the positional args plus optional `name=value` pairs (no separate
 `--arg` flag). `$X$` is invalid Rust, so `rustfmt` cannot rewrite it; never go
 back to `{{X}}` (valid Rust — `rustfmt` reformats it into nested blocks and
 silently breaks substitution). See `.memory.md` for the rolling state.
 
-**Payload formats (done).** `build.payload.format: pe|shellcode|dll` (default
-`pe`) plus an optional `build.payload.export` (a DLL's exported entry point;
+**Payload formats (done).** A payload's `format: pe|shellcode|dll` (default
+`pe`) plus an optional `export` (a DLL's exported entry point;
 rejected unless `format: dll`). `src/engine/pe.rs` gained the file-header
 `characteristics` and `is_dll()`; `src/main.rs` validates the input per format
 (`pe`/`dll` must be the matching x64 PE image, `shellcode` only non-empty) in
 `inspect_payload`, shared by `build` and `--dry-run`. The format and export
-reach the Execution fragment through `RuntimeStep::render_fragment(strings,
+reach the Execution fragment through `TechniqueKind::render_fragment(strings,
 format, export)` → `Params::render_fragment_for`; `reflective_loading` ships two
 fragments (`stub_fragment.rs` PE mapper, `stub_fragment_shellcode.rs` runner)
 and, for a DLL export, calls `DllMain(DLL_PROCESS_ATTACH)` before invoking the
@@ -298,7 +289,7 @@ export with no arguments (both `SHELLCODE_FRAGMENT` and the placeholder
 substitution are tested). `process_hollowing` only runs `pe`;
 `plan::validate` rejects the other formats with a pointer to
 `reflective_loading`. DLL/shellcode payloads run in-process, so
-`patch_command_line()` still delivers `build.payload.args` through the PEB.
+`patch_command_line()` still delivers the payload's `args` through the PEB.
 Examples: `examples/plans/shellcode.yaml` (+ `examples/payloads/demo_shellcode.bin`,
 `mov eax, 42; ret`). Verified end to end on Windows (shellcode exits 42; a Rust
 cdylib export ran and wrote its file). The `dll` format ships no example (the old
@@ -342,7 +333,7 @@ analysis process name and every hypervisor vendor token goes through
 checks outside the documented list.
 
 **Interactive build (done).** `picaro build interactive <payload>`
-(`src/wizard.rs`) asks the questions a schema-4 YAML encodes — name/args, the
+(`src/wizard.rs`) asks the questions a schema-6 YAML encodes — name/args, the
 execution technique, preparation techniques plus their parameters, the stub
 (`strings`/`syscalls`) and the output — assembles a `Plan`, prints it and
 writes it, then hands the file to the normal build, so the written YAML is the
@@ -366,6 +357,58 @@ for the architecture (second question, `x64` by default) and hides
 `syscalls: indirect` on x86, so it only assembles plans the packer accepts. Not
 prompted yet: `strings.key`, `build.stub.path`, `args_mode: override`,
 non-default `sleep_obfuscation` regions.
+
+**Parallel technique batch (done): `execution_callbacks`, `module_stomping`,
+`fibers`.** Three in-process Execution techniques, `format: shellcode` only
+(enforced by `plan::validate::validate_payload_format`), each *returning* control
+to the loader and therefore chainable in a schema-6 `runtime:` list.
+`execution_callbacks` (T1106/T1620) runs the payload as the callback of a
+legitimate enumeration API
+(`crypt32.dll!CertEnumSystemStoreLocation`, resolved dynamically and obfuscated);
+`module_stomping` (T1055) `LoadLibraryA`s a signed module (`params.module`,
+default `wininet.dll`) and overwrites the first bytes of its `.text`;
+`fibers` (T1055) runs the payload on a fiber of the loader's own thread
+(`ConvertThreadToFiber` → `CreateFiberEx` → `SwitchToFiber`, then back, delete
+and `ConvertFiberToThread`). None needed a new syscall helper (they use
+`nt_alloc_vm`/`nt_protect_vm`); all three were verified end to end on Windows
+(the packed artifact runs the demo shellcode and relays exit `42`).
+
+**Batch 2 (done): `unhook_ntdll`, `early_bird`, `pe_injection`,
+`ppid_spoofing`.** Four techniques, one per parallel agent, all verified end to
+end (not just compiled; numbers in `docs/measurements.md`). `unhook_ntdll`
+(Preparation, T1562.001) restores the live ntdll's `.text` from a clean on-disk
+copy — **the write window must be RWX** (a `PAGE_READWRITE` window faults on the
+syscall's return, which goes through an ntdll stub inside the region being
+rewritten) and **on x86 the section's base relocations must be applied** (the
+live 32-bit ntdll differs from the file in 19,004 bytes of HIGHLOW fixups).
+`early_bird` (T1055.004) spawns the target suspended, writes the payload and
+queues the APC before resuming; the payload's exit code cannot be relayed (it
+runs in another process), so the technique returns `STILL_ACTIVE` unless a
+bounded `wait_ms` observes the target exiting. It runs on x64 and x86 — note that
+the 32-bit `notepad.exe` of recent Windows builds is a launcher shim and
+`QueueUserAPC` fails on it with `ERROR_INVALID_HANDLE`. `pe_injection`
+(T1055.002) maps a full PE into a suspended process (relocations, imports
+resolved against the *target's* module bases, a thread at the entry point)
+**without unmapping the target's image**. `ppid_spoofing` (Control, T1134.004)
+launches a child with `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`, verified from
+PowerShell. Formats are enforced (`early_bird` shellcode-only, `pe_injection`
+pe-only), `validate_injection_target` checks the spawned target's architecture
+for the three spawn-a-target techniques, `advisories` warns when `unhook_ntdll`
+follows `patch_etw` (the restore would silently undo it), and `nt_queue_apc`
+(`NtQueueApcThread`) was added to the syscall layer for `early_bird`.
+
+**`Stability::Unimplemented` (new state).** The registry's maturity enum is
+`Stable | Experimental | Unimplemented | Deprecated`. `Unimplemented` means the
+technique is registered and wired (metadata, docs, tests) but its implementation
+is **not finished**: either the stub fragment is a placeholder or a required part
+of the loader contract is missing. `picaro techniques list` shows it in red, and
+`plan::validate::advisories` warns on every build that selects one — the build
+still succeeds, because an unfinished technique is often still useful in a lab.
+Today **`pe_injection`** carries it (the payload's TLS is not provisioned; the
+rest of the loader contract is in place and verified), so flip it back to
+`Experimental` when TLS lands. A technique that enters as a skeleton (the batch-2
+pre-wiring pattern) should declare it too, which replaces the older "placeholder
+fragment that fails at run time" idiom.
 
 **PE resources (done).** `build.output.resources` embeds an icon (`RT_GROUP_ICON`
 + `RT_ICON`), `VERSIONINFO` (`RT_VERSION`) and the Windows application manifest
@@ -465,16 +508,32 @@ where its CA is trusted; it gives no SmartScreen reputation.
   run them on the main thread (parked on a `jmp $` stub between calls) or build
   the callback thread's TLS array by hand. Evidence in
   `docs/techniques/process_hollowing.md`.
-- Custom stubs do not obfuscate the key/nonce by default. If the custom stub
-  uses `$PAYLOAD_KEY_DEF$` / `$PAYLOAD_NONCE_DEF$`, the values land in `.rdata`.
-  Use `$PAYLOAD_KEY_DEF_OBFUSCATED$` when available, or read the key at runtime
-  (see `examples/stubs/runtime-key.rs`).
+- Custom stubs keep the per-step payload keys in the runner: each Execution
+  step's key and nonce are emitted as hex literals in `$STEP_RUNNER_BODY$`. A
+  stub that wants no key material embedded must decrypt the payloads itself, or
+  take the value from a build argument (see `examples/stubs/runtime-key.rs`).
 - **`api_resolution.mode: proxy` is `reflective_loading`-only.** The proxies are
   ordinary Rust functions bound to the loader image (statics, obfuscated data,
   CRT), so a hollowed payload running in another process can only point its IAT
   at the real exports; `plan::validate` rejects the combination. Closing it needs
   a position-independent proxy emitter written into the target
   (`docs/api-resolution.md`, Phase E).
+- **`unhook_ntdll`, `early_bird`, `pe_injection` and `ppid_spoofing` are
+  registered but not implemented.** They exist so their directories are wired
+  into the registry, the validator and the stub renderer; a build that selects
+  one produces an artifact that exits `1` with an obfuscated "not implemented
+  yet" message. Remove the placeholder (and this note) as each lands.
+- **`unhook_ntdll` silently undoes `patch_etw` if it runs after it** (both
+  rewrite ntdll's `.text`); `plan::validate::advisories` warns about the order.
+- **`early_bird` needs a real target image.** The 32-bit `notepad.exe` of recent
+  Windows builds is a launcher shim on which `QueueUserAPC` fails with
+  `ERROR_INVALID_HANDLE`; `cmd.exe` and the 64-bit `notepad.exe` are fine, and
+  the default target is `svchost.exe`.
+- **The three in-process shellcode runners are shellcode-only by construction.**
+  `execution_callbacks`, `module_stomping` and `fibers` enter the payload as flat
+  position-independent code, so `plan::validate` rejects `pe`/`dll`/`dotnet` for
+  them (use `reflective_loading`/`dotnet_hosting`). All three compile for x86
+  and were run end to end on x86 and x64 (`code_examples/<name>/smoke-x86.yaml`).
 - `CreateProcessA`, `LoadLibraryA`/`GetProcAddress` and `TlsAlloc`/`TlsSetValue`
   still import statically: they are loader entry points, not kernel calls the stub
   issues.

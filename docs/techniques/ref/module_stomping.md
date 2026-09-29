@@ -1,0 +1,1 @@
+--8<-- "src/techniques/module_stomping/README.md"

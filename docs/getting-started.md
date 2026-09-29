@@ -34,22 +34,23 @@ makes the input larger.
 
 ## 2. Write the plan
 
-A build is one schema-4 YAML document. Strict by design: unknown keys are an
+A build is one schema-6 YAML document. Strict by design: unknown keys are an
 error, so a typo never silently does nothing.
 
 === "PE payload"
 
     ```yaml
-    schema: 4
+    schema: 6
     name: demo
 
     build:
-      payload:
-        source: ./payload.exe
-        format: pe
-        crypto:
-          algo: xchacha20poly1305
-          key: random
+      crypto:
+        algo: xchacha20poly1305
+        key: random
+      payloads:
+        implant:
+          source: ./payload.exe
+          format: pe
       output:
         path: ./dist/demo.exe
         arch: x64
@@ -58,21 +59,23 @@ error, so a typo never silently does nothing.
 
     runtime:
       - technique: reflective_loading
+        params: { payload: implant }
     ```
 
 === "Raw shellcode"
 
     ```yaml
-    schema: 4
+    schema: 6
     name: demo
 
     build:
-      payload:
-        source: ./payload.bin
-        format: shellcode
-        crypto:
-          algo: xchacha20poly1305
-          key: random
+      crypto:
+        algo: xchacha20poly1305
+        key: random
+      payloads:
+        beacon:
+          source: ./payload.bin
+          format: shellcode
       output:
         path: ./dist/demo.exe
         arch: x64
@@ -81,32 +84,40 @@ error, so a typo never silently does nothing.
 
     runtime:
       - technique: reflective_loading
+        params: { payload: beacon }
     ```
 
 Save it as `payload.yaml`. Input and output paths are resolved relative to the
 directory you run `picaro` from (the repo's examples assume the repo root).
 
-The four blocks:
+The blocks:
 
-- **`build.payload`** — what to pack and how to encrypt it. `source` is a local
-  path, `file://`, or an `http(s)://` URL fetched in memory.
+- **`build.crypto`** — the default encryption for every payload (a payload may
+  override it with its own `crypto` block).
+- **`build.payloads`** — the named payloads an Execution step can load; `source`
+  is a local path, `file://`, or an `http(s)://` URL fetched in memory.
 - **`build.stub`** — optional: a custom stub template, the syscall layer and
   string obfuscation. Omitted here, so the builtin stub and the defaults apply.
 - **`build.output`** — where the packed PE lands and how it is finalised.
-- **`runtime`** — the techniques, in order: `0..N` Preparation followed by
-  exactly one Execution.
+- **`runtime`** — the ordered steps: Preparation and Control techniques plus the
+  Execution techniques that run the payloads (see
+  [Runtime steps](multistage.md)).
 
 ### Choosing the format and the execution technique
 
-| `build.payload.format` | Input | Runs with |
+| `build.payloads.<name>.format` | Input | Runs with |
 | --- | --- | --- |
 | `pe` (default) | an executable matching `output.arch` | `reflective_loading`, or `process_hollowing` |
 | `dll` | a library matching `output.arch` | `reflective_loading` (set `export` to call a function) |
-| `shellcode` | a raw code blob | `reflective_loading` |
+| `shellcode` | a raw code blob | `reflective_loading`, or the in-process runners `execution_callbacks`, `module_stomping` and `fibers` |
 | `dotnet` | a managed (.NET) assembly | `dotnet_hosting` (the stub hosts the CLR) |
 
 `reflective_loading` maps the payload into the packed binary's own process and
-handles the native formats, so it is the safe default. `process_hollowing` only
+handles the native formats, so it is the safe default. Three lighter in-process
+runners take shellcode only and return control to the loader (so they chain in a
+`runtime:` list): `execution_callbacks` (a legitimate enumeration API invokes
+the payload), `module_stomping` (a signed DLL's code section is overwritten) and
+`fibers` (the payload runs on a fiber). `process_hollowing` only
 runs `format: pe`; it runs a full PE (imports, TLS state, entry hand-off) but not
 the payload's TLS callbacks — see
 [Process hollowing evidence](techniques/process_hollowing.md). A managed
@@ -144,10 +155,13 @@ offline Defender scan.
 
 ## Rules worth remembering
 
-- `schema: 4` is the only accepted version; an older document is rejected with a
-  migration hint (see [Migrations](migration-v3-v4.md)).
+- `schema: 6` is the only accepted version; an older document is rejected with a
+  migration hint.
 - Unknown keys are an error.
-- Exactly one Execution technique, after any Preparation techniques.
+- Only Execution techniques take a `params.payload`; with two or more payloads it
+  is required.
+- A terminal step (`reflective_loading` of a PE executable, `dotnet_hosting`) must
+  be last.
 - `build.output.arch` is `x64` or `x86`, and the payload must match it: the stub
   and the payload share one address space. Both execution techniques and the
   preparations support `x86` (see [x86 support](x86.md)); `sleep_obfuscation`,

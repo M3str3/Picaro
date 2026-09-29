@@ -1,0 +1,1 @@
+--8<-- "src/techniques/living_off_the_land/README.md"
