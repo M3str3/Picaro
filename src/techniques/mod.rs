@@ -478,32 +478,65 @@ const REQUIRED_SECTIONS: &[&str] = &[
     "## References",
 ];
 
+/// The widest cell of a listing column, header included.
+///
+/// The table is measured instead of fixed: a technique name or an ATT&CK list
+/// longer than the rest must not push the remaining columns of its own row out
+/// of line.
+fn column_width(header: &str, values: impl Iterator<Item = String>) -> usize {
+    values
+        .map(|value| value.chars().count())
+        .chain(std::iter::once(header.chars().count()))
+        .max()
+        .unwrap_or(0)
+}
+
+/// Pads a cell to `width`.
+///
+/// The padding happens before the cell is styled: padding an already-colored
+/// string would count the escape codes and misalign the row (see
+/// [`stability_label`], which pads for the same reason).
+fn pad(text: &str, width: usize) -> String {
+    format!("{text:<width$}")
+}
+
 /// Renders the `picaro techniques list` output.
 pub fn list(ui: &Palette) -> String {
     let mut out = String::new();
-    out.push_str(&format!(
-        "{} {} {} {} {}\n",
-        // Pad before styling: applying the width to an already-colored string
-        // would count the escape codes and misalign the header against the rows.
-        ui.dim(format!("{:<18}", "TECHNIQUE")),
-        ui.dim(format!("{:<12}", "CATEGORY")),
-        ui.dim(format!("{:<13}", "STABILITY")),
-        ui.dim(format!("{:<20}", "ATT&CK")),
-        ui.dim("SUMMARY"),
-    ));
+
     // Grouped by category, then maturity, then name: the listing reads as a
     // pipeline (Preparation before Execution) with the most reliable entries
     // first inside each group.
     let mut defs: Vec<&TechniqueDef> = all().iter().collect();
     defs.sort_by_key(|def| (def.category, def.stability, def.name));
+
+    let name_w = column_width("TECHNIQUE", defs.iter().map(|def| def.name.to_string()));
+    let category_w = column_width(
+        "CATEGORY",
+        defs.iter().map(|def| def.category.label().to_string()),
+    );
+    let stability_w = column_width(
+        "STABILITY",
+        defs.iter().map(|def| def.stability.label().to_string()),
+    );
+    let attck_w = column_width("ATT&CK", defs.iter().map(|def| def.attck.join(", ")));
+
+    out.push_str(&format!(
+        "{} {} {} {} {}\n",
+        ui.dim(pad("TECHNIQUE", name_w)),
+        ui.dim(pad("CATEGORY", category_w)),
+        ui.dim(pad("STABILITY", stability_w)),
+        ui.dim(pad("ATT&CK", attck_w)),
+        ui.dim("SUMMARY"),
+    ));
     for def in defs {
+        let name = ui.bold(pad(def.name, name_w));
+        let category = pad(def.category.label(), category_w);
+        let stability = stability_label(def, ui, stability_w);
+        let attck = pad(&def.attck.join(", "), attck_w);
         out.push_str(&format!(
-            "{} {:<12} {} {:<20} {}\n",
-            ui.bold(format!("{:<18}", def.name)),
-            def.category.label(),
-            stability_label(def, ui),
-            def.attck.join(", "),
-            truncate(summary(def), 70),
+            "{name} {category} {stability} {attck} {}\n",
+            truncate(summary(def), 70)
         ));
     }
 
@@ -522,9 +555,13 @@ pub fn list(ui: &Palette) -> String {
     out
 }
 
-/// The technique's stability label, padded and colored by maturity.
-fn stability_label(def: &TechniqueDef, ui: &Palette) -> String {
-    let label = format!("{:<13}", def.stability.label());
+/// The technique's stability label, padded to `width` and colored by maturity.
+fn stability_label(def: &TechniqueDef, ui: &Palette, width: usize) -> String {
+    let label = format!(
+        "{name:<width$}",
+        name = def.stability.label(),
+        width = width
+    );
     match def.stability {
         Stability::Stable => ui.ok(label),
         Stability::Experimental => ui.warn(label),
@@ -731,22 +768,31 @@ mod tests {
         assert!(!output.contains('\u{1b}'), "escapes leaked: {output:?}");
     }
 
-    /// Every stability label has to fit the listing's padded column.
+    /// A long technique name or ATT&CK list must not push the rest of its row.
+    ///
+    /// Regression: the name column was a fixed 18 characters, so the 19-char
+    /// `living_off_the_land` and `execution_callbacks` shifted the columns that
+    /// follow them by one.
     #[test]
-    fn stability_labels_fit_the_listing_column() {
-        for stability in [
-            Stability::Stable,
-            Stability::Experimental,
-            Stability::Unimplemented,
-            Stability::Deprecated,
-        ] {
-            let label = stability.label();
-            assert!(!label.is_empty());
-            assert!(
-                label.len() <= 13,
-                "'{label}' overflows the 13-char stability column"
-            );
-        }
+    fn list_columns_align_across_rows() {
+        let output = list(&Palette::plain());
+        let starts: Vec<usize> = all()
+            .iter()
+            .map(|def| {
+                let line = output
+                    .lines()
+                    .find(|line| line.split_whitespace().next() == Some(def.name))
+                    .unwrap_or_else(|| panic!("no row for {}: {output}", def.name));
+                let last = truncate(summary(def), 70);
+                line.rfind(&last)
+                    .unwrap_or_else(|| panic!("no summary column in {line:?}"))
+            })
+            .collect();
+
+        assert!(
+            starts.windows(2).all(|pair| pair[0] == pair[1]),
+            "the summary column is ragged: {starts:?}\n{output}"
+        );
     }
 
     /// Long summaries are truncated so the listing stays readable.
