@@ -485,6 +485,27 @@ where its CA is trusted; it gives no SmartScreen reputation.
 `examples/plans/mimikatz.yaml` (randomized identity + lab signature) and
 `examples/plans/lab-signed.yaml` (a backend-agnostic lab signature).
 
+**Host-loaded DLL output: code written, not compiled.** `build.output.kind: dll`
+(ship the same plan as a DLL the host loads, for environments where
+application whitelisting only allows interpreters) is specified in
+`docs/design/dll-output.md`, from the `void-loader` reference
+(`code_examples/void-loader`, `origin/experimental`, commit `00c93ce`). The
+shape: `--crate-type=cdylib`, a no-op `DllMain`, a non-blocking `JNI_OnLoad`
+(Java `System.load`) plus a blocking `export:<name>` in the rundll32 four-argument
+shape (CPython `ctypes`, P/Invoke, `rundll32`), the chain on a worker thread
+with `catch_unwind` (`panic=unwind` for DLL builds) and
+`AttachConsole(ATTACH_PARENT_PROCESS)` for output. It drops the reference's argv
+plumbing (picaro's plan is baked in) and rejects, for DLL builds:
+`subsystem: windows`, `resources.manifest`, `self_deletion`, `sleep_obfuscation`
+(both act on the *running image* — the host, in a DLL), `bouncer` `on_fail: exit`
+and custom stubs. Touchpoints: `src/plan/schema.rs`
+(`kind`/`entry`), `src/plan/validate.rs`, `src/engine/entry.rs` (new: the entry
+block), `src/engine/steps.rs` (`$ENTRY_BLOCK$`), `src/engine/compiler.rs`
+(`cdylib`, `--crate-name`, `IMAGE_FILE_DLL` verification) and `src/main.rs`.
+**Nothing has been compiled or tested**: `cargo` was blocked in that session, so
+phases A–C are "written, unverified" and the lab measurements (Phase D) are
+pending.
+
 ## Known limitations
 
 - **`x86` is supported for everything except the one parked workstream.** M0–M5

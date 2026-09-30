@@ -162,6 +162,8 @@ build:
     debug: false          # compile a debuggable, non-evasive stub for the lab
   output:
     path: ./dist/mimikatz_packed.exe
+    kind: exe             # exe | dll (a DLL a host process loads; see below)
+    entry: auto           # DLL only: auto | jni_on_load | export:<name>
     arch: x64             # x64 | x86 (default x64; the stub and the payload must match)
     strip: true           # default true: drop the symbol/debug tables
     trim_paths: all       # all | none | relative (default all: scrub absolute build paths)
@@ -198,7 +200,8 @@ runtime:                  # ordered technique steps
 | `build.stub.api_resolution` | Serve selected payload imports (`apis`) from proxies generated in the loader instead of the real exports (`mode: proxy`). Needs `syscalls.mode: indirect` and a `pe`/`dll` payload; not usable with `process_hollowing`. |
 | `build.stub.debug` | Compile a debuggable stub: no hardening, source paths kept, techniques log to stderr. Markedly less evasive — for the lab, never for delivery. |
 | `build.stub` | The stub itself: a custom template (`path`, `null` = builtin), the syscall layer (`syscalls`), API resolution (`api_resolution`) and string obfuscation (`strings`). |
-| `build.output` | Where the packed PE goes and how it is finalized. `arch` selects the stub's architecture (`x64` or `x86`) and the payload must match it. `manifest` writes the provenance file. |
+| `build.output` | Where the packed artifact goes and how it is finalized. `arch` selects the stub's architecture (`x64` or `x86`) and the payload must match it. `manifest` writes the provenance file. |
+| `build.output.kind` | `exe` (default) or `dll`. A DLL the host process loads — a JVM (`System.load`), CPython (`ctypes`), .NET (`[DllImport]`), `rundll32` — which is what makes the chain usable where application whitelisting only allows the host program. `entry` picks the exports: `auto`, `jni_on_load` or `export:<name>`. See [DLL output design](docs/design/dll-output.md). |
 | `build.output.subsystem` | `console` (default) or `windows` (GUI, no console window). |
 | `build.output.resources` | Optional PE resources embedded into the artifact: `icon`, `version_info` and `manifest` (Windows app manifest / UAC). Built in Rust and written into a `.rsrc` section. |
 | `build.output.sign` | Optional Authenticode signing: `lab` (self-signed), `store` (an existing cert, Windows only) or `file` (a `.pfx`). Uses `signtool` on Windows and `osslsigncode` elsewhere. |

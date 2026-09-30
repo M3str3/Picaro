@@ -17,12 +17,15 @@ use super::api_resolution::{ApiResolutionConfig, ApiResolutionMode};
 use super::obfuscation::StringsConfig;
 use super::syscalls::{self, SyscallsConfig, SyscallsMode};
 use super::{args, debug, imports, stub, BuildError, Result};
-use crate::plan::schema::{PayloadFormat, StepControl, StepFailure, StepOutcome};
+use crate::plan::schema::{
+    DllEntry, OutputKind, PayloadFormat, StepControl, StepFailure, StepOutcome,
+};
 use crate::techniques::{Category, RuntimeStep, TechniqueKind};
 
 /// The builtin template's required placeholders (its contract).
 const REQUIRED: &[&str] = &[
     "$STUB_HELPERS$",
+    "$ENTRY_BLOCK$",
     "$STEP_MODULES$",
     "$STEP_RUNNER_BODY$",
     "$SYSCALLS_BLOCK$",
@@ -117,6 +120,10 @@ pub struct StepsParams {
     pub debug: bool,
     /// Whether the artifact uses the `windows` subsystem.
     pub windows_subsystem: bool,
+    /// What the artifact is (`build.output.kind`).
+    pub kind: OutputKind,
+    /// What starts the chain in a DLL build (`build.output.entry`).
+    pub entry: DllEntry,
 }
 
 /// A rendered stub plus the non-fatal warnings a custom template produced.
@@ -150,7 +157,8 @@ pub fn render_builtin(
 /// Renders a custom loader stub template.
 ///
 /// The template may omit any placeholder; the only hard requirement (enforced
-/// separately by [`stub::validate_custom_stub_template`]) is a `fn main()`. When
+/// separately by [`stub::validate_custom_stub_template`]) is a `fn main()` — or,
+/// for a template that wants the generated entry, `$ENTRY_BLOCK$` instead. When
 /// it ignores a block the declared techniques need, a warning is returned.
 pub fn render_custom(
     template: &str,
@@ -235,6 +243,13 @@ fn render_common(
 
     let mut values = BTreeMap::new();
     values.insert("$STUB_HELPERS$".to_string(), STUB_HELPERS.to_string());
+    // The entry point: `fn main()` for an executable, the exports for a DLL
+    // (`build.output.kind`/`entry`). A custom stub that defines its own `fn main`
+    // simply omits the placeholder.
+    values.insert(
+        "$ENTRY_BLOCK$".to_string(),
+        super::entry::render(params.kind, &params.entry),
+    );
     values.insert("$STEP_MODULES$".to_string(), modules);
     values.insert("$STEP_RUNNER_BODY$".to_string(), runner);
     values.insert(
@@ -521,6 +536,8 @@ pub(crate) fn test_params(
         build_args: BTreeMap::new(),
         debug,
         windows_subsystem: false,
+        kind: OutputKind::Exe,
+        entry: DllEntry::Auto,
     }
 }
 
@@ -616,6 +633,8 @@ mod tests {
             build_args: BTreeMap::new(),
             debug: false,
             windows_subsystem: false,
+            kind: OutputKind::Exe,
+            entry: DllEntry::Auto,
         };
         render_builtin(
             &template(),
@@ -696,12 +715,83 @@ mod tests {
     }
 
     #[test]
+    fn an_exe_build_renders_the_plain_entry() {
+        let out = render(vec![execution_step(0)]);
+        assert!(
+            out.contains(crate::engine::entry::EXE_ENTRY),
+            "the executable entry is missing"
+        );
+        assert!(!out.contains("DllMain"), "an executable exports nothing");
+        assert!(!out.contains("dll_run_detached"));
+    }
+
+    #[test]
+    fn a_dll_build_renders_the_exports_instead_of_main() {
+        let params = StepsParams {
+            steps: vec![execution_step(0)],
+            build_args: BTreeMap::new(),
+            debug: false,
+            windows_subsystem: false,
+            kind: OutputKind::Dll,
+            entry: DllEntry::Export("Start".to_string()),
+        };
+        let source = render_builtin(
+            &template(),
+            &params,
+            &strings(),
+            &SyscallsConfig::default(),
+            &ApiResolutionConfig::default(),
+        )
+        .expect("render");
+        assert!(
+            source.contains("pub extern \"system\" fn Start("),
+            "export missing"
+        );
+        assert!(source.contains("fn DllMain"), "DllMain missing");
+        assert!(!source.contains("fn main("), "a DLL has no main");
+        assert!(
+            source.contains("fn run() -> Result<i32, String>"),
+            "the chain must stay shared"
+        );
+        assert!(
+            !source.contains("ENTRY_BLOCK"),
+            "the placeholder must be substituted"
+        );
+    }
+
+    /// A custom stub owns its entry point: without `$ENTRY_BLOCK$` nothing is
+    /// injected, so the `fn main` it already declares is what runs.
+    #[test]
+    fn a_custom_stub_keeps_its_own_main() {
+        let params = StepsParams {
+            steps: Vec::new(),
+            build_args: BTreeMap::new(),
+            debug: false,
+            windows_subsystem: false,
+            kind: OutputKind::Exe,
+            entry: DllEntry::Auto,
+        };
+        let rendered = render_custom(
+            "fn main() {}\n",
+            &params,
+            &strings(),
+            &SyscallsConfig::default(),
+            &ApiResolutionConfig::default(),
+        )
+        .expect("render");
+        assert!(rendered.source.starts_with("fn main() {}"));
+        assert!(!rendered.source.contains("dll_run_chain"));
+    }
+
+    #[test]
     fn a_missing_placeholder_is_an_error() {
         let params = StepsParams {
             steps: vec![execution_step(0)],
             build_args: BTreeMap::new(),
             debug: false,
             windows_subsystem: false,
+            kind: OutputKind::Exe,
+            entry: DllEntry::Auto,
         };
         let result = render_builtin(
             "fn main() {}",
@@ -720,6 +810,8 @@ mod tests {
             build_args: BTreeMap::new(),
             debug: false,
             windows_subsystem: false,
+            kind: OutputKind::Exe,
+            entry: DllEntry::Auto,
         };
         let rendered = render_custom(
             "fn main() {}",
@@ -787,6 +879,8 @@ mod tests {
             build_args: BTreeMap::new(),
             debug: false,
             windows_subsystem: false,
+            kind: OutputKind::Exe,
+            entry: DllEntry::Auto,
         };
         let source = render_builtin(
             &template(),
@@ -805,5 +899,64 @@ mod tests {
             .expect("compile");
         let bytes = std::fs::read(&out).expect("read");
         assert_eq!(&bytes[..2], b"MZ", "the stub must be a Windows PE");
+    }
+
+    /// Compiles a `kind: dll` stub and checks the artifact is a real library
+    /// that exports the entry points. The end-to-end check of the DLL output;
+    /// marked `#[ignore]` for the same reasons as the executable one.
+    #[test]
+    #[ignore = "requires rustc and the compiled dependencies"]
+    fn a_dll_stub_compiles_to_a_library_with_exports() {
+        use crate::engine::compiler;
+
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("build")
+            .join("dll_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("payload_0.bin"), [0u8; 16]).unwrap();
+
+        let params = StepsParams {
+            steps: vec![execution_step(0)],
+            build_args: BTreeMap::new(),
+            debug: false,
+            windows_subsystem: false,
+            kind: OutputKind::Dll,
+            entry: DllEntry::Auto,
+        };
+        let source = render_builtin(
+            &template(),
+            &params,
+            &strings(),
+            &SyscallsConfig::default(),
+            &ApiResolutionConfig::default(),
+        )
+        .expect("render");
+        let main_path = dir.join("main.rs");
+        std::fs::write(&main_path, &source).unwrap();
+
+        let deps = compiler::locate_stub_deps(Arch::X64).expect("deps");
+        let out = dir.join("loader.dll");
+        compiler::compile_stub(
+            &main_path,
+            &out,
+            &deps,
+            compiler::CompileOptions {
+                kind: OutputKind::Dll,
+                ..CompileOptions::default()
+            },
+        )
+        .expect("compile");
+
+        let bytes = std::fs::read(&out).expect("read");
+        let info = crate::engine::pe::parse(&bytes).expect("a valid PE");
+        assert!(
+            crate::engine::pe::is_dll(info.characteristics),
+            "IMAGE_FILE_DLL must be set"
+        );
+        // The export names live in the export directory as plain ASCII.
+        let text = String::from_utf8_lossy(&bytes);
+        for export in ["DllMain", "JNI_OnLoad", "Run"] {
+            assert!(text.contains(export), "missing export '{export}'");
+        }
     }
 }

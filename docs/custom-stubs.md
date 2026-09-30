@@ -29,11 +29,14 @@ plain `rustc` "crate not found" error.
 
 ## Contract
 
-Your template must define `fn main()`. Nothing else is imposed.
+Your template must define `fn main()`. Nothing else is imposed. (A
+`build.output.kind: dll` build refuses a custom stub: a DLL has no `main`, and
+its entry contract is `$ENTRY_BLOCK$`.)
 
 | Placeholder              | Substituted with |
 | ------------------------ | ---------------- |
 | `$STUB_HELPERS$`         | The shared `dec_xor` / `decrypt_step` helpers |
+| `$ENTRY_BLOCK$`          | The entry point: `fn main` (executable) or the DLL's exports (`build.output.kind`). Optional — a stub that defines its own `fn main` leaves it out |
 | `$STEP_MODULES$`         | One `mod step_<i>` per runtime step (fragments + adapters) |
 | `$STEP_RUNNER_BODY$`     | The generated straight-line runner (runs the steps in order) |
 | `$SYSCALLS_BLOCK$`       | The syscall layer (from `build.stub.syscalls`) |

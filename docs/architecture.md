@@ -129,6 +129,18 @@ pointer to `reflective_loading`. The format reaches the Execution fragment
 through `TechniqueKind::render_fragment`, which selects the technique's
 format-specific fragment.
 
+## Output kind (`build.output.kind`)
+
+The artifact is a PE **executable**: `compile_stub` compiles the rendered stub
+as a binary through `rustc` and the builtin template ends in `fn main()`.
+
+A host-loaded **DLL** output (`kind: dll`, for hosts that application
+whitelisting already allows — a JVM, CPython, .NET, `rundll32`) is implemented
+in `src/engine/entry.rs` (the entry block) and `src/engine/compiler.rs`
+(`cdylib`); its phases, couplings and limitations are in
+[DLL output design](design/dll-output.md). The lab verification of the host
+matrix (the design's Phase D) is still pending.
+
 ## Payload arguments (`build.payloads.<name>.args`)
 
 A packed binary is a stub, so the payload does not inherit the operator's command

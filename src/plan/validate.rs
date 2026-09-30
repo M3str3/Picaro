@@ -13,7 +13,7 @@ use crate::engine::syscalls::{SyscallsConfig, SyscallsMode};
 use crate::error::{PackerError, Result};
 use crate::techniques::{Capability, Stability, TechniqueKind};
 
-use super::schema::{Arch, PayloadFormat, Plan, StubPlan};
+use super::schema::{Arch, DllEntry, OutputKind, PayloadFormat, Plan, StubPlan, Subsystem};
 use super::steps::{self, ResolvedPayload, ResolvedStep};
 
 /// Checks the business invariants of a [`Plan`].
@@ -39,6 +39,7 @@ pub fn validate(plan: &Plan) -> Result<()> {
 
     let steps = steps::resolve(plan)?;
     validate_terminal(&steps)?;
+    validate_output(plan, &steps)?;
 
     for step in &steps {
         if let Some(payload) = &step.payload {
@@ -102,6 +103,125 @@ fn terminal_technique(step: &ResolvedStep) -> Option<&'static str> {
         }
         _ => None,
     }
+}
+
+/// Validates `build.output.kind`/`entry` and their couplings.
+///
+/// The chain, the techniques and the injected blocks are identical in both
+/// modes; what changes is who owns the process. Everything a standalone
+/// executable may do that a *host-loaded* DLL may not — kill the process, name
+/// itself, carry a process-scoped manifest — is rejected here. See
+/// `docs/design/dll-output.md` section 5.
+fn validate_output(plan: &Plan, steps: &[ResolvedStep]) -> Result<()> {
+    let output = &plan.build.output;
+
+    if output.kind == OutputKind::Exe {
+        if output.entry != DllEntry::Auto {
+            return Err(PackerError::Validation(format!(
+                "build.output.entry is '{}' but build.output.kind is 'exe': the entry only applies \
+                 to a DLL; an executable starts at its `main`",
+                output.entry.label()
+            )));
+        }
+        return Ok(());
+    }
+
+    if output.subsystem == Subsystem::Windows {
+        return Err(PackerError::Validation(
+            "build.output.subsystem is 'windows' but build.output.kind is 'dll': a DLL has no \
+             subsystem — the host process owns its own (and UAC/DPI awareness is per process)"
+                .to_string(),
+        ));
+    }
+
+    if output
+        .resources
+        .as_ref()
+        .is_some_and(|resources| resources.manifest.is_some())
+    {
+        return Err(PackerError::Validation(
+            "build.output.resources.manifest is set but build.output.kind is 'dll': an embedded \
+             application manifest is process-scoped (UAC, DPI awareness) and a DLL cannot express \
+             it — remove it for a DLL build"
+                .to_string(),
+        ));
+    }
+
+    if plan.build.stub.path.is_some() {
+        return Err(PackerError::Validation(
+            "build.stub.path is set but build.output.kind is 'dll': the custom-stub contract is a \
+             `fn main()`, which a DLL does not have. Use the builtin stub (a `$ENTRY_BLOCK$` \
+             contract is a documented extension, not implemented yet)"
+                .to_string(),
+        ));
+    }
+
+    if let DllEntry::Export(name) = &output.entry {
+        validate_export_name(name)?;
+    }
+
+    for step in steps {
+        if matches!(&step.technique, TechniqueKind::SelfDeletion { .. }) {
+            return Err(PackerError::Validation(format!(
+                "step {} ('{}') is 'self_deletion' and build.output.kind is 'dll': the technique \
+                 resolves the *running image* (`GetModuleFileNameW(NULL)`), which in a DLL build is \
+                 the host (`java.exe`, `python.exe`, ...) — it would rename or delete the \
+                 interpreter. A mapped DLL cannot be deleted while it is loaded anyway",
+                step.index, step.label
+            )));
+        }
+        if matches!(&step.technique, TechniqueKind::SleepObfuscation { .. }) {
+            return Err(PackerError::Validation(format!(
+                "step {} ('{}') is 'sleep_obfuscation' and build.output.kind is 'dll': the technique \
+                 encrypts the *running image* (`GetModuleHandleA(NULL)` + `SizeOfImage`), which in a \
+                 DLL build is the host's image (`java.exe`, `python.exe`) — the host's other threads \
+                 keep running that code. It would also miss the payload, which lives in its own \
+                 allocation outside the host image",
+                step.index, step.label
+            )));
+        }
+        if let TechniqueKind::Bouncer { params } = &step.technique {
+            if params.on_fail == crate::techniques::bouncer::OnFail::Exit {
+                return Err(PackerError::Validation(format!(
+                    "step {} ('{}') is 'bouncer' with `on_fail: exit` and build.output.kind is \
+                     'dll': `std::process::exit` would kill the host process. Use `on_fail: \
+                     silent`",
+                    step.index, step.label
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// The plain export a `kind: dll` build declares must be a C identifier and must
+/// not collide with the entry points the build itself emits.
+fn validate_export_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(PackerError::Validation(
+            "build.output.entry declares an empty export name (`export:`) — name the function hosts \
+             will call, e.g. `export:Run`"
+                .to_string(),
+        ));
+    }
+    let starts_well = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    if !starts_well || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(PackerError::Validation(format!(
+            "build.output.entry export name '{name}' is not a valid function name; use letters, \
+             digits and underscores, starting with a letter or an underscore"
+        )));
+    }
+    if matches!(name, "DllMain" | "JNI_OnLoad") {
+        return Err(PackerError::Validation(format!(
+            "build.output.entry export name '{name}' collides with an entry point the build already \
+             emits; pick another name"
+        )));
+    }
+    Ok(())
 }
 
 /// Non-fatal advisories produced by validation.
@@ -217,6 +337,82 @@ pub fn advisories(plan: &Plan) -> Vec<String> {
             );
         }
     }
+
+    if plan.build.output.kind == OutputKind::Dll {
+        warnings.extend(dll_advisories(plan, &steps));
+    }
+    warnings
+}
+
+/// The advisories specific to a host-loaded DLL build.
+///
+/// None of these are errors: the artifact works, but each one describes a way it
+/// is louder than it has to be (`docs/design/dll-output.md` section 5).
+fn dll_advisories(plan: &Plan, steps: &[ResolvedStep]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let output = &plan.build.output;
+
+    if output.entry == DllEntry::Auto {
+        warnings.push(
+            "build.output.entry is 'auto': the export table advertises `JNI_OnLoad` next to a plain \
+             chain-runner export, which no ordinary DLL does; a host-specific entry is less \
+             conspicuous"
+                .to_string(),
+        );
+    }
+
+    if output.sign.is_none() {
+        warnings.push(
+            "build.output.kind is 'dll' without `build.output.sign`: the host loads the file with \
+             the image loader, so it is scanned on load, and an unsigned module inside a signed \
+             host process is what an EDR reports first"
+                .to_string(),
+        );
+    }
+
+    if output.arch == Arch::X86 {
+        warnings.push(
+            "build.output.kind is 'dll' with arch 'x86': the host and the payload must be 32-bit \
+             too, the export follows the stdcall four-argument shape (only a caller that declares \
+             it is safe), and indirect syscalls stay x64-only"
+                .to_string(),
+        );
+    }
+
+    let extension = output.path.extension().and_then(|ext| ext.to_str());
+    if !extension.is_some_and(|ext| ext.eq_ignore_ascii_case("dll")) {
+        warnings.push(
+            "build.output.kind is 'dll' but the output path does not end in `.dll`: the OS loader \
+             and most hosts expect the extension (a different one is a deliberate choice)"
+                .to_string(),
+        );
+    }
+
+    for step in steps {
+        if matches!(&step.technique, TechniqueKind::PatchAmsi { .. }) {
+            warnings.push(format!(
+                "step {}: 'patch_amsi' loads `amsi.dll` when it is not already loaded, and a DLL \
+                 host (`java.exe`, `python.exe`) usually has none — the step would bring the \
+                 scanner into the process",
+                step.index
+            ));
+        }
+    }
+
+    if output.entry.export_name().is_some() {
+        for step in steps {
+            if let Some(technique) = terminal_technique(step) {
+                warnings.push(format!(
+                    "step {}: '{technique}' does not return control to the loader, and the DLL's \
+                     plain export waits for the chain: the caller's thread is held for the \
+                     payload's lifetime (that is what keeps `rundll32` alive)",
+                    step.index
+                ));
+                break;
+            }
+        }
+    }
+
     warnings
 }
 
@@ -1183,6 +1379,209 @@ mod tests {
         assert!(
             warnings.iter().any(|w| w.contains("debug")),
             "expected a debug advisory: {warnings:?}"
+        );
+    }
+
+    // --- host-loaded DLL output (`build.output.kind: dll`) --------------------
+
+    /// A `kind: dll` plan; `output_extra` is inserted right after `path`/`kind`.
+    fn with_dll(output_extra: &str, runtime: &str) -> String {
+        format!(
+            "schema: 6\nname: t\nbuild:\n  crypto: {{ algo: xchacha20poly1305, key: random }}\n  payloads:\n    p: {{ source: ./p.exe, format: pe }}\n  output:\n    path: ./dist/o.dll\n    kind: dll\n{output_extra}runtime:\n{runtime}"
+        )
+    }
+
+    fn dll_runtime() -> &'static str {
+        "  - technique: reflective_loading\n"
+    }
+
+    #[test]
+    fn accepts_a_dll_with_a_plain_export() {
+        let plan = parse(&with_dll("    entry: export:Run\n", dll_runtime()));
+        validate(&plan).expect("valid");
+    }
+
+    #[test]
+    fn accepts_the_default_dll_entry() {
+        let plan = parse(&with_dll("", dll_runtime()));
+        assert_eq!(plan.build.output.entry, DllEntry::Auto);
+        assert_eq!(plan.build.output.kind, OutputKind::Dll);
+        validate(&plan).expect("valid");
+    }
+
+    #[test]
+    fn rejects_an_export_name_that_is_not_an_identifier() {
+        let plan = parse(&with_dll("    entry: export:my-run\n", dll_runtime()));
+        let err = validate(&plan).expect_err("expected a validation error");
+        assert!(
+            err.to_string().contains("not a valid function name"),
+            "unclear error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_an_empty_export_name() {
+        let plan = parse(&with_dll("    entry: \"export:\"\n", dll_runtime()));
+        let err = validate(&plan).expect_err("expected a validation error");
+        assert!(
+            err.to_string().contains("empty export name"),
+            "unclear error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_an_export_name_that_collides_with_a_builtin_entry() {
+        let plan = parse(&with_dll("    entry: export:DllMain\n", dll_runtime()));
+        let err = validate(&plan).expect_err("expected a validation error");
+        assert!(err.to_string().contains("collides"), "unclear error: {err}");
+    }
+
+    #[test]
+    fn rejects_a_windows_subsystem_with_a_dll() {
+        let plan = parse(&with_dll("    subsystem: windows\n", dll_runtime()));
+        let err = validate(&plan).expect_err("expected a validation error");
+        assert!(
+            err.to_string().contains("subsystem"),
+            "unclear error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_the_application_manifest_with_a_dll() {
+        let plan = parse(&with_dll(
+            "    resources:\n      manifest: {}\n",
+            dll_runtime(),
+        ));
+        let err = validate(&plan).expect_err("expected a validation error");
+        assert!(
+            err.to_string().contains("process-scoped"),
+            "unclear error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_custom_stub_with_a_dll() {
+        let yaml = "schema: 6\nname: t\nbuild:\n  crypto: { algo: xchacha20poly1305, key: random }\n  payloads:\n    p: { source: ./p.exe, format: pe }\n  stub:\n    path: ./s.rs\n  output:\n    path: ./dist/o.dll\n    kind: dll\nruntime:\n  - technique: reflective_loading\n";
+        let plan = parse(yaml);
+        let err = validate(&plan).expect_err("expected a validation error");
+        assert!(
+            err.to_string().contains("stub.path"),
+            "unclear error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_self_deletion_with_a_dll() {
+        let plan = parse(&with_dll(
+            "",
+            "  - technique: self_deletion\n  - technique: reflective_loading\n",
+        ));
+        let err = validate(&plan).expect_err("expected a validation error");
+        assert!(
+            err.to_string().contains("self_deletion"),
+            "unclear error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_sleep_obfuscation_with_a_dll() {
+        let plan = parse(&with_dll(
+            "",
+            "  - technique: sleep_obfuscation\n    params: { sleep_ms: 10 }\n  - technique: reflective_loading\n",
+        ));
+        let err = validate(&plan).expect_err("expected a validation error");
+        assert!(
+            err.to_string().contains("encrypts the *running image*"),
+            "unclear error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_bouncer_exit_with_a_dll() {
+        let plan = parse(&with_dll(
+            "",
+            "  - technique: bouncer\n    params: { hostname: host, on_fail: exit }\n  - technique: reflective_loading\n",
+        ));
+        let err = validate(&plan).expect_err("expected a validation error");
+        assert!(
+            err.to_string().contains("kill the host"),
+            "unclear error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_an_entry_declared_on_an_executable() {
+        let plan = parse(&plan_yaml("", "    entry: export:Run\n", dll_runtime()));
+        let err = validate(&plan).expect_err("expected a validation error");
+        assert!(
+            err.to_string().contains("only applies to a DLL"),
+            "unclear error: {err}"
+        );
+    }
+
+    #[test]
+    fn advises_on_an_auto_entry_and_an_unsigned_dll() {
+        let plan = parse(&with_dll("", dll_runtime()));
+        let warnings = advisories(&plan);
+        assert!(
+            warnings.iter().any(|w| w.contains("entry is 'auto'")),
+            "expected an entry advisory: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("build.output.sign")),
+            "expected a signing advisory: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn a_host_specific_signed_dll_has_no_dll_advisory() {
+        let plan = parse(&with_dll(
+            "    entry: export:Run\n    sign: { mode: lab }\n",
+            dll_runtime(),
+        ));
+        let warnings = advisories(&plan);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.contains("entry is 'auto'") || w.contains("build.output.sign")),
+            "unexpected advisory: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn advises_on_patch_amsi_in_a_dll_build() {
+        let plan = parse(&with_dll(
+            "    entry: export:Run\n    sign: { mode: lab }\n",
+            "  - technique: patch_amsi\n  - technique: reflective_loading\n",
+        ));
+        let warnings = advisories(&plan);
+        assert!(
+            warnings.iter().any(|w| w.contains("patch_amsi")),
+            "expected an AMSI advisory: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn advises_on_a_32_bit_dll() {
+        let plan = parse(&with_dll(
+            "    entry: export:Run\n    arch: x86\n    sign: { mode: lab }\n",
+            dll_runtime(),
+        ));
+        let warnings = advisories(&plan);
+        assert!(
+            warnings.iter().any(|w| w.contains("32-bit")),
+            "expected an x86 advisory: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn advises_on_a_dll_path_without_the_extension() {
+        let yaml = "schema: 6\nname: t\nbuild:\n  crypto: { algo: xchacha20poly1305, key: random }\n  payloads:\n    p: { source: ./p.exe, format: pe }\n  output:\n    path: ./dist/o.bin\n    kind: dll\n    entry: export:Run\n    sign: { mode: lab }\nruntime:\n  - technique: reflective_loading\n";
+        let plan = parse(yaml);
+        let warnings = advisories(&plan);
+        assert!(
+            warnings.iter().any(|w| w.contains("`.dll`")),
+            "expected an extension advisory: {warnings:?}"
         );
     }
 }

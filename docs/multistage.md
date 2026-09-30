@@ -83,6 +83,13 @@ crypto comes from the payload's own `crypto` block, falling back to
 key. `build.output.arch` (`x64`), `strip` (`true`) and `trim_paths` (`all`) also
 default, so a minimal plan only needs `output.path`.
 
+`build.output.kind` (`exe`) turns the artifact into a DLL a host process loads
+(`dll`), and `build.output.entry` (`auto`) picks which exports start the chain
+(`jni_on_load`, `export:<name>`). A DLL build rejects what only an executable
+can do — `subsystem`, `resources.manifest`, `self_deletion`, `bouncer` with
+`on_fail: exit`, a custom stub — because the host owns the process. See
+[DLL output design](design/dll-output.md).
+
 ## Step fields
 
 Each step is `technique:` + optional `params:` + the orchestration fields:

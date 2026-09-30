@@ -30,8 +30,8 @@ use crate::engine::obfuscation::YamlStringsPlan;
 use crate::engine::syscalls::YamlSyscallsPlan;
 use crate::error::{PackerError, Result};
 use crate::plan::schema::{
-    Arch, BuildPlan, CryptoAlgorithm, CryptoPlan, KeySource, OutputPlan, PayloadFormat,
-    PayloadPlan, Plan, StubPlan, Subsystem, TrimPaths, SUPPORTED_SCHEMA,
+    Arch, BuildPlan, CryptoAlgorithm, CryptoPlan, DllEntry, KeySource, OutputKind, OutputPlan,
+    PayloadFormat, PayloadPlan, Plan, StubPlan, Subsystem, TrimPaths, SUPPORTED_SCHEMA,
 };
 use crate::plan::validate;
 use crate::techniques::{
@@ -1079,6 +1079,10 @@ fn assemble(payload: &Path, answers: &Answers) -> Plan {
             },
             output: OutputPlan {
                 path: PathBuf::from(&answers.output_path),
+                // The wizard assembles the standalone executable; a host-loaded
+                // DLL (`kind`/`entry`) is an advanced setting, edit it in the YAML.
+                kind: OutputKind::Exe,
+                entry: DllEntry::Auto,
                 arch: if answers.arch == "x86" {
                     Arch::X86
                 } else {

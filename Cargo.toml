@@ -77,4 +77,6 @@ windows = { version = "0.58", features = [
     "Win32_System_Variant",
     # self_deletion: CreateFileW + the FILE_SHARE_* / OPEN_EXISTING constants.
     "Win32_Storage_FileSystem",
+    # DLL output: AttachConsole (attach the console of the host that loaded us).
+    "Win32_System_Console",
 ] }

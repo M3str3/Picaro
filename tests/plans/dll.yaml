@@ -1,0 +1,18 @@
+schema: 6
+name: test-dll
+
+build:
+  crypto:
+    algo: xchacha20poly1305
+    key: random
+  payloads:
+    shellcode:
+      source: ./examples/payloads/demo_shellcode.bin
+      format: shellcode
+  output:
+    path: ./dist/test_dll.dll
+    kind: dll
+    entry: export:Run
+
+runtime:
+  - technique: reflective_loading

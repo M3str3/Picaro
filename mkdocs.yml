@@ -91,6 +91,7 @@ nav:
       - Custom stubs: custom-stubs.md
       - Syscall layer design: design/syscalls.md
       - API resolution design: design/api-resolution.md
+      - DLL output design: design/dll-output.md
       - x86 support: x86.md
   - Reference:
       - Measurements: measurements.md

@@ -4,7 +4,9 @@
 Builds the image on first use (or when the rebuild flag is passed) and runs it
 against the current directory with every argument passed through unchanged. One
 script replaces the former per-OS shell wrappers and behaves the same on Linux,
-macOS and Windows; it needs only the standard library.
+macOS and Windows; it needs only the standard library. A rebuild is incremental:
+the image caches the compiled dependencies in their own layer, so an edit under
+`src/` recompiles only the packer crate.
 
 Usage:
     python scripts/picaro.py build examples/plans/reflective-loading.yaml

@@ -7,6 +7,8 @@
 //! - `debug`: the `tech_dbg!` trace macro appended to a debug stub.
 //! - `obfuscation`: string obfuscation for stub literals.
 //! - `compiler`: stub compilation with `rustc`.
+//! - `entry`: the stub's entry point (`fn main` or the DLL's exports,
+//!   selected by `build.output.kind`).
 //! - `fetch`: in-memory HTTP(S) fetch of the input payload (URL input).
 //! - `api_resolution`: how the loader resolves the payload's imports
 //!   (`build.stub.api_resolution`) — the proxy catalogue and its validation.
@@ -25,6 +27,7 @@ pub mod args;
 pub mod compiler;
 pub mod crypto;
 pub mod debug;
+pub mod entry;
 pub mod fetch;
 pub mod hash;
 pub mod identity;

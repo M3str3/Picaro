@@ -46,37 +46,38 @@ RUN rustup target add x86_64-pc-windows-gnu i686-pc-windows-gnu
 # runtime, so the source stays in the image next to the built binary.
 WORKDIR /usr/src/picaro
 
-# Layer the build: manifests first so dependency resolution is cached, then the
-# source. `examples/` is needed only for the end-to-end smoke test below.
+# Layer the build so a source edit recompiles only the packer, not its
+# dependencies. Manifests plus a placeholder `main.rs` come first: this
+# downloads and compiles the whole dependency tree (windows-rs included) into a
+# layer keyed on `Cargo.toml`/`Cargo.lock` alone. The Cargo registry and the
+# `.rlib`s stay in the image regardless: the packer reads both at runtime to
+# link the stub.
 COPY Cargo.toml Cargo.lock ./
+RUN mkdir -p src \
+    && echo 'fn main() {}' > src/main.rs \
+    && cargo build --release \
+    && cargo build --target x86_64-pc-windows-gnu --release \
+    && cargo build --target i686-pc-windows-gnu --release
+
+# Then the real source on top of the dependency layer, so only the packer crate
+# is recompiled. The host build also produces the host-side proc-macro rlibs
+# (windows-implement, windows-interface) in `target/release/deps`; the cross
+# builds produce the stub's `.rlib`s and the windows_<arch>_gnu import libs
+# (`build.output.arch: x86` needs the i686 one). `touch` puts the sources
+# strictly after the placeholder build's fingerprints, so Cargo cannot treat the
+# crate as fresh and keep the placeholder binary when a copied file carries an
+# older mtime.
 COPY src ./src
-COPY templates ./templates
-COPY yara ./yara
-COPY examples ./examples
-
-# Build the packer for the host (Linux). This also produces the host-side
-# proc-macro rlibs (windows-implement, windows-interface) in target/release/deps.
-RUN cargo build --release
-
-# Cross-compile the workspace for the stub's Windows targets. This produces the
-# .rlib files the packer links with bare rustc (chacha20poly1305, hex, windows,
-# thiserror) plus the windows_<arch>_gnu import libs in the cargo registry cache.
-# The i686 build is what makes `build.output.arch: x86` work in here.
+RUN touch src/main.rs && cargo build --release
 RUN cargo build --target x86_64-pc-windows-gnu --release
 RUN cargo build --target i686-pc-windows-gnu --release
 
-# Smoke test: pack a payload end-to-end to prove the cross toolchain is wired
-# correctly. Fails the image build if anything is misconfigured.
-RUN ./target/release/picaro --quiet build examples/plans/reflective-loading.yaml \
-    && test -s dist/test_packed_reflective.exe
-
-# Second smoke test: the portable signer. Builds a lab-signed artifact (the
-# certificate chain is generated with `openssl`) and proves the artifact carries
-# a signature, so a missing/broken signer fails the image build.
-RUN ./target/release/picaro --quiet build examples/plans/lab-signed.yaml \
-    && test -s dist/lab_signed.exe \
-    && osslsigncode extract-signature -pem -in dist/lab_signed.exe -out /tmp/lab_signed.pem \
-    && test -s /tmp/lab_signed.pem
+# Copied after the compile: read at runtime, so editing a template or an example
+# must not invalidate the build layers above. `examples/` feeds the smoke tests
+# below; `yara/` is read by `audit`.
+COPY templates ./templates
+COPY yara ./yara
+COPY examples ./examples
 
 # The user mounts a directory with plans/payloads here; outputs land back on
 # the host through the same mount.

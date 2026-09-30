@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::{BuildError, Result};
-use crate::plan::schema::Arch;
+use crate::plan::schema::{Arch, OutputKind};
 
 /// `rustc` executable names (Windows and Unix).
 const RUSTC_NAMES: &[&str] = &["rustc.exe", "rustc"];
@@ -449,6 +449,9 @@ pub struct CompileOptions {
     /// Architecture the stub is compiled for: selects the `rustc` target and the
     /// matching dependency set (`build.output.arch`).
     pub arch: Arch,
+    /// What the artifact is: a binary or a host-loaded DLL
+    /// (`build.output.kind`).
+    pub kind: OutputKind,
 }
 
 impl Default for CompileOptions {
@@ -459,6 +462,7 @@ impl Default for CompileOptions {
             trim_paths: PathTrim::All,
             debug: false,
             arch: Arch::X64,
+            kind: OutputKind::Exe,
         }
     }
 }
@@ -487,6 +491,46 @@ fn strip_flag(strip: bool) -> &'static str {
     } else {
         "strip=none"
     }
+}
+
+/// The `-C panic=...` strategy for the requested output.
+///
+/// A DLL runs inside a host process, so a panic must unwind into the entry
+/// block's `catch_unwind` instead of taking `java.exe`/`python.exe` down with
+/// it. An executable keeps `abort`: nothing catches a panic there, and the
+/// unwinding machinery is weight — and `panic` strings — the artifact does not
+/// need.
+fn panic_flag(kind: OutputKind) -> &'static str {
+    match kind {
+        OutputKind::Dll => "panic=unwind",
+        OutputKind::Exe => "panic=abort",
+    }
+}
+
+/// A valid `rustc` crate name derived from the output file's stem.
+///
+/// Without `--crate-name` the crate is named after the generated source
+/// (`main`), which is what ends up in panic locations and symbol paths. A DLL
+/// should report the name it is delivered under.
+fn crate_name(output: &Path) -> String {
+    let stem = output
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .unwrap_or("loader");
+    let mut name: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit()) {
+        name.insert(0, '_');
+    }
+    name
 }
 
 /// Appends one `--remap-path-prefix=<from>=<to>` pair to `flags`.
@@ -550,12 +594,20 @@ pub fn compile_stub(
     if !is_native_target(options.arch) {
         cmd.arg("--target").arg(stub_target(options.arch));
     }
+    if options.kind == OutputKind::Dll {
+        // A library the host loads with the normal image loader. The crate name
+        // follows the output's stem so the artifact does not report the build's
+        // internal file name; the linker takes the export directory's `Name`
+        // from the link output itself.
+        cmd.arg("--crate-type").arg("cdylib");
+        cmd.arg("--crate-name").arg(crate_name(output));
+    }
     cmd.arg(stub_rs)
         .arg("--edition")
         .arg("2021")
         .args(hardening_flags(options, manifest_dir, home.as_deref()))
         .arg("-C")
-        .arg("panic=abort")
+        .arg(panic_flag(options.kind))
         .arg("-C")
         .arg("codegen-units=1")
         .arg("-C")
@@ -588,7 +640,8 @@ pub fn compile_stub(
         return Err(BuildError::CompilationFailed(stderr.to_string()));
     }
 
-    verify_pe_magic(output)
+    verify_pe_magic(output)?;
+    verify_output_kind(output, options.kind)
 }
 
 /// Verifies that the compiled stub is a Windows PE (`MZ` magic).
@@ -611,6 +664,37 @@ fn verify_pe_magic(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Verifies that the compiled image is the kind `build.output.kind` asked for.
+///
+/// `rustc` links a `cdylib` from any source, including one whose entry points
+/// were never exported (a name typo, a missing `#[no_mangle]`); the result is a
+/// DLL no host can start, and nothing else in the build would notice.
+/// `IMAGE_FILE_DLL` is the header bit that tells the two apart. An executable is
+/// checked too: it catches an entry block that was rendered for a DLL into a
+/// binary build.
+fn verify_output_kind(path: &Path, kind: OutputKind) -> Result<()> {
+    let bytes = std::fs::read(path)?;
+    let info = crate::engine::pe::parse(&bytes).map_err(|e| {
+        BuildError::CompilationFailed(format!(
+            "the compiled stub '{}' is not a valid PE: {e}",
+            path.display()
+        ))
+    })?;
+    let is_dll = crate::engine::pe::is_dll(info.characteristics);
+    match (kind, is_dll) {
+        (OutputKind::Dll, false) => Err(BuildError::CompilationFailed(format!(
+            "'{}' was built as a DLL (build.output.kind: dll) but the compiled image is an \
+             executable: no export was linked",
+            path.display()
+        ))),
+        (OutputKind::Exe, true) => Err(BuildError::CompilationFailed(format!(
+            "'{}' was built as an executable but the compiled image is a DLL",
+            path.display()
+        ))),
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,6 +705,22 @@ mod tests {
     #[test]
     fn find_executable_in_empty_path_is_none() {
         assert!(find_executable_in_path(OsStr::new(""), RUSTC_NAMES).is_none());
+    }
+
+    #[test]
+    fn a_dll_build_unwinds_and_an_executable_aborts() {
+        assert_eq!(panic_flag(OutputKind::Dll), "panic=unwind");
+        assert_eq!(panic_flag(OutputKind::Exe), "panic=abort");
+    }
+
+    #[test]
+    fn the_crate_name_follows_the_output_stem() {
+        assert_eq!(crate_name(Path::new("picaro.dll")), "picaro");
+        assert_eq!(crate_name(Path::new("/tmp/loader-x64.dll")), "loader_x64");
+        // A Rust crate name may not start with a digit, and an empty stem needs
+        // some name at all.
+        assert_eq!(crate_name(Path::new("2fast.dll")), "_2fast");
+        assert_eq!(crate_name(Path::new("")), "loader");
     }
 
     /// The stub target follows the requested architecture (and the host ABI on
@@ -727,6 +827,7 @@ dependencies = [
                 trim_paths: PathTrim::None,
                 debug: false,
                 arch: Arch::X64,
+                kind: OutputKind::Exe,
             },
             manifest,
             None,
@@ -739,6 +840,7 @@ dependencies = [
                 trim_paths: PathTrim::None,
                 debug: false,
                 arch: Arch::X64,
+                kind: OutputKind::Exe,
             },
             manifest,
             None,
@@ -755,6 +857,7 @@ dependencies = [
                 trim_paths: PathTrim::None,
                 debug: false,
                 arch: Arch::X64,
+                kind: OutputKind::Exe,
             },
             Path::new("/proj"),
             Some(Path::new("/home/dev")),
@@ -770,6 +873,7 @@ dependencies = [
                 trim_paths: PathTrim::Relative,
                 debug: false,
                 arch: Arch::X64,
+                kind: OutputKind::Exe,
             },
             Path::new("/proj"),
             Some(Path::new("/home/dev")),
@@ -785,6 +889,7 @@ dependencies = [
                 trim_paths: PathTrim::All,
                 debug: false,
                 arch: Arch::X64,
+                kind: OutputKind::Exe,
             },
             Path::new("/proj"),
             Some(Path::new("/home/dev/.cargo")),
@@ -800,6 +905,7 @@ dependencies = [
                 trim_paths: PathTrim::All,
                 debug: false,
                 arch: Arch::X64,
+                kind: OutputKind::Exe,
             },
             Path::new("/proj"),
             None,
@@ -817,6 +923,7 @@ dependencies = [
                 trim_paths: PathTrim::All,
                 debug: true,
                 arch: Arch::X64,
+                kind: OutputKind::Exe,
             },
             Path::new("/proj"),
             Some(Path::new("/home/dev/.cargo")),

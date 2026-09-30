@@ -3,8 +3,9 @@
 //! Runs an ordered chain of technique steps. Each Execution step decrypts an
 //! embedded payload with XChaCha20-Poly1305 and runs it with its technique; each
 //! Preparation step adjusts the process state; each Control step orchestrates the
-//! chain (`living_off_the_land` launches a process, `sleep` waits). Part of a red
-//! team research tool; not code for malicious use.
+//! chain (`living_off_the_land` launches a process, `sleep` waits). The entry
+//! point (`fn main`, or the exports of a host-loaded DLL) is injected above.
+//! Part of a red team research tool; not code for malicious use.
 
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
@@ -13,15 +14,7 @@ use chacha20poly1305::{
 
 $STUB_HELPERS$
 
-fn main() {
-    match run() {
-        Ok(code) => std::process::exit(code),
-        Err(msg) => {
-            eprintln!("{msg}");
-            std::process::exit(1);
-        }
-    }
-}
+$ENTRY_BLOCK$
 
 fn run() -> Result<i32, String> {
     init_syscalls()?;

@@ -262,8 +262,18 @@ pub enum KeySource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutputPlan {
-    /// Output path of the packed PE.
+    /// Output path of the packed artifact (`.exe` or `.dll`; see `kind`).
     pub path: PathBuf,
+
+    /// What the artifact is: an executable (default) or a DLL a host process
+    /// loads (`docs/design/dll-output.md`).
+    #[serde(default, skip_serializing_if = "OutputKind::is_exe")]
+    pub kind: OutputKind,
+
+    /// What starts the chain in a `kind: dll` build (`auto`, `jni_on_load` or
+    /// `export:<name>`). Ignored — and rejected — for `kind: exe`.
+    #[serde(default, skip_serializing_if = "DllEntry::is_auto")]
+    pub entry: DllEntry,
 
     /// Target architecture (default: `x64`).
     #[serde(default)]
@@ -342,6 +352,130 @@ impl Subsystem {
             Subsystem::Console => "console",
             Subsystem::Windows => "windows",
         }
+    }
+}
+
+/// What the build produces (`build.output.kind`).
+///
+/// `exe` (the default) is the standalone artifact. `dll` is a library a host
+/// process loads with the normal image loader — a JVM through `System.load`, a
+/// CPython interpreter through `ctypes`, a .NET host through `[DllImport]`, or
+/// `rundll32` — which is what makes the chain usable where application
+/// whitelisting only allows the host program. See `docs/design/dll-output.md`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputKind {
+    /// A Windows executable.
+    #[default]
+    Exe,
+    /// A Windows DLL, loaded by a host process.
+    Dll,
+}
+
+impl OutputKind {
+    /// Whether this is the default kind (used to skip it when serializing).
+    pub fn is_exe(&self) -> bool {
+        matches!(self, OutputKind::Exe)
+    }
+
+    /// Lowercase label used in messages and the build log.
+    pub fn label(self) -> &'static str {
+        match self {
+            OutputKind::Exe => "exe",
+            OutputKind::Dll => "dll",
+        }
+    }
+}
+
+/// What starts the chain in a `kind: dll` build (`build.output.entry`).
+///
+/// The chain is identical in every mode; the entry only decides which export a
+/// host calls and whether that export waits for the chain (see
+/// `docs/design/dll-output.md`, section 4.3).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum DllEntry {
+    /// Export every entry point — `JNI_OnLoad` and [`DllEntry::AUTO_EXPORT`] —
+    /// so one artifact works from any host.
+    #[default]
+    Auto,
+    /// Export only `JNI_OnLoad`, the JNI hook `System.load` calls. It returns
+    /// to the JVM at once, so the host owns the process lifetime.
+    JniOnLoad,
+    /// Export only a plain function with this name (CPython `ctypes`, P/Invoke,
+    /// `rundll32`). It blocks until the chain returns and reports its code.
+    Export(String),
+}
+
+impl DllEntry {
+    /// The export [`DllEntry::Auto`] adds besides `JNI_OnLoad`.
+    pub const AUTO_EXPORT: &'static str = "Run";
+
+    /// Whether this is the default entry (used to skip it when serializing).
+    pub fn is_auto(&self) -> bool {
+        matches!(self, DllEntry::Auto)
+    }
+
+    /// The plain export name the build declares, if any.
+    pub fn export_name(&self) -> Option<&str> {
+        match self {
+            DllEntry::Auto => Some(Self::AUTO_EXPORT),
+            DllEntry::Export(name) => Some(name),
+            DllEntry::JniOnLoad => None,
+        }
+    }
+
+    /// Whether the build exports `JNI_OnLoad`.
+    pub fn exports_jni_on_load(&self) -> bool {
+        matches!(self, DllEntry::Auto | DllEntry::JniOnLoad)
+    }
+
+    /// Label used in messages and the build log.
+    pub fn label(&self) -> String {
+        match self {
+            DllEntry::Auto => "auto".to_string(),
+            DllEntry::JniOnLoad => "jni_on_load".to_string(),
+            DllEntry::Export(name) => format!("export:{name}"),
+        }
+    }
+}
+
+impl std::str::FromStr for DllEntry {
+    type Err = String;
+
+    /// Parses `auto`, `jni_on_load` or `export:<name>`.
+    ///
+    /// The *syntax* of `<name>` is checked by `plan::validate` (so a bad name is
+    /// a normal validation error); here only the shape is recognized.
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value.trim() {
+            "auto" => Ok(DllEntry::Auto),
+            "jni_on_load" => Ok(DllEntry::JniOnLoad),
+            other => match other.strip_prefix("export:") {
+                Some(name) => Ok(DllEntry::Export(name.trim().to_string())),
+                None => Err(format!(
+                    "unknown entry '{other}'; expected 'auto', 'jni_on_load' or 'export:<name>'"
+                )),
+            },
+        }
+    }
+}
+
+impl From<DllEntry> for String {
+    fn from(entry: DllEntry) -> Self {
+        match entry {
+            DllEntry::Auto => "auto".to_string(),
+            DllEntry::JniOnLoad => "jni_on_load".to_string(),
+            DllEntry::Export(name) => format!("export:{name}"),
+        }
+    }
+}
+
+impl TryFrom<String> for DllEntry {
+    type Error = String;
+
+    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+        value.parse()
     }
 }
 
@@ -963,6 +1097,83 @@ runtime:
         assert_eq!(payload.format, PayloadFormat::Dll);
         assert_eq!(payload.export.as_deref(), Some("Run"));
         assert!(payload.format.is_pe_image());
+    }
+
+    #[test]
+    fn output_kind_defaults_to_an_executable() {
+        let plan: Plan = serde_yml::from_str(VALID_YAML).expect("valid YAML should parse");
+        assert_eq!(plan.build.output.kind, OutputKind::Exe);
+        assert_eq!(plan.build.output.entry, DllEntry::Auto);
+        assert!(plan.build.output.kind.is_exe());
+        assert_eq!(plan.build.output.kind.label(), "exe");
+    }
+
+    #[test]
+    fn parses_a_dll_output_with_a_plain_export() {
+        let yaml = VALID_YAML.replace(
+            "    path: ./dist/mimikatz_packed.exe\n",
+            "    path: ./dist/loader.dll\n    kind: dll\n    entry: export:Run\n",
+        );
+        let plan: Plan = serde_yml::from_str(&yaml).expect("a dll output should parse");
+        assert_eq!(plan.build.output.kind, OutputKind::Dll);
+        assert_eq!(plan.build.output.entry, DllEntry::Export("Run".to_string()));
+        assert_eq!(plan.build.output.entry.label(), "export:Run");
+        assert_eq!(plan.build.output.entry.export_name(), Some("Run"));
+        assert!(!plan.build.output.entry.exports_jni_on_load());
+    }
+
+    #[test]
+    fn parses_the_jni_entry() {
+        let yaml = VALID_YAML.replace(
+            "    path: ./dist/mimikatz_packed.exe\n",
+            "    path: ./dist/loader.dll\n    kind: dll\n    entry: jni_on_load\n",
+        );
+        let plan: Plan = serde_yml::from_str(&yaml).expect("a jni entry should parse");
+        assert_eq!(plan.build.output.entry, DllEntry::JniOnLoad);
+        assert!(plan.build.output.entry.exports_jni_on_load());
+        assert_eq!(plan.build.output.entry.export_name(), None);
+    }
+
+    #[test]
+    fn the_default_output_kind_and_entry_are_not_serialized() {
+        let plan: Plan = serde_yml::from_str(VALID_YAML).expect("valid YAML should parse");
+        let yaml = serde_yml::to_string(&plan).expect("serialize");
+        assert!(
+            !yaml.contains("kind:"),
+            "the default kind should be skipped: {yaml}"
+        );
+        assert!(
+            !yaml.contains("entry:"),
+            "the default entry should be skipped: {yaml}"
+        );
+    }
+
+    #[test]
+    fn a_dll_output_round_trips_through_yaml() {
+        let yaml = VALID_YAML.replace(
+            "    path: ./dist/mimikatz_packed.exe\n",
+            "    path: ./dist/loader.dll\n    kind: dll\n    entry: export:Run\n",
+        );
+        let plan: Plan = serde_yml::from_str(&yaml).expect("a dll output should parse");
+        let rendered = serde_yml::to_string(&plan).expect("serialize");
+        let again: Plan = serde_yml::from_str(&rendered).expect("a rendered plan should parse");
+        assert_eq!(again.build.output.kind, OutputKind::Dll);
+        assert_eq!(
+            again.build.output.entry,
+            DllEntry::Export("Run".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_an_unknown_dll_entry() {
+        let yaml = VALID_YAML.replace(
+            "    path: ./dist/mimikatz_packed.exe\n",
+            "    path: ./dist/loader.dll\n    kind: dll\n    entry: now\n",
+        );
+        assert!(
+            serde_yml::from_str::<Plan>(&yaml).is_err(),
+            "an unknown entry should fail"
+        );
     }
 
     #[test]
