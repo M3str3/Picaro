@@ -6,14 +6,14 @@
 #
 # `entry: auto` exports every entry point, so one artifact works from any host:
 #
-#   Java      System.load("C:\\path\\to\\test_dll.dll");
+#   Java      System.load("C:\\path\\to\\dll-loader.dll");
 #             JNI_OnLoad starts the chain and returns at once; the JVM owns the
 #             process lifetime, so the program has to stay alive long enough (a
 #             `main` that loads the DLL and returns kills the chain).
-#   CPython   import ctypes; ctypes.CDLL(r"C:\path\to\test_dll.dll").Run()
+#   CPython   import ctypes; ctypes.CDLL(r"C:\path\to\dll-loader.dll").Run()
 #             The plain export waits for the chain and returns its code.
-#   .NET      [DllImport("test_dll.dll")] static extern int Run();
-#   rundll32  rundll32 test_dll.dll,Run
+#   .NET      [DllImport("dll-loader.dll")] static extern int Run();
+#   rundll32  rundll32 dll-loader.dll,Run
 #
 # For delivery, pick a host-specific `entry` (`jni_on_load` or `export:<name>`):
 # `auto` advertises `JNI_OnLoad` next to `Run`, which no ordinary DLL does.
@@ -42,7 +42,7 @@ build:
       strategy: xor
 
   output:
-    path: ./dist/test_dll.dll
+    path: ./dist/dll-loader.dll
     kind: dll
     entry: auto
 

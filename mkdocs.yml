@@ -62,6 +62,8 @@ nav:
     - String obfuscation: features/ref/strings.md
     - Console args: features/ref/args.md
     - Adding a feature: features/adding-a-feature.md
+  - Hosts:
+      - Host catalogue: hosts.md
   - Techniques:
       - Overview: techniques/index.md
       - AMSI Patch: techniques/ref/patch_amsi.md

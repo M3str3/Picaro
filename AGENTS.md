@@ -60,6 +60,8 @@ examples/
   plans/      curated example YAMLs
   payloads/     test payloads for end-to-end verification
   stubs/        custom stub templates (build.stub.path)
+  hosts/        host-process examples for `kind: dll` (ctypes, P/Invoke, .NET,
+                rundll32, Java, Perl, Ruby, PHP, LuaJIT, Node)
   assets/       sample icon for build.output.resources
 tests/
   plans/      CI / validation fixtures
@@ -485,7 +487,7 @@ where its CA is trusted; it gives no SmartScreen reputation.
 `examples/plans/mimikatz.yaml` (randomized identity + lab signature) and
 `examples/plans/lab-signed.yaml` (a backend-agnostic lab signature).
 
-**Host-loaded DLL output: code written, not compiled.** `build.output.kind: dll`
+**Host-loaded DLL output (`kind: dll`, done: A–D verified).** `build.output.kind: dll`
 (ship the same plan as a DLL the host loads, for environments where
 application whitelisting only allows interpreters) is specified in
 `docs/design/dll-output.md`, from the `void-loader` reference
@@ -502,9 +504,24 @@ and custom stubs. Touchpoints: `src/plan/schema.rs`
 (`kind`/`entry`), `src/plan/validate.rs`, `src/engine/entry.rs` (new: the entry
 block), `src/engine/steps.rs` (`$ENTRY_BLOCK$`), `src/engine/compiler.rs`
 (`cdylib`, `--crate-name`, `IMAGE_FILE_DLL` verification) and `src/main.rs`.
-**Nothing has been compiled or tested**: `cargo` was blocked in that session, so
-phases A–C are "written, unverified" and the lab measurements (Phase D) are
-pending.
+**Verified 2026-09-30** (`cargo` available again): clippy clean, the §5
+validation table has one test per row, and the artifact loads in three hosts —
+CPython `ctypes` and .NET P/Invoke both report the chain's `42` (the second also
+sees the module in the host's module list), `rundll32` runs the chain (marker on
+the redirected stderr) but exits `0` because it does not relay the export's
+return value. `entry: auto` exports `DllMain`/`JNI_OnLoad`/`Run`; the PE records
+the delivered stem (`strings` shows `test_dll.dll`); icon + version info embed in
+a DLL and `GetFileVersionInfo` reads them back; `sign.mode: lab` signs it with
+`signtool` and Defender stays clean. The e2e
+`a_dll_artifact_runs_the_chain_when_a_host_loads_it` (`tests/cli.rs`) host-loads
+the artifact and asserts the export's `42`; the copy-paste host examples are in
+`examples/hosts/` (with `examples/plans/dll-shellcode.yaml`, a non-blocking
+`entry: auto` build whose chain returns `42`), the catalogue of host programs is
+`docs/hosts.md` (nav: Hosts), the scratch measurement plans are in
+`code_examples/dll-output/`, and the numbers are in `docs/measurements.md`. **Java was not
+measured** (no JDK on the host) and `dumpbin` was unavailable, so `picaro audit`
++ `strings` stand in for the export dump. The design's Phase E (custom stubs with
+`$ENTRY_BLOCK$`, `AttachCurrentThread` so the JVM waits) is still parked.
 
 ## Known limitations
 
@@ -620,6 +637,21 @@ them.
   `dedicated_stack: true` a payload that *returns* jumps to a null return address
   and takes the target down. The hijacked target's crash code depends on the
   payload: `ud2` gives `0xC000001D`, a `ret` gives `0xC0000005`.
+- **A DLL host's lifetime is its own, and `rundll32` hides the return code.**
+  `JNI_OnLoad` returns at once, so a Java host that does not keep running kills
+  the chain (the parked `AttachCurrentThread` is the fix, Phase E); the *Java* row
+  of the host matrix was never run (no JDK on the measurement host). `rundll32`
+  runs the chain but exits `0` regardless of the export's return value, and being
+  a GUI-subsystem binary it needs `Start-Process -RedirectStandard*` for its
+  output to be observable at all — `AttachConsole(ATTACH_PARENT_PROCESS)` cannot
+  attach a console that does not exist. Blocking techniques still wait: the
+  `export:<name>` form holds the caller's thread for the payload's lifetime.
+- **A DLL build changes the *host's* process state.** Process-scoped techniques
+  (`patch_etw`, `unhook_ntdll`, `patch_amsi`) patch `java.exe`/`python.exe`, and
+  `reflective_loading` rewrites the host's PEB `CommandLine`; `patch_amsi` can
+  even *load* `amsi.dll` into a host that had none. `output.sign` is the most
+  valuable mitigation (an unsigned module inside a signed host is the first EDR
+  report), but a lab signature verifies only where its CA is trusted.
 
 ## Session workflow
 

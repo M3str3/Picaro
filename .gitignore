@@ -13,6 +13,13 @@ code_examples/
 # Documentation site output (MkDocs).
 /site
 
+# Python bytecode cache (the host examples are Python scripts).
+__pycache__/
+
+# .NET host example build output (`dotnet run`).
+examples/hosts/dotnet_host/bin/
+examples/hosts/dotnet_host/obj/
+
 # Debug symbols and linker side artifacts (MSVC + MinGW).
 *.pdb
 *.ilk

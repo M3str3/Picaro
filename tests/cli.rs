@@ -1302,3 +1302,78 @@ fn without_timestamps(stdout: &[u8]) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+// --- DLL output (build.output.kind: dll) ---
+
+/// Loads a packed DLL into *this* process — the test binary becomes the host —
+/// and calls `export`, returning the value the export reports.
+///
+/// The module is mapped with `LoadLibraryW` and the entry point found with
+/// `GetProcAddress` (windows-rs); the raw call is the only `unsafe` and it stays
+/// in this one place.
+fn load_dll_and_call(dll: &Path, export: &str) -> i32 {
+    use windows::core::{PCSTR, PCWSTR};
+    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+
+    let wide: Vec<u16> = dll
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let module = unsafe { LoadLibraryW(PCWSTR(wide.as_ptr())) }
+        .expect("LoadLibraryW must map the packed DLL");
+
+    let name = std::ffi::CString::new(export).expect("an export name");
+    let address = unsafe { GetProcAddress(module, PCSTR(name.as_ptr().cast())) }
+        .expect("the export must exist in the packed DLL");
+
+    // SAFETY: the plain export has the rundll32 shape — four ignored arguments
+    // and an `i32` return — and the module stays loaded for the call.
+    let run: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *const u8,
+        i32,
+    ) -> i32 = unsafe { std::mem::transmute(address) };
+    unsafe {
+        run(
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            0,
+        )
+    }
+}
+
+/// End-to-end: a `kind: dll` artifact is loaded by a host process — this test
+/// binary — and its export runs the chain. The fixture's shellcode returns `42`,
+/// which the export reports back, so the value proves the chain ran rather than
+/// that the module merely mapped.
+///
+/// `#[ignore]`: compiles a stub and needs a Windows host, since the artifact is
+/// loaded by the image loader of the process that loads it.
+#[test]
+#[ignore = "requires rustc, the compiled dependencies and a Windows host"]
+fn a_dll_artifact_runs_the_chain_when_a_host_loads_it() {
+    if !cfg!(windows) {
+        return;
+    }
+    let _guard = BUILD_LOCK.lock().unwrap();
+
+    let build = picaro(&["build".as_ref(), "tests/plans/dll.yaml".as_ref()]);
+    assert!(
+        build.status.success(),
+        "DLL build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let artifact = Path::new("dist/test_dll.dll");
+    let bytes = std::fs::read(artifact).expect("read the DLL");
+    assert_eq!(&bytes[..2], b"MZ", "the artifact must be a PE");
+
+    assert_eq!(
+        load_dll_and_call(artifact, "Run"),
+        42,
+        "the chain must run through the export"
+    );
+}

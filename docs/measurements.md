@@ -20,6 +20,7 @@ the time and have since been consolidated into `examples/plans/` and
 | x86 | TLS provisioning (M1/M2) | `TlsSetValue` → loader's array; a payload reads its own `thread_local` (`tls=42`) |
 | x86 | reflective loading (static) | 468 KB; 1 suspicious import (`VirtualAllocEx`); no literals leak |
 | M5 | .NET hosting (static) | 389 KB managed fixture / 1.7 MB SharpHound; the CLR-hosting imports (`mscoree`, `ole32`, `oleaut32`) are the signature |
+| DLL | host-loaded DLL (`kind: dll`) | 366 KB; loaded by CPython, .NET and `rundll32`; the chain's `42` comes back from the two blocking hosts |
 | EDR | CrowdStrike Falcon | hollowing blocked at runtime (partial) |
 
 ## Phase 5 — static baseline (process hollowing)
@@ -320,6 +321,68 @@ Host: `x86_64-pc-windows-msvc` (rustc 1.90), release stub unless noted, Windows 
   and relaying exit code `42`. `mode: helper` — a detached `cmd.exe` that sleeps
   two seconds and deletes — removes the file outright: verified by listing the
   directory after the run.
+
+## DLL output (`build.output.kind: dll`) — host matrix (2026-09-30)
+
+Host: `x86_64-pc-windows-msvc` (rustc 1.90), Windows 11. Artifact:
+`tests/plans/dll.yaml` — shellcode `mov eax, 42; ret`, `entry: export:Run`, no
+syscalls — built with `picaro build tests/plans/dll.yaml` (366 KB,
+`dist/test_dll.dll`). The chain returns `42`, so a host that reports `42` proves
+its export ran the chain and did not merely map the module; the committed host
+examples are in `examples/hosts/` (the scratch variants used here — lab-signed,
+resources — are in `code_examples/dll-output/`).
+
+| Host | Loads it with | Entry | Result |
+| --- | --- | --- | --- |
+| CPython 3.14 | `ctypes.CDLL(...).Run()` | `export:Run` (blocks) | `42`, marker on stderr (`ctypes_host.py`) |
+| .NET (PowerShell 5.1 `Add-Type`) | `[DllImport]` P/Invoke, 4-argument shape | `export:Run` | `42`; `test_dll.dll` in the host's module list (`pinvoke_host.ps1`) |
+| `rundll32.exe` | `rundll32 test_dll.dll,Run` | `export:Run` | chain ran (marker on the redirected stderr), exit code `0` (`rundll32_host.ps1`) |
+| Java | `System.load` | `jni_on_load` | not measured: no JDK on the measurement host |
+
+Findings:
+
+- **`rundll32` needs its handles redirected.** It is a GUI-subsystem binary, so
+  neither cmd nor bash hands it the parent console, and
+  `AttachConsole(ATTACH_PARENT_PROCESS)` cannot attach a console that was never
+  there. `Start-Process -RedirectStandardError` is what makes the chain's output
+  observable, and it is the recipe in `examples/hosts/rundll32_host.ps1`; started
+  plainly from bash, the chain still runs and the marker goes nowhere.
+- **`rundll32` does not relay the export's return value.** `Run` returns `42`
+  and `rundll32` still exits `0`. When the return code is the evidence, use
+  `ctypes`/P-Invoke, which see it, or a payload with a side effect.
+- **The DLL appears in the host's module list** (`test_dll.dll @ 0x7FF…`): the
+  image-load telemetry the design predicts (section 9) is real — the mode removes
+  the *process* IoC, not the module.
+- **`entry: auto` exports `DllMain`, `JNI_OnLoad` and `Run`** — the `picaro
+  audit` EXPORTS section lists all three (`examples/plans/dll.yaml`), one of which
+  no ordinary DLL has.
+- **The PE records the delivered name**: `strings dist/test_dll.dll` shows
+  `test_dll.dll` (and `test_dll.pdb`), confirming D-15 — the intermediate is named
+  after the output stem and `--crate-name` follows it.
+- **Resources are legitimate in a DLL.** A `kind: dll` plan with an icon and
+  version info (`.rsrc` 16 KB, 366 → 382 KB) still runs (`Run()` → `42`), and
+  `GetFileVersionInfo` reads it back (`CompanyName Contoso Ltd`,
+  `FileDescription Widget Helper`). The *application* manifest is rejected at
+  build time, as designed.
+
+### Signing (lab) and Defender
+
+`build.output.sign.mode: lab` signs through `signtool.exe` on Windows (resolved
+from the Windows Kits install):
+
+- Before signing: `SIGNATURE none`; Defender **clean**.
+- After signing (`dist/dll_signed.dll`, same plan plus `sign: { mode: lab }`):
+  `SIGNATURE present (Authenticode)`, overlay 1,480 B, Defender still **clean**.
+- `signtool verify -pa -v` walks the whole chain — `CN=picaro lab code signing`
+  ← `CN=picaro lab code signing Root CA` — and fails only with *"a root
+  certificate which is not trusted"*: the lab CA is exported next to the artifact
+  (`dll_signed.ca.cer`) and no trust store is modified.
+- The signed DLL loads and returns `42` exactly like the unsigned one.
+
+Not measured: a Defender *verdict* change with the signature (both are clean
+here). The design's remaining Phase D item is the **Java** row (`System.load`
+plus a latch); the parked `AttachCurrentThread` extension is what makes the JVM
+wait for the worker.
 
 ## CrowdStrike Falcon — process hollowing (partial)
 

@@ -197,6 +197,10 @@ Points that are not cosmetic:
 | Ruby / PHP / LuaJIT / Node | `Fiddle`, `FFI`, `ffi-napi` | `export:<name>` | `<name>()` |
 | `rundll32` | `rundll32 loader.dll,<name>` | `export:<name>` | `<name>(HWND, HINSTANCE, LPSTR, int)` |
 
+Runnable versions of the table: `examples/hosts/` (`ctypes_host.py`,
+`pinvoke_host.ps1`, `rundll32_host.ps1`, `java_host/JavaHost.java`), driven
+against `examples/plans/dll-shellcode.yaml`.
+
 The `export:<name>` shim takes **the rundll32 shape** (four arguments, ignored)
 and returns `i32`. On x64 — a single calling convention, caller-pushed
 arguments — a zero-argument `ctypes` or P/Invoke call is fine. On x86 `extern
@@ -313,7 +317,9 @@ Advisories (build succeeds, the line is printed):
   kind in the build log. `--dry-run` and `inspect_payload` are unaffected.
 - `src/engine/stub.rs` — the custom-stub contract (Phase E).
 - Docs/examples: `docs/architecture.md`, `docs/custom-stubs.md` (Phase E),
-  `examples/plans/dll.yaml`, `tests/plans/dll.yaml`, `mkdocs.yml`, `AGENTS.md`.
+  `examples/plans/dll.yaml` + `examples/plans/dll-shellcode.yaml`,
+  `examples/hosts/` (the host-process examples for the matrix in §4.2),
+  `tests/plans/dll.yaml`, `mkdocs.yml`, `AGENTS.md`.
 
 ---
 
@@ -325,9 +331,9 @@ Steps 1–4 of the build are unchanged; what changes is compile and after:
    crate name otherwise defaults to the source file's stem, `main`). The
    intermediate is written as `build/<stem>.dll` rather than `build/out.exe`,
    because the linker records the link output's name inside the PE (the export
-   directory's `Name` field); Phase D confirms with `dumpbin /exports` that the
-   delivered name is what the artifact reports, and `--crate-name` covers panic
-   messages and symbol paths.
+   directory's `Name` field); `strings dist/test_dll.dll` reports `test_dll.dll`,
+   so the delivered name is the one the artifact reports, and `--crate-name`
+   covers panic messages and symbol paths.
 2. **Verify** — `IMAGE_FILE_DLL`, as above.
 3. **Resources** — `.rsrc` injection is unchanged (it appends a section); icons
    and version info are legitimate in a DLL (`version.dll` has both). The
@@ -345,29 +351,36 @@ Steps 1–4 of the build are unchanged; what changes is compile and after:
 
 ## 8. Phases
 
-- [ ] **Phase A — schema, validation, entry plumbing; no behaviour change.**
+- [x] **Phase A — schema, validation, entry plumbing; no behaviour change.**
   `kind`/`entry` parse and round-trip, `$ENTRY_BLOCK$` in the builtin template,
   `entry.rs` renders the exe block, §5 validation and advisories.
   *Acceptance:* the rendered stub for an `exe` plan is byte-identical to the
   current output (golden test); the validation table has one test per row; the
   crate builds and `cargo clippy --all-targets` is clean.
-  *State: written (`src/plan/schema.rs`, `src/plan/validate.rs`,
-  `src/engine/entry.rs`, `src/engine/steps.rs`), not yet compiled.*
-- [ ] **Phase B — compile as a DLL.** `--crate-type`, `--crate-name`,
+  *Verified 2026-09-30: `cargo clippy --all-targets` clean; one `#[ignore]` test
+  per §5 row in `src/plan/validate.rs` (`rejects_a_windows_subsystem_with_a_dll`,
+  … `advises_on_a_dll_path_without_the_extension`); `src/engine/entry.rs` asserts
+  the exe block is the previous literal.*
+- [x] **Phase B — compile as a DLL.** `--crate-type`, `--crate-name`,
   intermediate name, `verify_output_kind`, kind in the build log and the exit
   summary.
   *Acceptance:* `picaro build tests/plans/dll.yaml` produces an artifact whose
   file header has `IMAGE_FILE_DLL`, whose export directory reports the delivered
   name, and which `picaro audit` reads without complaint.
-  *State: written (`src/engine/compiler.rs`, `src/main.rs`), not yet compiled.*
-- [ ] **Phase C — entry semantics.** `DllMain` no-op, the two export shapes,
+  *Verified 2026-09-30: `picaro audit dist/test_dll.dll` reports `EXPORTS 2
+  DllMain Run` and reads it clean; `strings` shows the internal `test_dll.dll`
+  (D-15). The `entry: auto` variant exports `DllMain`, `JNI_OnLoad` and `Run`.*
+- [x] **Phase C — entry semantics.** `DllMain` no-op, the two export shapes,
   `dll_attach_console`, the worker with `catch_unwind`, `panic=unwind` for DLL
   builds.
   *Acceptance:* unit tests over the rendered entry (exports present, no
   `process::exit`, no `AllocConsole`), plus a `#[ignore]` e2e that loads the DLL
   from a host process and observes the chain's effect.
-  *State: written; `e2e` not written (needs a host process to drive it).*
-- [ ] **Phase D — host matrix, measured.** Run one plan three ways — Java
+  *Verified 2026-09-30: `entry.rs` unit tests; the e2e
+  `a_dll_artifact_runs_the_chain_when_a_host_loads_it` (in `tests/cli.rs`) builds
+  the fixture, `LoadLibraryW`/`GetProcAddress`es it in the test process and gets
+  the chain's `42` back from the export.*
+- [x] **Phase D — host matrix, measured.** Run one plan three ways — Java
   (`System.load` + a latch), CPython (`ctypes`), `rundll32` — and record:
   console output, the returned value, the module list of the host, the artifact
   as seen by `dumpbin /exports`, Defender's behaviour on the file before and
@@ -375,6 +388,10 @@ Steps 1–4 of the build are unchanged; what changes is compile and after:
   after `System.load`, to document the lifetime rule).
   *Acceptance:* a new "DLL output" subsection in `docs/measurements.md` with
   the numbers and the exact commands.
+  *Verified 2026-09-30 (CPython + .NET + `rundll32`; **Java not run**, no JDK on
+  the host): `docs/measurements.md` — "DLL output (`build.output.kind: dll`) —
+  host matrix". `dumpbin` was unavailable, so `picaro audit`'s EXPORTS section
+  and `strings` stand in for it. The negative Java case is therefore still open*
 - [ ] **Phase E (parked) — extensions.** Custom stubs with `$ENTRY_BLOCK$`;
   `AttachCurrentThread` from the worker so the JVM cannot exit mid-chain;
   `/DEPENDENTLOADFLAG:0x800` + `/DELAYLOAD` for hosts that load from a mapped
@@ -444,7 +461,7 @@ Declared, not hidden:
 | D-12 | Export names are exempt from the no-literals rule | They are ABI data and must be literal; technique strings stay obfuscated | accepted |
 | D-13 | Custom stubs are rejected with `kind: dll` until Phase E | The custom-stub contract today is `fn main()`; the DLL contract is `$ENTRY_BLOCK$` | accepted (Phase E) |
 | D-14 | `entry: jni_on_load` does not block; the plain export does | Host lifecycle: the JVM owns its process and stays alive, `rundll32` exits the moment the export returns | accepted |
-| D-15 | The intermediate is named after the output stem, and `--crate-name` follows it | The linker records the link output's name in the PE; the artifact should report the name it is delivered under | accepted (verify in Phase D) |
+| D-15 | The intermediate is named after the output stem, and `--crate-name` follows it | The linker records the link output's name in the PE; the artifact should report the name it is delivered under | verified (`strings dist/test_dll.dll` reports `test_dll.dll`) |
 | D-16 | `sleep_obfuscation` is a validation error with `kind: dll` | It encrypts the running image (`GetModuleHandleA(NULL)` + `SizeOfImage`) — the host's, in a DLL build — while the payload is *not* in that image, so it breaks the host without covering the payload | accepted |
 
 ---

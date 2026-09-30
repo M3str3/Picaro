@@ -31,7 +31,7 @@ pub mod pager;
 pub const NAME: &str = "picaro";
 
 /// One-line description, reused by the CLI help and the banner subtitle.
-pub const TAGLINE: &str = "mimicry-based packer";
+pub const TAGLINE: &str = "The plan is the program";
 
 // pub const BANNER: &str = "
 //   ██████╗  █████╗ ████████╗███████╗███████╗██╗ █████╗ ███╗  ██╗

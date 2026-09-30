@@ -1,0 +1,32 @@
+# Host-loaded DLL output, non-blocking variant: the same `kind: dll` artifact as
+# `dll.yaml`, but with a shellcode payload that *returns* 42 instead of opening a
+# dialog. Every host in `examples/hosts/` reports that value, so the examples are
+# copy-paste runnable and automatable; use `dll.yaml` when you want to *see* the
+# payload run.
+#
+#   cargo run -- build examples/plans/dll-shellcode.yaml
+#   python examples/hosts/ctypes_host.py
+#
+# `entry: auto` exports `DllMain`, `JNI_OnLoad` and `Run`, so one artifact works
+# from every host (see `examples/hosts/README.md`). `JNI_OnLoad` is the only
+# entry a JVM needs; the other hosts use `Run`.
+#
+# See docs/design/dll-output.md for the design and docs/measurements.md for the
+# measured host matrix.
+
+schema: 6
+name: dll-shellcode
+
+build:
+  payloads:
+    shellcode:
+      source: ./examples/payloads/demo_shellcode.bin
+      format: shellcode
+
+  output:
+    path: ./dist/dll-shellcode.dll
+    kind: dll
+    entry: auto
+
+runtime:
+  - technique: reflective_loading

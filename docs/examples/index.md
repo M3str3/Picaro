@@ -20,7 +20,8 @@ cargo run -- build examples/plans/<name>.yaml
 | `multistage.yaml` | A flat `runtime:` chain: two shellcodes and a `living_off_the_land` command in one artifact. |
 | `multistage-advanced.yaml` | A richer chain: a `bouncer` gate, indirect syscalls, a `certutil` step, a hollowed EXE, a sleep and a detached proxy. |
 | `lab-signed.yaml` | A self-signed (`mode: lab`) Authenticode signature and an embedded VERSIONINFO. |
-| `dll.yaml` | `output.kind: dll`: the chain ships as a DLL a host process loads (JVM `System.load`, CPython `ctypes`, `rundll32`) instead of a standalone executable. |
+| `dll.yaml` | `output.kind: dll`: the chain ships as a DLL a host process loads (JVM `System.load`, CPython `ctypes`, `rundll32`) instead of a standalone executable. Its payload opens a modal dialog (the visible check). |
+| `dll-shellcode.yaml` | The same `kind: dll` build with a shellcode payload: the chain returns 42, so every host example in `examples/hosts/` reports a value. |
 | `mimikatz.yaml` | A full-featured plan: remote payload URL, indirect syscalls, API resolution (import proxying), `patch_etw`, randomised VERSIONINFO and a lab signature. |
 
 ## Recipe: pack an msfvenom payload

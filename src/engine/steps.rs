@@ -907,7 +907,7 @@ mod tests {
     #[test]
     #[ignore = "requires rustc and the compiled dependencies"]
     fn a_dll_stub_compiles_to_a_library_with_exports() {
-        use crate::engine::compiler;
+        use crate::engine::compiler::{self, CompileOptions};
 
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("build")
@@ -940,7 +940,7 @@ mod tests {
             &main_path,
             &out,
             &deps,
-            compiler::CompileOptions {
+            CompileOptions {
                 kind: OutputKind::Dll,
                 ..CompileOptions::default()
             },

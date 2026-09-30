@@ -24,7 +24,21 @@
 # root-owned; `PICARO_BUILD_DIR` moves the packer's scratch files off the
 # read-only source tree. scripts/picaro.py sets both for you.
 
-FROM rust:1-bookworm
+# Pinned by digest, not by the floating `1-bookworm` tag. That tag is re-pushed
+# with every Rust release (roughly every six weeks) and every Debian bookworm
+# rebuild, and a new base image invalidates every layer below `FROM` — the
+# dependency layer (`COPY Cargo.toml Cargo.lock` plus the placeholder build)
+# included, so a rebuild would recompile the whole tree instead of reusing the
+# cache.
+#
+# The digest is the multi-arch *index* (linux/amd64, arm64, ...), so all
+# architectures keep working; pinning a per-arch digest would break the others.
+# At the time of writing `1-bookworm` == `1.98.1-bookworm` (2026-09-30).
+#
+# To bump: `docker pull rust:1-bookworm`, then
+# `docker image inspect rust:1-bookworm --format '{{index .RepoDigests 0}}'`,
+# and update the digest and the date below.
+FROM rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e
 
 # MinGW-w64 provides `x86_64-w64-mingw32-gcc` and `i686-w64-mingw32-gcc`, the
 # linkers `rustc --target <arch>-pc-windows-gnu` uses to link the stub into a PE.
