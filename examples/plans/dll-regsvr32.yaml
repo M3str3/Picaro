@@ -1,0 +1,32 @@
+# Host-loaded DLL output for `regsvr32`: `entry: export:DllRegisterServer`
+# exports the name regsvr32 calls, so the chain runs under another signed, in-box
+# Windows binary with no shell and no child process of its own.
+#
+#   cargo run -- build examples/plans/dll-regsvr32.yaml
+#   examples\hosts\regsvr32_host.cmd
+#
+# regsvr32 calls `DllRegisterServer` with no arguments. On x64 the export's
+# four-argument shape is harmless (one calling convention, unused slots); on x86
+# `extern "system"` is stdcall and the callee pops four arguments a zero-argument
+# caller never pushed, so keep this plan on x64 (`arch: x86` is rejected with the
+# stdcall four-argument advisory). The default `entry: auto`/`export:Run` artifact
+# is what rundll32 and the FFI hosts use; this plan exists only for regsvr32.
+#
+# See docs/hosts.md for the launcher's measured caveats.
+
+schema: 6
+name: dll-regsvr32
+
+build:
+  payloads:
+    shellcode:
+      source: ./examples/payloads/demo_shellcode.bin
+      format: shellcode
+
+  output:
+    path: ./dist/dll-regsvr32.dll
+    kind: dll
+    entry: export:DllRegisterServer
+
+runtime:
+  - technique: reflective_loading
