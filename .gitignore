@@ -13,6 +13,17 @@ code_examples/
 # Documentation site output (MkDocs).
 /site
 
+# Development container exchange folder (docker-compose.yml): the one host folder
+# shared writable with the containers — msfvenom payloads, plans and packed
+# artifacts go here. Keep the directory itself so a fresh clone has somewhere to
+# point the bind mount.
+/exchange/*
+!/exchange/.gitkeep
+
+# CA material for a corporate TLS-inspecting proxy (PICARO_EXTRA_CA); a trust
+# anchor must never be committed.
+/certs/
+
 # Python bytecode cache (the host examples are Python scripts).
 __pycache__/
 
