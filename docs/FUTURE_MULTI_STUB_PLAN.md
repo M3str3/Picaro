@@ -303,17 +303,13 @@ existing path).
 ## 5. Config surface
 
 ```yaml
-schema: 5
+schema: 6
 name: loader
 
 build:
-  payload:
-    source: "./mimikatz.exe"
-    format: pe
-    crypto: { algo: xchacha20poly1305, key: random }
-  strings:
-    strategy: xor
-    key: random
+  crypto: { algo: xchacha20poly1305, key: random }
+  payloads:
+    implant: { source: "./mimikatz.exe", format: pe }
   stub:
     language: c              # rust (default) | c
     path: "./loader.c"       # custom template; optional
@@ -322,6 +318,9 @@ build:
       cc: clang              # clang | cl | mingw
       path: null             # explicit compiler path
       lib_dirs: []           # extra /LIBPATH: dirs for the link step
+    strings:
+      strategy: xor
+      key: random
   output:
     path: "./dist/loader.exe"
     arch: x64
@@ -380,7 +379,7 @@ Block names are the **registry technique names**
 Rules:
 
 - The `(FORMAT)` argument is optional and is **an assertion, not a
-  selector**: when present it must equal `build.payload.format`,
+  selector**: when present it must equal `build.payloads.<name>.format`,
   otherwise a hard error. Without it, the plan's format applies.
   `PROCESS_HOLLOWING` rejects any format other than `PE`, mirroring
   today's validation.
@@ -464,7 +463,7 @@ touched yet.
 
 ### Phase 2 — Runtime as a library ⬜
 
-- New `templates/runtime/lib.rs.tpl` (today's `main.rs.tpl` minus
+- New `src/engine/templates/runtime/lib.rs.tpl` (today's `main.rs.tpl` minus
   `main`, plus the FFI layer and `picaro_run`).
 - `compiler.rs`: `compile_runtime_lib()` (`--crate-type=staticlib`)
   and `link_c_stub()`; `compile_stub()` stays for
@@ -472,7 +471,7 @@ touched yet.
 - Minimal ABI first: `picaro_init` (singleton), `picaro_marker`,
   `picaro_last_error`, `picaro_print_error`, `picaro_free`,
   `picaro_run`. No granular wrappers yet.
-- Builtin C template `templates/stub/main.c.tpl` = `$PICARO.RUNTIME$`.
+- Builtin C template `src/engine/templates/main.c.tpl` = `$PICARO.RUNTIME$`.
 
 Exit criteria: a C stub built end to end from a YAML, running a
 test payload, with the same observable behaviour as the Rust path
@@ -550,7 +549,7 @@ noise.
 
 - `examples/stubs/loader.c` showing both styles (+ a YAML using it).
 - `docs/` page: the block catalog, a worked C example, toolchain
-  requirements; nav entry in `mkdocs.yml`.
+  requirements; nav entry in `docs/nav.yml`.
 - Manifest fields (`stub.language`, compiler version/path) in
   `engine/manifest.rs`.
 - Wizard: prompt for the language (only after the C path is proven).
@@ -571,9 +570,9 @@ noise.
 | `src/config/schema.rs` | `build.stub.language`, `build.stub.toolchain`, `build.stub.header_out`, top-level `exports:` |
 | `src/config/validate.rs` | language/arch/toolchain validation; `exports:` vs `runtime:` mutual exclusion; block-catalog rules (§5) |
 | `src/main.rs` | dispatch on language in `build()` and `dry_run()`; subsystem for C |
-| `templates/runtime/lib.rs.tpl` | **new** — generated runtime library template |
-| `templates/stub/main.c.tpl` | **new** — builtin C stub (`$PICARO.RUNTIME$`) |
-| `templates/stub/main.rs.tpl` | unchanged |
+| `src/engine/templates/runtime/lib.rs.tpl` | **new** — generated runtime library template |
+| `src/engine/templates/main.c.tpl` | **new** — builtin C stub (`$PICARO.RUNTIME$`) |
+| `src/engine/templates/main.rs.tpl` | unchanged |
 | `src/techniques/**` | fragment text unchanged (verify per technique) |
 | `src/engine/resources/`, `signing.rs` | unchanged (PE post-processing) |
 | `src/audit/**` | unchanged; used as the parity gate |
@@ -629,7 +628,7 @@ Also record: the C path must not regress the Rust path;
 | D-5 | Library compiled per build vs cached | Per build (keeps the per-build minimal binary and dead-code elimination) | agreed |
 | D-6 | Cross-compile support in v1 | Windows host only unless Phase 0 proves the GNU line | decided |
 | D-7 | Payload ownership | Library (no C byte arrays); `picaro_run_image` as a later escape hatch | agreed |
-| D-8 | Block `(FORMAT)` argument | Optional **assertion**; must equal `build.payload.format` or hard error; not a selector | decided |
+| D-8 | Block `(FORMAT)` argument | Optional **assertion**; must equal `build.payloads.<name>.format` or hard error; not a selector | decided |
 | D-9 | `runtime:` in C mode | Forbidden. C mode uses `exports:` (a flat list of techniques compiled into the lib and exposed in the header). Order of calls is decided by the C stub. | decided |
 | D-10 | Multiple / distinct Execution techniques | Distinct Executions in a custom C stub → warning (registry conflict); decrypt once, payload may run N times | decided |
 | D-11 | `$PICARO.$` blocks in Rust custom stubs | Not in v1 (defer) — the Rust path already has its builtin + block mechanism | decided |

@@ -1,12 +1,17 @@
 # AMSI Patch
 
+*Patches `AmsiScanBuffer` in the current process so every scan returns clean,
+disabling in-process AMSI inspection of scripts and .NET content.*
+
 ## Metadata
 
-- **ATT&CK**: T1562.001 (Impair Defenses: Disable or Modify Tools)
-- **Stability**: Stable
-- **Category**: Preparation
-- **YAML key**: `patch_amsi`
-- **Introduced in**: Phase 7
+| | |
+|---|---|
+| **ATT&CK** | T1562.001 (Impair Defenses: Disable or Modify Tools) |
+| **Stability** | Stable |
+| **Category** | Preparation |
+| **YAML key** | `patch_amsi` |
+| **Introduced in** | Phase 7 |
 
 ## What it does
 
@@ -28,8 +33,25 @@ runtime:
 
 ## How it works
 
+```mermaid
+sequenceDiagram
+    participant L as Loader
+    participant A as amsi.dll
+    L->>A: LoadLibraryA(amsi.dll)
+    L->>A: GetProcAddress(AmsiScanBuffer)
+    L->>A: nt_protect_vm(RWX)
+    L->>A: write 29 C0 C3 (sub eax,eax; ret)
+    L->>A: restore original protection
+    Note over L,A: AmsiScanBuffer now returns S_OK
+```
+
+### 1. Resolve the target export
+
 1. Load `amsi.dll` (`LoadLibraryA`, a no-op if already loaded).
 2. Resolve `AmsiScanBuffer` with `GetProcAddress`.
+
+### 2. Overwrite the prologue
+
 3. Make the first three bytes of `AmsiScanBuffer` writable (`nt_protect_vm` →
    `PAGE_EXECUTE_READWRITE`).
 4. Write `sub eax, eax; ret` (`29 C0 C3`): zero EAX (S_OK) and return.

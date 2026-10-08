@@ -13,14 +13,12 @@ use crate::engine::obfuscation::StringsConfig;
 use super::{Capability, Category, Stability, TechniqueDef};
 
 /// Parameters for .NET hosting.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Params {}
-
-impl Default for Params {
-    /// The technique has no parameters.
-    fn default() -> Self {
-        Self {}
-    }
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Params {
+    /// Name of the payload in `build.payloads` to load. Optional when the plan
+    /// declares exactly one payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<String>,
 }
 
 /// Static metadata for .NET hosting.

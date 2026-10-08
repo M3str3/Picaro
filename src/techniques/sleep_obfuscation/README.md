@@ -1,11 +1,17 @@
 # Sleep obfuscation
 
+*Encrypts the process's executable image for the duration of a sleep, so a
+memory scan during the sleep sees RC4 ciphertext instead of the payload.*
+
 ## Metadata
 
-- **ATT&CK**: T1027 (Obfuscated Files or Information)
-- **Stability**: Experimental
-- **YAML key**: `sleep_obfuscation`
-- **Introduced in**: phase 6 (ekko variant)
+| | |
+|---|---|
+| **ATT&CK** | T1027 (Obfuscated Files or Information) |
+| **Stability** | Experimental |
+| **Category** | Preparation |
+| **YAML key** | `sleep_obfuscation` |
+| **Introduced in** | phase 6 (ekko variant) |
 
 ## What it does
 
@@ -42,6 +48,23 @@ runtime:
 
 ## How it works
 
+```mermaid
+sequenceDiagram
+    participant M as Main thread
+    participant T as Timer thread
+    M->>M: VirtualQuery image regions
+    M->>M: flip image to PAGE_READWRITE
+    M->>T: queue timer chain
+    T->>T: RtlCaptureContext
+    T->>T: NtContinue -> encrypt (RC4)
+    T->>T: WaitForSingleObject(sleep_ms)
+    T->>T: NtContinue -> decrypt
+    T->>T: VirtualProtect restore
+    T->>M: SetEvent
+```
+
+### 1. Prepare the image and capture the context
+
 The ekko sequence (all on `CreateTimerQueueTimer` timers flagged
 `WT_EXECUTEINTIMERTHREAD`, so every step runs on the timer thread outside the
 encrypted image):
@@ -58,6 +81,9 @@ encrypted image):
    the target returns, its `ret` lands on the dispatch's return address and
    the hijacked timer thread unwinds cleanly (the ROP chain is the sequence of
    timer callbacks, each entering through `NtContinue`).
+
+### 2. Run the timer-queue ROP chain
+
 5. The chain, queued with staggered due times:
    1. `SystemFunction032` (RC4, resolved from `advapi32`) encrypts the image
       in ≤ 64 KB chunks. Its data parameter is a `struct ustring` whose

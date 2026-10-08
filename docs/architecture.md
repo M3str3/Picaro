@@ -8,50 +8,51 @@ produces a packed PE with the selected evasion techniques applied.
 
 ## Pipeline (build)
 
+```mermaid
+flowchart TD
+    A[YAML plan] --> B[parse + validate]
+    B --> C[read payload: file or URL]
+    C --> D[encrypt: XChaCha20-Poly1305]
+    D --> E[render Rust stub]
+    E --> F[compile with rustc]
+    F --> G[embed PE resources .rsrc]
+    G --> H[sign artifact]
+    H --> I[provenance manifest]
 ```
-picaro build plan.yaml
-    │
-    ├─ 1. Parse YAML, substitute build args, validate   (src/plan)
-    ├─ 2. Read (file or URL) + validate the payload     (src/engine/pe, src/engine/fetch)
-    │      + verify build.payload.sha256 when pinned
-    ├─ 3. Encrypt payload              (src/engine/crypto, XChaCha20-Poly1305)
-    ├─ 4. Render Rust stub             (src/engine/stub, templates/stub/main.rs.tpl)
-    ├─ 5. Compile stub with rustc      (src/engine/compiler, --extern from target/)
-    ├─ 5b. Embed PE resources (.rsrc)  (src/engine/resources)
-    ├─ 6. Copy to output path
-    ├─ 6b. Sign the artifact           (src/engine/signing; signtool or osslsigncode)
-    └─ 7. Write the provenance manifest (src/engine/manifest)
 
 `picaro build plan.yaml --dry-run` stops after step 2 (no encryption,
 compilation or output).
-```
 
 The generated stub decrypts the payload in memory and runs it. No cleartext
 payload touches disk.
 
 ## Technique pipeline model
 
-Each technique is Preparation or Execution (`src/techniques/mod.rs`):
+Each technique is Preparation, Execution or Control (`src/techniques/mod.rs`):
 
 - **Preparation** — modifies the current process state (e.g. `patch_amsi`) but
   never runs the payload.
-- **Execution** — runs the decrypted payload (`process_hollowing`,
-  `reflective_loading`, `dotnet_hosting`).
+- **Execution** — runs a payload (`process_hollowing`, `reflective_loading`,
+  `dotnet_hosting`, `execution_callbacks`, `module_stomping`, `fibers`).
+- **Control** — orchestrates the chain without touching the payload
+  (`living_off_the_land`, `sleep`).
 
-A valid pipeline is `0..N` Preparation techniques followed by exactly one
-Execution technique; `src/plan/validate.rs` rejects anything else, including a
-Preparation placed after the Execution technique.
+The plan is a flat `runtime:` list of steps; `src/plan/steps.rs` resolves it and
+`src/plan/validate.rs` checks the per-step rules (the terminal-step rule above
+all, plus format/arch/capability checks).
 
-The stub renders the pipeline into two placeholders:
+The stub renders the steps into three placeholders:
 
-- `$PREPARATION_BLOCKS$` — the Preparation fragments, each wrapped in its own
-  module (so their `use` statements cannot collide), plus a generated
-  `run_preparations()` dispatcher that calls each one in order.
-- `$EXECUTION_BLOCK$` — the single Execution fragment, injected at the top level
-  (it provides `execute_payload`).
+- `$STEP_MODULES$` — one `mod step_<i>` per step (a Preparation exposes
+  `run() -> Result<bool, _>`, an Execution `payload(image)`, a Control
+  `run() -> Result<i32, _>`), so two steps can reuse a technique without
+  colliding on top-level names.
+- `$STEP_RUNNER_BODY$` — the generated straight-line runner that walks the steps
+  in order, decrypting each payload and applying the declared gating.
+- `$STUB_HELPERS$` — the shared `dec_xor` / `decrypt_step` helpers.
 
-`run()` calls `init_syscalls()?`, then `run_preparations()?`, then
-`execute_payload(&mut image)`.
+`run()` calls `init_syscalls()?`, then the runner. A terminal step
+(`reflective_loading` of a PE executable, `dotnet_hosting`) must be last.
 
 ## Syscall layer (`build.stub.syscalls`)
 
@@ -75,7 +76,7 @@ The stub template renders the layer into `$SYSCALLS_BLOCK$` (a no-op
   only resolves the union of the active pipeline's requirements.
 - All Nt*/DLL names go through `StringsConfig` (or are replaced by hash
   constants), so they never appear in the binary. See
-  [Syscall layer](techniques/indirect_syscalls.md) and
+  [Syscall layer](features/ref/syscalls.md) and
   [Measurements](measurements.md).
 
 ## API resolution (`build.stub.api_resolution`)
@@ -98,16 +99,16 @@ payload (there is no IAT to rewrite otherwise). It is rejected with
 `process_hollowing`, because the proxies live in the loader image, which is not
 mapped in the target. `unmatched` decides what a non-catalogue import does:
 `forward` (default) resolves it normally, `abort` fails the load. Design, phases
-and limitations: [API resolution](api-resolution.md).
+and limitations: [API resolution design](design/api-resolution.md).
 
-## Payload formats (`build.payload.format`)
+## Payload formats (`build.payloads.<name>.format`)
 
 `format` describes the input: `pe` (default), `shellcode`, `dll` or `dotnet`.
 
 - `pe` — a PE32/PE32+ executable. Validated as such; run by either native
   execution technique.
 - `dll` — a PE32/PE32+ library (`IMAGE_FILE_DLL`). The packer rejects a DLL
-  declared as `pe` and vice versa. `build.payload.export` optionally names an
+  declared as `pe` and vice versa. The payload's `export` optionally names an
   exported function to call after `DllMain(DLL_PROCESS_ATTACH)`.
 - `shellcode` — a raw, position-independent code blob with no PE headers. The
   packer only checks that it is non-empty; `reflective_loading` copies the bytes
@@ -122,10 +123,22 @@ and limitations: [API resolution](api-resolution.md).
 `process_hollowing` replaces a suspended process's image, so it only runs
 `format: pe` today and `plan::validate` rejects the other formats with a
 pointer to `reflective_loading`. The format reaches the Execution fragment
-through `RuntimeStep::render_fragment`, which selects the technique's
+through `TechniqueKind::render_fragment`, which selects the technique's
 format-specific fragment.
 
-## Payload arguments (`build.payload.args`)
+## Output kind (`build.output.kind`)
+
+The artifact is a PE **executable**: `compile_stub` compiles the rendered stub
+as a binary through `rustc` and the builtin template ends in `fn main()`.
+
+A host-loaded **DLL** output (`kind: dll`, for hosts that application
+whitelisting already allows — a JVM, CPython, .NET, `rundll32`) is implemented
+in `src/engine/entry.rs` (the entry block) and `src/engine/compiler.rs`
+(`cdylib`); its phases, couplings and limitations are in
+[DLL output design](design/dll-output.md). The lab verification of the host
+matrix (the design's Phase D) is still pending.
+
+## Payload arguments (`build.payloads.<name>.args`)
 
 A packed binary is a stub, so the payload does not inherit the operator's command
 line by itself. `args` fixes arguments at build time; `args_mode` is `join`
@@ -144,25 +157,28 @@ execution techniques use it: `process_hollowing` passes the line as
 `lpCommandLine` to `CreateProcessA`, while `reflective_loading` calls
 `patch_command_line()` before mapping. Token 0 is always the executable name, so
 the payload's `argv[0]` is the exe and its args start at `argv[1]`. See
-[Payload arguments](techniques/process_argument_spoofing.md).
+[Payload arguments](features/ref/args.md).
 
 ## Pipeline (audit)
 
+```mermaid
+flowchart TD
+    A[binary] --> B[PE header + sections + entropy]
+    A --> C[imports / exports]
+    A --> D[strings scan]
+    A --> E[YARA]
+    A --> F[Defender offline scan]
+    B --> G[report]
+    C --> G
+    D --> G
+    E --> G
+    F --> G
+    G --> H[baseline comparison]
 ```
-picaro audit binary [--focus sections] [--json] [--baseline report.json]
-    │
-    ├─ PE header + sections + entropy  (src/audit/pe_info)
-    ├─ imports / exports              (src/audit/pe_info)
-    ├─ strings scan                   (src/audit/strings)
-    ├─ YARA (stub)                    (src/audit/yara)
-    ├─ Defender offline scan          (src/audit/defender)
-    ├─ report                         (src/audit/report)
-    └─ baseline comparison            (src/audit/baseline)
 
 `--json` emits the same data as a serializable `audit::model::Report`;
 `--baseline` compares it against a saved report and fails (exit 3) on a
 regression. `--focus` only affects the pretty output.
-```
 
 ## PE resources (`build.output.resources`)
 
@@ -230,18 +246,16 @@ src/
   plan/     YAML parsing and validation
   engine/     crypto, pe parsing, stub generation, compilation, syscall layer,
               imports, api_resolution, args, resources (icon/VERSIONINFO/
-              manifest), identity, signing, manifest, hash
+              manifest), identity, signing, manifest, hash, builtin stub template
   audit/      static measurement (pe_info, strings, yara, defender, report)
   techniques/ one directory per technique + the registry (mod.rs)
   error.rs    top-level error types
   ui.rs       terminal output: banner, palette, formatting primitives
-templates/
-  stub/       Rust stub template with $placeholders$
 examples/
   plans/    example YAMLs
   payloads/   test payloads
-yara/         YARA rules (engine not wired yet)
-docs/         this file + the rest of the book
+docs/         this file + the rest of the book; the navigation is docs/nav.yml
+docs/site/    the Starlight site project (assembler, config, Dockerfile)
 build/        (gitignored) intermediate artifacts
 dist/         (gitignored) final packed binaries
 ```

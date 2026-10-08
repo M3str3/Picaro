@@ -1,0 +1,1 @@
+--8<-- "src/techniques/fibers/README.md"

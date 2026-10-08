@@ -2,16 +2,17 @@
 
 use super::{default_target, Params, DEF};
 use crate::engine::obfuscation::{StringStrategy, StringsConfig};
-use crate::techniques::RuntimeStep;
+use crate::techniques::TechniqueKind;
 
 #[test]
 fn parses_params_with_default_target() {
-    let step: RuntimeStep = serde_yml::from_str("technique: process_hollowing\n")
+    let step: TechniqueKind = serde_yml::from_str("technique: process_hollowing\n")
         .expect("process_hollowing without target should parse");
     assert_eq!(
         step,
-        RuntimeStep::ProcessHollowing {
+        TechniqueKind::ProcessHollowing {
             params: Params {
+                payload: None,
                 target: default_target(),
             }
         }
@@ -20,7 +21,7 @@ fn parses_params_with_default_target() {
 
 #[test]
 fn parses_params_with_explicit_target() {
-    let step: RuntimeStep = serde_yml::from_str(
+    let step: TechniqueKind = serde_yml::from_str(
         r#"technique: process_hollowing
 params:
   target: "C:\\Windows\\System32\\notepad.exe""#,
@@ -28,8 +29,9 @@ params:
     .expect("process_hollowing with target should parse");
     assert_eq!(
         step,
-        RuntimeStep::ProcessHollowing {
+        TechniqueKind::ProcessHollowing {
             params: Params {
+                payload: None,
                 target: r"C:\Windows\System32\notepad.exe".to_string(),
             }
         }
@@ -39,6 +41,7 @@ params:
 #[test]
 fn render_fragment_substitutes_and_obfuscates_target() {
     let params = Params {
+        payload: None,
         target: r"C:\Windows\System32\svchost.exe".to_string(),
     };
     let strings = StringsConfig {

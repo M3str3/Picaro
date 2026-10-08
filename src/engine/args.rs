@@ -4,10 +4,10 @@
 //! and runs it. The payload must still see a command line, built from two
 //! sources:
 //!
-//! - the fixed arguments declared in the YAML (`build.payload.args`), and
+//! - the fixed arguments declared in the YAML (`build.payloads.<name>.args`), and
 //! - the arguments the operator passes to the packed binary itself (`argv[1..]`).
 //!
-//! `build.payload.args_mode` decides how they combine ([`ArgsMode::Join`] by
+//! `build.payloads.<name>.args_mode` decides how they combine ([`ArgsMode::Join`] by
 //! default: YAML first, runtime after; [`ArgsMode::Override`]: the runtime args
 //! replace the YAML ones when present).
 //!
@@ -30,7 +30,7 @@ use crate::techniques::{Category, RuntimeStep};
 
 use super::obfuscation::StringsConfig;
 
-/// How `build.payload.args` combine with the packed binary's runtime args.
+/// How `build.payloads.<name>.args` combine with the packed binary's runtime args.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ArgsMode {
@@ -61,43 +61,32 @@ pub fn needed(pipeline: &[RuntimeStep]) -> bool {
         .any(|step| step.category() == Category::Execution)
 }
 
-/// Renders the `$ARGS_BLOCK$` fragment for the given payload configuration.
+/// Renders the `$ARGS_BLOCK$` fragment.
 ///
-/// Emits an empty string when no active technique executes the payload.
-pub fn render_block(
-    yaml_args: &[String],
-    mode: ArgsMode,
-    pipeline: &[RuntimeStep],
-    strings: &StringsConfig,
-) -> String {
+/// The YAML args and the mode are read from a **thread-local step context** the
+/// generated runner sets before each execution step (`crate::set_stage_args`).
+/// That lets every step deliver its own `build.payloads.<name>.args` while the technique
+/// fragments keep calling `crate::patch_command_line` /
+/// `crate::build_command_line` unchanged.
+///
+/// Emits an empty string when no active technique executes the payload, so a
+/// preparation-only runtime gets no block at all.
+pub fn render_block(pipeline: &[RuntimeStep], strings: &StringsConfig) -> String {
+    let _ = strings;
     if !needed(pipeline) {
         return String::new();
     }
 
-    // Each YAML arg becomes a runtime-reconstructed `String` expression, so a
-    // suspicious literal (e.g. a mimikatz module) never lands in `.rdata`.
-    let defs = if yaml_args.is_empty() {
-        "vec![]".to_string()
-    } else {
-        let mut body = String::from("vec![\n");
-        for (i, arg) in yaml_args.iter().enumerate() {
-            let expr = strings
-                .obfuscate(arg)
-                .render_stub_expr(&format!("payload_arg_{i}"));
-            body.push_str(&format!("            {expr},\n"));
-        }
-        body.push_str("        ]");
-        body
-    };
-
-    let mode_def = match mode {
-        ArgsMode::Join => "ArgsMode::Join",
-        ArgsMode::Override => "ArgsMode::Override",
-    };
-
     ARGS_BLOCK
-        .replace("$YAML_ARGS_DEF$", &defs)
-        .replace("$ARGS_MODE_DEF$", mode_def)
+        .replace(
+            "    /// The resolved `build.payloads.<name>.args_mode`.\n    const ARGS_MODE: ArgsMode = $ARGS_MODE_DEF$;\n\n    /// The `build.payloads.<name>.args` from the YAML, rebuilt at runtime.\n    fn yaml_args() -> Vec<String> {\n        $YAML_ARGS_DEF$\n    }",
+            "    thread_local! {\n        static STAGE_ARGS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };\n        static STAGE_MODE: std::cell::Cell<ArgsMode> = const { std::cell::Cell::new(ArgsMode::Join) };\n    }\n\n    /// Sets the current step's YAML args and mode (called by the generated runner).\n    pub fn set_stage_args(args: Vec<String>, override_mode: bool) {\n        STAGE_ARGS.with(|cell| *cell.borrow_mut() = args);\n        STAGE_MODE.with(|cell| cell.set(if override_mode { ArgsMode::Override } else { ArgsMode::Join }));\n    }\n\n    /// The current step's `build.payloads.<name>.args`, set by the runner.\n    fn yaml_args() -> Vec<String> {\n        STAGE_ARGS.with(|cell| cell.borrow().clone())\n    }",
+        )
+        .replace("match ARGS_MODE {", "match STAGE_MODE.with(|cell| cell.get()) {")
+        .replace(
+            "use payload_args::{build_command_line, patch_command_line, payload_arguments};",
+            "use payload_args::{build_command_line, patch_command_line, payload_arguments, set_stage_args};",
+        )
 }
 
 /// The block body. It is wrapped in `mod payload_args` so its `use`/items
@@ -105,7 +94,7 @@ pub fn render_block(
 /// the two entry points are re-exported so the fragments call
 /// `crate::build_command_line` / `crate::patch_command_line`.
 const ARGS_BLOCK: &str = r##"mod payload_args {
-    /// How the YAML args combine with the runtime args (`build.payload.args_mode`).
+    /// How the YAML args combine with the runtime args (`build.payloads.<name>.args_mode`).
     #[allow(dead_code)]
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum ArgsMode {
@@ -113,10 +102,10 @@ const ARGS_BLOCK: &str = r##"mod payload_args {
         Override,
     }
 
-    /// The resolved `build.payload.args_mode`.
+    /// The resolved `build.payloads.<name>.args_mode`.
     const ARGS_MODE: ArgsMode = $ARGS_MODE_DEF$;
 
-    /// The `build.payload.args` from the YAML, rebuilt at runtime.
+    /// The `build.payloads.<name>.args` from the YAML, rebuilt at runtime.
     fn yaml_args() -> Vec<String> {
         $YAML_ARGS_DEF$
     }
@@ -498,24 +487,19 @@ mod tests {
 
     #[test]
     fn an_unneeded_block_is_empty() {
-        let block = render_block(&[], ArgsMode::Join, &preparation(), &xor_config());
+        let block = render_block(&preparation(), &xor_config());
         assert!(block.is_empty(), "unexpected block: {block}");
     }
 
     #[test]
-    fn emits_the_mode_and_the_helpers() {
-        let block = render_block(
-            &["a".to_string()],
-            ArgsMode::Override,
-            &execution(),
-            &xor_config(),
-        );
-        assert!(block.contains("const ARGS_MODE: ArgsMode = ArgsMode::Override;"));
+    fn emits_the_step_args_context_and_the_helpers() {
+        let block = render_block(&execution(), &xor_config());
+        assert!(block.contains("pub fn set_stage_args("));
         assert!(block.contains("pub fn build_command_line"));
         assert!(block.contains("pub fn patch_command_line"));
         assert!(
             block.contains(
-                "use payload_args::{build_command_line, patch_command_line, payload_arguments};"
+                "use payload_args::{build_command_line, patch_command_line, payload_arguments, set_stage_args};"
             ),
             "helpers not re-exported: {block}"
         );
@@ -524,42 +508,22 @@ mod tests {
     }
 
     #[test]
-    fn yaml_args_are_obfuscated() {
-        let args = vec![
-            "privilege::debug".to_string(),
-            "sekurlsa::logonpasswords".to_string(),
-        ];
-        let block = render_block(&args, ArgsMode::Join, &execution(), &xor_config());
-        for arg in &args {
-            assert!(
-                !block.contains(arg.as_str()),
-                "cleartext argument '{arg}' leaked: {block}"
-            );
-        }
-        assert!(block.contains("crate::dec_xor"));
-        assert_eq!(
-            block.matches("crate::dec_xor").count(),
-            args.len(),
-            "every argument must be emitted: {block}"
+    fn the_block_reads_the_step_context() {
+        let block = render_block(&execution(), &xor_config());
+        assert!(
+            block.contains("STAGE_MODE.with(|cell| cell.get())"),
+            "the mode must come from the step context: {block}"
+        );
+        assert!(
+            !block.contains("const ARGS_MODE"),
+            "no baked-in mode should remain: {block}"
         );
     }
 
     #[test]
     fn stack_strategy_avoids_the_decoder() {
-        let args = vec!["sekurlsa::logonpasswords".to_string()];
-        let block = render_block(&args, ArgsMode::Join, &execution(), &stack_config());
+        let block = render_block(&execution(), &stack_config());
         assert!(!block.contains("dec_xor"));
-        assert!(!block.contains("sekurlsa::logonpasswords"));
-        assert!(block.contains("std::hint::black_box"));
-    }
-
-    #[test]
-    fn no_args_still_renders_an_empty_vec() {
-        let block = render_block(&[], ArgsMode::Join, &execution(), &xor_config());
-        assert!(block.contains("fn yaml_args() -> Vec<String>"));
-        assert!(
-            block.contains("vec![]"),
-            "expected an empty arg list: {block}"
-        );
+        assert!(block.contains("set_stage_args"));
     }
 }

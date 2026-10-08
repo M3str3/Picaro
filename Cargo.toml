@@ -11,7 +11,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_yml = "0.0.12"
 # JSON output for `audit --json` and the build manifest.
 serde_json = "1"
-# SHA-256 for build provenance and `build.payload.sha256` pinning.
+# SHA-256 for build provenance and `build.payloads.<name>.sha256` pinning.
 sha2 = "0.10"
 # Authenticated payload encryption: ChaCha20-Poly1305.
 chacha20poly1305 = "0.10"
@@ -36,6 +36,10 @@ anstyle = "1"
 # for `picaro build interactive`. Used only when stdin/stdout is a terminal;
 # scripted/redirected input falls back to a plain line reader.
 inquire = "0.7"
+# Terminal control for the built-in pager used by `techniques show`. Reuses the
+# version already in the tree via `inquire`'s crossterm dependency instead of
+# pulling a second copy.
+crossterm = "0.25"
 # Windows FFI (windows-rs). Only the generated stub uses it, but it is declared
 # here so its .rlib is available under target/ for `rustc --extern`.
 windows = { version = "0.58", features = [
@@ -71,4 +75,8 @@ windows = { version = "0.58", features = [
     "Win32_System_Ole",
     # dotnet_hosting: the VARIANT the hosting calls exchange.
     "Win32_System_Variant",
+    # self_deletion: CreateFileW + the FILE_SHARE_* / OPEN_EXISTING constants.
+    "Win32_Storage_FileSystem",
+    # DLL output: AttachConsole (attach the console of the host that loaded us).
+    "Win32_System_Console",
 ] }

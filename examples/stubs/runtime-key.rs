@@ -1,26 +1,14 @@
-// Custom stub that reads the key from argv instead of embedding it.
-// The packer does NOT embed the key: PAYLOAD_KEY_DEF is not referenced
-// below, so the key only arrives at runtime via argv.
+// Custom stub that takes a value from a build argument instead of embedding it.
 //
-// Usage: ./out.exe <hex_key>
+// A `name=value` CLI argument becomes `$ARG_<name>$` at build time, so nothing
+// derived from it lands in the artifact:
+//
+//   picaro build <plan.yaml> key=<hex>
+//
+// This stub only illustrates the substitution; it ignores the technique blocks,
+// so the packer prints a warning (the declared techniques will have no effect).
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        eprintln!("usage: {} <hex_key>", args[0]);
-        std::process::exit(1);
-    }
-    let key_bytes = hex::decode(&args[1]).expect("invalid hex key");
-    if key_bytes.len() != 32 {
-        eprintln!("key must be 32 bytes (64 hex chars)");
-        std::process::exit(1);
-    }
-
-    let ciphertext: Vec<u8> = $PAYLOAD_BYTES$.to_vec();
-    let nonce = $PAYLOAD_NONCE_DEF$;
-
-    // decrypt with chacha20poly1305::XChaCha20Poly1305
-    // ... el usuario escribe esta parte ...
-
-    println!("decrypted {} bytes", plaintext.len());
+    let key: String = $ARG_key$;
+    println!("configured key length: {}", key.len());
 }

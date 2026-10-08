@@ -1,0 +1,47 @@
+# Multi-step plan (schema 6): several payloads in one artifact.
+#
+# `runtime:` is an ordered list of technique steps:
+#   - `reflective_loading` runs an embedded payload (here a shellcode). The
+#     shellcode is `demo_shellcode.bin` (x64 `mov eax, 42; ret`), so it returns
+#     control and the chain continues.
+#   - `living_off_the_land` launches a process (a signed Microsoft binary or any
+#     command). Here `cmd /c echo` stands in for a real LOLBin.
+#
+#   cargo run -- build examples/plans/multistage.yaml
+#   .\dist\multistage.exe ; echo $LASTEXITCODE   # the last step's code (42)
+#
+# A `reflective_loading` step that runs a PE *executable* would be terminal (a
+# normal EXE calls `ExitProcess`); it is rejected unless it is the last step.
+# Use `process_hollowing` or a `living_off_the_land` step to chain more work.
+
+schema: 6
+name: multistage
+
+build:
+  payloads:
+    first:
+      source: ./examples/payloads/demo_shellcode.bin
+      format: shellcode
+    second:
+      source: ./examples/payloads/demo_shellcode.bin
+      format: shellcode
+  stub:
+    strings:
+      strategy: xor
+      key: random
+  output:
+    path: ./dist/multistage.exe
+
+runtime:
+  - technique: reflective_loading
+    params: { payload: first }
+
+  - technique: living_off_the_land
+    params:
+      binary: cmd.exe
+      args: ["/c", "echo", "picaro multistage"]
+      wait: true
+      window: hidden
+
+  - technique: reflective_loading
+    params: { payload: second }

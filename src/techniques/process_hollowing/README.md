@@ -1,11 +1,17 @@
 # Process hollowing
 
+*Replace a suspended process's image with the payload, so the payload runs from
+a legitimate process (`svchost.exe`) it was never loaded into from disk.*
+
 ## Metadata
 
-- **ATT&CK**: T1055.012 (Process Injection: Process Hollowing)
-- **Stability**: Experimental
-- **YAML key**: `process_hollowing`
-- **Introduced in**: Phase 4
+| | |
+|---|---|
+| **ATT&CK** | T1055.012 — Process Injection: Process Hollowing |
+| **Stability** | Experimental |
+| **Category** | Execution |
+| **YAML key** | `process_hollowing` |
+| **Introduced in** | Phase 4 |
 
 ## What it does
 
@@ -31,6 +37,24 @@ runtime:
 
 ## How it works
 
+```mermaid
+sequenceDiagram
+    participant L as Loader
+    participant T as Target (svchost.exe)
+    L->>T: CreateProcessA(CREATE_SUSPENDED)
+    L->>L: read thread ctx -> PEB -> image base
+    L->>T: load payload DLLs (remote LoadLibraryA)
+    L->>T: NtUnmapViewOfSection (hollow)
+    L->>T: NtAllocateVirtualMemory(RWX)
+    L->>T: write headers + sections
+    Note over T: fix relocations · resolve IAT · provision TLS
+    L->>T: NtSetThreadContext(RIP -> entry)
+    L->>T: NtResumeThread
+    T->>T: payload runs as svchost.exe
+```
+
+### 1. Create the target and park its loader
+
 1. Create a legitimate process (`svchost.exe`) suspended with
    `CreateProcessA(..., CREATE_SUSPENDED)`.
 2. Read the suspended thread's context to find the PEB (`Rdx` on x64) and, from
@@ -41,6 +65,9 @@ runtime:
    (so the loader has mapped the process's default DLLs and populated
    `PEB->Ldr`), then suspend it again. The original image is unmapped later, so
    the patched bytes never need restoring.
+
+### 2. Hollow the image and write the payload
+
 4. **Load the payload's imported DLLs in the target.** Each imported DLL name
    is written into the target and loaded there with a remote thread that calls
    `LoadLibraryA` (`NtCreateThreadEx` through the syscall layer), so the target
@@ -49,8 +76,12 @@ runtime:
 6. Allocate memory at the same base (`MEM_COMMIT | MEM_RESERVE`,
    `PAGE_EXECUTE_READWRITE`).
 7. Fix up base relocations if the preferred image base changed.
-8. Resolve the payload's import table and fill in its IAT (see below).
+8. Resolve the payload's import table and fill in its IAT (see
+   [Import resolution](#import-resolution)).
 9. Write the payload's headers and sections.
+
+### 3. Provision TLS and hand the thread off
+
 10. **Provision the payload's TLS** (see below): a real TLS index allocated in
     the target, the index published where the payload reads `_tls_index`, and a
     per-thread copy of the `.tls` template pointed at by the main thread's TLS
@@ -61,7 +92,7 @@ runtime:
 
 ### Import resolution
 
-Step 6 walks the payload's import descriptors and, for every thunk, calls
+Step 8 walks the payload's import descriptors and, for every thunk, calls
 `LoadLibraryA` + `GetProcAddress` and writes the resulting address into the
 payload's IAT slot, before the image is written to the target. This is the same
 walk reflective loading uses; both share the resolver injected as
@@ -78,23 +109,21 @@ target has that DLL mapped — which step 4 guarantees. API set names
 schema; `LoadLibraryA` therefore returns the contract host's module (with a
 family-based fallback for the CRT contracts).
 
-> **Known limitation (open).** The payload's **TLS callbacks** are not run yet.
-> A callback has to run on a thread, and a freshly created (never started)
-> thread has no TLS array in its TEB, so its slot cannot be provisioned the way
-> the main thread's is. The TLS *index*, the per-thread template copy and the
-> main thread's slot **are** provisioned (step 10), so a payload whose CRT reads
-> thread-local state now runs; a payload that needs its `DLL_PROCESS_ATTACH`
-> callback for something else still loses that init. Taking the callback thread
-> through a started state first (or hand-building its TLS array) is the
-> follow-up; evidence in `docs/techniques/process_hollowing.md`.
+> The payload's **TLS callbacks** run now. The TLS *index*, the per-thread
+> template copy and the main thread's slot **are** provisioned (step 10), and
+> the `DLL_PROCESS_ATTACH` callbacks are invoked on the main thread via a
+> `jmp $` parking stub before the entry-point hand-off, so a payload whose CRT
+> relies on its TLS init completes. Runtime verification of the callbacks on a
+> Defender-off host is still pending; evidence in
+> `docs/techniques/process_hollowing.md`.
 
 ### Payload arguments
 
-The command line passed to `CreateProcessA` is built from `build.payload.args`
+The command line passed to `CreateProcessA` is built from `build.payloads.<name>.args`
 plus the args the operator passes to the packed binary, combined by
-`build.payload.args_mode` (`join`/`override`). The shared helper lives in
+`build.payloads.<name>.args_mode` (`join`/`override`). The shared helper lives in
 `src/engine/args.rs` (`$ARGS_BLOCK$`); see
-`docs/techniques/process_argument_spoofing.md`.
+`src/features/args/README.md`.
 
 The line is `<target exe name> <args>`: **token 0 is the executable name, never
 an argument**, so the payload's `argv[0]` is `svchost.exe` and the payload args

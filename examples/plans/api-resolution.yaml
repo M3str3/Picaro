@@ -1,0 +1,43 @@
+# API resolution proxy: `build.stub.api_resolution` serves the selected payload
+# imports from proxies generated inside the loader, rebuilt on the NT calls
+# through the syscall layer. The shadowed names never enter the loader's IAT.
+#
+#   cargo run -- build examples/plans/api-resolution.yaml
+#   .\dist\api_resolution_packed.exe
+#
+# Requirements (enforced by validation):
+#   - `syscalls.mode: indirect` and a `pe`/`dll` payload;
+#   - `reflective_loading` (the proxies live in the loader image, so
+#     `process_hollowing` is rejected).
+#
+# `unmatched: forward` leaves any non-catalogue import untouched; `abort` instead
+# fails the load on the first one (with a build-time advisory).
+
+schema: 6
+name: api-resolution
+
+build:
+  payloads:
+    payload:
+      source: ./examples/payloads/test_payload.exe
+  stub:
+    syscalls:
+      mode: indirect
+      resolver: hells_gate
+    strings:
+      strategy: xor
+    api_resolution:
+      mode: proxy
+      apis:
+        - "kernel32!ReadProcessMemory"
+        - "kernel32!OpenProcess"
+        - "kernel32!GetProcAddress"
+        - "ntdll!NtReadVirtualMemory"
+        - "ntdll!NtOpenProcess"
+      unmatched: forward
+  output:
+    path: ./dist/api_resolution_packed.exe
+
+runtime:
+  - technique: patch_etw
+  - technique: reflective_loading

@@ -32,7 +32,7 @@ pub enum PackerError {
     },
 
     /// The stub template could not be read: the custom loader stub
-    /// (`build.stub.path`) or the builtin one (`templates/stub/main.rs.tpl`).
+    /// (`build.stub.path`) or the builtin one (`src/engine/templates/main.rs.tpl`).
     #[error("could not read loader stub '{path}': {source}")]
     ReadLoader {
         path: PathBuf,
@@ -75,6 +75,10 @@ pub enum PackerError {
     /// PE resource embedding error.
     #[error("resources: {0}")]
     Resources(#[from] crate::engine::resources::ResourceError),
+
+    /// Error acquiring the per-output build lock.
+    #[error("build lock: {0}")]
+    BuildLock(#[from] crate::engine::build_lock::BuildLockError),
 
     /// Artifact signing error.
     #[error("signing: {0}")]

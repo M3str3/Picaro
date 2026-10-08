@@ -306,12 +306,12 @@ fn render_strings(pe: &PeAudit, strings: &StringFindings, ui: &Palette) -> Strin
 fn render_yara(yara: &YaraResult, ui: &Palette) -> String {
     let mut out = section(ui, "YARA", None);
     if yara.matches.is_empty() {
-        out.push_str(&status_line(
-            ui,
-            ui.check(),
-            ui.dim("no matches"),
-            Some(format!("({})", yara.note)),
-        ));
+        let note = if yara.note.is_empty() {
+            None
+        } else {
+            Some(format!("({})", yara.note))
+        };
+        out.push_str(&status_line(ui, ui.check(), ui.dim("no matches"), note));
     } else {
         for m in &yara.matches {
             out.push_str(&format!("{} {}\n", ui.bang(), ui.error(m)));

@@ -4,20 +4,15 @@
 #   cargo run -- build examples/plans/reflective-loading.yaml
 #   .\dist\test_packed_reflective.exe
 
-schema: 4
+schema: 6
 name: reflective-loading
 
 build:
-  payload:
-    source: ./examples/payloads/test_payload.exe
-    crypto:
-      algo: xchacha20poly1305
-      key: random
+  payloads:
+    payload:
+      source: ./examples/payloads/test_payload.exe
   output:
     path: ./dist/test_packed_reflective.exe
-    arch: x64
-    strip: true
-    trim_paths: all
 
 runtime:
   - technique: reflective_loading

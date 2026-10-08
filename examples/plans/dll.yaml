@@ -1,0 +1,50 @@
+# Host-loaded DLL output: `output.kind: dll` builds the same chain as a DLL a
+# host process loads, instead of a standalone `.exe`. That is what makes it
+# usable where application whitelisting (SRP / AppLocker / a GPO) only allows
+# certain programs and the allowed program is an interpreter: a DLL is not a
+# program, so the policy's program rules never apply to it.
+#
+# `entry: auto` exports every entry point, so one artifact works from any host:
+#
+#   Java      System.load("C:\\path\\to\\dll-loader.dll");
+#             JNI_OnLoad starts the chain and returns at once; the JVM owns the
+#             process lifetime, so the program has to stay alive long enough (a
+#             `main` that loads the DLL and returns kills the chain).
+#   CPython   import ctypes; ctypes.CDLL(r"C:\path\to\dll-loader.dll").Run()
+#             The plain export waits for the chain and returns its code.
+#   .NET      [DllImport("dll-loader.dll")] static extern int Run();
+#   rundll32  rundll32 dll-loader.dll,Run
+#
+# For delivery, pick a host-specific `entry` (`jni_on_load` or `export:<name>`):
+# `auto` advertises `JNI_OnLoad` next to `Run`, which no ordinary DLL does.
+#
+# The DLL must match the host's bitness (it runs in-process), and the host loads
+# it with the normal image loader, so it is scanned on load — `output.sign` is
+# the mitigation with the most value here. `subsystem`, `resources.manifest`,
+# `self_deletion` and `bouncer` with `on_fail: exit` are rejected for DLL
+# builds: the host owns the process. See docs/design/dll-output.md.
+#
+#   cargo run -- build examples/plans/dll.yaml
+
+schema: 6
+name: dll-loader
+
+build:
+  payloads:
+    shellcode:
+      source: ./examples/payloads/msgbox.exe
+
+  stub:
+    syscalls:
+      mode: indirect
+      resolver: hells_gate
+    strings:
+      strategy: xor
+
+  output:
+    path: ./dist/dll-loader.dll
+    kind: dll
+    entry: auto
+
+runtime:
+  - technique: reflective_loading

@@ -2,15 +2,15 @@
 
 use super::{EncryptRegion, Params, Variant, DEF};
 use crate::engine::obfuscation::StringsConfig;
-use crate::techniques::RuntimeStep;
+use crate::techniques::TechniqueKind;
 
 #[test]
 fn parses_params_with_defaults() {
-    let step: RuntimeStep =
+    let step: TechniqueKind =
         serde_yml::from_str("technique: sleep_obfuscation\n").expect("should parse");
     assert_eq!(
         step,
-        RuntimeStep::SleepObfuscation {
+        TechniqueKind::SleepObfuscation {
             params: Params {
                 variant: Variant::Ekko,
                 sleep_ms: 5000,
@@ -22,13 +22,13 @@ fn parses_params_with_defaults() {
 
 #[test]
 fn parses_explicit_params() {
-    let step: RuntimeStep = serde_yml::from_str(
+    let step: TechniqueKind = serde_yml::from_str(
         "technique: sleep_obfuscation\nparams:\n  variant: cronos\n  sleep_ms: 1234\n  encrypt_regions: [payload, stack]\n",
     )
     .expect("should parse");
     assert_eq!(
         step,
-        RuntimeStep::SleepObfuscation {
+        TechniqueKind::SleepObfuscation {
             params: Params {
                 variant: Variant::Cronos,
                 sleep_ms: 1234,
@@ -40,7 +40,7 @@ fn parses_explicit_params() {
 
 #[test]
 fn rejects_unknown_variant() {
-    let err = serde_yml::from_str::<RuntimeStep>(
+    let err = serde_yml::from_str::<TechniqueKind>(
         "technique: sleep_obfuscation\nparams:\n  variant: banana\n",
     )
     .expect_err("an unknown variant must fail");
@@ -50,7 +50,7 @@ fn rejects_unknown_variant() {
 
 #[test]
 fn rejects_unknown_encrypt_region() {
-    let err = serde_yml::from_str::<RuntimeStep>(
+    let err = serde_yml::from_str::<TechniqueKind>(
         "technique: sleep_obfuscation\nparams:\n  encrypt_regions: [banana]\n",
     )
     .expect_err("an unknown region must fail");
@@ -60,12 +60,12 @@ fn rejects_unknown_encrypt_region() {
 
 #[test]
 fn parses_bare_all_region_scalar() {
-    let step: RuntimeStep =
+    let step: TechniqueKind =
         serde_yml::from_str("technique: sleep_obfuscation\nparams:\n  encrypt_regions: all\n")
             .expect("the bare 'all' scalar should parse");
     assert_eq!(
         step,
-        RuntimeStep::SleepObfuscation {
+        TechniqueKind::SleepObfuscation {
             params: Params {
                 variant: Variant::Ekko,
                 sleep_ms: 5000,
@@ -141,6 +141,7 @@ fn render_fragment_obfuscates_api_names() {
         "$NT_CONTINUE_DEF$",
         "$SYSTEM_FUNCTION_032_DEF$",
         "$SLEEP_MS$",
+        "$SLEEP_KEY_DEF$",
     ] {
         assert!(
             !fragment.contains(placeholder),
@@ -198,45 +199,37 @@ fn compiles_sleep_obfuscation_stub_to_pe() {
 
     let template = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("templates")
-            .join("stub")
+            .join("src").join("engine").join("templates")
             .join("main.rs.tpl"),
     )
     .unwrap();
-    let params = crate::engine::stub::StubParams {
-        nonce: encrypted.nonce,
-        key: encrypted.key,
-        ciphertext: encrypted.ciphertext.clone(),
-        plaintext_len: encrypted.plaintext_len,
-        payload_format: crate::plan::schema::PayloadFormat::Pe,
-        payload_export: None,
-        stub_marker: crate::engine::stub::generate_stub_marker(),
-        payload_path: "payload.bin".to_string(),
-        build_args: std::collections::BTreeMap::new(),
-        payload_args: Vec::new(),
-        args_mode: crate::engine::args::ArgsMode::Join,
-        debug: false,
-        windows_subsystem: false,
-    };
     let pipeline = vec![
-        RuntimeStep::SleepObfuscation {
+        crate::techniques::RuntimeStep::new(TechniqueKind::SleepObfuscation {
             params: Params {
                 variant: Variant::Ekko,
                 sleep_ms: 5000,
                 encrypt_regions: vec![EncryptRegion::Payload],
             },
-        },
-        RuntimeStep::ReflectiveLoading {
-            params: crate::techniques::reflective_loading::Params {},
-        },
+        }),
+        crate::techniques::RuntimeStep::new(TechniqueKind::ReflectiveLoading {
+            params: crate::techniques::reflective_loading::Params::default(),
+        }),
     ];
     let strings = StringsConfig::from_yaml(None).unwrap();
-    let stub_src = crate::engine::stub::render_main_rs(
+    let params = crate::engine::steps::test_params(
+        &pipeline,
+        &encrypted,
+        "payload.bin",
+        crate::plan::schema::PayloadFormat::Pe,
+        None,
+        false,
+    );
+    let stub_src = crate::engine::steps::render_builtin(
         &template,
         &params,
-        &pipeline,
         &strings,
         &crate::engine::syscalls::SyscallsConfig::default(),
+        &crate::engine::api_resolution::ApiResolutionConfig::default(),
     )
     .unwrap();
     let stub_path = build_dir.join("main.rs");

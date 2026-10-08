@@ -1,0 +1,70 @@
+# picaro — documentation navigation (single source of truth).
+#
+# This file holds only the navigation, which two consumers read:
+#   1. `docs/site/scripts/assemble-docs.mjs`, which generates the Starlight
+#      sidebar from it when the site is built.
+#   2. the Rust tests `every_technique_is_documented` / `every_feature_is_documented`
+#      in `src/techniques/mod.rs` / `src/features/mod.rs`, which assert that every
+#      registered technique/feature has a `techniques/ref/<name>.md` /
+#      `features/ref/<name>.md` entry here.
+#
+# Every entry is `label: <path>` where the path is relative to `docs/`. A page
+# whose only content is `--8<-- "src/…/README.md"` is rendered straight from that
+# README at build time, so the technique/feature docs are the same Markdown as the
+# source — never a copy that can drift.
+
+nav:
+  - Home: index.md
+  - Getting started:
+    - Getting started: getting-started.md
+    - Plan: plan.md
+    - Examples: examples/index.md
+  - Loader features:
+    - Overview: features/index.md
+    - Direct/Indirect syscalls: features/ref/syscalls.md
+    - API Proxy wrapper: features/ref/api_resolution.md
+    - String obfuscation: features/ref/strings.md
+    - Console args: features/ref/args.md
+    - Adding a feature: features/adding-a-feature.md
+  - Hosts:
+      - Host catalogue: hosts.md
+  - Techniques:
+      - Overview: techniques/index.md
+      - AMSI Patch: techniques/ref/patch_amsi.md
+      - ETW Patch: techniques/ref/patch_etw.md
+      - Anti-debug: techniques/ref/anti_debug.md
+      - Sleep obfuscation: techniques/ref/sleep_obfuscation.md
+      - Bouncer: techniques/ref/bouncer.md
+      - Unhook ntdll: techniques/ref/unhook_ntdll.md
+      - Guardrail: techniques/ref/guardrail.md
+      - Process hollowing: techniques/ref/process_hollowing.md
+      - Process ghosting: techniques/ref/process_ghosting.md
+      - Reflective loading: techniques/ref/reflective_loading.md
+      - .NET hosting: techniques/ref/dotnet_hosting.md
+      - Execution callbacks: techniques/ref/execution_callbacks.md
+      - Module stomping: techniques/ref/module_stomping.md
+      - DLL hollowing: techniques/ref/dll_hollowing.md
+      - Fibers: techniques/ref/fibers.md
+      - Early bird: techniques/ref/early_bird.md
+      - PE injection: techniques/ref/pe_injection.md
+      - Thread hijacking: techniques/ref/thread_hijacking.md
+      - Living off the land: techniques/ref/living_off_the_land.md
+      - Sleep: techniques/ref/sleep.md
+      - Network stager: techniques/ref/network_stager.md
+      - Self-deletion: techniques/ref/self_deletion.md
+      - Timestomping: techniques/ref/timestomping.md
+      - Stack spoofing: techniques/ref/stack_spoofing.md
+      - PPID spoofing: techniques/ref/ppid_spoofing.md
+      - Adding a technique: techniques/adding-a-technique.md
+  - Architecture:
+      - How it fits together: architecture.md
+      - Runtime steps: multistage.md
+      - Custom stubs: custom-stubs.md
+      - Syscall layer design: design/syscalls.md
+      - API resolution design: design/api-resolution.md
+      - DLL output design: design/dll-output.md
+      - Network stager design: design/network-stager.md
+      - x86 support: x86.md
+  - Reference:
+      - Measurements: measurements.md
+      - Process hollowing evidence: techniques/process_hollowing.md

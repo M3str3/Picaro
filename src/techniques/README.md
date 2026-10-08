@@ -49,7 +49,7 @@ copied files.
   `$PLACEHOLDER$` values into `DEF.stub_fragment`.
 
 An **Execution** technique also gets the payload's binary format
-(`build.payload.format`) and export (`build.payload.export`) through
+(`build.payloads.<name>.format`) and export (`build.payloads.<name>.export`) through
 `RuntimeStep::render_fragment`. A technique that runs more than one payload
 format exposes `Params::render_fragment_for(&self, strings, format, export)` and
 picks the fragment or substitutes the format-specific values there (see
@@ -75,7 +75,7 @@ built through `StringsConfig::obfuscate` (the `TODO`/`docs` convention; the
  provides the helpers with two implementations — direct Win32 calls when
  `build.stub.syscalls.mode` is `none`, indirect syscalls when it is `indirect` — so
  the fragment must not care which mode is active. See
- `docs/techniques/indirect_syscalls.md`.
+ `src/features/syscalls/README.md`.
 
 A Preparation fragment must expose a `pub fn <name>() -> Result<bool, E>` entry
 point (where `<name>` is the technique key); the stub wraps each Preparation
@@ -127,6 +127,17 @@ correctly. An Execution technique that supports several payload formats gets the
 Copy the fixed template `src/techniques/_template/README.md` and fill in every
 section. All sections are required; `picaro techniques validate` checks them.
 
+The shape is the same for every technique, so the site reads as a catalogue:
+
+1. `# Title`, then one italic **TL;DR** line — a single sentence.
+2. `## Metadata` as a two-column table (empty header): ATT&CK, Stability,
+   Category, YAML key, Introduced in.
+3. `## How it works` opens with a **```mermaid** diagram of the flow, then
+   groups the detail under numbered `### N. <phase>` headings.
+
+Keep the prose terse; the diagram carries the shape, the phases carry the
+substance.
+
 ## 7. Update the measurements page
 
 Add a section to `docs/measurements.md` and link it from the README's
@@ -157,7 +168,12 @@ not — route it through `StringsConfig`.
 ## 9. Conventions
 
 - **Names**: snake_case, matching the YAML key.
-- **Stability**: `Stable` once the technique is complete and verified (a measurement baseline or passing runtime checks); `Experimental` while gaps remain; `Deprecated` for techniques superseded by a better one.
+- **Stability**: `Stable` once the technique is complete and verified (a
+  measurement baseline or passing runtime checks); `Experimental` while gaps
+  remain; `Unimplemented` while the technique is registered but its
+  implementation is not finished (a placeholder fragment, or a missing part of
+  the loader contract) — the listing shows it in red and a build that selects it
+  warns; `Deprecated` for techniques superseded by a better one.
 - **ATT&CK**: use the specific sub-technique ID when available (e.g.
   `T1055.012`).
 - Keep `stub_fragment.rs` self-contained; prefer reusing the stub skeleton's

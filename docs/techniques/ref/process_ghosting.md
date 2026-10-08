@@ -1,0 +1,1 @@
+--8<-- "src/techniques/process_ghosting/README.md"

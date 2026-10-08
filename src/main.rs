@@ -1,7 +1,7 @@
 //! `picaro` entry point.
 //!
 //! Three subcommands:
-//! - `build`: YAML → encrypt payload → render Rust stub → compile → out.exe.
+//! - `build`: YAML → encrypt payloads → render Rust stub → compile → out.exe.
 //!   `build interactive <payload>` generates that YAML from a few questions.
 //! - `audit`: static analysis of a PE (measurement infrastructure).
 //! - `techniques`: inspect the technique registry.
@@ -11,23 +11,27 @@
 mod audit;
 mod engine;
 mod error;
+mod features;
 mod plan;
 mod techniques;
 mod ui;
 mod wizard;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use clap::{CommandFactory, Parser, Subcommand};
 
-use engine::{api_resolution, compiler, crypto, obfuscation, pe, stub, syscalls};
+use engine::{
+    api_resolution, build_lock, compiler, crypto, obfuscation, pe, steps, stub, syscalls,
+};
 use error::Result;
 use plan::schema::{
-    Arch, CryptoAlgorithm, KeySource, PayloadFormat, PayloadPlan, Subsystem, TrimPaths,
+    Arch, CryptoAlgorithm, KeySource, OutputKind, PayloadFormat, PayloadPlan, Subsystem, TrimPaths,
 };
-use techniques::RuntimeStep;
+use plan::steps::ResolvedStep;
+use techniques::{Category, RuntimeStep, TechniqueKind};
 use ui::{format_elapsed, glyph, human_size, Palette};
 
 /// Extra help printed under the generated usage block.
@@ -40,11 +44,14 @@ Examples:
   picaro audit dist/out.exe --json > baseline.json
   picaro audit dist/out.exe --baseline baseline.json
   picaro techniques list
+  picaro techniques show process_hollowing
 
 Colors are disabled automatically when the output is not a terminal; set
 NO_COLOR=1 (or pass --no-color) to disable them explicitly. Pass -q (or
 --quiet) to skip the banner, and -v (or --verbose) to print per-step build
-detail (paths, sizes, timings).
+detail (paths, sizes, timings). `techniques show` renders the README as styled
+Markdown and pages it full-screen when it is taller than the terminal; pass
+--raw for the verbatim Markdown or --no-pager to always print it inline.
 
 audit --baseline exits 3 when it finds a regression, so it can gate a CI
 job; every other failure exits 1.";
@@ -155,6 +162,14 @@ enum TechniquesCommand {
         /// Technique YAML key (e.g. `process_hollowing`).
         #[arg(value_name = "NAME")]
         name: String,
+
+        /// Print the README verbatim instead of rendering it.
+        #[arg(long)]
+        raw: bool,
+
+        /// Never page the output, even when it is longer than the terminal.
+        #[arg(long)]
+        no_pager: bool,
     },
 
     /// Validate the technique registry (CI helper; never fails).
@@ -279,7 +294,25 @@ fn run() -> Result<()> {
                 anstream::println!();
                 anstream::print!("{}", techniques::list(&ui));
             }
-            TechniquesCommand::Show { name } => anstream::print!("{}", techniques::show(&name)?),
+            TechniquesCommand::Show {
+                name,
+                raw,
+                no_pager,
+            } => {
+                anstream::println!("{}", ui.command_line("techniques", &name));
+                anstream::println!();
+                let content = if raw {
+                    techniques::readme(&name)?.to_string()
+                } else {
+                    techniques::show(&name, &ui)?
+                };
+                if !no_pager && ui::pager::page(&content, &ui) {
+                    // The pager displayed it full-screen and restored the
+                    // terminal already.
+                } else {
+                    anstream::print!("{content}");
+                }
+            }
             TechniquesCommand::Validate => validate_techniques(&ui),
         },
     }
@@ -311,7 +344,11 @@ fn validate_techniques(ui: &Palette) {
         anstream::println!(
             "{} {}",
             ui.check(),
-            ui.ok(format!("all {} techniques OK", techniques::all().len()))
+            ui.ok(format!(
+                "all {} techniques and {} loader features OK",
+                techniques::all().len(),
+                features::all().len(),
+            ))
         );
         return;
     }
@@ -360,90 +397,10 @@ fn build(
         print_plan(plan, plan_path, ui);
     }
 
-    // 1. Read the input payload and validate it against its declared format
-    //    (fail early, before encrypting or compiling).
-    let timer = Instant::now();
-    let plaintext = load_source(&plan.build.payload.source)?;
-    verify_payload_hash(&plaintext, plan.build.payload.sha256.as_deref())?;
-    let summary = inspect_payload(
-        plan.build.payload.format,
-        &plaintext,
-        plan.build.output.arch,
-    )?;
-    let read_time = timer.elapsed();
-    let mut read_parts = vec![
-        ui.target(describe_source(&plan.build.payload.source)),
-        ui.dim(summary.label),
-        human_size(plaintext.len()),
-    ];
-    if let Some(export) = &plan.build.payload.export {
-        read_parts.push(ui.dim(format!("export {export}")));
-    }
-    anstream::println!("{}", ui.done("read", dotted(ui, &read_parts)));
-    if verbose {
-        if let Some(info) = &summary.pe {
-            anstream::println!(
-                "{}",
-                ui.detail("machine", ui.dim(format!("0x{:04x}", info.machine)))
-            );
-        }
-        anstream::println!(
-            "{}",
-            ui.detail("sha256", ui.dim(engine::hash::sha256_hex(&plaintext)))
-        );
-        anstream::println!("{}", ui.detail("time", ui.dim(format_elapsed(read_time))));
-    }
+    // 1. Resolve the flat runtime into concrete steps (payloads pinned down).
+    let steps = plan::steps::resolve(plan)?;
 
-    // 2. Derive the key and encrypt the payload with XChaCha20-Poly1305.
-    let timer = Instant::now();
-    let key = match plan.build.payload.crypto.key {
-        KeySource::Random => crypto::generate_key(),
-    };
-    let encrypted = crypto::encrypt_payload(&plaintext, &key)?;
-    let encrypt_time = timer.elapsed();
-    anstream::println!(
-        "{}",
-        ui.done(
-            "encrypt",
-            dotted(
-                ui,
-                &[
-                    ui.brand(crypto_label(plan.build.payload.crypto.algo)),
-                    format!(
-                        "{} {} {}",
-                        human_size(plaintext.len()),
-                        ui.faint(glyph::ARROW),
-                        human_size(encrypted.ciphertext.len())
-                    ),
-                ]
-            )
-        )
-    );
-    if verbose {
-        let tag = encrypted.ciphertext.len().saturating_sub(plaintext.len());
-        anstream::println!(
-            "{}",
-            ui.detail("key", format!("random {} 32 bytes", ui.faint(glyph::DOT)))
-        );
-        anstream::println!(
-            "{}",
-            ui.detail("nonce", format!("random {} 24 bytes", ui.faint(glyph::DOT)))
-        );
-        anstream::println!(
-            "{}",
-            ui.detail(
-                "tag",
-                format!("poly1305 {} {tag} bytes", ui.faint(glyph::DOT))
-            )
-        );
-        anstream::println!(
-            "{}",
-            ui.detail("time", ui.dim(format_elapsed(encrypt_time)))
-        );
-    }
-
-    // 3. Per-build marker, the string-obfuscation and syscall configurations.
-    let stub_marker = stub::generate_stub_marker();
+    // 2. String-obfuscation, syscall and API-resolution configurations.
     if plan.build.stub.strings.is_none() {
         anstream::eprintln!(
             "  {} {}",
@@ -455,14 +412,16 @@ fn build(
     let syscalls = syscalls::SyscallsConfig::from_yaml(plan.build.stub.syscalls.as_ref())?;
     let api_resolution =
         api_resolution::ApiResolutionConfig::from_yaml(plan.build.stub.api_resolution.as_ref())?;
-    if syscalls.mode == syscalls::SyscallsMode::Indirect
-        && syscalls::required(&plan.runtime).is_empty()
-    {
+    let union: Vec<RuntimeStep> = steps
+        .iter()
+        .map(|step| RuntimeStep::new(step.technique.clone()))
+        .collect();
+    if syscalls.mode == syscalls::SyscallsMode::Indirect && syscalls::required(&union).is_empty() {
         anstream::eprintln!(
             "  {} {}",
             ui.bang(),
             ui.warn(
-                "build.stub.syscalls.mode is 'indirect' but no technique in the pipeline \
+                "build.stub.syscalls.mode is 'indirect' but no technique in the runtime \
                  uses NT syscalls yet (phase 6a: only process_hollowing does)"
             )
         );
@@ -472,99 +431,221 @@ fn build(
         anstream::eprintln!("  {} {}", ui.bang(), ui.warn(format!("warning: {warning}")));
     }
 
-    // 4. Prepare `build/` and write the ciphertext the builtin template embeds.
-    let timer = Instant::now();
-    let build_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("build");
+    // 3. Encrypt every Execution step's payload and collect the renderer input.
+    let build_dir = scratch_dir();
     prepare_build_dir(&build_dir)?;
-    std::fs::write(build_dir.join("payload.bin"), &encrypted.ciphertext)?;
 
-    // 5. Load the stub template: the builtin one, or a custom loader stub.
-    //    A custom stub receives the payload as `$PAYLOAD_BYTES$` and does not
-    //    need `build/payload.bin`. `build.stub.syscalls` applies to both.
-    let (template, template_display, is_custom) = match &plan.build.stub.path {
-        Some(path) => {
-            let path = path.clone();
-            let source = std::fs::read_to_string(&path).map_err(|source| {
-                error::PackerError::ReadLoader {
-                    path: path.clone(),
-                    source,
-                }
-            })?;
-            let display = format!("custom {} {}", glyph::DOT, path.display());
-            (source, display, true)
-        }
-        None => {
-            let relative = "templates/stub/main.rs.tpl";
-            let template_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
-            let source = std::fs::read_to_string(&template_path).map_err(|source| {
-                error::PackerError::ReadLoader {
-                    path: template_path.clone(),
-                    source,
-                }
-            })?;
-            let display = format!("builtin {} {relative}", glyph::DOT);
-            (source, display, false)
-        }
-    };
+    let mut step_payloads = Vec::new();
+    let mut step_records = Vec::new();
+    let mut total_plaintext: usize = 0;
+    let mut nonces: Vec<(usize, [u8; 24], [u8; 32])> = Vec::new();
 
-    let params = stub::StubParams {
-        nonce: encrypted.nonce,
-        key: encrypted.key,
-        ciphertext: encrypted.ciphertext.clone(),
-        plaintext_len: encrypted.plaintext_len,
-        payload_format: plan.build.payload.format,
-        payload_export: plan.build.payload.export.clone(),
-        stub_marker: stub_marker.clone(),
-        payload_path: "payload.bin".to_string(),
+    // Payloads named by a `network_stager` step are fetched at run time, not
+    // embedded, so the build skips reading/encrypting/writing them.
+    let staged_payloads: BTreeSet<String> = steps
+        .iter()
+        .filter_map(|step| match &step.technique {
+            TechniqueKind::NetworkStager { params } => Some(params.payload.clone()),
+            _ => None,
+        })
+        .collect();
+
+    for step in &steps {
+        let mut record = engine::manifest::StepRecord {
+            index: step.index,
+            label: step.label.clone(),
+            technique: step.technique.name().to_string(),
+            payload: step.payload.as_ref().map(|payload| payload.name.clone()),
+            payload_sha256: None,
+            payload_size: None,
+            nonce: None,
+        };
+
+        let cipher = match &step.payload {
+            Some(payload) if staged_payloads.contains(&payload.name) => {
+                // A payload fetched at run time by a `network_stager` step is not
+                // embedded: nothing is read, encrypted or written for it.
+                anstream::println!(
+                    "{}",
+                    ui.done(
+                        &format!(
+                            "step {} {}",
+                            step.index,
+                            ui.brand(step.technique.name())
+                        ),
+                        dotted(
+                            ui,
+                            &[ui.brand("staged"), ui.dim(payload.plan.format.label())]
+                        )
+                    )
+                );
+                Some(steps::PayloadCipher {
+                    nonce: [0u8; 24],
+                    key: [0u8; 32],
+                    plaintext_len: 0,
+                    path: String::new(),
+                    format: payload.plan.format,
+                    export: payload.plan.export.clone(),
+                    args: payload.plan.args.clone().unwrap_or_default(),
+                    args_override: payload.plan.args_mode == engine::args::ArgsMode::Override,
+                    marker: stub::generate_stub_marker(),
+                    staged: true,
+                })
+            }
+            Some(payload) => {
+                // Read the input payload and validate it (fail early, before
+                // encrypting or compiling).
+                let timer = Instant::now();
+                let plaintext = load_source(&payload.plan.source)?;
+                verify_payload_hash(&plaintext, payload.plan.sha256.as_deref())?;
+                let summary =
+                    inspect_payload(payload.plan.format, &plaintext, plan.build.output.arch)?;
+                let read_time = timer.elapsed();
+
+                // Derive the key and encrypt with XChaCha20-Poly1305.
+                let timer = Instant::now();
+                let key = match payload.crypto.key {
+                    KeySource::Random => crypto::generate_key(),
+                };
+                let encrypted = crypto::encrypt_payload(&plaintext, &key)?;
+                let encrypt_time = timer.elapsed();
+
+                let path = format!("payload_{}.bin", step.index);
+                std::fs::write(build_dir.join(&path), &encrypted.ciphertext)?;
+                total_plaintext += plaintext.len();
+                record.payload_sha256 = Some(engine::hash::sha256_hex(&plaintext));
+                record.payload_size = Some(plaintext.len() as u64);
+                record.nonce = Some(hex::encode(encrypted.nonce));
+                nonces.push((step.index, encrypted.nonce, encrypted.key));
+
+                let mut parts = vec![
+                    ui.target(describe_source(&payload.plan.source)),
+                    ui.dim(summary.label),
+                    human_size(plaintext.len()),
+                ];
+                if let Some(export) = &payload.plan.export {
+                    parts.push(ui.dim(format!("export {export}")));
+                }
+                parts.push(ui.brand(crypto_label(payload.crypto.algo)));
+                anstream::println!(
+                    "{}",
+                    ui.done(
+                        &format!("step {} {}", step.index, ui.brand(step.technique.name())),
+                        dotted(ui, &parts)
+                    )
+                );
+                if verbose {
+                    if let Some(info) = &summary.pe {
+                        anstream::println!(
+                            "{}",
+                            ui.detail("machine", ui.dim(format!("0x{:04x}", info.machine)))
+                        );
+                    }
+                    anstream::println!(
+                        "{}",
+                        ui.detail("sha256", ui.dim(engine::hash::sha256_hex(&plaintext)))
+                    );
+                    anstream::println!(
+                        "{}",
+                        ui.detail(
+                            "payload",
+                            ui.dim(format!("read {}", format_elapsed(read_time)))
+                        )
+                    );
+                    let tag = encrypted.ciphertext.len().saturating_sub(plaintext.len());
+                    anstream::println!(
+                        "{}",
+                        ui.detail(
+                            "encrypt",
+                            ui.dim(format!(
+                                "{} -> {} (+{tag} tag) {}",
+                                human_size(plaintext.len()),
+                                human_size(encrypted.ciphertext.len()),
+                                format_elapsed(encrypt_time)
+                            ))
+                        )
+                    );
+                }
+
+                Some(steps::PayloadCipher {
+                    nonce: encrypted.nonce,
+                    key: encrypted.key,
+                    plaintext_len: encrypted.plaintext_len,
+                    path,
+                    format: payload.plan.format,
+                    export: payload.plan.export.clone(),
+                    args: payload.plan.args.clone().unwrap_or_default(),
+                    args_override: payload.plan.args_mode == engine::args::ArgsMode::Override,
+                    marker: stub::generate_stub_marker(),
+                    staged: false,
+                })
+            }
+            None => {
+                anstream::println!(
+                    "{}",
+                    ui.done(
+                        &format!("step {} {}", step.index, ui.brand(step.technique.name())),
+                        ui.dim(step.technique.category().label())
+                    )
+                );
+                None
+            }
+        };
+
+        step_payloads.push(steps::StepPayload {
+            index: step.index,
+            label: step.label.clone(),
+            technique: step.technique.clone(),
+            control: step.control,
+            payload: cipher,
+        });
+        step_records.push(record);
+    }
+
+    // 4. Load the stub template (builtin or custom) and render the step stub.
+    let timer = Instant::now();
+    let (template, template_display, is_custom) = load_stub_template(plan)?;
+    let params = steps::StepsParams {
+        steps: step_payloads,
         build_args: build_args.clone(),
-        payload_args: plan.build.payload.args.clone().unwrap_or_default(),
-        args_mode: plan.build.payload.args_mode,
         debug,
         windows_subsystem: plan.build.output.subsystem == Subsystem::Windows,
+        kind: plan.build.output.kind,
+        entry: plan.build.output.entry.clone(),
     };
-
     let stub_src = if is_custom {
         stub::validate_custom_stub_template(&template)?;
-        let rendered = stub::render_custom_stub_with(
-            &template,
-            &params,
-            &plan.runtime,
-            &strings,
-            &syscalls,
-            &api_resolution,
-        )?;
+        let rendered =
+            steps::render_custom(&template, &params, &strings, &syscalls, &api_resolution)?;
         for warning in &rendered.warnings {
             anstream::eprintln!("  {} {}", ui.bang(), ui.warn(format!("warning: {warning}")));
         }
         rendered.source
     } else {
-        stub::render_main_rs_with(
-            &template,
-            &params,
-            &plan.runtime,
-            &strings,
-            &syscalls,
-            &api_resolution,
-        )?
+        steps::render_builtin(&template, &params, &strings, &syscalls, &api_resolution)?
     };
-    let stub_src = apply_subsystem(stub_src, plan.build.output.subsystem);
+    // A DLL has no subsystem: the host's applies, and `#![windows_subsystem]`
+    // would be ignored (or, worse, silently taken as an instruction).
+    let stub_src = if plan.build.output.kind == OutputKind::Exe {
+        apply_subsystem(stub_src, plan.build.output.subsystem)
+    } else {
+        stub_src
+    };
     let stub_path = build_dir.join("main.rs");
     std::fs::write(&stub_path, &stub_src)?;
     let stub_time = timer.elapsed();
 
     let mut stub_parts = vec![
-        pipeline_chain(ui, &plan.runtime),
+        runtime_chain(ui, &steps),
         format!("{} {}", ui.dim("strings"), strings.strategy.label()),
         format!("{} {}", ui.dim("syscalls"), syscalls.mode.label()),
-        format!("{} {}", ui.dim("format"), plan.build.payload.format.label()),
     ];
-    if !params.payload_args.is_empty() {
-        stub_parts.push(format!(
-            "{} {} ({})",
-            ui.dim("args"),
-            params.payload_args.len(),
-            plan.build.payload.args_mode.label()
-        ));
+    if plan.build.output.kind == OutputKind::Dll {
+        stub_parts.push(ui.brand(format!(
+            "{} {}",
+            plan.build.output.kind.label(),
+            plan.build.output.entry.label()
+        )));
     }
     if debug {
         stub_parts.push(ui.warn("debug"));
@@ -572,7 +653,6 @@ fn build(
     anstream::println!("{}", ui.done("stub", dotted(ui, &stub_parts)));
     if verbose {
         anstream::println!("{}", ui.detail("template", ui.dim(&template_display)));
-        anstream::println!("{}", ui.detail("marker", ui.dim(&stub_marker)));
         anstream::println!(
             "{}",
             ui.detail("resolver", ui.dim(syscalls.resolver.label()))
@@ -580,16 +660,10 @@ fn build(
         anstream::println!(
             "{}",
             ui.detail(
-                "payload args",
-                ui.dim(payload_args_label(&plan.build.payload))
-            )
-        );
-        anstream::println!(
-            "{}",
-            ui.detail(
                 "source",
                 format!(
-                    "build/main.rs {} {} lines",
+                    "{} {} {} lines",
+                    stub_path.display(),
                     ui.faint(glyph::DOT),
                     stub_src.lines().count()
                 )
@@ -598,11 +672,11 @@ fn build(
         anstream::println!("{}", ui.detail("time", ui.dim(format_elapsed(stub_time))));
     }
 
-    // 6. Locate the dependencies and compile the stub.
+    // 5. Locate the dependencies and compile the stub.
     let timer = Instant::now();
     let arch = plan.build.output.arch;
     let deps = compiler::locate_stub_deps(arch)?;
-    let out = build_dir.join("out.exe");
+    let out = intermediate_path(&build_dir, &plan.build.output);
     let options = compiler::CompileOptions {
         strip: plan.build.output.strip,
         trim_paths: match plan.build.output.trim_paths {
@@ -612,6 +686,7 @@ fn build(
         },
         debug,
         arch,
+        kind: plan.build.output.kind,
     };
     compiler::compile_stub(&stub_path, &out, &deps, options)?;
     // D-21: a proxy must never import the API it intercepts, or the signature
@@ -644,37 +719,38 @@ fn build(
         );
     }
 
-    // 6b. Embed PE resources into the compiled stub (icon, VERSIONINFO and the
-    //     application manifest), written into a new `.rsrc` section. Nothing is
-    //     injected when `output.resources` is absent.
+    // 5b. Embed PE resources into the compiled stub (icon, VERSIONINFO and the
+    //     application manifest), written into a new `.rsrc` section.
     let resources = resolve_resources(plan);
     if let Some(resources) = &resources {
-        let pe = std::fs::read(&out)?;
-        let injected = engine::resources::embed(&pe, resources)?;
-        if injected.len() != pe.len() {
+        let pe_bytes = std::fs::read(&out)?;
+        let injected = engine::resources::embed(&pe_bytes, resources)?;
+        if injected.len() != pe_bytes.len() {
             std::fs::write(&out, &injected)?;
             if verbose {
                 anstream::println!(
                     "{}",
                     ui.detail(
                         "resources",
-                        ui.dim(format!("+{} bytes (.rsrc)", injected.len() - pe.len()))
+                        ui.dim(format!(
+                            "+{} bytes (.rsrc)",
+                            injected.len() - pe_bytes.len()
+                        ))
                     )
                 );
             }
         }
     }
 
-    // 7. Copy `out.exe` to the output path from the YAML.
-    if let Some(parent) = plan.build.output.path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
+    // 6. Lock the shared output, then copy the compiled stub to the output path
+    //    from the YAML, sign it and write the manifest. The lock is keyed on the
+    //    output path so two concurrent `picaro build` runs cannot interleave
+    //    their copy/sign/manifest writes into the same artifact.
+    let _output_lock = build_lock::OutputLock::acquire(&plan.build.output.path)?;
     std::fs::copy(&out, &plan.build.output.path)?;
     let out_size = std::fs::metadata(&plan.build.output.path)?.len() as usize;
 
-    // 7b. Sign the artifact (Authenticode), if configured. Signing must be the
+    // 6b. Sign the artifact (Authenticode), if configured. Signing must be the
     //     last modification, so the manifest below hashes the signed file.
     let sign_plan = resolve_sign(plan, resources.as_ref());
     let signature = engine::signing::sign(&plan.build.output.path, sign_plan.as_ref())?;
@@ -694,19 +770,16 @@ fn build(
         }
     }
 
-    // 7c. Provenance: a manifest next to the artifact (artifact and payload
-    //     hashes, resolved plan, toolchain). The payload key is never written.
+    // 6c. Provenance: a manifest next to the artifact (artifact hash, the
+    //     per-step payload records, resolved plan, toolchain). The payload keys
+    //     are never written.
     if plan.build.output.manifest {
         let manifest_path = engine::manifest::manifest_path(&plan.build.output.path);
-        let mut manifest = engine::manifest::BuildManifest::new(
-            plan,
-            plan_path,
-            &plan.build.output.path,
-            &plaintext,
-            encrypted.nonce,
-        )?;
+        let mut manifest =
+            engine::manifest::BuildManifest::new(plan, plan_path, &plan.build.output.path)?;
         manifest.signature = signature;
         manifest.version_info = resources.as_ref().and_then(|r| r.version_info.clone());
+        manifest.steps = step_records;
         manifest.write(&manifest_path)?;
         if verbose {
             anstream::println!(
@@ -718,7 +791,7 @@ fn build(
 
     let total = started.elapsed();
 
-    // 8. The result, standing apart from the per-step lines.
+    // 7. The result, standing apart from the per-step lines.
     anstream::println!();
     anstream::println!(
         "{}",
@@ -735,20 +808,29 @@ fn build(
         )
     );
     if verbose {
-        let delta = out_size.saturating_sub(plaintext.len());
+        let delta = out_size.saturating_sub(total_plaintext);
         anstream::println!(
             "{}",
             ui.detail("delta", format!("+{} over the input", human_size(delta)))
         );
     }
 
-    // 9. Per-build material: the nonce is public; the keys are printed in debug
-    //    builds only, never in release.
+    // 8. Per-build material: the nonces are public; the keys are printed in
+    //    debug builds only, never in release.
     anstream::println!();
-    anstream::println!("{}", ui.field("nonce", hex::encode(encrypted.nonce)));
+    for (index, nonce, key) in &nonces {
+        anstream::println!(
+            "{}",
+            ui.field(&format!("nonce {index}"), hex::encode(nonce))
+        );
+        #[cfg(debug_assertions)]
+        {
+            let _ = key;
+            anstream::println!("{}", ui.field(&format!("key {index}"), hex::encode(key)));
+        }
+    }
     #[cfg(debug_assertions)]
     {
-        anstream::println!("{}", ui.field("key", hex::encode(encrypted.key)));
         if let Some(key) = strings.key {
             anstream::println!("{}", ui.field("strings key", hex::encode(key)));
         }
@@ -757,45 +839,103 @@ fn build(
     Ok(())
 }
 
+/// Loads the stub template: the builtin one, or a custom loader stub.
+fn load_stub_template(plan: &plan::Plan) -> Result<(String, String, bool)> {
+    match &plan.build.stub.path {
+        Some(path) => {
+            let path = path.clone();
+            let source = std::fs::read_to_string(&path).map_err(|source| {
+                error::PackerError::ReadLoader {
+                    path: path.clone(),
+                    source,
+                }
+            })?;
+            Ok((
+                source,
+                format!("custom {} {}", glyph::DOT, path.display()),
+                true,
+            ))
+        }
+        None => {
+            let relative = "src/engine/templates/main.rs.tpl";
+            let template_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+            let source = std::fs::read_to_string(&template_path).map_err(|source| {
+                error::PackerError::ReadLoader {
+                    path: template_path.clone(),
+                    source,
+                }
+            })?;
+            Ok((source, format!("builtin {} {relative}", glyph::DOT), false))
+        }
+    }
+}
+
 /// Resolves and validates a build without encrypting, compiling or writing.
 ///
-/// `build --dry-run` is a pre-flight check: it loads the payload (fetching a URL
-/// as a real build would), verifies `build.payload.sha256` when pinned,
-/// validates the PE and prints the resolved plan. Nothing is written, so it is
-/// safe to run against a plan before committing it.
+/// `build --dry-run` is a pre-flight check: it loads every payload (fetching a
+/// URL as a real build would), verifies each `sha256` when pinned, validates the
+/// PEs and prints the resolved plan. Nothing is written, so it is safe to run
+/// against a plan before committing it.
 fn dry_run(plan: &plan::Plan, plan_path: &Path, ui: &Palette) -> Result<()> {
     anstream::println!("{}", ui.command_line("build", plan_path.display()));
     anstream::println!();
     print_plan(plan, plan_path, ui);
 
-    let payload = load_source(&plan.build.payload.source)?;
-    verify_payload_hash(&payload, plan.build.payload.sha256.as_deref())?;
-    let summary = inspect_payload(plan.build.payload.format, &payload, plan.build.output.arch)?;
-
-    let mut parts = vec![
-        ui.target(describe_source(&plan.build.payload.source)),
-        ui.dim(summary.label),
-        human_size(payload.len()),
-    ];
-    if let Some(export) = &plan.build.payload.export {
-        parts.push(ui.dim(format!("export {export}")));
-    }
-    if plan.build.output.subsystem == Subsystem::Windows {
-        parts.push(ui.dim("windows subsystem"));
-    }
-    if plan.build.payload.sha256.is_some() {
-        parts.push(ui.ok("sha256 verified"));
-    }
     // Resource building is cheap and validates the icon/versions, so a dry run
     // can check it without touching the compiled stub.
     let resources = resolve_resources(plan);
+
+    let steps = plan::steps::resolve(plan)?;
+    for step in &steps {
+        let Some(payload) = &step.payload else {
+            anstream::println!(
+                "{}",
+                ui.detail(
+                    &format!("step {}", step.index),
+                    ui.dim(format!(
+                        "{} {}",
+                        step.technique.name(),
+                        step.technique.category().label()
+                    ))
+                )
+            );
+            continue;
+        };
+        let bytes = load_source(&payload.plan.source)?;
+        verify_payload_hash(&bytes, payload.plan.sha256.as_deref())?;
+        let summary = inspect_payload(payload.plan.format, &bytes, plan.build.output.arch)?;
+        let mut parts = vec![
+            ui.target(describe_source(&payload.plan.source)),
+            ui.dim(summary.label),
+            human_size(bytes.len()),
+        ];
+        if let Some(export) = &payload.plan.export {
+            parts.push(ui.dim(format!("export {export}")));
+        }
+        if payload.plan.sha256.is_some() {
+            parts.push(ui.ok("sha256 verified"));
+        }
+        anstream::println!(
+            "{}",
+            ui.done(
+                &format!("step {} {}", step.index, ui.brand(step.technique.name())),
+                dotted(ui, &parts)
+            )
+        );
+    }
+
+    if plan.build.output.subsystem == Subsystem::Windows {
+        anstream::println!("{}", ui.detail("subsystem", ui.dim("windows")));
+    }
     if let Some(resources) = &resources {
         let blob = engine::resources::build(resources, 0)?;
         if !blob.is_empty() {
-            parts.push(ui.ok(format!("{} B resources", blob.len())));
+            anstream::println!(
+                "{}",
+                ui.detail("resources", ui.dim(format!("{} B", blob.len())))
+            );
         }
     }
-    anstream::println!("{}", ui.done("payload", dotted(ui, &parts)));
 
     // Signing is validated without signing: the configured inputs are checked
     // (a missing .pfx fails without needing a tool) and a backend is located
@@ -836,8 +976,8 @@ struct PayloadSummary {
     pe: Option<pe::PeInfo>,
 }
 
-/// Parses and validates the payload according to `build.payload.format` and the
-/// requested `arch`.
+/// Parses and validates the payload according to its `format` and the requested
+/// `arch`.
 ///
 /// `pe`/`dll` must be a well-formed PE of the matching kind **and** the matching
 /// architecture: the stub and the payload share one address space, so a 32-bit
@@ -862,7 +1002,7 @@ fn inspect_payload(format: PayloadFormat, data: &[u8], arch: Arch) -> Result<Pay
             let info = pe::parse(data)?;
             let Some(clr) = info.com else {
                 return Err(error::PackerError::Validation(
-                    "build.payload.format is 'dotnet' but the payload has no CLR header (data directory 14 is empty): it is a native image, so use 'format: pe'"
+                    "a payload has 'format: dotnet' but no CLR header (data directory 14 is empty): it is a native image, so use 'format: pe'"
                         .to_string(),
                 ));
             };
@@ -903,13 +1043,13 @@ fn inspect_payload(format: PayloadFormat, data: &[u8], arch: Arch) -> Result<Pay
             let info = pe::parse(data)?;
             if info.is_dotnet() {
                 return Err(error::PackerError::Validation(
-                    "the payload is a .NET assembly (it has a CLR header): a managed image is not mapped as native code; use 'build.payload.format: dotnet' with 'technique: dotnet_hosting', which hosts the CLR and loads the assembly from memory"
+                    "a payload is a .NET assembly (it has a CLR header): a managed image is not mapped as native code; use 'format: dotnet' with 'technique: dotnet_hosting', which hosts the CLR and loads the assembly from memory"
                         .to_string(),
                 ));
             }
             let payload_arch = info.arch().ok_or_else(|| {
                 error::PackerError::Validation(format!(
-                    "unsupported PE machine 0x{:04x}: picaro packs x86 (PE32) and x64 (PE32+)                      images",
+                    "unsupported PE machine 0x{:04x}: picaro packs x86 (PE32) and x64 (PE32+) images",
                     info.machine
                 ))
             })?;
@@ -927,15 +1067,14 @@ fn inspect_payload(format: PayloadFormat, data: &[u8], arch: Arch) -> Result<Pay
             match format {
                 PayloadFormat::Dll if !is_dll => {
                     return Err(error::PackerError::Validation(
-                        "build.payload.format is 'dll' but the payload is an executable \
+                        "a payload has 'format: dll' but is an executable \
                          (IMAGE_FILE_DLL is not set)"
                             .to_string(),
                     ));
                 }
                 PayloadFormat::Pe if is_dll => {
                     return Err(error::PackerError::Validation(
-                        "build.payload.format is 'pe' but the payload is a DLL; use 'format: dll'"
-                            .to_string(),
+                        "a payload has 'format: pe' but is a DLL; use 'format: dll'".to_string(),
                     ));
                 }
                 _ => {}
@@ -953,7 +1092,7 @@ fn inspect_payload(format: PayloadFormat, data: &[u8], arch: Arch) -> Result<Pay
     }
 }
 
-/// Fails when the payload does not match `build.payload.sha256`.
+/// Fails when the payload does not match its `sha256`.
 ///
 /// The comparison is case-insensitive hex; the format is already validated in
 /// `plan::validate`, so a mismatch here means the payload changed.
@@ -979,17 +1118,19 @@ fn print_plan(plan: &plan::Plan, plan_path: &Path, ui: &Palette) {
     anstream::println!("{}", ui.heading("PLAN"));
     anstream::println!("{}", ui.field("name", &plan.name));
     anstream::println!("{}", ui.field("plan", ui.target(plan_path.display())));
-    anstream::println!(
-        "{}",
-        ui.field(
-            "source",
-            ui.target(describe_source(&plan.build.payload.source))
-        )
-    );
-    anstream::println!(
-        "{}",
-        ui.field("payload args", payload_args_label(&plan.build.payload))
-    );
+    for (name, payload) in &plan.build.payloads {
+        anstream::println!(
+            "{}",
+            ui.field(
+                &format!("payload {name}"),
+                ui.target(describe_source(&payload.source))
+            )
+        );
+        anstream::println!(
+            "{}",
+            ui.field(&format!("  {name} args"), payload_args_label(payload))
+        );
+    }
     anstream::println!(
         "{}",
         ui.field("output", ui.target(plan.build.output.path.display()))
@@ -1041,19 +1182,24 @@ fn print_plan(plan: &plan::Plan, plan_path: &Path, ui: &Palette) {
         };
         anstream::println!("{}", ui.field("sign", label));
     }
-    anstream::println!("{}", ui.field("runtime", pipeline_chain(ui, &plan.runtime)));
+    if let Ok(steps) = plan::steps::resolve(plan) {
+        anstream::println!("{}", ui.field("runtime", runtime_chain(ui, &steps)));
+    }
     anstream::println!("{}", ui.field("schema", plan.schema));
     anstream::println!();
 }
 
-/// `patch_amsi → reflective_loading`, technique names in the brand color.
-fn pipeline_chain(ui: &Palette, pipeline: &[RuntimeStep]) -> String {
-    if pipeline.is_empty() {
+/// `patch_amsi → reflective_loading`, step labels in the accent colors.
+fn runtime_chain(ui: &Palette, steps: &[ResolvedStep]) -> String {
+    if steps.is_empty() {
         return ui.dim("no techniques");
     }
-    pipeline
+    steps
         .iter()
-        .map(|step| ui.brand(step.name()))
+        .map(|step| match step.technique.category() {
+            Category::Control => ui.target(step.label.clone()),
+            Category::Preparation | Category::Execution => ui.brand(step.label.clone()),
+        })
         .collect::<Vec<_>>()
         .join(&format!(" {} ", ui.dim(glyph::ARROW)))
 }
@@ -1096,10 +1242,6 @@ fn stub_mode_label(plan: &plan::Plan) -> &'static str {
         .unwrap_or("none")
 }
 
-/// Prepends `#![windows_subsystem = "windows"]` for a GUI build.
-///
-/// Runs on the rendered source (builtin or custom) so `rustc` links a GUI
-/// binary. A source that already sets `windows_subsystem` is left untouched.
 /// Verifies that the compiled stub does not import any API that
 /// `build.stub.api_resolution` routes or forwards (D-21).
 ///
@@ -1143,6 +1285,10 @@ fn verify_no_intercepted_imports(
     Ok(())
 }
 
+/// Prepends `#![windows_subsystem = "windows"]` for a GUI build.
+///
+/// Runs on the rendered source (builtin or custom) so `rustc` links a GUI
+/// binary. A source that already sets `windows_subsystem` is left untouched.
 fn apply_subsystem(source: String, subsystem: Subsystem) -> String {
     if subsystem == Subsystem::Windows && !source.contains("windows_subsystem") {
         let mut out = String::with_capacity(source.len() + 40);
@@ -1151,6 +1297,26 @@ fn apply_subsystem(source: String, subsystem: Subsystem) -> String {
         out
     } else {
         source
+    }
+}
+
+/// Where the compiled stub is written inside the build directory.
+///
+/// An executable keeps the fixed `out.exe`. A DLL is named after the artifact
+/// the operator asked for: the linker records the link output's name inside the
+/// PE (the export directory's `Name` field), so the file should report the name
+/// it will be delivered under rather than the build's scratch name.
+fn intermediate_path(build_dir: &Path, output: &plan::schema::OutputPlan) -> PathBuf {
+    match output.kind {
+        OutputKind::Exe => build_dir.join("out.exe"),
+        OutputKind::Dll => {
+            let stem = output
+                .path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("loader");
+            build_dir.join(format!("{stem}.dll"))
+        }
     }
 }
 
@@ -1243,7 +1409,7 @@ fn resolve_sign(
     Some(resolved)
 }
 
-/// The configured `build.payload.source`, or a placeholder when empty.
+/// The configured payload source, or a placeholder when empty.
 fn describe_source(source: &str) -> String {
     if source.trim().is_empty() {
         "(unspecified)".to_string()
@@ -1259,7 +1425,7 @@ fn crypto_label(algo: CryptoAlgorithm) -> &'static str {
     }
 }
 
-/// `(none)` or `N (mode)` for the payload's configured runtime arguments.
+/// `(none)` or `N (mode)` for a payload's configured runtime arguments.
 fn payload_args_label(payload: &PayloadPlan) -> String {
     match &payload.args {
         Some(args) if !args.is_empty() => {
@@ -1269,7 +1435,7 @@ fn payload_args_label(payload: &PayloadPlan) -> String {
     }
 }
 
-/// Reads the input payload into memory from its configured source.
+/// Reads an input payload into memory from its configured source.
 ///
 /// `http://` and `https://` sources are fetched in memory (never written to
 /// disk); a `file://` source is read from disk after stripping the scheme; any
@@ -1281,7 +1447,7 @@ fn load_source(source: &str) -> Result<Vec<u8>> {
     }
     if source.starts_with("ftp://") {
         return Err(error::PackerError::Validation(
-            "'build.payload.source' uses ftp://, which is not supported; \
+            "a payload 'source' uses ftp://, which is not supported; \
              use http(s):// or a local path"
                 .to_string(),
         ));
@@ -1318,6 +1484,49 @@ fn prepare_build_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The scratch directory for intermediate artifacts (the ciphertexts, the
+/// rendered stub, the compiled `out.exe`).
+///
+/// Defaults to a unique `build/run-<pid>-<nanos>` directory next to the
+/// manifest, so concurrent `picaro build` runs never share — and never wipe —
+/// each other's intermediate files. `PICARO_BUILD_DIR`, when set and non-empty,
+/// is used verbatim for reproducible single-directory workflows (e.g. the
+/// read-only Docker source tree).
+fn scratch_dir() -> PathBuf {
+    let override_dir = std::env::var_os("PICARO_BUILD_DIR").map(PathBuf::from);
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    match &override_dir {
+        Some(dir) if !dir.as_os_str().is_empty() => scratch_dir_in(override_dir, manifest_dir),
+        _ => unique_scratch_dir_in(manifest_dir, &run_nonce()),
+    }
+}
+
+/// Resolves [`scratch_dir`] from an explicit `PICARO_BUILD_DIR` value (when set
+/// and non-empty) and the manifest directory. Split out so both branches are
+/// testable without touching the process environment.
+fn scratch_dir_in(override_dir: Option<PathBuf>, manifest_dir: &Path) -> PathBuf {
+    match override_dir {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => manifest_dir.join("build"),
+    }
+}
+
+/// A unique scratch directory for one build run, derived from `nonce`.
+///
+/// Split from [`scratch_dir`] so tests can inject a deterministic nonce.
+fn unique_scratch_dir_in(manifest_dir: &Path, nonce: &str) -> PathBuf {
+    manifest_dir.join("build").join(format!("run-{nonce}"))
+}
+
+/// A process- and time-unique label (`<pid>-<nanos>`) for a build run.
+fn run_nonce() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("{}-{nanos}", std::process::id())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1346,5 +1555,39 @@ mod tests {
     #[test]
     fn short_thumbprint_keeps_the_first_16_digits() {
         assert_eq!(short_thumbprint("DEADBEEF00112233AABB"), "DEADBEEF00112233");
+    }
+
+    #[test]
+    fn scratch_dir_defaults_to_build_next_to_the_manifest() {
+        let dir = scratch_dir_in(None, Path::new("/usr/src/picaro"));
+        assert_eq!(dir, Path::new("/usr/src/picaro/build"));
+    }
+
+    #[test]
+    fn scratch_dir_honors_the_picaro_build_dir_override() {
+        let dir = scratch_dir_in(
+            Some(PathBuf::from("/tmp/picaro-build")),
+            Path::new("/usr/src/picaro"),
+        );
+        assert_eq!(dir, Path::new("/tmp/picaro-build"));
+    }
+
+    #[test]
+    fn an_empty_scratch_override_falls_back_to_the_default() {
+        let dir = scratch_dir_in(Some(PathBuf::new()), Path::new("/usr/src/picaro"));
+        assert_eq!(dir, Path::new("/usr/src/picaro/build"));
+    }
+
+    #[test]
+    fn unique_scratch_dirs_differ_across_nonces() {
+        let first = unique_scratch_dir_in(Path::new("/usr/src/picaro"), "1-100");
+        let second = unique_scratch_dir_in(Path::new("/usr/src/picaro"), "2-200");
+        assert_ne!(first, second, "each run must get its own scratch directory");
+    }
+
+    #[test]
+    fn unique_scratch_dir_lives_in_a_run_folder_under_build() {
+        let dir = unique_scratch_dir_in(Path::new("/usr/src/picaro"), "42-123");
+        assert_eq!(dir, Path::new("/usr/src/picaro/build/run-42-123"));
     }
 }

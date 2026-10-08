@@ -3,14 +3,19 @@
 use super::{Params, DEF, SHELLCODE_FRAGMENT};
 use crate::engine::obfuscation::StringsConfig;
 use crate::plan::schema::PayloadFormat;
-use crate::techniques::RuntimeStep;
+use crate::techniques::{RuntimeStep, TechniqueKind};
 use std::process::Command;
 
 #[test]
 fn parses_params_from_empty_yaml() {
-    let step: RuntimeStep = serde_yml::from_str("technique: reflective_loading\n")
+    let step: TechniqueKind = serde_yml::from_str("technique: reflective_loading\n")
         .expect("reflective_loading should parse");
-    assert_eq!(step, RuntimeStep::ReflectiveLoading { params: Params {} });
+    assert_eq!(
+        step,
+        TechniqueKind::ReflectiveLoading {
+            params: Params::default()
+        }
+    );
 }
 
 #[test]
@@ -45,7 +50,7 @@ fn fragment_has_no_forbidden_patterns() {
 #[test]
 fn the_payload_format_selects_the_fragment() {
     let strings = StringsConfig::from_yaml(None).expect("default strings");
-    let params = Params {};
+    let params = Params::default();
 
     let pe = params.render_fragment_for(&strings, PayloadFormat::Pe, None);
     assert!(pe.contains("fn run_reflective"));
@@ -61,7 +66,7 @@ fn the_payload_format_selects_the_fragment() {
 #[test]
 fn rendered_fragments_substitute_placeholders_and_obfuscate_the_export() {
     let strings = StringsConfig::from_yaml(None).expect("default strings");
-    let params = Params {};
+    let params = Params::default();
 
     for format in [
         PayloadFormat::Pe,
@@ -105,8 +110,7 @@ fn compiles_reflective_loading_stub_for_every_format() {
 
     let template = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("templates")
-            .join("stub")
+            .join("src").join("engine").join("templates")
             .join("main.rs.tpl"),
     )
     .unwrap();
@@ -122,28 +126,23 @@ fn compiles_reflective_loading_stub_for_every_format() {
     ];
 
     for (format, export, name) in cases {
-        let params = crate::engine::stub::StubParams {
-            nonce: encrypted.nonce,
-            key: encrypted.key,
-            ciphertext: encrypted.ciphertext.clone(),
-            plaintext_len: encrypted.plaintext_len,
-            payload_format: format,
-            payload_export: export.map(str::to_string),
-            stub_marker: crate::engine::stub::generate_stub_marker(),
-            payload_path: "payload.bin".to_string(),
-            build_args: std::collections::BTreeMap::new(),
-            payload_args: Vec::new(),
-            args_mode: crate::engine::args::ArgsMode::Join,
-            debug: false,
-            windows_subsystem: false,
-        };
-        let pipeline = vec![RuntimeStep::ReflectiveLoading { params: Params {} }];
-        let stub_src = crate::engine::stub::render_main_rs(
+        let pipeline = vec![RuntimeStep::new(TechniqueKind::ReflectiveLoading {
+            params: Params::default(),
+        })];
+        let params = crate::engine::steps::test_params(
+            &pipeline,
+            &encrypted,
+            "payload.bin",
+            format,
+            export,
+            false,
+        );
+        let stub_src = crate::engine::steps::render_builtin(
             &template,
             &params,
-            &pipeline,
             &strings,
             &crate::engine::syscalls::SyscallsConfig::default(),
+            &crate::engine::api_resolution::ApiResolutionConfig::default(),
         )
         .unwrap();
         // The appended debug prelude uses `$` as Rust macro syntax, so the
@@ -190,34 +189,27 @@ fn compiles_reflective_loading_stub_to_pe() {
 
     let template = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("templates")
-            .join("stub")
+            .join("src").join("engine").join("templates")
             .join("main.rs.tpl"),
     )
     .unwrap();
-    let params = crate::engine::stub::StubParams {
-        nonce: encrypted.nonce,
-        key: encrypted.key,
-        ciphertext: encrypted.ciphertext.clone(),
-        plaintext_len: encrypted.plaintext_len,
-        payload_format: PayloadFormat::Pe,
-        payload_export: None,
-        stub_marker: crate::engine::stub::generate_stub_marker(),
-        payload_path: "payload.bin".to_string(),
-        build_args: std::collections::BTreeMap::new(),
-        payload_args: Vec::new(),
-        args_mode: crate::engine::args::ArgsMode::Join,
-        debug: false,
-        windows_subsystem: false,
-    };
-    let pipeline = vec![RuntimeStep::ReflectiveLoading { params: Params {} }];
+    let params = crate::engine::steps::test_params(
+        &[RuntimeStep::new(TechniqueKind::ReflectiveLoading {
+            params: Params::default(),
+        })],
+        &encrypted,
+        "payload.bin",
+        PayloadFormat::Pe,
+        None,
+        false,
+    );
     let strings = crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap();
-    let stub_src = crate::engine::stub::render_main_rs(
+    let stub_src = crate::engine::steps::render_builtin(
         &template,
         &params,
-        &pipeline,
         &strings,
         &crate::engine::syscalls::SyscallsConfig::default(),
+        &crate::engine::api_resolution::ApiResolutionConfig::default(),
     )
     .unwrap();
     let stub_path = build_dir.join("main.rs");
@@ -284,28 +276,21 @@ fn run_proxy_case(
 
     // 4. Render (debug) and compile the stub.
     let template =
-        std::fs::read_to_string(root.join("templates").join("stub").join("main.rs.tpl")).unwrap();
-    let params = crate::engine::stub::StubParams {
-        nonce: encrypted.nonce,
-        key: encrypted.key,
-        ciphertext: encrypted.ciphertext.clone(),
-        plaintext_len: encrypted.plaintext_len,
-        payload_format: PayloadFormat::Pe,
-        payload_export: None,
-        stub_marker: crate::engine::stub::generate_stub_marker(),
-        payload_path: "payload.bin".to_string(),
-        build_args: std::collections::BTreeMap::new(),
-        payload_args: Vec::new(),
-        args_mode: crate::engine::args::ArgsMode::Join,
-        debug: true,
-        windows_subsystem: false,
-    };
-    let pipeline = vec![RuntimeStep::ReflectiveLoading { params: Params {} }];
+        std::fs::read_to_string(root.join("src").join("engine").join("templates").join("main.rs.tpl")).unwrap();
+    let params = crate::engine::steps::test_params(
+        &[RuntimeStep::new(TechniqueKind::ReflectiveLoading {
+            params: Params::default(),
+        })],
+        &encrypted,
+        "payload.bin",
+        PayloadFormat::Pe,
+        None,
+        true,
+    );
     let strings = StringsConfig::from_yaml(None).unwrap();
-    let stub_src = crate::engine::stub::render_main_rs_with(
+    let stub_src = crate::engine::steps::render_builtin(
         &template,
         &params,
-        &pipeline,
         &strings,
         &syscalls,
         &api_resolution,

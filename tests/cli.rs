@@ -2,11 +2,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
-
-/// Serializes the e2e `picaro build` tests: they share the repo's `build/`
-/// directory (wiped by each build), so two of them must not run concurrently.
-static BUILD_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn techniques_list_lists_all_techniques() {
@@ -28,7 +23,7 @@ fn techniques_list_lists_all_techniques() {
 }
 
 #[test]
-fn techniques_show_prints_readme() {
+fn techniques_show_renders_readme_by_default() {
     let output = Command::new(env!("CARGO_BIN_EXE_picaro"))
         .args(["techniques", "show", "process_hollowing"])
         .output()
@@ -37,8 +32,37 @@ fn techniques_show_prints_readme() {
     assert!(output.status.success(), "show must exit 0");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("# Process hollowing"),
+        stdout.contains("Process hollowing"),
         "show output: {stdout}"
+    );
+    assert!(stdout.contains("T1055"), "show output: {stdout}");
+    // Stdout is captured (not a TTY), so the pager must not engage and the
+    // styled page must not leak escape codes.
+    assert!(!stdout.contains('\u{1b}'), "escapes leaked: {stdout:?}");
+    assert!(
+        !stdout.contains("## Metadata"),
+        "the metadata header should supersede the raw section: {stdout}"
+    );
+}
+
+#[test]
+fn techniques_show_raw_prints_verbatim_readme() {
+    let output = Command::new(env!("CARGO_BIN_EXE_picaro"))
+        .args([
+            "techniques",
+            "show",
+            "process_hollowing",
+            "--raw",
+            "--no-pager",
+        ])
+        .output()
+        .expect("run picaro techniques show --raw");
+
+    assert!(output.status.success(), "show --raw must exit 0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("# Process hollowing"),
+        "raw output: {stdout}"
     );
 }
 
@@ -48,7 +72,6 @@ fn techniques_show_prints_readme() {
 #[test]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn build_with_amsi_patch_produces_pe() {
-    let _guard = BUILD_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_picaro"))
         .args(["build", "tests/plans/amsi-patch.yaml"])
         .output()
@@ -76,7 +99,7 @@ fn build_with_invalid_order_fails() {
     assert!(!output.status.success(), "invalid order must fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("appears after the Execution technique"),
+        stderr.contains("does not return control"),
         "unclear error: {stderr}"
     );
 }
@@ -92,7 +115,7 @@ fn banner_is_printed_by_default() {
     assert!(output.status.success(), "list must exit 0");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("mimicry-based packer"),
+        stdout.contains("The plan is the program"),
         "banner missing: {stdout}"
     );
 }
@@ -122,7 +145,6 @@ fn quiet_flag_hides_the_banner() {
 #[test]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn build_with_bouncer_produces_pe() {
-    let _guard = BUILD_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_picaro"))
         .args(["build", "tests/plans/bouncer.yaml"])
         .output()
@@ -149,7 +171,6 @@ fn bouncer_gate_blocks_and_allows_on_windows() {
     if !cfg!(windows) {
         return;
     }
-    let _guard = BUILD_LOCK.lock().unwrap();
 
     // Build the plan and run the packed binary, returning its stdout.
     let run = |plan: &str, exe: &str| -> String {
@@ -189,7 +210,6 @@ fn bouncer_gate_blocks_and_allows_on_windows() {
 #[test]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn build_with_custom_stub_produces_pe() {
-    let _guard = BUILD_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_picaro"))
         .args(["build", "examples/plans/custom-stub.yaml"])
         .output()
@@ -225,10 +245,12 @@ fn build_interactive_quit_writes_nothing() {
         .spawn()
         .expect("spawn picaro build interactive");
 
-    // Nine blank answers walk the first pass with their defaults; `3` quits the
-    // review screen, so the wizard stops before writing (or compiling) anything.
+    // Eleven blank answers walk the first pass with their defaults (name, args,
+    // arch, output kind, execution, preparation, strings, syscalls, output path,
+    // strip, trim paths); `3` quits the review screen, so the wizard stops
+    // before writing (or compiling) anything.
     let mut stdin = child.stdin.take().expect("stdin is piped");
-    stdin.write_all(&b"\n".repeat(10)).expect("write answers");
+    stdin.write_all(&b"\n".repeat(11)).expect("write answers");
     stdin.write_all(b"3\n").expect("write the quit choice");
     drop(stdin);
 
@@ -277,16 +299,17 @@ fn pack_args_payload(name: &str, payload: &Path, args: &[&str], mode: &str) -> P
         .collect::<String>();
     let source = payload.display().to_string().replace('\\', "/");
     let plan = format!(
-        r#"schema: 4
+        r#"schema: 6
 name: {name}
 build:
-  payload:
-    source: "{source}"
-    args:
-{yaml_args}    args_mode: {mode}
-    crypto:
-      algo: xchacha20poly1305
-      key: random
+  crypto:
+    algo: xchacha20poly1305
+    key: random
+  payloads:
+    payload:
+      source: "{source}"
+      args:
+{yaml_args}      args_mode: {mode}
   output:
     path: ./dist/{name}.exe
     arch: x64
@@ -294,6 +317,7 @@ build:
     trim_paths: all
 runtime:
   - technique: reflective_loading
+    params: {{ payload: payload }}
 "#
     );
 
@@ -350,7 +374,6 @@ fn run_packed(exe: &Path, args: &[&str]) -> Vec<String> {
 #[test]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn payload_receives_yaml_then_runtime_args() {
-    let _guard = BUILD_LOCK.lock().unwrap();
     let payload = build_args_payload();
     let exe = pack_args_payload("test_args_join", &payload, &["yaml-a", "yaml-b"], "join");
 
@@ -368,7 +391,6 @@ fn payload_receives_yaml_then_runtime_args() {
 #[test]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn payload_override_mode_prefers_runtime_args() {
-    let _guard = BUILD_LOCK.lock().unwrap();
     let payload = build_args_payload();
     let exe = pack_args_payload(
         "test_args_override",
@@ -476,31 +498,33 @@ fn audit_baseline_gates_a_regression() {
     assert!(String::from_utf8_lossy(&regressed.stdout).contains("regression"));
 }
 
-// --- build --dry-run / build.payload.sha256 ---
+// --- build --dry-run / build.payloads.<name>.sha256 ---
 
 /// A minimal build plan (reflective loading, builtin stub) for `out`.
 fn minimal_build_plan(out: &Path, sha256: Option<&str>) -> String {
     let sha_line = match sha256 {
-        Some(hash) => format!("    sha256: \"{hash}\"\n"),
+        Some(hash) => format!("      sha256: \"{hash}\"\n"),
         None => String::new(),
     };
     let out = out.display().to_string().replace('\\', "/");
     format!(
-        r#"schema: 4
+        r#"schema: 6
 name: cli-dry-run
 build:
-  payload:
-    source: examples/payloads/test_payload.exe
-{sha_line}    crypto:
-      algo: xchacha20poly1305
-      key: random
-  output:
+  crypto:
+    algo: xchacha20poly1305
+    key: random
+  payloads:
+    payload:
+      source: examples/payloads/test_payload.exe
+{sha_line}  output:
     path: "{out}"
     arch: x64
     strip: true
     trim_paths: all
 runtime:
   - technique: reflective_loading
+    params: {{ payload: payload }}
 "#
     )
 }
@@ -538,7 +562,7 @@ fn build_dry_run_validates_without_writing() {
     assert!(!manifest.exists(), "a dry run must not write a manifest");
 }
 
-/// A `build.payload.sha256` that does not match the payload aborts the build
+/// A `build.payloads.<name>.sha256` that does not match the payload aborts the build
 /// with a clear message, before anything is compiled.
 #[test]
 fn build_rejects_a_payload_sha256_mismatch() {
@@ -589,7 +613,6 @@ fn build_dry_run_validates_resources() {
 #[test]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn build_with_resources_embeds_a_resource_section() {
-    let _guard = BUILD_LOCK.lock().unwrap();
     let build = picaro(&["build".as_ref(), "tests/plans/resources.yaml".as_ref()]);
     assert!(
         build.status.success(),
@@ -717,7 +740,6 @@ fn packs_and_runs_an_x86_reflective_payload() {
     if !cfg!(windows) {
         return;
     }
-    let _guard = BUILD_LOCK.lock().unwrap();
 
     // 1. Build the 32-bit payload.
     let src = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -739,14 +761,15 @@ fn packs_and_runs_an_x86_reflective_payload() {
     // 2. Pack it with `arch: x86`.
     let source = payload.display().to_string().replace('\\', "/");
     let plan = format!(
-        r#"schema: 4
+        r#"schema: 6
 name: x86_reflective
 build:
-  payload:
-    source: "{source}"
-    crypto:
-      algo: xchacha20poly1305
-      key: random
+  crypto:
+    algo: xchacha20poly1305
+    key: random
+  payloads:
+    payload:
+      source: "{source}"
   output:
     path: ./dist/x86_reflective.exe
     arch: x86
@@ -754,6 +777,7 @@ build:
     trim_paths: all
 runtime:
   - technique: reflective_loading
+    params: {{ payload: payload }}
 "#
     );
     let plan_path = std::env::temp_dir().join(format!("picaro_x86_{}.yaml", std::process::id()));
@@ -822,16 +846,17 @@ fn build_hollow_payload(target: Option<&str>) -> PathBuf {
 fn pack_hollowing_payload(name: &str, payload: &Path, arch: &str) -> PathBuf {
     let source = payload.display().to_string().replace('\\', "/");
     let plan = format!(
-        r#"schema: 4
+        r#"schema: 6
 name: {name}
 build:
-  payload:
-    source: "{source}"
-    args:
-      - "dist/{name}.marker"
-    crypto:
-      algo: xchacha20poly1305
-      key: random
+  crypto:
+    algo: xchacha20poly1305
+    key: random
+  payloads:
+    payload:
+      source: "{source}"
+      args:
+        - "dist/{name}.marker"
   output:
     path: ./dist/{name}.exe
     arch: {arch}
@@ -840,6 +865,7 @@ build:
 runtime:
   - technique: process_hollowing
     params:
+      payload: payload
       target: "C:\\Windows\\System32\\svchost.exe"
 "#
     );
@@ -898,7 +924,6 @@ fn packs_and_runs_a_hollowed_payload() {
     if !cfg!(windows) {
         return;
     }
-    let _guard = BUILD_LOCK.lock().unwrap();
     let payload = build_hollow_payload(None);
     let artifact = pack_hollowing_payload("hollow_x64", &payload, "x64");
     assert_hollowed_run(&artifact, "hollow_x64");
@@ -914,7 +939,6 @@ fn packs_and_runs_an_x86_hollowed_payload() {
     if !cfg!(windows) {
         return;
     }
-    let _guard = BUILD_LOCK.lock().unwrap();
     let payload = build_hollow_payload(Some(x86_target()));
     let artifact = pack_hollowing_payload("hollow_x86", &payload, "x86");
     assert_hollowed_run(&artifact, "hollow_x86");
@@ -934,7 +958,6 @@ fn x86_preparations_run_before_the_payload() {
     if !cfg!(windows) {
         return;
     }
-    let _guard = BUILD_LOCK.lock().unwrap();
 
     // The plain marker payload: it prints to stdout, which the stub's own
     // console shows (a hollowed payload would not).
@@ -954,14 +977,15 @@ fn x86_preparations_run_before_the_payload() {
     assert!(status.success(), "the 32-bit payload must compile");
     let source = payload.display().to_string().replace('\\', "/");
     let plan = format!(
-        r#"schema: 4
+        r#"schema: 6
 name: x86_preparations
 build:
-  payload:
-    source: "{source}"
-    crypto:
-      algo: xchacha20poly1305
-      key: random
+  crypto:
+    algo: xchacha20poly1305
+    key: random
+  payloads:
+    payload:
+      source: "{source}"
   output:
     path: ./dist/x86_preparations.exe
     arch: x86
@@ -975,6 +999,7 @@ runtime:
     params:
       min_ram_mb: 1
   - technique: reflective_loading
+    params: {{ payload: payload }}
 "#
     );
     let plan_path =
@@ -1010,15 +1035,16 @@ runtime:
 /// point of these tests is the coupling between them.
 fn managed_plan(name: &str, source: &str, format: &str, arch: &str, technique: &str) -> String {
     format!(
-        r#"schema: 4
+        r#"schema: 6
 name: {name}
 build:
-  payload:
-    source: {source}
-    format: {format}
-    crypto:
-      algo: xchacha20poly1305
-      key: random
+  crypto:
+    algo: xchacha20poly1305
+    key: random
+  payloads:
+    payload:
+      source: {source}
+      format: {format}
   output:
     path: ./dist/{name}.exe
     arch: {arch}
@@ -1026,6 +1052,7 @@ build:
     trim_paths: all
 runtime:
   - technique: {technique}
+    params: {{ payload: payload }}
 "#
     )
 }
@@ -1110,7 +1137,6 @@ fn packs_and_runs_a_managed_payload() {
     if !cfg!(windows) {
         return;
     }
-    let _guard = BUILD_LOCK.lock().unwrap();
     let plan = write_temp_plan(
         "picaro_managed_x86.yaml",
         &managed_plan(
@@ -1121,13 +1147,8 @@ fn packs_and_runs_a_managed_payload() {
             "dotnet_hosting",
         )
         .replace(
-            "    format: dotnet
-",
-            "    format: dotnet
-    args:
-      - one
-      - two
-",
+            "      format: dotnet\n",
+            "      format: dotnet\n      args:\n        - one\n        - two\n",
         ),
     );
 
@@ -1172,7 +1193,6 @@ fn packs_and_runs_a_managed_payload_on_x64() {
     if !cfg!(windows) {
         return;
     }
-    let _guard = BUILD_LOCK.lock().unwrap();
     let plan = write_temp_plan(
         "picaro_managed_x64.yaml",
         &managed_plan(
@@ -1202,23 +1222,22 @@ fn packs_and_runs_a_managed_payload_on_x64() {
     assert_eq!(run.status.code(), Some(42));
 }
 
-/// Acceptance case: the real-world managed assembly in the repository root
-/// (`SharpHound.exe`, a 32-bit .NET assembly) packs and runs, and behaves the
-/// same as it does unpacked.
+/// Acceptance case: the real-world managed assembly dropped in
+/// `tests/fixtures/` (`SharpHound.exe`, a 32-bit .NET assembly) packs and runs,
+/// and behaves the same as it does unpacked.
 ///
 /// `#[ignore]`: it needs `SharpHound.exe` (not committed) plus a Windows host.
 #[test]
-#[ignore = "requires SharpHound.exe in the repository root and a Windows host"]
+#[ignore = "requires SharpHound.exe in tests/fixtures/ and a Windows host"]
 fn packs_and_runs_sharphound() {
-    if !cfg!(windows) || !Path::new("SharpHound.exe").exists() {
+    if !cfg!(windows) || !Path::new("tests/fixtures/SharpHound.exe").exists() {
         return;
     }
-    let _guard = BUILD_LOCK.lock().unwrap();
     let plan = write_temp_plan(
         "picaro_sharphound.yaml",
         &managed_plan(
             "sharphound",
-            "./SharpHound.exe",
+            "./tests/fixtures/SharpHound.exe",
             "dotnet",
             "x86",
             "dotnet_hosting",
@@ -1247,7 +1266,7 @@ fn packs_and_runs_sharphound() {
     // host that loads the assembly but hands it the wrong environment. SharpHound
     // timestamps every line with sub-second precision, so the timestamps are
     // stripped before comparing.
-    let direct = Command::new("./SharpHound.exe")
+    let direct = Command::new("./tests/fixtures/SharpHound.exe")
         .output()
         .expect("run the unpacked SharpHound");
     assert_eq!(
@@ -1265,4 +1284,78 @@ fn without_timestamps(stdout: &[u8]) -> String {
         .map(|line| line.split_once('|').map_or(line, |(_, rest)| rest))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+// --- DLL output (build.output.kind: dll) ---
+
+/// Loads a packed DLL into *this* process — the test binary becomes the host —
+/// and calls `export`, returning the value the export reports.
+///
+/// The module is mapped with `LoadLibraryW` and the entry point found with
+/// `GetProcAddress` (windows-rs); the raw call is the only `unsafe` and it stays
+/// in this one place.
+fn load_dll_and_call(dll: &Path, export: &str) -> i32 {
+    use windows::core::{PCSTR, PCWSTR};
+    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+
+    let wide: Vec<u16> = dll
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let module = unsafe { LoadLibraryW(PCWSTR(wide.as_ptr())) }
+        .expect("LoadLibraryW must map the packed DLL");
+
+    let name = std::ffi::CString::new(export).expect("an export name");
+    let address = unsafe { GetProcAddress(module, PCSTR(name.as_ptr().cast())) }
+        .expect("the export must exist in the packed DLL");
+
+    // SAFETY: the plain export has the rundll32 shape — four ignored arguments
+    // and an `i32` return — and the module stays loaded for the call.
+    let run: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *const u8,
+        i32,
+    ) -> i32 = unsafe { std::mem::transmute(address) };
+    unsafe {
+        run(
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            0,
+        )
+    }
+}
+
+/// End-to-end: a `kind: dll` artifact is loaded by a host process — this test
+/// binary — and its export runs the chain. The fixture's shellcode returns `42`,
+/// which the export reports back, so the value proves the chain ran rather than
+/// that the module merely mapped.
+///
+/// `#[ignore]`: compiles a stub and needs a Windows host, since the artifact is
+/// loaded by the image loader of the process that loads it.
+#[test]
+#[ignore = "requires rustc, the compiled dependencies and a Windows host"]
+fn a_dll_artifact_runs_the_chain_when_a_host_loads_it() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    let build = picaro(&["build".as_ref(), "tests/plans/dll.yaml".as_ref()]);
+    assert!(
+        build.status.success(),
+        "DLL build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let artifact = Path::new("dist/test_dll.dll");
+    let bytes = std::fs::read(artifact).expect("read the DLL");
+    assert_eq!(&bytes[..2], b"MZ", "the artifact must be a PE");
+
+    assert_eq!(
+        load_dll_and_call(artifact, "Run"),
+        42,
+        "the chain must run through the export"
+    );
 }

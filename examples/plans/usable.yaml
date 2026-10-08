@@ -1,18 +1,19 @@
-# Reflective loading: the payload is mapped and executed inside the packed
-# binary's own process (no suspended target, no executable image on disk).
+# Reflective loading driven entirely by a build argument: the payload path is a
+# `$arg.0$` token, so the plan is reusable without editing.
 #
-#   cargo run -- build examples/plans/reflective-loading.yaml
-#   .\dist\test_packed_reflective.exe
+#   cargo run -- build examples/plans/usable.yaml .\some\payload.exe
+#
+# `build.stub.strings` obfuscates every stub literal, `syscalls: indirect`
+# resolves the NTs at runtime, and the artifact is lab-signed with generated
+# metadata.
 
-schema: 4
+schema: 6
 name: usable-example
 
 build:
-  payload:
-    source: "$arg.0$"
-    crypto:
-      algo: xchacha20poly1305
-      key: random
+  payloads:
+    payload:
+      source: "$arg.0$"
 
   stub:
     syscalls:
@@ -23,9 +24,6 @@ build:
 
   output:
     path: out.exe
-    arch: x64
-    strip: true
-    trim_paths: all
     resources:
       version_info:
         randomize: true

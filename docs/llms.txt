@@ -6,48 +6,66 @@
 
 ## Getting started
 
-- [Introduction](index.html): what picaro is and its authorized-use scope.
-- [Getting started](getting-started.html): requirements, a first plan, and the build/run/measure commands.
-- [Plan](plan.html): every block and field, plus the interactive wizard.
-- [Examples](examples/index.html): the runnable plans, recipes and end-to-end tests.
+- [Introduction](/): what picaro is and its authorized-use scope.
+- [Getting started](/getting-started/): requirements, a first plan, and the build/run/measure commands.
+- [Plan](/plan/): every block and field, plus the interactive wizard.
+- [Examples](/examples/): the runnable plans, recipes and end-to-end tests.
 
 ## Techniques
 
-- [Techniques overview](techniques/index.html): the Preparation/Execution model and the registry table.
-- [patch_amsi](techniques/ref/patch_amsi.html)
-- [patch_etw](techniques/ref/patch_etw.html)
-- [anti_debug](techniques/ref/anti_debug.html)
-- [sleep_obfuscation](techniques/ref/sleep_obfuscation.html)
-- [bouncer](techniques/ref/bouncer.html)
-- [process_hollowing](techniques/ref/process_hollowing.html)
-- [reflective_loading](techniques/ref/reflective_loading.html)
-- [dotnet_hosting](techniques/ref/dotnet_hosting.html)
-- [Syscall layer](techniques/indirect_syscalls.html): none / Hell's Gate / Tartarus Gate / API hashing.
-- [Payload arguments](techniques/process_argument_spoofing.html): build.payload.args and PEB command-line patching.
-- [String obfuscation](techniques/string_obfuscation.html): build.stub.strings (xor / stack).
-- [Adding a technique](techniques/adding-a-technique.html): the four-file ritual.
+- [Techniques overview](/techniques/): the Preparation/Execution model and the registry table.
+- [patch_amsi](/techniques/ref/patch_amsi/)
+- [patch_etw](/techniques/ref/patch_etw/)
+- [anti_debug](/techniques/ref/anti_debug/)
+- [sleep_obfuscation](/techniques/ref/sleep_obfuscation/)
+- [bouncer](/techniques/ref/bouncer/)
+- [process_hollowing](/techniques/ref/process_hollowing/)
+- [reflective_loading](/techniques/ref/reflective_loading/)
+- [dotnet_hosting](/techniques/ref/dotnet_hosting/)
+- [execution_callbacks](/techniques/ref/execution_callbacks/)
+- [module_stomping](/techniques/ref/module_stomping/)
+- [fibers](/techniques/ref/fibers/)
+- [unhook_ntdll](/techniques/ref/unhook_ntdll/)
+- [early_bird](/techniques/ref/early_bird/)
+- [pe_injection](/techniques/ref/pe_injection/)
+- [living_off_the_land](/techniques/ref/living_off_the_land/)
+- [sleep](/techniques/ref/sleep/)
+- [ppid_spoofing](/techniques/ref/ppid_spoofing/)
+- [thread_hijacking](/techniques/ref/thread_hijacking/)
+- [self_deletion](/techniques/ref/self_deletion/)
+- [stack_spoofing](/techniques/ref/stack_spoofing/)
+- [Adding a technique](/techniques/adding-a-technique/): the four-file ritual.
+
+## Loader features
+
+- [Loader features overview](/features/): the stub-level configuration (not runtime steps) and the registry table.
+- [syscalls](/features/ref/syscalls/): the syscall layer — none / Hell's Gate / Tartarus Gate / API hashing.
+- [api_resolution](/features/ref/api_resolution/): the payload import proxy.
+- [strings](/features/ref/strings/): build.stub.strings (xor / stack).
+- [args](/features/ref/args/): build.payloads.<name>.args and PEB command-line patching.
+- [Adding a feature](/features/adding-a-feature/): the metadata ritual.
 
 ## Architecture
 
-- [How it fits together](architecture.html): the packer pipeline and repo layout.
-- [Custom stubs](custom-stubs.html): replacing the builtin loader template.
-- [API resolution](api-resolution.html): the payload import proxy (catalogue, phases, limitations).
-- [x86 support](x86.html): `build.output.arch`, what is ported and what is still x64-only.
+- [How it fits together](/architecture/): the packer pipeline and repo layout.
+- [Multi-stage plans](/multistage/): schema 6 `runtime:` — several payloads and living-off-the-land steps in one artifact.
+- [Custom stubs](/custom-stubs/): replacing the builtin loader template.
+- [Syscall layer design](/design/syscalls/): phases 6a/6b/6c, the resolvers and the trampoline.
+- [API resolution design](/design/api-resolution/): the payload import proxy (catalogue, phases, limitations).
+- [x86 support](/x86/): `build.output.arch`, what is ported and what is still x64-only.
 
 ## Reference
 
-- [Measurements](measurements.html): phase-by-phase static/dynamic results and the EDR report.
-- [Process hollowing evidence](techniques/process_hollowing.html): measured behaviour and remaining work.
-- [Migration: v1 to v3](migration-v1-v3.html)
-- [Migration: v2 to v3](migration-v2-v3.html)
-- [Migration: v3 to v4](migration-v3-v4.html)
+- [Measurements](/measurements/): phase-by-phase static/dynamic results and the EDR report.
+- [Process hollowing evidence](/techniques/process_hollowing/): measured behaviour and remaining work.
 
 ## Notes
 
 - The canonical sources are the Markdown files in docs/ plus
-  src/techniques/*/README.md, README.md and examples/README.md.
-- mkdocs.yml holds the navigation; the per-technique pages, the plan
-  reference and the examples page are generated from those files via
-  pymdownx.snippets.
-- The site is built with Material for MkDocs. The links above are
+  src/techniques/*/README.md, src/features/*/README.md, README.md and
+  examples/README.md.
+- `docs/nav.yml` holds the navigation; the per-technique and per-feature pages, the
+  plan reference and the examples page are generated from those files by the
+  Starlight build (docs/site/scripts/assemble-docs.mjs).
+- The site is built with Astro + Starlight. The links above are
   site-root-relative paths in the generated site.

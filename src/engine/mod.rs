@@ -7,10 +7,14 @@
 //! - `debug`: the `tech_dbg!` trace macro appended to a debug stub.
 //! - `obfuscation`: string obfuscation for stub literals.
 //! - `compiler`: stub compilation with `rustc`.
+//! - `entry`: the stub's entry point (`fn main` or the DLL's exports,
+//!   selected by `build.output.kind`).
 //! - `fetch`: in-memory HTTP(S) fetch of the input payload (URL input).
 //! - `api_resolution`: how the loader resolves the payload's imports
 //!   (`build.stub.api_resolution`) — the proxy catalogue and its validation.
 //! - `args`: payload command-line construction and argument spoofing.
+//! - `build_lock`: a dependency-free per-output lock that serializes the
+//!   copy/sign/manifest section of concurrent builds targeting one artifact.
 //! - `manifest`: the build manifest (provenance record written next to the
 //!   artifact).
 //! - `hash`: SHA-256 for provenance and payload pinning.
@@ -22,9 +26,11 @@
 
 pub mod api_resolution;
 pub mod args;
+pub mod build_lock;
 pub mod compiler;
 pub mod crypto;
 pub mod debug;
+pub mod entry;
 pub mod fetch;
 pub mod hash;
 pub mod identity;
@@ -34,6 +40,8 @@ pub mod obfuscation;
 pub mod pe;
 pub mod resources;
 pub mod signing;
+pub mod stager;
+pub mod steps;
 pub mod stub;
 pub mod syscalls;
 

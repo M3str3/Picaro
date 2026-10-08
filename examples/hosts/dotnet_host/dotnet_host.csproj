@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- A .NET host for a `kind: dll` artifact: the CLR loads the packed DLL with
+       the OS image loader and calls its export. No packages: `NativeLibrary`
+       and `Marshal` are in the runtime. Targets net6.0 because that is the
+       installed SDK here; the API is the same from .NET Core 3.0 on. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net6.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AssemblyName>dotnet_host</AssemblyName>
+    <RootNamespace>Picaro.Hosts</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+</Project>

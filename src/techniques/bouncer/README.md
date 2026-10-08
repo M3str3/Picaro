@@ -1,13 +1,17 @@
 # Bouncer
 
+*Checks the host against declared requirements and aborts the pipeline before
+the payload runs when the target does not match.*
+
 ## Metadata
 
-- **ATT&CK**: T1497.001 (Virtualization/Sandbox Evasion: System Checks),
-  T1614.001 (System Location Discovery: System Language Discovery)
-- **Stability**: Experimental
-- **Category**: Preparation
-- **YAML key**: `bouncer`
-- **Introduced in**: Phase 8
+| | |
+|---|---|
+| **ATT&CK** | T1497.001 (Virtualization/Sandbox Evasion: System Checks), T1614.001 (System Location Discovery: System Language Discovery) |
+| **Stability** | Stable |
+| **Category** | Preparation |
+| **YAML key** | `bouncer` |
+| **Introduced in** | Phase 8 |
 
 ## What it does
 
@@ -71,10 +75,23 @@ runtime:
 
 ## How it works
 
+```mermaid
+flowchart TD
+    A[Count declared checks] --> B{Combine: all / any}
+    B -->|pass| C[Run the next step]
+    B -->|reject| D{on_fail}
+    D -->|silent| E[exit 0]
+    D -->|exit| F[exit 1]
+```
+
+### 1. The gate
+
 The gate counts how many checks are declared and how many pass, then applies
 `mode` (`all`: `passed == declared`; `any`: `passed > 0`). No declared check is
 always a pass. On rejection the stub does not run the payload; `on_fail`
 chooses between a silent exit (`0`) and an explicit one (`1`).
+
+### 2. The checks
 
 - **`hostname`** — `GetComputerNameW`, matched with a case-insensitive glob.
 - **`username`** — `GetUserNameW`, same matcher.

@@ -3,15 +3,15 @@
 use super::{Action, Params, DEF};
 use crate::audit::strings::find_sensitive_literals_in_source;
 use crate::engine::obfuscation::StringsConfig;
-use crate::techniques::{Category, RuntimeStep};
+use crate::techniques::{Category, TechniqueKind};
 
 #[test]
 fn parses_params_from_empty_yaml_and_defaults_to_abort() {
-    let step: RuntimeStep =
+    let step: TechniqueKind =
         serde_yml::from_str("technique: anti_debug\n").expect("anti_debug should parse");
     assert_eq!(
         step,
-        RuntimeStep::AntiDebug {
+        TechniqueKind::AntiDebug {
             params: Params {
                 action: Action::Abort
             }
@@ -21,12 +21,12 @@ fn parses_params_from_empty_yaml_and_defaults_to_abort() {
 
 #[test]
 fn parses_explicit_continue() {
-    let step: RuntimeStep =
+    let step: TechniqueKind =
         serde_yml::from_str("technique: anti_debug\nparams:\n  action: continue\n")
             .expect("anti_debug should parse");
     assert_eq!(
         step,
-        RuntimeStep::AntiDebug {
+        TechniqueKind::AntiDebug {
             params: Params {
                 action: Action::Continue
             }
@@ -37,7 +37,7 @@ fn parses_explicit_continue() {
 #[test]
 fn rejects_an_unknown_action() {
     let err =
-        serde_yml::from_str::<RuntimeStep>("technique: anti_debug\nparams:\n  action: nope\n")
+        serde_yml::from_str::<TechniqueKind>("technique: anti_debug\nparams:\n  action: nope\n")
             .expect_err("an unknown action must be rejected");
     assert!(
         err.to_string().contains("unknown variant") && err.to_string().contains("abort"),

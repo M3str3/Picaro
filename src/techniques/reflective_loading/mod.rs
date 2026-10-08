@@ -13,10 +13,15 @@ use crate::plan::schema::PayloadFormat;
 
 use super::{Capability, Category, Stability, TechniqueDef};
 
-/// Parameters for reflective loading (none; the payload format and its export
-/// live in `build.payload`, not in the technique).
+/// Parameters for reflective loading: which payload to load (the payload
+/// format and export live in the payload's `build.payloads` entry).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Params {}
+pub struct Params {
+    /// Name of the payload in `build.payloads` to load. Optional when the plan
+    /// declares exactly one payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<String>,
+}
 
 /// Static metadata for reflective loading.
 pub const DEF: TechniqueDef = TechniqueDef {
@@ -39,7 +44,7 @@ pub const DEF: TechniqueDef = TechniqueDef {
 };
 
 /// The shellcode format's fragment: the same technique, but a runner instead of
-/// a PE mapper. Rendered when `build.payload.format: shellcode`.
+/// a PE mapper. Rendered when `build.payloads.<name>.format: shellcode`.
 pub const SHELLCODE_FRAGMENT: &str = include_str!("stub_fragment_shellcode.rs");
 
 impl Params {
@@ -52,7 +57,7 @@ impl Params {
     /// Renders the fragment that matches the payload's binary format.
     ///
     /// `pe` and `dll` share the PE mapper; a DLL may additionally name an
-    /// export to call (`build.payload.export`, obfuscated through `strings`). A
+    /// export to call (`build.payloads.<name>.export`, obfuscated through `strings`). A
     /// `shellcode` payload gets the raw-code runner instead.
     pub fn render_fragment_for(
         &self,

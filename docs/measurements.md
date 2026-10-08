@@ -20,6 +20,7 @@ the time and have since been consolidated into `examples/plans/` and
 | x86 | TLS provisioning (M1/M2) | `TlsSetValue` → loader's array; a payload reads its own `thread_local` (`tls=42`) |
 | x86 | reflective loading (static) | 468 KB; 1 suspicious import (`VirtualAllocEx`); no literals leak |
 | M5 | .NET hosting (static) | 389 KB managed fixture / 1.7 MB SharpHound; the CLR-hosting imports (`mscoree`, `ole32`, `oleaut32`) are the signature |
+| DLL | host-loaded DLL (`kind: dll`) | 366 KB; loaded by CPython, .NET and `rundll32`; the chain's `42` comes back from the two blocking hosts |
 | EDR | CrowdStrike Falcon | hollowing blocked at runtime (partial) |
 
 ## Phase 5 — static baseline (process hollowing)
@@ -188,6 +189,200 @@ and the real-world `SharpHound.exe` (1.3 MB, 32-bit .NET).
 - Runtime: the fixture prints `MANAGED_MARKER_7f3a9c2e args=0 x64=False` and exits
   `42`; SharpHound's output is identical to running the original, line for line
   (modulo its own timestamps).
+
+## Parallel technique batch — callbacks, module stomping, fibers (2026-09-28)
+
+Three in-process Execution techniques added in one batch, each built from its own
+`code_examples/<name>/smoke.yaml` with the 6-byte demo shellcode
+(`examples/payloads/demo_shellcode.bin`), `strings: xor`, `syscalls: none`.
+
+| | `execution_callbacks` | `module_stomping` | `fibers` |
+| --- | --- | --- | --- |
+| Artifact | 376 KB | 378 KB (387,584 B) | 372 KB (380,416 B) |
+| Imports only this one has | `VirtualAllocEx`, `VirtualProtectEx` (both gone with `syscalls: indirect`, 95 → 93 imported functions) | `LoadLibraryA`, `GetCurrentProcess`, `VirtualProtectEx` | `ConvertThreadToFiber`, `CreateFiberEx`, `SwitchToFiber`, `DeleteFiber`, `ConvertFiberToThread`, `VirtualProtectEx`; no `CreateThread`/`GetExitCodeThread` (the reflective shellcode runner has them) |
+| Strings | sensitive 0, API names 0, technique names 0 | sensitive 0 | sensitive 0 |
+| `audit` | LOW RISK, "IAT looks minimal" | LOW RISK | LOW RISK |
+| Runtime | exit `42` (x64 and x86) | exit `42` (x64 and x86) | exit `42` (x64 and x86) |
+
+- The runtime row is the packed artifact itself (`code_examples/<name>/smoke.exe`,
+  produced by `picaro build` and executed on the Windows host): the demo
+  shellcode (`mov eax, 42; ret`) runs and the stub relays its exit code. The
+  artifacts are gitignored scratch and were not kept.
+- Every one of the three also builds and runs as an **i686** stub
+  (`code_examples/<name>/smoke-x86.yaml`), so the x86 claim in each DEF is
+  measured, not assumed.
+- They chain as documented: one artifact with `fibers` → `execution_callbacks` →
+  `module_stomping` (three shellcode payloads, `code_examples/chain/chain.yaml`)
+  runs all three steps in order and exits with the payload's code (`42`).
+- `execution_callbacks` resolves `crypt32.dll!CertEnumSystemStoreLocation`
+  dynamically (`LoadLibraryA` + `GetProcAddress`, both names obfuscated), so
+  neither the module nor the entry point appears in the IAT or in `.rdata`.
+- `module_stomping` keeps the stomped module's own `.text` mapping, so the added
+  static surface is `LoadLibraryA` + `GetCurrentProcess` + the protection change;
+  `.text` capacity was probed on live modules (`wininet.dll` 1,957,888 B,
+  `dbghelp.dll` 1,712,128 B, `amsi.dll` 53,248 B — a poor target for a staged
+  payload, besides the `patch_amsi` conflict).
+- `fibers` was also probed directly (`code_examples/fibers/harness/`): the
+  payload's `eax` returns as the step's exit code, a second `fibers` run on the
+  same thread works after `ConvertFiberToThread`, a fiber function that returns
+  ends the process silently (exit 0 — the explicit switch back is required), and
+  protecting the decrypted buffer's own heap pages hangs the switch when the
+  loader's fiber state shares the page (hence the dedicated region).
+
+## Batch 2 — ntdll unhooking, Early Bird, PE injection, PPID spoofing (2026-09-28)
+
+Four techniques added in a second parallel batch. Each was built from its own
+plan under `code_examples/<name>/` and **run end to end**, not just compiled.
+
+| | `unhook_ntdll` | `early_bird` | `pe_injection` | `ppid_spoofing` |
+| --- | --- | --- | --- | --- |
+| Category | preparation | execution | execution | control |
+| Artifact | 405 KB (x64) / 371 KB (x86) | 362 KB (x64) | 587 KB (x64) / 529 KB (x86) | 279 KB (x64) / 242 KB (x86) |
+| Payload | — | `shellcode` | `pe` | — |
+| `audit` | LOW RISK · sensitive 0 · technique names 0 · System32 paths 0 | LOW RISK · no suspicious strings | — | — |
+| Runtime proof | the following step still exits `42` | the APC kills the target (`0xC000001D`) | the payload's own exit code (`42`) returns | the child's exit code (`7`) returns |
+
+- **`unhook_ntdll`** restores 1,482,908 bytes of `.text` at the live ntdll base.
+  Two measured constraints: the write window must be `PAGE_EXECUTE_READWRITE`
+  (with `PAGE_READWRITE` the protection call faults on its return, because it
+  returns *through* an ntdll stub inside the region being rewritten), and on x86
+  the section's base relocations must be applied — the live 32-bit ntdll differs
+  from the file in 19,004 bytes (HIGHLOW fixups, delta `0x2bda0000`), so a raw
+  copy crashes the stub. With `syscalls.mode: indirect` the
+  `VirtualProtectEx`/`VirtualAllocEx` imports disappear (x64 artifacts).
+- **`early_bird`**'s proof is a two-byte `ud2` payload plus a bounded `wait_ms`:
+  the loader relays the target's `0xC000001D`
+  (`STATUS_ILLEGAL_INSTRUCTION`), which can only happen if the APC was
+  delivered. Verified on x64 and x86. **Target choice matters:** the 32-bit
+  `notepad.exe` of this Windows build is a launcher shim, so `QueueUserAPC` on
+  its thread fails with `ERROR_INVALID_HANDLE` (measured `0x80070006`), while the
+  64-bit one works and `cmd.exe` works on both architectures. The default target
+  is `svchost.exe`; check the target first when a run fails on an unusual image.
+- **`pe_injection`** returns the payload's own exit code (`42`) through the stub
+  on x64 and x86, for a minimal payload and for one with unusual section
+  alignment; a stack probe reports the same `rsp & 0xF` injected and direct, so
+  the thread starts with the same alignment as a normally created one.
+- **`ppid_spoofing`** relays the child's exit code (`7`) and the chain keeps
+  running; the spoof itself was verified from PowerShell (`Win32_Process`
+  reports the configured parent's PID while the real creator is the loader). A
+  missing parent fails loudly (`exit 1`) and a detached child outlives the
+  loader.
+
+## Batch 3 — thread hijacking, stack spoofing, self-deletion (2026-09-29)
+
+Host: `x86_64-pc-windows-msvc` (rustc 1.90), release stub unless noted, Windows 11.
+
+- **`thread_hijacking`** (T1055.003, execution, shellcode only): a throwaway
+  `ping.exe -t 127.0.0.1` started by hand, payload `ud2` (`0f 0b`, two bytes).
+  The target's thread was redirected and died with `0xC000001D`
+  (`STATUS_ILLEGAL_INSTRUCTION`); the loader — `wait_ms: 4000` — relayed exactly
+  that code as its own exit status, which is the proof the redirection happened.
+  No thread was created in the target. Running it against `notepad.exe` produced
+  `0xC0000005` events instead: the *crash code* of a hijacked thread depends on
+  what the payload does with the (private) stack, so `ud2` is the payload to use
+  when the point is the proof. The target's own exit code can only be relayed
+  when `wait_ms` covers its death.
+
+- **`stack_spoofing`** (T1036, preparation, x64): indirect syscalls with
+  `resolver: tartarus_gate`, a shellcode payload through `reflective_loading`.
+  The payload's exit code (`42`) is relayed, so every syscall in the chain ran
+  with the stack shifted by 4 KB and its arguments copied — the copy is the part
+  that could silently corrupt a wide call. `init_stack_spoofing` resolves 16
+  fabricated return sites from the live ntdll. Two findings worth keeping:
+  - The decoy fill loop originally wrote a full 128-byte block whenever its
+    cursor was below the caller's `rsp`, which could run up to 124 bytes *past*
+    that pointer and overwrite the caller's real return address. With the
+    argument copy in place the syscall itself still succeeded, so the symptom was
+    a hang in the *first* spoofed syscall (`NtAllocateVirtualMemory`), not a
+    crash. The loop bound is now one block below `rsp`.
+  - The structural minimum for `decoy_bytes` is `0x70` (the fabricated frames
+    plus the nine copied argument slots), but every value below `0x80` faults in
+    the first spoofed syscall on this host (`0xC0000005`) while `0x80` and above
+    work. The clamp is `0x80` and the sweep is committed as
+    `code_examples/stack_spoofing/bisect.py`, so the floor can be re-measured
+    instead of trusted.
+
+- **`self_deletion`** (T1070.004, preparation): the artifact's own path, three
+  variants, measured with a stand-in process that opens *its own* image
+  (`code_examples/self_deletion/probe.cs`):
+
+  | Variant | Result |
+  |---------|--------|
+  | `FileDispositionInformationEx` (64) `DELETE|POSIX_SEMANTICS`, share `RW+DELETE` | `FALSE`, `ERROR_ACCESS_DENIED` |
+  | `FileDispositionInformation` (13), share `RW+DELETE` | `FALSE`, `ERROR_ACCESS_DENIED` |
+  | `FileDispositionInformation` (13), share `READ` | `FALSE`, `ERROR_ACCESS_DENIED` |
+  | `FileDispositionInformationEx` (64) `DELETE`, share `READ` | `FALSE`, `ERROR_ACCESS_DENIED` |
+  | `FileRenameInformation` (10) to `:stream`, share `READ` | **`TRUE`** |
+
+  A mapped image cannot be deleted on this build, which is why the default is the
+  rename: after `mode: rename_ads` the path is a 0-byte file and the loader's
+  386,560 bytes live in a randomly named alternate data stream (verified with
+  `Get-Item -Stream *`), with the payload still running from the mapped section
+  and relaying exit code `42`. `mode: helper` — a detached `cmd.exe` that sleeps
+  two seconds and deletes — removes the file outright: verified by listing the
+  directory after the run.
+
+## DLL output (`build.output.kind: dll`) — host matrix (2026-09-30)
+
+Host: `x86_64-pc-windows-msvc` (rustc 1.90), Windows 11. Artifact:
+`tests/plans/dll.yaml` — shellcode `mov eax, 42; ret`, `entry: export:Run`, no
+syscalls — built with `picaro build tests/plans/dll.yaml` (366 KB,
+`dist/test_dll.dll`). The chain returns `42`, so a host that reports `42` proves
+its export ran the chain and did not merely map the module; the committed host
+examples are in `examples/hosts/` (the scratch variants used here — lab-signed,
+resources — are in `code_examples/dll-output/`).
+
+| Host | Loads it with | Entry | Result |
+| --- | --- | --- | --- |
+| CPython 3.14 | `ctypes.CDLL(...).Run()` | `export:Run` (blocks) | `42`, marker on stderr (`ctypes_host.py`) |
+| .NET (PowerShell 5.1 `Add-Type`) | `[DllImport]` P/Invoke, 4-argument shape | `export:Run` | `42`; `test_dll.dll` in the host's module list (`pinvoke_host.ps1`) |
+| `rundll32.exe` | `rundll32 test_dll.dll,Run` | `export:Run` | chain ran (marker on the redirected stderr), exit code `0` (`rundll32_host.ps1`) |
+| Java | `System.load` | `jni_on_load` | not measured: no JDK on the measurement host |
+
+Findings:
+
+- **`rundll32` needs its handles redirected.** It is a GUI-subsystem binary, so
+  neither cmd nor bash hands it the parent console, and
+  `AttachConsole(ATTACH_PARENT_PROCESS)` cannot attach a console that was never
+  there. `Start-Process -RedirectStandardError` is what makes the chain's output
+  observable, and it is the recipe in `examples/hosts/rundll32_host.ps1`; started
+  plainly from bash, the chain still runs and the marker goes nowhere.
+- **`rundll32` does not relay the export's return value.** `Run` returns `42`
+  and `rundll32` still exits `0`. When the return code is the evidence, use
+  `ctypes`/P-Invoke, which see it, or a payload with a side effect.
+- **The DLL appears in the host's module list** (`test_dll.dll @ 0x7FF…`): the
+  image-load telemetry the design predicts (section 9) is real — the mode removes
+  the *process* IoC, not the module.
+- **`entry: auto` exports `DllMain`, `JNI_OnLoad` and `Run`** — the `picaro
+  audit` EXPORTS section lists all three (`examples/plans/dll.yaml`), one of which
+  no ordinary DLL has.
+- **The PE records the delivered name**: `strings dist/test_dll.dll` shows
+  `test_dll.dll` (and `test_dll.pdb`), confirming D-15 — the intermediate is named
+  after the output stem and `--crate-name` follows it.
+- **Resources are legitimate in a DLL.** A `kind: dll` plan with an icon and
+  version info (`.rsrc` 16 KB, 366 → 382 KB) still runs (`Run()` → `42`), and
+  `GetFileVersionInfo` reads it back (`CompanyName Contoso Ltd`,
+  `FileDescription Widget Helper`). The *application* manifest is rejected at
+  build time, as designed.
+
+### Signing (lab) and Defender
+
+`build.output.sign.mode: lab` signs through `signtool.exe` on Windows (resolved
+from the Windows Kits install):
+
+- Before signing: `SIGNATURE none`; Defender **clean**.
+- After signing (`dist/dll_signed.dll`, same plan plus `sign: { mode: lab }`):
+  `SIGNATURE present (Authenticode)`, overlay 1,480 B, Defender still **clean**.
+- `signtool verify -pa -v` walks the whole chain — `CN=picaro lab code signing`
+  ← `CN=picaro lab code signing Root CA` — and fails only with *"a root
+  certificate which is not trusted"*: the lab CA is exported next to the artifact
+  (`dll_signed.ca.cer`) and no trust store is modified.
+- The signed DLL loads and returns `42` exactly like the unsigned one.
+
+Not measured: a Defender *verdict* change with the signature (both are clean
+here). The design's remaining Phase D item is the **Java** row (`System.load`
+plus a latch); the parked `AttachCurrentThread` extension is what makes the JVM
+wait for the worker.
 
 ## CrowdStrike Falcon — process hollowing (partial)
 

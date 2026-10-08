@@ -5,13 +5,46 @@ code_examples/
 # Local session memory: a rolling developer note, not part of the repo.
 .memory.md
 
+# Local working notes: plans, prompts and scratch — never published.
+.plan*.md
+docs/FUTURE_MULTI_STUB_PLAN.md
+docs/site/MERMAID_PROMPT.md
+
 # Host build output.
 /target
 /build
 /dist
 
-# Documentation site output (MkDocs).
+# Lab
+/lab
+
+# Documentation site output.
 /site
+
+# Documentation site (Astro + Starlight) build artifacts and generated sources.
+/docs/site/node_modules/
+/docs/site/.astro/
+/docs/site/dist/
+/docs/site/src/content/docs/
+/docs/site/src/sidebar.mjs
+
+# Development container exchange folder (docker-compose.yml): the one host folder
+# shared writable with the containers — msfvenom payloads, plans and packed
+# artifacts go here. Keep the directory itself so a fresh clone has somewhere to
+# point the bind mount.
+/exchange/*
+!/exchange/.gitkeep
+
+# CA material for a corporate TLS-inspecting proxy (PICARO_EXTRA_CA); a trust
+# anchor must never be committed.
+/certs/
+
+# Python bytecode cache (the host examples are Python scripts).
+__pycache__/
+
+# .NET host example build output (`dotnet run`).
+examples/hosts/dotnet_host/bin/
+examples/hosts/dotnet_host/obj/
 
 # Debug symbols and linker side artifacts (MSVC + MinGW).
 *.pdb

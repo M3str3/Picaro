@@ -19,6 +19,7 @@
 //! for redirected or scripted input. That keeps the whole session testable: the
 //! same wizard logic runs against `Cursor`/`Vec` in the unit tests.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
@@ -29,13 +30,14 @@ use crate::engine::obfuscation::YamlStringsPlan;
 use crate::engine::syscalls::YamlSyscallsPlan;
 use crate::error::{PackerError, Result};
 use crate::plan::schema::{
-    Arch, BuildPlan, CryptoAlgorithm, CryptoPlan, KeySource, OutputPlan, PayloadFormat,
-    PayloadPlan, Plan, StubPlan, Subsystem, TrimPaths, SUPPORTED_SCHEMA,
+    Arch, BuildPlan, CryptoAlgorithm, CryptoPlan, DllEntry, KeySource, OutputKind, OutputPlan,
+    PayloadFormat, PayloadPlan, Plan, StubPlan, Subsystem, TrimPaths, SUPPORTED_SCHEMA,
 };
 use crate::plan::validate;
 use crate::techniques::{
-    self, anti_debug, bouncer, patch_amsi, patch_etw, process_hollowing, sleep_obfuscation,
-    Category, RuntimeStep, TechniqueDef,
+    self, anti_debug, bouncer, early_bird, living_off_the_land, module_stomping, patch_amsi,
+    patch_etw, pe_injection, process_hollowing, sleep, sleep_obfuscation, Category, RuntimeStep,
+    TechniqueDef, TechniqueKind,
 };
 use crate::ui::Palette;
 
@@ -169,11 +171,18 @@ fn write_plan(plan: &Plan, yaml: &str, plan_out: Option<&Path>) -> Result<PathBu
 struct Answers {
     name: String,
     payload_args: Vec<String>,
-    execution: RuntimeStep,
-    preparations: Vec<RuntimeStep>,
+    execution: TechniqueKind,
+    preparations: Vec<TechniqueKind>,
+    /// Additional runtime steps appended after the execution technique, in
+    /// order (Control steps and in-process runners that return control).
+    additional_steps: Vec<TechniqueKind>,
     strings_strategy: String,
     syscalls_mode: String,
     output_path: String,
+    /// `build.output.kind`: a standalone executable or a host-loaded DLL.
+    output_kind: OutputKind,
+    /// `build.output.entry` for a DLL build (always `auto` for an executable).
+    dll_entry: DllEntry,
     /// `build.output.arch` as the wizard's answer string (`x64` / `x86`).
     arch: String,
     strip: bool,
@@ -557,10 +566,37 @@ impl Wizard<'_> {
             _ => "x86".to_string(),
         };
 
+        // The output kind gates which techniques are runnable — a DLL lives in a
+        // host process and must not touch that process's image — so it is asked
+        // before the techniques, for the same reason as `arch`.
+        let output_kind = match self.ask_select(
+            "output kind",
+            &[
+                ("exe", "a standalone executable (the default)"),
+                (
+                    "dll",
+                    "a DLL a host process loads (ctypes, P/Invoke, a JVM)",
+                ),
+            ],
+            previous
+                .map(|answers| usize::from(answers.output_kind == OutputKind::Dll))
+                .unwrap_or(0),
+        )? {
+            0 => OutputKind::Exe,
+            _ => OutputKind::Dll,
+        };
+
         self.section("TECHNIQUES")?;
         let execution = self.ask_execution(previous.map(|answers| &answers.execution))?;
+        let format = default_format(&execution);
         let preparations = self.ask_preparations(
             previous.map_or(&[][..], |answers| answers.preparations.as_slice()),
+            output_kind,
+        )?;
+        let additional_steps = self.ask_additional_steps(
+            previous.map(|answers| answers.additional_steps.as_slice()),
+            &execution,
+            format,
         )?;
 
         self.section("STUB")?;
@@ -601,9 +637,45 @@ impl Wizard<'_> {
         };
 
         self.section("OUTPUT")?;
+        // `entry` only applies to a DLL; an executable starts at `main`.
+        let dll_entry = if output_kind == OutputKind::Dll {
+            let default_entry = previous.map_or(0, |answers| dll_entry_index(&answers.dll_entry));
+            match self.ask_select(
+                "entry",
+                &[
+                    (
+                        "auto",
+                        "export `JNI_OnLoad` and `Run`, so any host can call it",
+                    ),
+                    (
+                        "jni_on_load",
+                        "export only `JNI_OnLoad` (a JVM's `System.load`)",
+                    ),
+                    ("export", "export only one function name of your choice"),
+                ],
+                default_entry,
+            )? {
+                1 => DllEntry::JniOnLoad,
+                2 => {
+                    let default_export = match previous.map(|answers| &answers.dll_entry) {
+                        Some(DllEntry::Export(name)) => name.clone(),
+                        _ => DllEntry::AUTO_EXPORT.to_string(),
+                    };
+                    DllEntry::Export(self.ask_text("export name", &default_export)?)
+                }
+                _ => DllEntry::Auto,
+            }
+        } else {
+            DllEntry::Auto
+        };
+
+        // A DLL the host loads carries the `.dll` extension, an executable
+        // `.exe`; a path the operator typed is kept only while the kind still
+        // matches it.
         let default_output = previous
+            .filter(|answers| answers.output_kind == output_kind)
             .map(|answers| answers.output_path.clone())
-            .unwrap_or_else(|| format!("./dist/{name}_packed.exe"));
+            .unwrap_or_else(|| format!("./dist/{name}_packed.{}", output_kind.label()));
         let output_path = self.ask_text("output path", &default_output)?;
         let strip = self.prompts.confirm(
             "strip symbols",
@@ -630,9 +702,12 @@ impl Wizard<'_> {
             payload_args,
             execution,
             preparations,
+            additional_steps,
             strings_strategy,
             syscalls_mode,
             output_path,
+            output_kind,
+            dll_entry,
             arch,
             strip,
             trim_paths,
@@ -649,7 +724,7 @@ impl Wizard<'_> {
     }
 
     /// Asks for the execution technique and its parameters.
-    fn ask_execution(&mut self, previous: Option<&RuntimeStep>) -> Result<RuntimeStep> {
+    fn ask_execution(&mut self, previous: Option<&TechniqueKind>) -> Result<TechniqueKind> {
         let choices = execution_defs();
         let options = describe(&choices);
         let default = previous
@@ -663,16 +738,85 @@ impl Wizard<'_> {
         let index = self.prompts.select("execution", &options, default)?;
         let def = choices[index];
         let previous = previous.filter(|step| step.name() == def.name);
+        self.ask_execution_params(def, previous)
+    }
 
+    /// Asks the parameters of one Execution technique.
+    ///
+    /// Shared by the primary execution question and the appended runtime steps,
+    /// so an appended `module_stomping` asks for its stomp target the same way
+    /// the primary one does. Techniques the wizard has no tailored questions for
+    /// fall back to their documented `params_example`.
+    fn ask_execution_params(
+        &mut self,
+        def: &TechniqueDef,
+        previous: Option<&TechniqueKind>,
+    ) -> Result<TechniqueKind> {
         match def.name {
             "process_hollowing" => {
                 let default_target = match previous {
-                    Some(RuntimeStep::ProcessHollowing { params }) => params.target.clone(),
+                    Some(TechniqueKind::ProcessHollowing { params }) => params.target.clone(),
                     _ => process_hollowing::default_target(),
                 };
                 let target = self.ask_text("target", &default_target)?;
-                Ok(RuntimeStep::ProcessHollowing {
-                    params: process_hollowing::Params { target },
+                Ok(TechniqueKind::ProcessHollowing {
+                    params: process_hollowing::Params {
+                        payload: None,
+                        target,
+                    },
+                })
+            }
+            "module_stomping" => {
+                let default_module = match previous {
+                    Some(TechniqueKind::ModuleStomping { params }) => params.module.clone(),
+                    _ => module_stomping::default_module(),
+                };
+                let module = self.ask_text("module", &default_module)?;
+                Ok(TechniqueKind::ModuleStomping {
+                    params: module_stomping::Params {
+                        payload: None,
+                        module,
+                    },
+                })
+            }
+            "early_bird" => {
+                let (default_target, default_wait) = match previous {
+                    Some(TechniqueKind::EarlyBird { params }) => {
+                        (params.target.clone(), params.wait_ms)
+                    }
+                    _ => (early_bird::default_target(), 0),
+                };
+                let target = self.ask_text("target", &default_target)?;
+                let wait_ms =
+                    self.ask_number("wait_ms (0 = do not wait)", default_wait, 0, u64::MAX)?;
+                Ok(TechniqueKind::EarlyBird {
+                    params: early_bird::Params {
+                        payload: None,
+                        target,
+                        wait_ms,
+                    },
+                })
+            }
+            "pe_injection" => {
+                let (default_target, default_timeout) = match previous {
+                    Some(TechniqueKind::PeInjection { params }) => {
+                        (params.target.clone(), u64::from(params.timeout_ms))
+                    }
+                    _ => (pe_injection::default_target(), 0),
+                };
+                let target = self.ask_text("target", &default_target)?;
+                let timeout_ms = self.ask_number(
+                    "timeout_ms (0 = wait forever)",
+                    default_timeout,
+                    0,
+                    u64::from(u32::MAX),
+                )? as u32;
+                Ok(TechniqueKind::PeInjection {
+                    params: pe_injection::Params {
+                        payload: None,
+                        target,
+                        timeout_ms,
+                    },
                 })
             }
             _ => default_step(def),
@@ -680,8 +824,19 @@ impl Wizard<'_> {
     }
 
     /// Asks which preparations to apply, then each one's parameters.
-    fn ask_preparations(&mut self, previous: &[RuntimeStep]) -> Result<Vec<RuntimeStep>> {
-        let choices = preparation_defs();
+    ///
+    /// A `kind: dll` build cannot run a preparation that acts on the *running
+    /// image* (that image is the host's), so those are not offered at all — the
+    /// same way `syscalls: indirect` is hidden on x86.
+    fn ask_preparations(
+        &mut self,
+        previous: &[TechniqueKind],
+        kind: OutputKind,
+    ) -> Result<Vec<TechniqueKind>> {
+        let choices: Vec<&'static TechniqueDef> = preparation_defs()
+            .into_iter()
+            .filter(|def| !(kind == OutputKind::Dll && is_dll_incompatible(def.name)))
+            .collect();
         let options = describe(&choices);
         let default: Vec<usize> = choices
             .iter()
@@ -697,7 +852,7 @@ impl Wizard<'_> {
         for index in selected {
             let def = choices[index];
             let previous = previous.iter().find(|step| step.name() == def.name);
-            out.push(self.ask_preparation(def, previous)?);
+            out.push(self.ask_preparation(def, previous, kind)?);
         }
         Ok(out)
     }
@@ -706,8 +861,9 @@ impl Wizard<'_> {
     fn ask_preparation(
         &mut self,
         def: &TechniqueDef,
-        previous: Option<&RuntimeStep>,
-    ) -> Result<RuntimeStep> {
+        previous: Option<&TechniqueKind>,
+        kind: OutputKind,
+    ) -> Result<TechniqueKind> {
         self.blank()?;
         let heading = self.ui.heading(def.name);
         let subtitle = self.ui.dim(techniques::summary(def));
@@ -716,16 +872,16 @@ impl Wizard<'_> {
         match def.name {
             "bouncer" => {
                 let previous = previous.and_then(|step| match step {
-                    RuntimeStep::Bouncer { params } => Some(params),
+                    TechniqueKind::Bouncer { params } => Some(params),
                     _ => None,
                 });
-                Ok(RuntimeStep::Bouncer {
-                    params: self.ask_bouncer(previous)?,
+                Ok(TechniqueKind::Bouncer {
+                    params: self.ask_bouncer(previous, kind)?,
                 })
             }
             "anti_debug" => {
                 let previous = previous.and_then(|step| match step {
-                    RuntimeStep::AntiDebug { params } => Some(params.action),
+                    TechniqueKind::AntiDebug { params } => Some(params.action),
                     _ => None,
                 });
                 let action = match self.ask_select(
@@ -739,35 +895,35 @@ impl Wizard<'_> {
                     0 => anti_debug::Action::Abort,
                     _ => anti_debug::Action::Continue,
                 };
-                Ok(RuntimeStep::AntiDebug {
+                Ok(TechniqueKind::AntiDebug {
                     params: anti_debug::Params { action },
                 })
             }
-            "patch_amsi" => Ok(RuntimeStep::PatchAmsi {
+            "patch_amsi" => Ok(TechniqueKind::PatchAmsi {
                 params: patch_amsi::Params {},
             }),
             "patch_etw" => {
                 let previous = previous.and_then(|step| match step {
-                    RuntimeStep::PatchEtw { params } => Some(params.full),
+                    TechniqueKind::PatchEtw { params } => Some(params.full),
                     _ => None,
                 });
                 let full = self
                     .prompts
                     .confirm("also patch EtwEventWriteFull", previous.unwrap_or(true))?;
-                Ok(RuntimeStep::PatchEtw {
+                Ok(TechniqueKind::PatchEtw {
                     params: patch_etw::Params { full },
                 })
             }
             "sleep_obfuscation" => {
                 let previous = previous.and_then(|step| match step {
-                    RuntimeStep::SleepObfuscation { params } => Some(params.sleep_ms),
+                    TechniqueKind::SleepObfuscation { params } => Some(params.sleep_ms),
                     _ => None,
                 });
                 // Only `ekko` and `[payload]` are implemented, so the variant and
                 // the encrypted regions are not questions yet.
                 let sleep_ms =
                     self.ask_number("sleep_ms", previous.unwrap_or(5000), 1, u32::MAX as u64)?;
-                Ok(RuntimeStep::SleepObfuscation {
+                Ok(TechniqueKind::SleepObfuscation {
                     params: sleep_obfuscation::Params {
                         variant: sleep_obfuscation::Variant::Ekko,
                         sleep_ms,
@@ -779,9 +935,100 @@ impl Wizard<'_> {
         }
     }
 
+    /// Asks whether to append more runtime steps after the execution technique.
+    ///
+    /// The loader keeps control only when the execution technique returns; when
+    /// it is terminal (`dotnet_hosting`, or `reflective_loading` of a PE
+    /// executable) a following step would never run, so nothing is appended. The
+    /// Control steps always return; the in-process runners return only for a
+    /// shellcode payload, so they are offered only then.
+    fn ask_additional_steps(
+        &mut self,
+        previous: Option<&[TechniqueKind]>,
+        execution: &TechniqueKind,
+        format: PayloadFormat,
+    ) -> Result<Vec<TechniqueKind>> {
+        if execution_is_terminal(execution, format) {
+            return Ok(Vec::new());
+        }
+        let choices = appendable_defs(format);
+        let options = describe(&choices);
+
+        let mut steps = Vec::new();
+        let mut position = 0;
+        loop {
+            let previous_step = previous.and_then(|steps| steps.get(position));
+            if !self
+                .prompts
+                .confirm("add another runtime step?", previous_step.is_some())?
+            {
+                break;
+            }
+            let default = previous_step
+                .and_then(|step| choices.iter().position(|def| def.name == step.name()))
+                .unwrap_or(0);
+            let index = self.prompts.select("append step", &options, default)?;
+            let def = choices[index];
+            let previous_step = previous_step.filter(|step| step.name() == def.name);
+            steps.push(self.ask_additional_step(def, previous_step)?);
+            position += 1;
+        }
+        Ok(steps)
+    }
+
+    /// Asks the parameters of one appended runtime step.
+    fn ask_additional_step(
+        &mut self,
+        def: &TechniqueDef,
+        previous: Option<&TechniqueKind>,
+    ) -> Result<TechniqueKind> {
+        self.blank()?;
+        let heading = self.ui.heading(def.name);
+        let subtitle = self.ui.dim(techniques::summary(def));
+        self.echo(&format!("{heading}  {subtitle}"))?;
+
+        match def.name {
+            "sleep" => {
+                let default_ms = match previous {
+                    Some(TechniqueKind::Sleep { params }) => params.ms,
+                    _ => sleep::default_ms(),
+                };
+                let ms = self.ask_number("ms", default_ms, 1, u64::MAX)?;
+                Ok(TechniqueKind::Sleep {
+                    params: sleep::Params { ms },
+                })
+            }
+            "living_off_the_land" => {
+                let (default_binary, default_args) = match previous {
+                    Some(TechniqueKind::LivingOffTheLand { params }) => {
+                        (params.binary.clone(), params.args.clone())
+                    }
+                    _ => ("cmd.exe".to_string(), Vec::new()),
+                };
+                let binary = self.ask_text("binary", &default_binary)?;
+                let args = self.ask_list("args (comma-separated)", &default_args)?;
+                Ok(TechniqueKind::LivingOffTheLand {
+                    params: living_off_the_land::Params {
+                        binary,
+                        args,
+                        ..Default::default()
+                    },
+                })
+            }
+            // The in-process runners reuse the primary execution's questions
+            // (`module_stomping` asks its target; the no-arg runners keep their
+            // `params_example` defaults).
+            _ => self.ask_execution_params(def, previous),
+        }
+    }
+
     /// The bouncer gate: how the checks combine, what to do on rejection, and
     /// which checks to declare (each with its own value question).
-    fn ask_bouncer(&mut self, previous: Option<&bouncer::Params>) -> Result<bouncer::Params> {
+    fn ask_bouncer(
+        &mut self,
+        previous: Option<&bouncer::Params>,
+        kind: OutputKind,
+    ) -> Result<bouncer::Params> {
         let mode = match self.ask_select(
             "mode",
             &[
@@ -793,20 +1040,26 @@ impl Wizard<'_> {
             0 => bouncer::Mode::All,
             _ => bouncer::Mode::Any,
         };
-        let on_fail = match self.ask_select(
-            "on_fail",
-            &[
-                ("silent", "stop with exit code 0"),
-                ("exit", "stop with exit code 1"),
-            ],
-            matches!(
-                previous.map(|params| params.on_fail),
-                Some(bouncer::OnFail::Exit)
-            )
-            .into(),
-        )? {
-            0 => bouncer::OnFail::Silent,
-            _ => bouncer::OnFail::Exit,
+        // `on_fail: exit` calls `std::process::exit`, which would kill the host
+        // process, so a DLL build only offers the silent rejection.
+        let on_fail = if kind == OutputKind::Dll {
+            bouncer::OnFail::Silent
+        } else {
+            match self.ask_select(
+                "on_fail",
+                &[
+                    ("silent", "stop with exit code 0"),
+                    ("exit", "stop with exit code 1"),
+                ],
+                matches!(
+                    previous.map(|params| params.on_fail),
+                    Some(bouncer::OnFail::Exit)
+                )
+                .into(),
+            )? {
+                0 => bouncer::OnFail::Silent,
+                _ => bouncer::OnFail::Exit,
+            }
         };
 
         let checks: [(&str, &str); 9] = [
@@ -918,6 +1171,56 @@ fn trim_index(trim: TrimPaths) -> usize {
     }
 }
 
+/// The index of a [`DllEntry`] in the wizard's entry menu.
+fn dll_entry_index(entry: &DllEntry) -> usize {
+    match entry {
+        DllEntry::Auto => 0,
+        DllEntry::JniOnLoad => 1,
+        DllEntry::Export(_) => 2,
+    }
+}
+
+/// A preparation a `kind: dll` build cannot run: both act on the *running image*
+/// (`GetModuleHandleA(NULL)`), which in a DLL build is the host process.
+/// `plan::validate` rejects them, so the wizard must not offer them.
+fn is_dll_incompatible(name: &str) -> bool {
+    matches!(name, "self_deletion" | "sleep_obfuscation")
+}
+
+/// Whether an execution technique hands the whole process to the payload, so a
+/// following step would never run. Mirrors `plan::validate`'s terminal-step rule
+/// so the wizard never offers to append a step past it.
+fn execution_is_terminal(technique: &TechniqueKind, format: PayloadFormat) -> bool {
+    match technique {
+        TechniqueKind::DotnetHosting { .. } => true,
+        TechniqueKind::ReflectiveLoading { .. } => format == PayloadFormat::Pe,
+        _ => false,
+    }
+}
+
+/// The techniques the wizard offers as appendable runtime steps, in menu order.
+///
+/// The Control steps (`sleep`, `living_off_the_land`) always return control and
+/// are always offered. The in-process runners (`execution_callbacks`,
+/// `module_stomping`, `fibers`, `reflective_loading`) return only for a shellcode
+/// payload, so they are offered only then; a PE `reflective_loading` would be
+/// terminal.
+fn appendable_defs(format: PayloadFormat) -> Vec<&'static TechniqueDef> {
+    let mut names: Vec<&'static str> = vec!["sleep", "living_off_the_land"];
+    if format == PayloadFormat::Shellcode {
+        names.extend([
+            "execution_callbacks",
+            "module_stomping",
+            "fibers",
+            "reflective_loading",
+        ]);
+    }
+    names
+        .into_iter()
+        .filter_map(|name| techniques::find(name))
+        .collect()
+}
+
 /// The registered Execution techniques, in registry order.
 fn execution_defs() -> Vec<&'static TechniqueDef> {
     techniques::all()
@@ -961,28 +1264,54 @@ fn describe(defs: &[&'static TechniqueDef]) -> Vec<(&'static str, &'static str)>
 }
 
 /// Assembles the [`Plan`] from the answered questions.
+///
+/// The wizard builds a single-payload plan: the payload's key is the file stem,
+/// and the crypto lives on `build.crypto` (no per-payload block).
 fn assemble(payload: &Path, answers: &Answers) -> Plan {
-    let mut runtime = answers.preparations.clone();
-    runtime.push(answers.execution.clone());
+    let mut runtime: Vec<RuntimeStep> = answers
+        .preparations
+        .iter()
+        .cloned()
+        .map(RuntimeStep::new)
+        .collect();
+    runtime.push(RuntimeStep::new(answers.execution.clone()));
+    runtime.extend(
+        answers
+            .additional_steps
+            .iter()
+            .cloned()
+            .map(RuntimeStep::new),
+    );
+
+    let payload_name = default_name(payload);
+    let mut payloads = BTreeMap::new();
+    payloads.insert(
+        payload_name,
+        PayloadPlan {
+            source: payload.display().to_string(),
+            // The wizard writes one payload and never asks for its format, so it
+            // must pick one the chosen technique runs (see `default_format`);
+            // anything else is an advanced setting edited in the YAML.
+            format: default_format(&answers.execution),
+            export: None,
+            args: (!answers.payload_args.is_empty()).then(|| answers.payload_args.clone()),
+            args_mode: ArgsMode::Join,
+            // The crypto lives on `build.crypto`; inherited by the payload.
+            crypto: None,
+            // Integrity pinning is an advanced setting; edit it in the YAML.
+            sha256: None,
+        },
+    );
 
     Plan {
         schema: SUPPORTED_SCHEMA,
         name: answers.name.clone(),
         build: BuildPlan {
-            payload: PayloadPlan {
-                source: payload.display().to_string(),
-                // Payload formats are an advanced setting; edit them in the YAML.
-                format: PayloadFormat::Pe,
-                export: None,
-                args: (!answers.payload_args.is_empty()).then(|| answers.payload_args.clone()),
-                args_mode: ArgsMode::Join,
-                crypto: CryptoPlan {
-                    algo: CryptoAlgorithm::XChaCha20Poly1305,
-                    key: KeySource::Random,
-                },
-                // Integrity pinning is an advanced setting; edit it in the YAML.
-                sha256: None,
-            },
+            crypto: Some(CryptoPlan {
+                algo: CryptoAlgorithm::XChaCha20Poly1305,
+                key: KeySource::Random,
+            }),
+            payloads,
             stub: StubPlan {
                 // The wizard always renders the builtin stub.
                 path: None,
@@ -1003,6 +1332,8 @@ fn assemble(payload: &Path, answers: &Answers) -> Plan {
             },
             output: OutputPlan {
                 path: PathBuf::from(&answers.output_path),
+                kind: answers.output_kind,
+                entry: answers.dll_entry.clone(),
                 arch: if answers.arch == "x86" {
                     Arch::X86
                 } else {
@@ -1022,12 +1353,31 @@ fn assemble(payload: &Path, answers: &Answers) -> Plan {
     }
 }
 
+/// The payload format the wizard writes for an execution technique.
+///
+/// `plan::validate` rejects a plan whose payload format the technique cannot
+/// run, and the wizard never asks for the format, so the default has to be one
+/// the chosen technique accepts. Formats the wizard cannot infer (a DLL export,
+/// or shellcode for `reflective_loading`) are edited in the YAML afterwards.
+fn default_format(technique: &TechniqueKind) -> PayloadFormat {
+    match technique {
+        TechniqueKind::DotnetHosting { .. } => PayloadFormat::Dotnet,
+        TechniqueKind::ExecutionCallbacks { .. }
+        | TechniqueKind::ModuleStomping { .. }
+        | TechniqueKind::EarlyBird { .. }
+        | TechniqueKind::ThreadHijacking { .. }
+        | TechniqueKind::Fibers { .. }
+        | TechniqueKind::DllHollowing { .. } => PayloadFormat::Shellcode,
+        _ => PayloadFormat::Pe,
+    }
+}
+
 /// Builds a step from the technique's documented `params_example`.
 ///
 /// Used for techniques the wizard has no tailored questions for yet: the
 /// registry guarantees the snippet parses, so a newly registered technique
 /// arrives with its YAML defaults instead of being unreachable.
-fn default_step(def: &TechniqueDef) -> Result<RuntimeStep> {
+fn default_step(def: &TechniqueDef) -> Result<TechniqueKind> {
     serde_yml::from_str(def.params_example).map_err(|source| {
         PackerError::Validation(format!(
             "technique '{}' has unparsable default params: {source}",
@@ -1202,13 +1552,13 @@ mod tests {
         assert_eq!(default_name(Path::new("payload")), "payload");
     }
 
-    /// Ten blank first-pass answers plus a blank review selection (`build now`)
-    /// produce a plan the packer accepts as-is.
+    /// Twelve blank first-pass answers plus a blank review selection (`build
+    /// now`) produce a plan the packer accepts as-is.
     #[test]
     fn defaults_produce_a_valid_reflective_plan() {
         let dir = temp_dir("defaults");
         let plan_path = dir.join("out.yaml");
-        let answers = ["", "", "", "", "", "", "", "", "", "", ""];
+        let answers = ["", "", "", "", "", "", "", "", "", "", "", ""];
 
         let (written, transcript) = session("payload.exe", &answers, Some(&plan_path));
 
@@ -1221,8 +1571,15 @@ mod tests {
         let plan = load_plan(&plan_path, &BTreeMap::new()).expect("valid plan");
         assert_eq!(plan.name, "payload");
         assert_eq!(plan.build.output.arch, Arch::X64, "the default arch is x64");
-        assert_eq!(plan.build.payload.source, "payload.exe");
-        assert!(plan.build.payload.args.is_none());
+        assert_eq!(
+            plan.build.output.kind,
+            OutputKind::Exe,
+            "the default output kind is exe"
+        );
+        let payload = plan.build.payloads.get("payload").expect("the payload");
+        assert_eq!(payload.source, "payload.exe");
+        assert!(payload.args.is_none());
+        assert!(plan.build.crypto.is_some(), "build.crypto is the default");
         assert_eq!(
             plan.build.output.path,
             PathBuf::from("./dist/payload_packed.exe")
@@ -1230,7 +1587,10 @@ mod tests {
         assert!(plan.build.output.strip);
         assert_eq!(plan.runtime.len(), 1);
         assert!(
-            matches!(plan.runtime[0], RuntimeStep::ReflectiveLoading { .. }),
+            matches!(
+                plan.runtime[0].technique,
+                TechniqueKind::ReflectiveLoading { .. }
+            ),
             "got {:?}",
             plan.runtime[0]
         );
@@ -1240,6 +1600,132 @@ mod tests {
         assert_eq!(syscalls.mode, "indirect");
         assert_eq!(syscalls.resolver, "hells_gate");
         assert!(plan.build.stub.strings.is_some());
+    }
+
+    /// The execution techniques the wizard has tailored questions for must
+    /// honour the answers instead of silently keeping the `params_example`
+    /// defaults.
+    #[test]
+    fn prompts_the_execution_technique_params() {
+        // module_stomping: which module to stomp.
+        let dir = temp_dir("exec_params_module");
+        let plan_path = dir.join("out.yaml");
+        let answers = [
+            "demo",
+            "",
+            "",
+            "",
+            "module_stomping",
+            "dbghelp.dll",
+            "",
+            "", // add another runtime step? -> no
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+        ];
+        let (written, _) = session("payload.exe", &answers, Some(&plan_path));
+        assert_eq!(written.as_deref(), Some(plan_path.as_path()));
+        let plan = load_plan(&plan_path, &BTreeMap::new()).expect("valid plan");
+        match &plan.runtime[0].technique {
+            TechniqueKind::ModuleStomping { params } => {
+                assert_eq!(params.module, "dbghelp.dll");
+                assert_eq!(params.payload, None);
+            }
+            other => panic!("expected module_stomping, got {other:?}"),
+        }
+
+        // early_bird: the target and the bounded wait.
+        let dir = temp_dir("exec_params_early_bird");
+        let plan_path = dir.join("out.yaml");
+        let answers = [
+            "demo",
+            "",
+            "",
+            "",
+            "early_bird",
+            "C:\\Windows\\System32\\notepad.exe",
+            "1500",
+            "",
+            "", // add another runtime step? -> no
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+        ];
+        let (written, _) = session("payload.exe", &answers, Some(&plan_path));
+        assert_eq!(written.as_deref(), Some(plan_path.as_path()));
+        let plan = load_plan(&plan_path, &BTreeMap::new()).expect("valid plan");
+        match &plan.runtime[0].technique {
+            TechniqueKind::EarlyBird { params } => {
+                assert_eq!(params.target, "C:\\Windows\\System32\\notepad.exe");
+                assert_eq!(params.wait_ms, 1500);
+            }
+            other => panic!("expected early_bird, got {other:?}"),
+        }
+        let payload = plan.build.payloads.get("payload").expect("the payload");
+        assert_eq!(payload.format, PayloadFormat::Shellcode);
+    }
+
+    /// Every Execution technique must assemble a plan the packer accepts.
+    ///
+    /// The wizard writes a single payload and never asks for its format, so the
+    /// assembled plan must use a format the chosen technique runs
+    /// (`dotnet_hosting` hosts a managed assembly; the in-process shellcode
+    /// runners execute raw code) and the step's `params_example` must not name
+    /// a payload the plan does not declare.
+    #[test]
+    fn every_execution_technique_assembles_a_valid_plan() {
+        use crate::plan::validate;
+
+        for def in execution_defs() {
+            let answers = Answers {
+                name: "demo".to_string(),
+                payload_args: Vec::new(),
+                execution: default_step(def).expect("params_example parses"),
+                preparations: Vec::new(),
+                additional_steps: Vec::new(),
+                strings_strategy: "xor".to_string(),
+                syscalls_mode: "none".to_string(),
+                output_path: "./dist/demo_packed.exe".to_string(),
+                output_kind: OutputKind::Exe,
+                dll_entry: DllEntry::Auto,
+                arch: "x64".to_string(),
+                strip: true,
+                trim_paths: TrimPaths::All,
+            };
+
+            let plan = assemble(Path::new("payload.exe"), &answers);
+            let payload = plan.build.payloads.get("payload").expect("the payload");
+            assert_eq!(
+                payload.format,
+                default_format(&answers.execution),
+                "{}: the payload format must be one the technique runs",
+                def.name
+            );
+            validate::validate(&plan).unwrap_or_else(|e| panic!("{}: {e}", def.name));
+        }
+    }
+
+    /// The wizard names its payload after the input file, so an Execution
+    /// technique's `params_example` must not name one: the default step would
+    /// reference a payload the plan never declares.
+    #[test]
+    fn execution_params_examples_do_not_name_a_payload() {
+        for def in execution_defs() {
+            let step: RuntimeStep =
+                serde_yml::from_str(def.params_example).expect("params_example parses");
+            assert!(
+                step.technique.payload_name().is_none(),
+                "{}: params_example names a payload; the wizard's payload is named after the input \
+                 file",
+                def.name
+            );
+        }
     }
 
     /// A full script exercises the execution choice, a preparation with several
@@ -1252,6 +1738,7 @@ mod tests {
             "demo",              // name
             "a,b",               // payload args
             "2",                 // arch -> x86
+            "",                  // output kind -> exe
             "process_hollowing", // execution
             "",                  // target -> default
             "1",                 // preparation: bouncer
@@ -1259,6 +1746,7 @@ mod tests {
             "",                  // bouncer on_fail -> silent
             "1,6",               // checks: hostname + not_in_vm
             "WORKSTATION-*",     // hostname
+            "",                  // add another runtime step? -> no
             "",                  // strings -> xor
             "",                  // syscalls -> none (indirect is x64-only)
             "",                  // output path
@@ -1273,12 +1761,12 @@ mod tests {
         let plan = load_plan(&plan_path, &BTreeMap::new()).expect("valid plan");
         assert_eq!(plan.name, "demo");
         assert_eq!(
-            plan.build.payload.args,
+            plan.build.payloads.get("mimikatz").expect("payload").args,
             Some(vec!["a".to_string(), "b".to_string()])
         );
 
         assert_eq!(plan.runtime.len(), 2);
-        let RuntimeStep::Bouncer { params } = &plan.runtime[0] else {
+        let TechniqueKind::Bouncer { params } = &plan.runtime[0].technique else {
             panic!("expected a bouncer first, got {:?}", plan.runtime[0]);
         };
         assert_eq!(params.mode, bouncer::Mode::All);
@@ -1286,7 +1774,7 @@ mod tests {
         assert_eq!(params.hostname.as_deref(), Some("WORKSTATION-*"));
         assert_eq!(params.not_in_vm, Some(true));
 
-        let RuntimeStep::ProcessHollowing { params } = &plan.runtime[1] else {
+        let TechniqueKind::ProcessHollowing { params } = &plan.runtime[1].technique else {
             panic!(
                 "expected process_hollowing second, got {:?}",
                 plan.runtime[1]
@@ -1303,6 +1791,185 @@ mod tests {
         );
     }
 
+    /// A shellcode payload can run several in-process steps: the wizard appends
+    /// Control and Execution steps in order, and every appended Execution step
+    /// references the single payload.
+    #[test]
+    fn a_multi_step_runtime_appends_steps_in_order() {
+        let dir = temp_dir("multistep");
+        let plan_path = dir.join("out.yaml");
+        let answers = [
+            "demo",                // name
+            "",                    // payload args
+            "",                    // arch -> x64
+            "",                    // output kind -> exe
+            "fibers",              // execution (a shellcode runner)
+            "",                    // preparations -> none
+            "y",                   // add another runtime step? -> yes
+            "sleep",               // append step -> sleep (menu #1)
+            "500",                 // sleep ms
+            "y",                   // add another runtime step? -> yes
+            "living_off_the_land", // append step -> exec (menu #2)
+            "certutil.exe",        // binary
+            "-urlcache,-f",        // args
+            "y",                   // add another runtime step? -> yes
+            "module_stomping",     // append step -> module_stomping (menu #4)
+            "dbghelp.dll",         // module
+            "",                    // add another runtime step? -> no
+            "",                    // strings
+            "",                    // syscalls
+            "",                    // output path
+            "",                    // strip
+            "",                    // trim paths
+            "",                    // review -> build now
+        ];
+
+        let (written, _) = session("payload.exe", &answers, Some(&plan_path));
+        assert_eq!(written.as_deref(), Some(plan_path.as_path()));
+
+        let plan = load_plan(&plan_path, &BTreeMap::new()).expect("valid plan");
+        assert_eq!(plan.runtime.len(), 4);
+
+        let TechniqueKind::Fibers { params } = &plan.runtime[0].technique else {
+            panic!("expected fibers first, got {:?}", plan.runtime[0]);
+        };
+        assert_eq!(params.payload, None);
+
+        let TechniqueKind::Sleep { params } = &plan.runtime[1].technique else {
+            panic!("expected sleep second, got {:?}", plan.runtime[1]);
+        };
+        assert_eq!(params.ms, 500);
+
+        let TechniqueKind::LivingOffTheLand { params } = &plan.runtime[2].technique else {
+            panic!(
+                "expected living_off_the_land third, got {:?}",
+                plan.runtime[2]
+            );
+        };
+        assert_eq!(params.binary, "certutil.exe");
+        assert_eq!(params.args, vec!["-urlcache", "-f"]);
+
+        let TechniqueKind::ModuleStomping { params } = &plan.runtime[3].technique else {
+            panic!("expected module_stomping fourth, got {:?}", plan.runtime[3]);
+        };
+        assert_eq!(params.module, "dbghelp.dll");
+        assert_eq!(params.payload, None);
+
+        // Every appended step still references the one wizard payload.
+        let payload = plan.build.payloads.get("payload").expect("the payload");
+        assert_eq!(payload.format, PayloadFormat::Shellcode);
+    }
+
+    /// A terminal execution (`reflective_loading` of a PE executable) hands the
+    /// process to the payload, so the wizard must not offer to append a step
+    /// after it.
+    #[test]
+    fn a_terminal_execution_offers_no_further_steps() {
+        let dir = temp_dir("terminal");
+        let plan_path = dir.join("out.yaml");
+        let answers = ["", "", "", "", "", "", "", "", "", "", "", ""];
+
+        let (written, transcript) = session("payload.exe", &answers, Some(&plan_path));
+        assert_eq!(written.as_deref(), Some(plan_path.as_path()));
+
+        let plan = load_plan(&plan_path, &BTreeMap::new()).expect("valid plan");
+        assert_eq!(plan.runtime.len(), 1);
+        assert!(
+            !transcript.contains("add another runtime step"),
+            "a terminal execution must not offer appended steps: {transcript}"
+        );
+    }
+
+    /// `kind: dll` turns the wizard into a DLL build: it asks for the entry, the
+    /// default path carries the `.dll` extension, and the preparations that act
+    /// on the running image are not offered (a DLL's image is the host's).
+    #[test]
+    fn a_dll_build_asks_for_the_entry_and_hides_image_scoped_preparations() {
+        let dir = temp_dir("dll");
+        let plan_path = dir.join("out.yaml");
+        let answers = [
+            "demo",   // name
+            "",       // payload args
+            "",       // arch -> x64
+            "dll",    // output kind
+            "",       // execution -> reflective_loading
+            "",       // preparation -> none
+            "",       // strings
+            "",       // syscalls
+            "export", // entry
+            "Start",  // export name
+            "",       // output path -> default
+            "",       // strip
+            "",       // trim paths
+            "",       // review -> build now
+        ];
+
+        let (written, transcript) = session("payload.exe", &answers, Some(&plan_path));
+        assert_eq!(written.as_deref(), Some(plan_path.as_path()));
+
+        let plan = load_plan(&plan_path, &BTreeMap::new()).expect("valid plan");
+        let output = &plan.build.output;
+        assert_eq!(output.kind, OutputKind::Dll);
+        assert_eq!(output.entry, DllEntry::Export("Start".to_string()));
+        assert_eq!(
+            output.path,
+            PathBuf::from("./dist/demo_packed.dll"),
+            "a DLL build defaults to the `.dll` extension"
+        );
+
+        // `self_deletion` and `sleep_obfuscation` rewrite the running image,
+        // which in a DLL build is the host, so `plan::validate` rejects them and
+        // the wizard must not offer them at all.
+        assert!(
+            !transcript.contains("self_deletion") && !transcript.contains("sleep_obfuscation"),
+            "image-scoped preparations must be hidden in a DLL build: {transcript}"
+        );
+    }
+
+    /// A DLL build never offers `bouncer`'s `on_fail: exit` (which would kill the
+    /// host process), so the bouncer question flow is one prompt shorter.
+    #[test]
+    fn a_dll_build_never_offers_the_process_killing_bouncer_rejection() {
+        use crate::techniques::bouncer;
+
+        let dir = temp_dir("dll_bouncer");
+        let plan_path = dir.join("out.yaml");
+        let answers = [
+            "demo", // name
+            "",     // payload args
+            "",     // arch -> x64
+            "dll",  // output kind
+            "",     // execution -> reflective_loading
+            "1",    // preparation: bouncer
+            "",     // bouncer mode -> all
+            "1",    // checks: hostname
+            "PC-*", // hostname
+            "",     // strings
+            "",     // syscalls
+            "",     // entry -> auto
+            "",     // output path
+            "",     // strip
+            "",     // trim paths
+            "",     // review -> build now
+        ];
+
+        let (written, _) = session("payload.exe", &answers, Some(&plan_path));
+        assert_eq!(written.as_deref(), Some(plan_path.as_path()));
+
+        let plan = load_plan(&plan_path, &BTreeMap::new()).expect("valid plan");
+        let TechniqueKind::Bouncer { params } = &plan.runtime[0].technique else {
+            panic!("expected a bouncer first, got {:?}", plan.runtime[0]);
+        };
+        assert_eq!(params.mode, bouncer::Mode::All);
+        assert_eq!(params.hostname.as_deref(), Some("PC-*"));
+        assert_eq!(
+            params.on_fail,
+            bouncer::OnFail::Silent,
+            "a DLL build must never select the exiting rejection"
+        );
+        assert_eq!(plan.build.output.kind, OutputKind::Dll);
+    }
+
     /// Choosing `edit answers` at the review re-asks the questions with the
     /// previous values as defaults, so a single field can be corrected.
     #[test]
@@ -1313,6 +1980,7 @@ mod tests {
             "first",  // name
             "",       // payload args
             "",       // arch
+            "",       // output kind
             "",       // execution
             "",       // preparation
             "",       // strings
@@ -1324,6 +1992,7 @@ mod tests {
             "second", // name (corrected)
             "",       // payload args
             "",       // arch
+            "",       // output kind
             "",       // execution
             "",       // preparation
             "",       // strings
@@ -1346,7 +2015,7 @@ mod tests {
     fn quitting_the_review_writes_nothing() {
         let dir = temp_dir("aborted");
         let plan_path = dir.join("out.yaml");
-        let answers = ["", "", "", "", "", "", "", "", "", "", "3"];
+        let answers = ["", "", "", "", "", "", "", "", "", "", "", "3"];
 
         let (written, _) = session("payload.exe", &answers, Some(&plan_path));
 

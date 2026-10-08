@@ -1,11 +1,17 @@
 # Reflective loading
 
+*Manually maps a PE image (or runs shellcode) into the current process, so the
+payload executes from memory without touching disk or spawning a child.*
+
 ## Metadata
 
-- **ATT&CK**: T1620 (Reflective Code Loading)
-- **Stability**: Experimental
-- **YAML key**: `reflective_loading`
-- **Introduced in**: Phase 6
+| | |
+|---|---|
+| **ATT&CK** | T1620 (Reflective Code Loading) |
+| **Stability** | Experimental |
+| **Category** | Execution |
+| **YAML key** | `reflective_loading` |
+| **Introduced in** | Phase 6 |
 
 ## What it does
 
@@ -22,8 +28,8 @@ are copied into an executable allocation and run on a thread instead (see
 ## YAML parameters
 
 None. The payload format and, for a DLL, its exported entry point come from
-`build.payload` (`format`, `export`), and the command-line arguments from
-`build.payload.args` / `build.payload.args_mode`.
+`build.payloads.<name>` (`format`, `export`), and the command-line arguments from
+`build.payloads.<name>.args` / `build.payloads.<name>.args_mode`.
 
 ## YAML example
 
@@ -56,19 +62,40 @@ runtime:
 
 ## How it works
 
+```mermaid
+flowchart TD
+    A[Validate MZ and PE signatures] --> B[Allocate at the preferred base]
+    B --> C[Copy headers and sections]
+    C --> D[Resolve imports, patch the IAT]
+    D --> E{Landed at preferred base?}
+    E -- no --> F[Apply base relocations]
+    E -- yes --> G[Set section protections]
+    F --> G
+    G --> H[Run TLS callbacks]
+    H --> I[Run the entry point on a new thread]
+```
+
+### 1. Map the image
+
 1. Validate the image (MZ and PE signatures, x64 magic).
 2. Allocate memory at the preferred image base (fall back to any address if it
    is taken) through `nt_alloc_vm`.
 3. Copy the PE headers and each section's raw data into the allocation.
+
+### 2. Fix it up
+
 4. Resolve imports (`LoadLibraryA` + `GetProcAddress`), patching the import
    address table.
 5. Apply base relocations if the image did not land at its preferred base.
 6. Set each section's final memory protection (`nt_protect_vm`).
+
+### 3. Run it
+
 7. Run TLS callbacks, if present.
 8. Run the entry point (`DllMain` for a DLL, `mainCRTStartup`-style for an EXE)
    on a new thread and return its exit code.
 
-With `build.payload.export` (DLLs only), step 8 changes: the entry point is
+With `build.payloads.<name>.export` (DLLs only), step 8 changes: the entry point is
 called once with `DLL_PROCESS_ATTACH` — the loader step a mapped DLL needs so
 its CRT and global constructors initialize — and then the named export is called
 with no arguments instead of running the entry point on a thread. The process
@@ -76,7 +103,7 @@ exits 0 once the export returns.
 
 ## Payload formats
 
-The technique renders a different fragment per `build.payload.format`:
+The technique renders a different fragment per `build.payloads.<name>.format`:
 
 - `pe` and `dll` map the image as above; the `is_dll` flag is read from the
   file-header characteristics.
@@ -93,9 +120,9 @@ The technique renders a different fragment per `build.payload.format`:
 Before mapping, `execute_payload` calls `patch_command_line()` (shared, in
 `src/engine/args.rs`, rendered as `$ARGS_BLOCK$`). The payload runs in *this*
 process, so the stub's own command line has to be replaced with
-`<exe> <yaml args> <runtime args>` (combined by `build.payload.args_mode`).
+`<exe> <yaml args> <runtime args>` (combined by `build.payloads.<name>.args_mode`).
 
-Two places are updated (see `docs/techniques/process_argument_spoofing.md`):
+Two places are updated (see `src/features/args/README.md`):
 
 1. `PEB->ProcessParameters->CommandLine` (the `UNICODE_STRING` PEB-reading tools
    see), repointed at a new leaked UTF-16 buffer; and
@@ -167,7 +194,7 @@ index.
   whole stub process (and its thread).
 - Payload arguments are rewritten into the PEB and `kernelbase`'s cached
   command-line pointer before the payload runs, so the payload's `argv` is what
-  the operator configured (`build.payload.args` + runtime args).
+  the operator configured (`build.payloads.<name>.args` + runtime args).
 - Allocation and page protection go through the syscall layer
   (`nt_alloc_vm`/`nt_protect_vm`); `CreateThread` stays Win32 because
   `NtCreateThreadEx` takes eleven arguments, more stack arguments than the

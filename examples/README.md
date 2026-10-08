@@ -20,7 +20,7 @@ powershell -ExecutionPolicy Bypass -File examples/payloads/build_msgbox.ps1
 Its source (`msgbox.rs`) is a single `rustc` compile with no Cargo project, like
 the other payloads, and links `user32.lib` for `MessageBoxW`.
 
-Packing it needs no dedicated plan: point `build.payload.source` at it (the
+Packing it needs no dedicated plan: point `build.payloads.<name>.source` at it (the
 default `format: pe` applies) and build as usual.
 
 ```yaml
@@ -119,12 +119,68 @@ strings dist/test_packed_reflective.exe | grep -i svchost   # should print nothi
 strings dist/test_packed_reflective.exe | grep PAYLOAD_MARKER # should print nothing
 ```
 
+## In-process shellcode runners
+
+The three runners added for `format: shellcode` (`fibers`, `module_stomping`,
+`execution_callbacks`) return control to the loader, so several can run in one
+artifact. The example chains all three with the demo blob and exits `42`:
+
+```sh
+cargo run -- build examples/plans/in-process-runners.yaml
+.\dist\test_in_process.exe ; echo $LASTEXITCODE
+```
+
+Each step needs its own `build.payloads` entry (pinned with `params.payload`).
+Delete the steps you do not want: a single technique needs one step and one
+payload. See the per-technique READMEs for what each one evades and what
+detects it.
+
+## DLL output (host-loaded)
+
+`build.output.kind: dll` ships the same chain as a DLL a host process loads — the
+mode for environments where application whitelisting only lets an interpreter
+run. The artifact exports `DllMain`, `JNI_OnLoad` and `Run` (`entry: auto`), so
+one file works from every host, and everything runs **in the host's process**.
+
+```sh
+cargo run -- build examples/plans/dll-shellcode.yaml   # chain returns 42
+cargo run -- build examples/plans/dll.yaml             # chain opens a dialog
+```
+
+Then load it from a host — the scripts take the DLL and export as arguments:
+
+| Host | Command | Expected |
+|---|---|---|
+| CPython | `python examples/hosts/ctypes_host.py` | `Run() -> 42` |
+| PowerShell | `powershell -ExecutionPolicy Bypass -File examples/hosts/pinvoke_host.ps1` | `Run() -> 42` + the DLL in the host's module list |
+| .NET | `dotnet run --project examples/hosts/dotnet_host -- dist/dll-shellcode.dll Run` | `Run() -> 42` |
+| `rundll32` | `powershell -ExecutionPolicy Bypass -File examples/hosts/rundll32_host.ps1` | the stub's `STUB_MARKER_<hex>` on the captured stderr (`rundll32` exits 0) |
+| `rundll32` (cmd) | `examples\hosts\rundll32_host.cmd` | the marker in cmd's console — the PowerShell-free path |
+| Java | `java -cp examples/hosts/java_host JavaHost dist/dll-shellcode.dll 10000` | `JNI_OnLoad` returns at once; the latch keeps the JVM alive |
+
+Java (compile it first with
+`javac -d examples/hosts/java_host examples/hosts/java_host/FfmHost.java`),
+Perl, Ruby, PHP, LuaJIT and Node scripts are in `examples/hosts/` too. The
+complete catalogue — which runtime loads a DLL, with what, and which one reports
+the chain's return code — is the docs page `docs/hosts.md`.
+
+The `dll.yaml` payload is a modal dialog: it appears *from the host process*
+(`python.exe`, `java.exe`, …), which is the visible proof of in-process
+execution; `Run` blocks until you dismiss it and then returns 0.
+
+The Java host has no prebuilt binary: compile it once with
+`javac -d examples/hosts/java_host examples/hosts/java_host/JavaHost.java`.
+
+`entry: auto` is convenient but conspicuous (a plain chain-runner export next to
+`JNI_OnLoad`); for delivery pick `jni_on_load` or `export:<name>`. Full guide,
+per-host caveats and the calling shape: `examples/hosts/README.md`.
+
 ## Payload arguments
 
-The payload's arguments come from `build.payload.args` (fixed, YAML) plus the
-args you pass to the packed binary, combined by `build.payload.args_mode`
+The payload's arguments come from `build.payloads.<name>.args` (fixed, YAML) plus the
+args you pass to the packed binary, combined by `build.payloads.<name>.args_mode`
 (`join` = YAML first, then runtime; `override` = runtime args replace the YAML
-ones). See `docs/techniques/process_argument_spoofing.md`.
+ones). See `docs/features/ref/args.md`.
 
 ### 1. Compile the argument-printing payload
 

@@ -19,15 +19,19 @@
 //! processing is enabled on Windows consoles where it is not on by default.
 
 use std::fmt::Display;
+use std::io::IsTerminal;
 
 use anstream::{AutoStream, ColorChoice};
 use anstyle::{Color, Reset, RgbColor, Style};
+
+pub mod markdown;
+pub mod pager;
 
 /// Application name, used in the banner subtitle and the CLI help.
 pub const NAME: &str = "picaro";
 
 /// One-line description, reused by the CLI help and the banner subtitle.
-pub const TAGLINE: &str = "mimicry-based packer";
+pub const TAGLINE: &str = "The plan is the program";
 
 // pub const BANNER: &str = "
 //   ██████╗  █████╗ ████████╗███████╗███████╗██╗ █████╗ ███╗  ██╗
@@ -127,6 +131,10 @@ pub mod glyph {
     pub const SHADE: &str = "░";
     /// Horizontal rule.
     pub const RULE: &str = "─";
+    /// List item marker (Markdown renderer).
+    pub const LIST: &str = "•";
+    /// Vertical gutter of a quote or code block (Markdown renderer).
+    pub const BAR: &str = "│";
 }
 
 /// Brand accent (banner, app name, headings): a soft violet.
@@ -146,9 +154,14 @@ const BLUE: Color = Color::Rgb(RgbColor(122, 167, 224));
 const SLATE: Color = Color::Rgb(RgbColor(154, 164, 178));
 /// Structural punctuation (rules, separators, empty gauge cells).
 const SLATE_DIM: Color = Color::Rgb(RgbColor(120, 130, 146));
+/// Inline code (Markdown renderer): a soft cyan, distinct from the brand violet.
+const CYAN: Color = Color::Rgb(RgbColor(126, 200, 208));
 
 /// Column labels are padded to this width in [`Palette::field`].
 const LABEL_WIDTH: usize = 12;
+/// Indent of a wrapped field value: the two leading spaces, the label column and
+/// its trailing space (see [`Palette::field_wrapped`]).
+const VALUE_INDENT: usize = 2 + LABEL_WIDTH + 1;
 /// Step labels are padded to this width in [`Palette::step`]/[`Palette::done`].
 const STEP_WIDTH: usize = 8;
 /// Gap between columns of the metadata bar.
@@ -187,6 +200,12 @@ pub enum Tone {
     Target,
     /// Emphasis with no color.
     Bold,
+    /// Italic emphasis with no color.
+    Italic,
+    /// An inline code span.
+    Code,
+    /// A hyperlink's label.
+    Link,
 }
 
 /// The style backing each [`Tone`].
@@ -204,6 +223,9 @@ fn style_of(tone: Tone) -> Style {
         Tone::Bad => Style::new().fg_color(Some(RED)).bold(),
         Tone::Target => Style::new().fg_color(Some(BLUE)),
         Tone::Bold => Style::new().bold(),
+        Tone::Italic => Style::new().italic(),
+        Tone::Code => Style::new().fg_color(Some(CYAN)),
+        Tone::Link => Style::new().underline(),
     }
 }
 
@@ -269,6 +291,21 @@ impl Palette {
     /// Emphasis.
     pub fn bold(self, text: impl Display) -> String {
         self.tone(Tone::Bold, text)
+    }
+
+    /// Italic emphasis.
+    pub fn italic(self, text: impl Display) -> String {
+        self.tone(Tone::Italic, text)
+    }
+
+    /// An inline code span.
+    pub fn code(self, text: impl Display) -> String {
+        self.tone(Tone::Code, text)
+    }
+
+    /// A hyperlink's label.
+    pub fn link(self, text: impl Display) -> String {
+        self.tone(Tone::Link, text)
     }
 
     /// Primary value text (the terminal's default foreground).
@@ -466,6 +503,25 @@ impl Palette {
         )
     }
 
+    /// An aligned `label  value` line whose value wraps onto continuation lines
+    /// indented under it (no trailing newline).
+    ///
+    /// The `techniques show` header carries long comma-joined lists that must
+    /// not overflow a narrow terminal even when the page is printed inline
+    /// (without the pager), so they are wrapped here instead of at draw time.
+    pub fn field_wrapped(self, label: &str, value: impl Display, width: usize) -> String {
+        let text = value.to_string();
+        let available = width.saturating_sub(VALUE_INDENT).max(1);
+        let mut lines = wrap_text(&text, available).into_iter();
+        let mut out = self.field(label, lines.next().unwrap_or_default());
+        for line in lines {
+            out.push('\n');
+            out.push_str(&" ".repeat(VALUE_INDENT));
+            out.push_str(&line);
+        }
+        out
+    }
+
     /// A completed step: `  ✓ label  detail`.
     ///
     /// `detail` is used verbatim so the caller can color each fragment; this
@@ -501,6 +557,116 @@ impl Palette {
             detail
         )
     }
+}
+
+/// A token produced by [`wrap_text_pieces`]: `continuation` marks a chunk that
+/// continues the previous one (a hard-broken long token), so no space is added.
+struct Piece {
+    text: String,
+    continuation: bool,
+}
+
+/// Wraps plain `text` to `width` visible columns.
+///
+/// It breaks on whitespace; a single token wider than `width` is first split at
+/// its `,` boundaries (so a joined list breaks readably), then hard-broken.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    let mut line_width = 0usize;
+
+    for piece in wrap_text_pieces(text, width) {
+        let piece_width = piece.text.chars().count();
+        let mut gap = if line_width > 0 && !piece.continuation {
+            1
+        } else {
+            0
+        };
+        if line_width > 0 && line_width + gap + piece_width > width {
+            lines.push(std::mem::take(&mut line));
+            line_width = 0;
+            gap = 0;
+        }
+        if gap == 1 {
+            line.push(' ');
+        }
+        line.push_str(&piece.text);
+        line_width += gap + piece_width;
+    }
+
+    if !line.is_empty() || lines.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+/// Splits `text` into wrappable pieces of at most `width` visible columns.
+fn wrap_text_pieces(text: &str, width: usize) -> Vec<Piece> {
+    let mut pieces = Vec::new();
+    for token in text.split_whitespace() {
+        if token.chars().count() <= width {
+            pieces.push(Piece {
+                text: token.to_string(),
+                continuation: false,
+            });
+            continue;
+        }
+        for part in split_at_commas(token) {
+            if part.chars().count() <= width {
+                pieces.push(Piece {
+                    text: part,
+                    continuation: false,
+                });
+            } else {
+                for (index, chunk) in hard_chunks(&part, width).into_iter().enumerate() {
+                    pieces.push(Piece {
+                        text: chunk,
+                        continuation: index > 0,
+                    });
+                }
+            }
+        }
+    }
+    pieces
+}
+
+/// Splits a token at its commas, keeping each comma with the piece before it.
+fn split_at_commas(token: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    for ch in token.chars() {
+        current.push(ch);
+        if ch == ',' {
+            parts.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    if parts.is_empty() {
+        parts.push(token.to_string());
+    }
+    parts
+}
+
+/// Hard-splits `text` into chunks of exactly `width` characters.
+fn hard_chunks(text: &str, width: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut count = 0usize;
+    for ch in text.chars() {
+        if count == width {
+            chunks.push(std::mem::take(&mut current));
+            count = 0;
+        }
+        current.push(ch);
+        count += 1;
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
 }
 
 /// The banner and the mascot art, printed side by side as a single block.
@@ -606,12 +772,22 @@ pub fn frame(content: &str, padding: usize) -> String {
     out.join("\n")
 }
 
-/// The terminal width in columns, from `COLUMNS` when set (default 80).
+/// The terminal width in columns.
 ///
-/// Layout helpers use this to decide between a wide and a stacked rendering;
-/// reading the environment keeps us dependency-free, and a wrong guess only
-/// costs a fallback that is always readable.
-fn term_width() -> usize {
+/// Prefers the real terminal size when stdout is a TTY, then `COLUMNS` (set by
+/// some shells), then a safe default of 80. Layout helpers use this to decide
+/// between a wide and a stacked rendering and to wrap the Markdown page; a wrong
+/// guess only costs a fallback that is always readable, and keeping `COLUMNS`
+/// and the 80 default as fallbacks keeps non-interactive output deterministic.
+pub(crate) fn term_width() -> usize {
+    if std::io::stdout().is_terminal() {
+        if let Ok((cols, _)) = crossterm::terminal::size() {
+            let cols = cols as usize;
+            if cols > 0 {
+                return cols;
+            }
+        }
+    }
     std::env::var("COLUMNS")
         .ok()
         .and_then(|value| value.trim().parse().ok())
@@ -817,5 +993,49 @@ mod tests {
             "      2. stack  decoder-free"
         );
         assert_eq!(ui.menu(1, "xor", ""), "      1. xor");
+    }
+
+    /// A wrapped field value stays aligned and never exceeds the width.
+    #[test]
+    fn field_wrapped_indents_and_fits_continuations() {
+        let value = (1..=12)
+            .map(|i| format!("NtSomething{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let rendered = Palette::plain().field_wrapped("syscalls", value, 40);
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert!(lines.len() > 1, "should have wrapped: {rendered}");
+        assert!(lines[0].starts_with("  syscalls"), "{rendered}");
+        for line in &lines[1..] {
+            assert!(
+                line.starts_with(&" ".repeat(VALUE_INDENT)),
+                "continuation not indented under the value: {line:?}"
+            );
+        }
+        for line in &lines {
+            assert!(line.chars().count() <= 40, "overflow: {line:?}");
+        }
+    }
+
+    /// A short field value stays exactly on the single `field` line.
+    #[test]
+    fn field_wrapped_keeps_short_values_on_one_line() {
+        let ui = Palette::plain();
+        assert_eq!(
+            ui.field_wrapped("requires", "windows-x64, windows-x86", 80),
+            ui.field("requires", "windows-x64, windows-x86")
+        );
+    }
+
+    /// A single long comma-joined token breaks at its commas, not mid-word.
+    #[test]
+    fn field_wrapped_breaks_long_joined_tokens() {
+        let value =
+            "NtAllocateVirtualMemory,NtWriteVirtualMemory,NtReadVirtualMemory,NtResumeThread";
+        let rendered = Palette::plain().field_wrapped("syscalls", value, 40);
+        assert!(rendered.contains("NtAllocateVirtualMemory,"), "{rendered}");
+        for line in rendered.lines() {
+            assert!(line.chars().count() <= 40, "overflow: {line:?}");
+        }
     }
 }

@@ -1,20 +1,27 @@
 #!/usr/bin/env python3
 """Run the picaro packer inside its Docker image.
 
-Builds the image on first use (or when ``--build`` comes first) and runs it
+Builds the image on first use (or when the rebuild flag is passed) and runs it
 against the current directory with every argument passed through unchanged. One
 script replaces the former per-OS shell wrappers and behaves the same on Linux,
-macOS and Windows; it needs only the standard library.
+macOS and Windows; it needs only the standard library. A rebuild is incremental:
+the image caches the compiled dependencies in their own layer, so an edit under
+`src/` recompiles only the packer crate.
 
 Usage:
     python scripts/picaro.py build examples/plans/reflective-loading.yaml
     python scripts/picaro.py audit dist/test_packed_reflective.exe
     python scripts/picaro.py techniques list
-    python scripts/picaro.py --build build plan.yaml   # force a rebuild
+    python scripts/picaro.py --rebuild build plan.yaml   # rebuild the image first
+
+The rebuild flag (`--rebuild`, or the older `--build`) may appear anywhere in
+the arguments; everything else is passed to picaro unchanged.
 
 Environment:
     PICARO_IMAGE   image tag to build and run (default: picaro:latest)
     PICARO_PRINT   when set, print the `docker run` command instead of running it
+    PICARO_USER    `--user` value for the container (default: the invoking user
+                   on Linux; set it to the empty string to run as the image user)
 """
 
 from __future__ import annotations
@@ -31,6 +38,16 @@ IMAGE = os.environ.get("PICARO_IMAGE", "picaro:latest")
 
 # An absolute Windows path: a drive letter ("C:/...") or a UNC path ("//...").
 WINDOWS_ABSOLUTE = re.compile(r"(?i)^[a-z]:/|^//")
+
+# Flags that force a `docker build` before the run. `--rebuild` is the explicit
+# spelling; `--build` predates it and stays as an alias. Either may appear
+# anywhere, since picaro itself has no such option.
+REBUILD_FLAGS = frozenset({"--build", "--rebuild"})
+
+# The container's scratch directory for intermediate artifacts. The image bakes
+# its source in at /usr/src/picaro, and the packer writes `build/` next to it,
+# which the invoking user cannot touch; point it at a writable path instead.
+SCRATCH_DIR = "/tmp/picaro-build"
 
 
 def is_tty(stream: object) -> bool:
@@ -65,16 +82,70 @@ def translate_arg(arg: str, workdir: Path) -> str:
     return arg
 
 
+def rootless_docker() -> bool:
+    """Whether the Docker daemon runs rootless (uid-mapped).
+
+    A rootless daemon lives in a user namespace where the host user *is* the
+    container's root, so a root container already writes files as the host user
+    and forcing `--user <uid>` would run the process as an unmapped sub-uid that
+    cannot write the mounted directory.
+    """
+    try:
+        probe = subprocess.run(
+            ["docker", "info", "--format", "{{.SecurityOptions}}"],
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return False
+    return probe.returncode == 0 and "rootless" in probe.stdout
+
+
+def container_user() -> str | None:
+    """The `--user` value that stops the container writing root-owned files.
+
+    On a Linux host a bind mount carries the container's uid straight to the
+    host, and the image runs as root, so every output (`dist/...`, the `.picaro`
+    lab certificate state) would be owned by root. Running the container as the
+    invoking user avoids that. Docker Desktop (macOS, Windows) and rootless
+    Docker already map ownership to the host user, so nothing is passed there;
+    `PICARO_USER` overrides the choice, and an empty value disables it.
+    """
+    if "PICARO_USER" in os.environ:
+        return os.environ["PICARO_USER"] or None
+    if not sys.platform.startswith("linux") or not hasattr(os, "getuid"):
+        return None
+    if rootless_docker():
+        return None
+    return f"{os.getuid()}:{os.getgid()}"
+
+
 def build_command(args: list[str], workdir: Path, interactive: bool) -> list[str]:
     """Assemble the `docker run` argv.
 
-    The current directory is mounted at /work: plans and payloads are read from
-    it and outputs (dist/...) are written back through the same mount.
+    The current directory is mounted at /work: it is the exchange folder — plans
+    and payloads are read from it and outputs (dist/...) are written back through
+    the same mount. Run the wrapper from a dedicated folder (not the repo root)
+    to keep the packed artifacts off the source tree. The container runs as the
+    invoking user where that matters (see [`container_user`]) and keeps its
+    scratch files out of the read-only source tree (`PICARO_BUILD_DIR`).
     """
     command = ["docker", "run", "--rm"]
     if interactive:
         command.append("-it")
-    command += ["-v", f"{workdir.as_posix()}:/work", "-w", "/work", IMAGE, *args]
+    user = container_user()
+    if user is not None:
+        command += ["--user", user]
+    command += [
+        "-e",
+        f"PICARO_BUILD_DIR={SCRATCH_DIR}",
+        "-v",
+        f"{workdir.as_posix()}:/work",
+        "-w",
+        "/work",
+        IMAGE,
+        *args,
+    ]
     return command
 
 
@@ -95,9 +166,9 @@ def build_image() -> int:
 
 def main(argv: list[str]) -> int:
     args = list(argv)
-    force_build = bool(args) and args[0] == "--build"
+    force_build = any(arg in REBUILD_FLAGS for arg in args)
     if force_build:
-        args = args[1:]
+        args = [arg for arg in args if arg not in REBUILD_FLAGS]
 
     workdir = Path.cwd()
     if os.name == "nt":

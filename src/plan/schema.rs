@@ -1,4 +1,4 @@
-//! `serde` structs modeling the YAML plan document (schema 4).
+//! `serde` structs modeling the YAML plan document (schema 6).
 //!
 //! Each struct maps to a block of the YAML (see `examples/plans/`).
 //! The design aims to be:
@@ -8,12 +8,13 @@
 //! - **Extensible**: the enums centralize the valid options, so adding a new
 //!   technique or algorithm is a localized change.
 //!
-//! Schema 3 groups everything the build needs under `build` (`payload`,
-//! `stub`, `output`) and keeps the execution-time technique list under
-//! `runtime`. Stub-level string obfuscation lives under `build.stub.strings`.
-//! See `docs/migration-v1-v3.md` (schema 1 → current) and
-//! `docs/migration-v2-v3.md` (schema 2 → 3).
+//! Schema 6 groups everything the build needs under `build` (`crypto`,
+//! `payloads`, `stub`, `output`) and keeps the ordered technique list under
+//! `runtime`. Every runtime step is a technique call (`technique` + `params`)
+//! plus its orchestration fields (see [`StepControl`]).
+//! See `docs/multistage.md` for the reference.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -24,68 +25,47 @@ use crate::engine::obfuscation::YamlStringsPlan;
 use crate::engine::syscalls::YamlSyscallsPlan;
 use crate::techniques::RuntimeStep;
 
-/// The only schema version we accept.
-pub const SUPPORTED_SCHEMA: u32 = 4;
+/// The schema version this packer writes.
+///
+/// Schema 6 is the flat `runtime:` model: one ordered list of technique steps,
+/// each with its `params` and its orchestration fields. There is no other shape.
+pub const SUPPORTED_SCHEMA: u32 = 6;
 
-/// Migration hint shown when a plan still declares `schema: 1`.
-const SCHEMA_1_MIGRATION: &str = "\
-schema 1 is no longer supported.
-Migration:
-  input.path      → build.payload.source
-  payload.*       → build.payload.*
-  payload.strings → build.stub.strings
-  loader.path     → build.stub.path
-  loader.syscalls → build.stub.syscalls
-  output.*        → build.output.*
-  pipeline        → runtime
-  pipeline params → runtime[].params (nested)
-  $build.N$       → $arg.N$
-See docs/migration-v1-v3.md, then docs/migration-v3-v4.md for details.";
-
-/// Migration hint shown when a plan still declares `schema: 2`.
-const SCHEMA_2_MIGRATION: &str = "\
-schema 2 is no longer supported.
-Migration:
-  build.strings → build.stub.strings
-  runtime entries now nest parameters under `params:` (schema 3 → 4)
-See docs/migration-v2-v3.md (then docs/migration-v3-v4.md) for details.";
-
-/// Migration hint shown when a plan still declares `schema: 3`.
-const SCHEMA_3_MIGRATION: &str = "\
-schema 3 is no longer supported.
-Migration: a runtime entry now nests the technique's parameters under a
-`params:` mapping instead of putting them next to `technique:`.
-  before (schema 3):
-    - technique: process_hollowing
-      target: \"C:\\\\Windows\\\\System32\\\\svchost.exe\"
-  after (schema 4):
-    - technique: process_hollowing
-      params:
-        target: \"C:\\\\Windows\\\\System32\\\\svchost.exe\"
-A technique with no parameters omits `params:` entirely.
-See docs/migration-v3-v4.md for details.";
+/// Migration hint shown for any retired schema version (1–5).
+const RETIRED_SCHEMA_MIGRATION: &str = "\
+this schema version is no longer supported; schema 6 is the only accepted one.
+Migration (schema <= 5 → 6):
+  build.payload            → build.payloads.<name>
+  stage.payload            → params.payload: <name> (in the execution technique)
+  stages: [...actions...]  → runtime: [...steps...]
+  stage.action: technique  → technique: <name> (+ params)
+  stage.action: exec      → technique: living_off_the_land (+ params)
+  stage.action: sleep     → technique: sleep (+ params)
+  stage.on_success/on_fail/delay_ms → same fields on the step
+A payload crypto block moves to `build.crypto` when shared by every payload.
+See docs/multistage.md for the schema-6 reference.";
 
 /// Root document of the YAML.
 ///
-/// Two halves: `build` (what to produce) and `runtime` (the techniques the
-/// generated stub applies), plus the `schema` and `name` metadata.
+/// Two halves: `build` (what to produce) and `runtime` (the ordered technique
+/// steps the generated stub runs), plus the `schema` and `name` metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Plan {
-    /// Schema version. Only `3` is accepted; it is validated on deserialize.
+    /// Schema version. Only [`SUPPORTED_SCHEMA`] is accepted; it is validated on
+    /// deserialize.
     #[serde(deserialize_with = "deserialize_schema_version")]
     pub schema: u32,
 
     /// Descriptive build name (identifies the generated artifact).
     pub name: String,
 
-    /// Build block: payload, stub and output.
+    /// Build block: payloads, stub and output.
     pub build: BuildPlan,
 
-    /// Execution techniques the stub applies, in order.
-    ///
-    /// It is optional: an empty runtime produces a stub with no extra
-    /// techniques.
+    /// Ordered chain of technique steps. Each step names a technique and passes
+    /// it its `params`; the loader orchestrates the chain from the steps' control
+    /// fields. A plan needs at least one step (validated).
     #[serde(default)]
     pub runtime: Vec<RuntimeStep>,
 }
@@ -94,8 +74,16 @@ pub struct Plan {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BuildPlan {
-    /// Payload block: where the input PE comes from and how it is encrypted.
-    pub payload: PayloadPlan,
+    /// Default crypto for every payload, inherited when a payload omits its own
+    /// `crypto` block. A plan with no `crypto` here must set one per payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crypto: Option<CryptoPlan>,
+
+    /// The named payloads a `technique` execution step can load by name
+    /// (`params.payload: <name>`). A plan needs at least one when it declares an
+    /// execution step (validated).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub payloads: BTreeMap<String, PayloadPlan>,
 
     /// Stub configuration: builtin or custom, the syscall layer and the
     /// string obfuscation applied to the stub's literals.
@@ -144,8 +132,10 @@ pub struct PayloadPlan {
     #[serde(default)]
     pub args_mode: ArgsMode,
 
-    /// Sub-block with the cryptographic configuration.
-    pub crypto: CryptoPlan,
+    /// Sub-block with the cryptographic configuration. Optional: inherits
+    /// `build.crypto` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crypto: Option<CryptoPlan>,
 
     /// Optional expected SHA-256 (hex) of the input payload.
     ///
@@ -234,13 +224,15 @@ impl PayloadFormat {
 }
 
 /// Cryptographic configuration of the payload.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CryptoPlan {
-    /// Authenticated encryption algorithm.
+    /// Authenticated encryption algorithm (default: `xchacha20poly1305`).
+    #[serde(default)]
     pub algo: CryptoAlgorithm,
 
-    /// Source of the encryption key.
+    /// Source of the encryption key (default: `random`, a fresh key per build).
+    #[serde(default)]
     pub key: KeySource,
 }
 
@@ -248,18 +240,21 @@ pub struct CryptoPlan {
 ///
 /// `rename_all = "lowercase"` makes the YAML value `xchacha20poly1305` map to
 /// this variant (and vice versa when serializing).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CryptoAlgorithm {
-    /// XChaCha20-Poly1305 (AEAD authenticated encryption, 24-byte nonce).
+    /// XChaCha20-Poly1305 (AEAD authenticated encryption, 24-byte nonce). The
+    /// only supported algorithm, and the default.
+    #[default]
     XChaCha20Poly1305,
 }
 
 /// Source of the encryption key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum KeySource {
-    /// Random key generated on every build.
+    /// Random key generated on every build. The default.
+    #[default]
     Random,
 }
 
@@ -267,16 +262,37 @@ pub enum KeySource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutputPlan {
-    /// Output path of the packed PE.
+    /// Output path of the packed artifact (`.exe` or `.dll`; see `kind`).
     pub path: PathBuf,
 
-    /// Target architecture.
+    /// What the artifact is: an executable (default) or a DLL a host process
+    /// loads (`docs/design/dll-output.md`).
+    #[serde(default, skip_serializing_if = "OutputKind::is_exe")]
+    pub kind: OutputKind,
+
+    /// What starts the chain in a `kind: dll` build (`auto`, `jni_on_load` or
+    /// `export:<name>`). Ignored — and rejected — for `kind: exe`.
+    #[serde(default, skip_serializing_if = "DllEntry::is_auto")]
+    pub entry: DllEntry,
+
+    /// Target architecture (default: `x64`).
+    #[serde(default)]
     pub arch: Arch,
 
-    /// Whether to strip the symbol table from the final binary.
+    /// Whether to strip the symbol table from the final binary (default: `true`).
+    ///
+    /// Stripping removes the symbol and debug tables `rustc` emits, so the
+    /// artifact is smaller and carries no function names or debug type info.
+    #[serde(default = "default_true")]
     pub strip: bool,
 
-    /// Path-remapping policy for the debug info.
+    /// Path-remapping policy for the debug info (default: `all`).
+    ///
+    /// `all` rewrites the absolute build paths the compiler bakes into the debug
+    /// info (the project directory and the Cargo home) so they do not leak the
+    /// build machine's layout. Best effort: paths baked into prebuilt dependency
+    /// rlibs are outside `rustc`'s control — `strip: true` is what removes those.
+    #[serde(default)]
     pub trim_paths: TrimPaths,
 
     /// Whether to write the build manifest next to the artifact (default: yes).
@@ -336,6 +352,130 @@ impl Subsystem {
             Subsystem::Console => "console",
             Subsystem::Windows => "windows",
         }
+    }
+}
+
+/// What the build produces (`build.output.kind`).
+///
+/// `exe` (the default) is the standalone artifact. `dll` is a library a host
+/// process loads with the normal image loader — a JVM through `System.load`, a
+/// CPython interpreter through `ctypes`, a .NET host through `[DllImport]`, or
+/// `rundll32` — which is what makes the chain usable where application
+/// whitelisting only allows the host program. See `docs/design/dll-output.md`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputKind {
+    /// A Windows executable.
+    #[default]
+    Exe,
+    /// A Windows DLL, loaded by a host process.
+    Dll,
+}
+
+impl OutputKind {
+    /// Whether this is the default kind (used to skip it when serializing).
+    pub fn is_exe(&self) -> bool {
+        matches!(self, OutputKind::Exe)
+    }
+
+    /// Lowercase label used in messages and the build log.
+    pub fn label(self) -> &'static str {
+        match self {
+            OutputKind::Exe => "exe",
+            OutputKind::Dll => "dll",
+        }
+    }
+}
+
+/// What starts the chain in a `kind: dll` build (`build.output.entry`).
+///
+/// The chain is identical in every mode; the entry only decides which export a
+/// host calls and whether that export waits for the chain (see
+/// `docs/design/dll-output.md`, section 4.3).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum DllEntry {
+    /// Export every entry point — `JNI_OnLoad` and [`DllEntry::AUTO_EXPORT`] —
+    /// so one artifact works from any host.
+    #[default]
+    Auto,
+    /// Export only `JNI_OnLoad`, the JNI hook `System.load` calls. It returns
+    /// to the JVM at once, so the host owns the process lifetime.
+    JniOnLoad,
+    /// Export only a plain function with this name (CPython `ctypes`, P/Invoke,
+    /// `rundll32`). It blocks until the chain returns and reports its code.
+    Export(String),
+}
+
+impl DllEntry {
+    /// The export [`DllEntry::Auto`] adds besides `JNI_OnLoad`.
+    pub const AUTO_EXPORT: &'static str = "Run";
+
+    /// Whether this is the default entry (used to skip it when serializing).
+    pub fn is_auto(&self) -> bool {
+        matches!(self, DllEntry::Auto)
+    }
+
+    /// The plain export name the build declares, if any.
+    pub fn export_name(&self) -> Option<&str> {
+        match self {
+            DllEntry::Auto => Some(Self::AUTO_EXPORT),
+            DllEntry::Export(name) => Some(name),
+            DllEntry::JniOnLoad => None,
+        }
+    }
+
+    /// Whether the build exports `JNI_OnLoad`.
+    pub fn exports_jni_on_load(&self) -> bool {
+        matches!(self, DllEntry::Auto | DllEntry::JniOnLoad)
+    }
+
+    /// Label used in messages and the build log.
+    pub fn label(&self) -> String {
+        match self {
+            DllEntry::Auto => "auto".to_string(),
+            DllEntry::JniOnLoad => "jni_on_load".to_string(),
+            DllEntry::Export(name) => format!("export:{name}"),
+        }
+    }
+}
+
+impl std::str::FromStr for DllEntry {
+    type Err = String;
+
+    /// Parses `auto`, `jni_on_load` or `export:<name>`.
+    ///
+    /// The *syntax* of `<name>` is checked by `plan::validate` (so a bad name is
+    /// a normal validation error); here only the shape is recognized.
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value.trim() {
+            "auto" => Ok(DllEntry::Auto),
+            "jni_on_load" => Ok(DllEntry::JniOnLoad),
+            other => match other.strip_prefix("export:") {
+                Some(name) => Ok(DllEntry::Export(name.trim().to_string())),
+                None => Err(format!(
+                    "unknown entry '{other}'; expected 'auto', 'jni_on_load' or 'export:<name>'"
+                )),
+            },
+        }
+    }
+}
+
+impl From<DllEntry> for String {
+    fn from(entry: DllEntry) -> Self {
+        match entry {
+            DllEntry::Auto => "auto".to_string(),
+            DllEntry::JniOnLoad => "jni_on_load".to_string(),
+            DllEntry::Export(name) => format!("export:{name}"),
+        }
+    }
+}
+
+impl TryFrom<String> for DllEntry {
+    type Error = String;
+
+    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+        value.parse()
     }
 }
 
@@ -533,13 +673,14 @@ impl Arch {
 }
 
 /// Path-remapping policy for the final binary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TrimPaths {
     /// Rewrite every absolute build path the compiler emits (the project and the
     /// Cargo home). Best effort: source paths baked into prebuilt dependency
     /// rlibs are outside `rustc`'s control, so `strip: true` is what removes
-    /// those.
+    /// those. The default.
+    #[default]
     All,
     /// Leave build paths untouched.
     None,
@@ -548,43 +689,101 @@ pub enum TrimPaths {
     Relative,
 }
 
+/// Orchestration every runtime step carries, outside the technique's `params`.
+///
+/// A step is the lego: a technique call plus how the loader reacts to its
+/// result. These fields are deliberately *not* part of a technique's `params`
+/// — they are not arguments of the function, they are the loader's policy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepControl {
+    /// What to do when the step completes (default: continue).
+    #[serde(default)]
+    pub on_success: StepOutcome,
+
+    /// What to do when the step fails (default: stop, i.e. propagate the error
+    /// and exit 1).
+    #[serde(default)]
+    pub on_fail: StepFailure,
+
+    /// Wait this long before starting the step.
+    #[serde(default)]
+    pub delay_ms: u64,
+}
+
+/// Window visibility for `living_off_the_land`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WindowMode {
+    /// No console window (`CREATE_NO_WINDOW` + `SW_HIDE`). The default.
+    #[default]
+    Hidden,
+    /// Inherit the parent's console/window state.
+    Normal,
+}
+
+/// What to do after a step completes (`runtime[].on_success`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StepOutcome {
+    /// Run the next step (default).
+    #[default]
+    Continue,
+    /// Stop the chain, exiting with this step's code.
+    Stop,
+    /// Stop the chain and exit `0` immediately.
+    Exit,
+}
+
+/// What to do when a step fails (`runtime[].on_fail`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StepFailure {
+    /// Propagate the failure: the stub reports it and exits `1` (default).
+    #[default]
+    Stop,
+    /// Log the failure and run the next step.
+    Continue,
+    /// Report the failure and exit `0`.
+    Exit,
+}
+
 /// Validates the schema version during deserialization.
 ///
-/// Gives a clear error at parse time (not later): a specific migration hint for
-/// the retired schema 1 and a generic message for anything unknown.
+/// Only [`SUPPORTED_SCHEMA`] (6) is accepted; any other version is rejected with
+/// a migration hint pointing at the schema-6 shape.
 fn deserialize_schema_version<'de, D>(deserializer: D) -> std::result::Result<u32, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let version = u32::deserialize(deserializer)?;
-    match version {
-        SUPPORTED_SCHEMA => Ok(version),
-        1 => Err(serde::de::Error::custom(SCHEMA_1_MIGRATION)),
-        2 => Err(serde::de::Error::custom(SCHEMA_2_MIGRATION)),
-        3 => Err(serde::de::Error::custom(SCHEMA_3_MIGRATION)),
-        other => Err(serde::de::Error::custom(format!(
-            "unsupported schema version: {other} (only {SUPPORTED_SCHEMA} is accepted)"
-        ))),
+    if version == SUPPORTED_SCHEMA {
+        Ok(version)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "schema {version} is not supported (schema {SUPPORTED_SCHEMA} is current).\n\
+             {RETIRED_SCHEMA_MIGRATION}"
+        )))
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use crate::techniques::process_hollowing::{default_target, Params};
+    use crate::techniques::TechniqueKind;
 
     /// Minimal valid YAML used as a base in all tests.
     const VALID_YAML: &str = r#"
-schema: 4
+schema: 6
 name: mimikatz-basic
 
 build:
-  payload:
-    source: ./mimikatz.exe
-    crypto:
-      algo: xchacha20poly1305
-      key: random
+  crypto:
+    algo: xchacha20poly1305
+    key: random
+  payloads:
+    mimikatz:
+      source: ./mimikatz.exe
 
   output:
     path: ./dist/mimikatz_packed.exe
@@ -602,25 +801,26 @@ runtime:
     fn parses_valid_plan() {
         let plan: Plan = serde_yml::from_str(VALID_YAML).expect("the example YAML should parse");
 
-        assert_eq!(plan.schema, 4);
+        assert_eq!(plan.schema, 6);
         assert_eq!(plan.name, "mimikatz-basic");
-        assert_eq!(plan.build.payload.source, "./mimikatz.exe");
-        assert_eq!(
-            plan.build.payload.crypto.algo,
-            CryptoAlgorithm::XChaCha20Poly1305
-        );
-        assert_eq!(plan.build.payload.crypto.key, KeySource::Random);
+        let payload = plan.build.payloads.get("mimikatz").expect("the payload");
+        assert_eq!(payload.source, "./mimikatz.exe");
+        assert_eq!(payload.format, PayloadFormat::Pe);
+        let crypto = plan.build.crypto.as_ref().expect("build.crypto");
+        assert_eq!(crypto.algo, CryptoAlgorithm::XChaCha20Poly1305);
+        assert_eq!(crypto.key, KeySource::Random);
         assert_eq!(plan.build.stub.path, None);
         assert_eq!(plan.build.stub.syscalls, None);
         assert_eq!(plan.build.stub.api_resolution, None);
         assert_eq!(plan.build.stub.strings, None);
         assert_eq!(
-            plan.runtime,
-            vec![RuntimeStep::ProcessHollowing {
+            plan.runtime[0].technique,
+            TechniqueKind::ProcessHollowing {
                 params: Params {
+                    payload: None,
                     target: r"C:\Windows\System32\svchost.exe".to_string(),
                 }
-            }]
+            }
         );
         assert_eq!(
             plan.build.output.path,
@@ -679,7 +879,7 @@ runtime:
 
     #[test]
     fn rejects_strings_block_at_build_level() {
-        // Schema 2's `build.strings` is no longer a valid sibling of `payload`.
+        // Schema 2's `build.strings` is no longer a valid sibling of `payloads`.
         let yaml = VALID_YAML.replace(
             "  output:\n",
             "  strings:\n    strategy: xor\n\n  output:\n",
@@ -746,13 +946,13 @@ runtime:
     #[test]
     fn parses_url_source() {
         let yaml = VALID_YAML.replace(
-            "    source: ./mimikatz.exe\n",
-            "    source: https://example.com/mimikatz.exe\n",
+            "      source: ./mimikatz.exe\n",
+            "      source: https://example.com/mimikatz.exe\n",
         );
         let plan: Plan = serde_yml::from_str(&yaml).expect("a url source should parse");
 
         assert_eq!(
-            plan.build.payload.source,
+            plan.build.payloads.get("mimikatz").expect("payload").source,
             "https://example.com/mimikatz.exe"
         );
     }
@@ -766,20 +966,22 @@ runtime:
         let plan: Plan =
             serde_yml::from_str(&yaml).expect("process_hollowing without target should parse");
         assert_eq!(
-            plan.runtime,
-            vec![RuntimeStep::ProcessHollowing {
+            plan.runtime[0].technique,
+            TechniqueKind::ProcessHollowing {
                 params: Params {
+                    payload: None,
                     target: default_target(),
                 }
-            }]
+            }
         );
     }
 
     #[test]
     fn payload_args_default_to_join() {
         let plan: Plan = serde_yml::from_str(VALID_YAML).expect("valid YAML should parse");
-        assert_eq!(plan.build.payload.args, None);
-        assert_eq!(plan.build.payload.args_mode, ArgsMode::Join);
+        let payload = plan.build.payloads.get("mimikatz").expect("payload");
+        assert_eq!(payload.args, None);
+        assert_eq!(payload.args_mode, ArgsMode::Join);
     }
 
     /// Locks in the documented migration hazard: unknown keys inside a runtime
@@ -793,12 +995,13 @@ runtime:
         );
         let plan: Plan = serde_yml::from_str(&yaml).expect("a flat param still parses");
         assert_eq!(
-            plan.runtime,
-            vec![RuntimeStep::ProcessHollowing {
+            plan.runtime[0].technique,
+            TechniqueKind::ProcessHollowing {
                 params: Params {
+                    payload: None,
                     target: default_target(),
                 }
-            }],
+            },
             "the flat target must be dropped in favour of the default"
         );
     }
@@ -806,41 +1009,43 @@ runtime:
     #[test]
     fn payload_args_and_override_mode_parse() {
         let yaml = VALID_YAML.replace(
-            "    source: ./mimikatz.exe\n",
-            "    source: ./mimikatz.exe\n    args: [\"privilege::debug\", \"log\", \"C:\\\\temp\\\\out.log\"]\n    args_mode: override\n",
+            "      source: ./mimikatz.exe\n",
+            "      source: ./mimikatz.exe\n      args: [\"privilege::debug\", \"log\", \"C:\\\\temp\\\\out.log\"]\n      args_mode: override\n",
         );
         let plan: Plan = serde_yml::from_str(&yaml).expect("args should parse");
+        let payload = plan.build.payloads.get("mimikatz").expect("payload");
         assert_eq!(
-            plan.build.payload.args,
+            payload.args,
             Some(vec![
                 "privilege::debug".to_string(),
                 "log".to_string(),
                 r"C:\temp\out.log".to_string(),
             ])
         );
-        assert_eq!(plan.build.payload.args_mode, ArgsMode::Override);
+        assert_eq!(payload.args_mode, ArgsMode::Override);
     }
 
     #[test]
     fn empty_payload_args_are_valid() {
         let yaml = VALID_YAML.replace(
-            "    source: ./mimikatz.exe\n",
-            "    source: ./mimikatz.exe\n    args: []\n",
+            "      source: ./mimikatz.exe\n",
+            "      source: ./mimikatz.exe\n      args: []\n",
         );
         let plan: Plan = serde_yml::from_str(&yaml).expect("empty args should parse");
-        assert_eq!(plan.build.payload.args, Some(vec![]));
-        assert_eq!(plan.build.payload.args_mode, ArgsMode::Join);
+        let payload = plan.build.payloads.get("mimikatz").expect("payload");
+        assert_eq!(payload.args, Some(vec![]));
+        assert_eq!(payload.args_mode, ArgsMode::Join);
     }
 
     #[test]
     fn payload_args_keep_special_characters() {
         let yaml = VALID_YAML.replace(
-            "    source: ./mimikatz.exe\n",
-            "    source: ./mimikatz.exe\n    args: ['hello world', 'say \"hi\"', 'C:\\Program Files\\x']\n",
+            "      source: ./mimikatz.exe\n",
+            "      source: ./mimikatz.exe\n      args: ['hello world', 'say \"hi\"', 'C:\\Program Files\\x']\n",
         );
         let plan: Plan = serde_yml::from_str(&yaml).expect("special args should parse");
         assert_eq!(
-            plan.build.payload.args,
+            plan.build.payloads.get("mimikatz").expect("payload").args,
             Some(vec![
                 "hello world".to_string(),
                 "say \"hi\"".to_string(),
@@ -852,8 +1057,8 @@ runtime:
     #[test]
     fn rejects_unknown_args_mode() {
         let yaml = VALID_YAML.replace(
-            "    source: ./mimikatz.exe\n",
-            "    source: ./mimikatz.exe\n    args_mode: prepend\n",
+            "      source: ./mimikatz.exe\n",
+            "      source: ./mimikatz.exe\n      args_mode: prepend\n",
         );
         assert!(
             serde_yml::from_str::<Plan>(&yaml).is_err(),
@@ -864,38 +1069,118 @@ runtime:
     #[test]
     fn payload_format_defaults_to_pe() {
         let plan: Plan = serde_yml::from_str(VALID_YAML).expect("valid YAML should parse");
-        assert_eq!(plan.build.payload.format, PayloadFormat::Pe);
-        assert_eq!(plan.build.payload.export, None);
+        let payload = plan.build.payloads.get("mimikatz").expect("payload");
+        assert_eq!(payload.format, PayloadFormat::Pe);
+        assert_eq!(payload.export, None);
     }
 
     #[test]
     fn parses_shellcode_format() {
         let yaml = VALID_YAML.replace(
-            "    source: ./mimikatz.exe\n",
-            "    source: ./beacon.bin\n    format: shellcode\n",
+            "      source: ./mimikatz.exe\n",
+            "      source: ./beacon.bin\n      format: shellcode\n",
         );
         let plan: Plan = serde_yml::from_str(&yaml).expect("shellcode format should parse");
-        assert_eq!(plan.build.payload.format, PayloadFormat::Shellcode);
-        assert!(!plan.build.payload.format.is_pe_image());
+        let payload = plan.build.payloads.get("mimikatz").expect("payload");
+        assert_eq!(payload.format, PayloadFormat::Shellcode);
+        assert!(!payload.format.is_pe_image());
     }
 
     #[test]
     fn parses_dll_format_with_export() {
         let yaml = VALID_YAML.replace(
-            "    source: ./mimikatz.exe\n",
-            "    source: ./payload.dll\n    format: dll\n    export: Run\n",
+            "      source: ./mimikatz.exe\n",
+            "      source: ./payload.dll\n      format: dll\n      export: Run\n",
         );
         let plan: Plan = serde_yml::from_str(&yaml).expect("dll format should parse");
-        assert_eq!(plan.build.payload.format, PayloadFormat::Dll);
-        assert_eq!(plan.build.payload.export.as_deref(), Some("Run"));
-        assert!(plan.build.payload.format.is_pe_image());
+        let payload = plan.build.payloads.get("mimikatz").expect("payload");
+        assert_eq!(payload.format, PayloadFormat::Dll);
+        assert_eq!(payload.export.as_deref(), Some("Run"));
+        assert!(payload.format.is_pe_image());
+    }
+
+    #[test]
+    fn output_kind_defaults_to_an_executable() {
+        let plan: Plan = serde_yml::from_str(VALID_YAML).expect("valid YAML should parse");
+        assert_eq!(plan.build.output.kind, OutputKind::Exe);
+        assert_eq!(plan.build.output.entry, DllEntry::Auto);
+        assert!(plan.build.output.kind.is_exe());
+        assert_eq!(plan.build.output.kind.label(), "exe");
+    }
+
+    #[test]
+    fn parses_a_dll_output_with_a_plain_export() {
+        let yaml = VALID_YAML.replace(
+            "    path: ./dist/mimikatz_packed.exe\n",
+            "    path: ./dist/loader.dll\n    kind: dll\n    entry: export:Run\n",
+        );
+        let plan: Plan = serde_yml::from_str(&yaml).expect("a dll output should parse");
+        assert_eq!(plan.build.output.kind, OutputKind::Dll);
+        assert_eq!(plan.build.output.entry, DllEntry::Export("Run".to_string()));
+        assert_eq!(plan.build.output.entry.label(), "export:Run");
+        assert_eq!(plan.build.output.entry.export_name(), Some("Run"));
+        assert!(!plan.build.output.entry.exports_jni_on_load());
+    }
+
+    #[test]
+    fn parses_the_jni_entry() {
+        let yaml = VALID_YAML.replace(
+            "    path: ./dist/mimikatz_packed.exe\n",
+            "    path: ./dist/loader.dll\n    kind: dll\n    entry: jni_on_load\n",
+        );
+        let plan: Plan = serde_yml::from_str(&yaml).expect("a jni entry should parse");
+        assert_eq!(plan.build.output.entry, DllEntry::JniOnLoad);
+        assert!(plan.build.output.entry.exports_jni_on_load());
+        assert_eq!(plan.build.output.entry.export_name(), None);
+    }
+
+    #[test]
+    fn the_default_output_kind_and_entry_are_not_serialized() {
+        let plan: Plan = serde_yml::from_str(VALID_YAML).expect("valid YAML should parse");
+        let yaml = serde_yml::to_string(&plan).expect("serialize");
+        assert!(
+            !yaml.contains("kind:"),
+            "the default kind should be skipped: {yaml}"
+        );
+        assert!(
+            !yaml.contains("entry:"),
+            "the default entry should be skipped: {yaml}"
+        );
+    }
+
+    #[test]
+    fn a_dll_output_round_trips_through_yaml() {
+        let yaml = VALID_YAML.replace(
+            "    path: ./dist/mimikatz_packed.exe\n",
+            "    path: ./dist/loader.dll\n    kind: dll\n    entry: export:Run\n",
+        );
+        let plan: Plan = serde_yml::from_str(&yaml).expect("a dll output should parse");
+        let rendered = serde_yml::to_string(&plan).expect("serialize");
+        let again: Plan = serde_yml::from_str(&rendered).expect("a rendered plan should parse");
+        assert_eq!(again.build.output.kind, OutputKind::Dll);
+        assert_eq!(
+            again.build.output.entry,
+            DllEntry::Export("Run".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_an_unknown_dll_entry() {
+        let yaml = VALID_YAML.replace(
+            "    path: ./dist/mimikatz_packed.exe\n",
+            "    path: ./dist/loader.dll\n    kind: dll\n    entry: now\n",
+        );
+        assert!(
+            serde_yml::from_str::<Plan>(&yaml).is_err(),
+            "an unknown entry should fail"
+        );
     }
 
     #[test]
     fn rejects_unknown_payload_format() {
         let yaml = VALID_YAML.replace(
-            "    source: ./mimikatz.exe\n",
-            "    source: ./beacon.bin\n    format: vbs\n",
+            "      source: ./mimikatz.exe\n",
+            "      source: ./beacon.bin\n      format: vbs\n",
         );
         assert!(
             serde_yml::from_str::<Plan>(&yaml).is_err(),
@@ -916,60 +1201,42 @@ runtime:
     }
 
     #[test]
-    fn rejects_schema_one_with_a_migration_message() {
-        let yaml = VALID_YAML.replace("schema: 4", "schema: 1");
-        let err = serde_yml::from_str::<Plan>(&yaml).expect_err("schema 1 should fail");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("schema 1 is no longer supported"),
-            "unclear error message: {msg}"
-        );
-        assert!(msg.contains("build.payload.source"), "msg: {msg}");
-        assert!(msg.contains("$arg.N$"), "msg: {msg}");
-        assert!(msg.contains("docs/migration-v1-v3.md"), "msg: {msg}");
+    fn rejects_retired_schema_versions_with_a_migration_message() {
+        for version in [1, 2, 3, 4, 5] {
+            let yaml = VALID_YAML.replace("schema: 6", &format!("schema: {version}"));
+            let err =
+                serde_yml::from_str::<Plan>(&yaml).expect_err("a retired schema version must fail");
+            assert!(
+                err.to_string().contains("not supported"),
+                "schema {version}: unclear error: {err}"
+            );
+        }
     }
 
     #[test]
-    fn rejects_schema_two_with_a_migration_message() {
-        let yaml = VALID_YAML.replace("schema: 4", "schema: 2");
-        let err = serde_yml::from_str::<Plan>(&yaml).expect_err("schema 2 should fail");
+    fn rejects_a_retired_schema_with_a_migration_hint() {
+        let yaml = VALID_YAML.replace("schema: 6", "schema: 4");
+        let err = serde_yml::from_str::<Plan>(&yaml).expect_err("schema 4 should fail");
         let msg = err.to_string();
+        assert!(msg.contains("not supported"), "unclear message: {msg}");
         assert!(
-            msg.contains("schema 2 is no longer supported"),
-            "unclear error message: {msg}"
+            msg.contains("build.payloads"),
+            "missing migration hint: {msg}"
         );
-        assert!(msg.contains("build.stub.strings"), "msg: {msg}");
-        assert!(msg.contains("docs/migration-v2-v3.md"), "msg: {msg}");
-    }
-
-    #[test]
-    fn rejects_schema_three_with_a_migration_message() {
-        let yaml = VALID_YAML.replace("schema: 4", "schema: 3");
-        let err = serde_yml::from_str::<Plan>(&yaml).expect_err("schema 3 should fail");
-        let msg = err.to_string();
         assert!(
-            msg.contains("schema 3 is no longer supported"),
-            "unclear error message: {msg}"
-        );
-        assert!(msg.contains("params:"), "msg: {msg}");
-        assert!(msg.contains("docs/migration-v3-v4.md"), "msg: {msg}");
-    }
-
-    #[test]
-    fn rejects_unknown_schema_version() {
-        let yaml = VALID_YAML.replace("schema: 4", "schema: 5");
-        let err = serde_yml::from_str::<Plan>(&yaml).expect_err("schema 5 should fail");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("unsupported schema version"),
-            "unclear error message: {msg}"
+            msg.contains("living_off_the_land"),
+            "missing migration hint: {msg}"
         );
     }
 
     #[test]
-    fn rejects_schema_one_keys() {
-        // A schema-1 document is rejected by the version check, not by the
-        // (now unknown) top-level keys.
+    fn accepts_only_the_current_schema() {
+        let plan: Plan = serde_yml::from_str(VALID_YAML).expect("schema 6 parses");
+        assert_eq!(plan.schema, SUPPORTED_SCHEMA);
+    }
+
+    #[test]
+    fn rejects_schema_1_keys() {
         let yaml = r#"
 schema: 1
 name: old
@@ -987,7 +1254,7 @@ output:
 "#;
         let err = serde_yml::from_str::<Plan>(yaml).expect_err("schema 1 should fail");
         assert!(
-            err.to_string().contains("schema 1 is no longer supported"),
+            err.to_string().contains("not supported"),
             "unclear error: {err}"
         );
     }
@@ -1013,8 +1280,8 @@ output:
     #[test]
     fn rejects_legacy_top_level_input_block() {
         let yaml = VALID_YAML.replace(
-            "build:\n  payload:\n    source: ./mimikatz.exe\n",
-            "input:\n  path: ./mimikatz.exe\nbuild:\n  payload:\n    crypto:\n      algo: xchacha20poly1305\n      key: random\n",
+            "build:\n  crypto:\n",
+            "input:\n  path: ./mimikatz.exe\nbuild:\n  crypto:\n",
         );
         assert!(
             serde_yml::from_str::<Plan>(&yaml).is_err(),

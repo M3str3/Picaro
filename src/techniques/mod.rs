@@ -8,42 +8,97 @@
 
 pub mod anti_debug;
 pub mod bouncer;
+pub mod dll_hollowing;
 pub mod dotnet_hosting;
+pub mod early_bird;
+pub mod execution_callbacks;
+pub mod fibers;
+pub mod guardrail;
+pub mod living_off_the_land;
+pub mod module_stomping;
+pub mod network_stager;
 pub mod patch_amsi;
 pub mod patch_etw;
+pub mod pe_injection;
+pub mod ppid_spoofing;
+pub mod process_ghosting;
 pub mod process_hollowing;
 pub mod reflective_loading;
+pub mod self_deletion;
+pub mod sleep;
 pub mod sleep_obfuscation;
+pub mod stack_spoofing;
+pub mod thread_hijacking;
+pub mod timestomping;
+pub mod unhook_ntdll;
 
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
 use crate::engine::obfuscation::StringsConfig;
-use crate::error::{PackerError, Result};
-use crate::ui::{glyph, Palette};
+use crate::error::Result;
+use crate::ui::{glyph, markdown, Meta, Palette, Tone};
 
-use crate::plan::schema::PayloadFormat;
+use crate::plan::schema::{PayloadFormat, StepControl};
 
 /// One step of the `runtime` list in the YAML plan.
 ///
-/// Internally-tagged enum: the step names the technique with `technique: <name>`
-/// and carries the technique's parameters under a nested `params:` mapping. The
-/// nested mapping keeps the technique key and its parameters in separate
-/// namespaces, so adding a parameter can never collide with the tag:
+/// A step is a technique call: the technique's `params` plus the loader's own
+/// orchestration ([`StepControl`]). The two live in separate namespaces, so a
+/// technique parameter can never collide with an orchestration field: the
+/// technique interprets `params`, the loader reads the control fields.
 ///
 /// ```yaml
 /// runtime:
 ///   - technique: process_hollowing
 ///     params:
+///       payload: implant
 ///       target: "C:\\Windows\\System32\\svchost.exe"
+///     on_fail: continue
 /// ```
 ///
 /// `params` is optional: a technique whose parameters all have defaults (e.g.
-/// `reflective_loading`) may omit it entirely.
+/// `patch_amsi`) may omit it entirely.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeStep {
+    /// The technique the step calls, with its `params`.
+    #[serde(flatten)]
+    pub technique: TechniqueKind,
+
+    /// How the loader reacts to this step's result.
+    #[serde(flatten)]
+    pub control: StepControl,
+}
+
+impl RuntimeStep {
+    /// Builds a step that calls `technique` with default orchestration.
+    pub fn new(technique: TechniqueKind) -> Self {
+        Self {
+            technique,
+            control: StepControl::default(),
+        }
+    }
+
+    /// The technique's YAML key (used by semantic validation and the build log).
+    pub fn name(&self) -> &'static str {
+        self.technique.name()
+    }
+
+    /// The technique's [`Category`] (Preparation, Execution or Control).
+    pub fn category(&self) -> Category {
+        self.technique.category()
+    }
+}
+
+/// A technique call: which technique, and the arguments it interprets.
+///
+/// Internally tagged enum: the step names the technique with `technique: <name>`
+/// and passes its parameters under a nested `params:` mapping, so a parameter
+/// can never collide with the tag.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "technique", rename_all = "snake_case")]
-pub enum RuntimeStep {
+pub enum TechniqueKind {
     /// Detect a debugger in the current process, aborting by default
     /// (preparation).
     AntiDebug {
@@ -70,26 +125,88 @@ pub enum RuntimeStep {
         #[serde(default)]
         params: patch_etw::Params,
     },
+    /// ntdll unhooking: restore the loaded ntdll's code section from a clean
+    /// copy read from disk (preparation).
+    UnhookNtdll {
+        /// Technique parameters (none).
+        #[serde(default)]
+        params: unhook_ntdll::Params,
+    },
     /// Process hollowing: run the payload inside a suspended, legitimate
     /// process instead of on disk.
     ProcessHollowing {
-        /// Technique parameters (`target`).
+        /// Technique parameters (`payload`, `target`).
         #[serde(default)]
         params: process_hollowing::Params,
     },
     /// .NET hosting: start the CLR in the current process and load the managed
     /// payload as an assembly from memory.
     DotnetHosting {
-        /// Technique parameters (none).
+        /// Technique parameters (`payload`).
         #[serde(default)]
         params: dotnet_hosting::Params,
     },
     /// Reflective loading: map the payload into the current process and run
     /// its entry point.
     ReflectiveLoading {
-        /// Technique parameters (none).
+        /// Technique parameters (`payload`).
         #[serde(default)]
         params: reflective_loading::Params,
+    },
+    /// Callback execution: run the payload as the callback of a legitimate
+    /// Windows enumeration API in the current process.
+    ExecutionCallbacks {
+        /// Technique parameters (`payload`).
+        #[serde(default)]
+        params: execution_callbacks::Params,
+    },
+    /// Fiber execution: run the payload on a fiber in the current process.
+    Fibers {
+        /// Technique parameters (`payload`).
+        #[serde(default)]
+        params: fibers::Params,
+    },
+    /// Module stomping: overwrite a legitimately loaded module's code with the
+    /// payload and run it from there.
+    ModuleStomping {
+        /// Technique parameters (`payload`).
+        #[serde(default)]
+        params: module_stomping::Params,
+    },
+    /// Early Bird APC injection: spawn a suspended process, write the payload
+    /// and queue an APC before the target runs.
+    EarlyBird {
+        /// Technique parameters (`payload`, `target`).
+        #[serde(default)]
+        params: early_bird::Params,
+    },
+    /// PE injection: map the payload image into a suspended process and start
+    /// it at its entry point.
+    PeInjection {
+        /// Technique parameters (`payload`, `target`).
+        #[serde(default)]
+        params: pe_injection::Params,
+    },
+    /// Thread hijacking: suspend a thread that already exists in the target
+    /// process, point it at the payload and resume it.
+    ThreadHijacking {
+        /// Technique parameters (`payload`, `target`, `pid`,
+        /// `dedicated_stack`, `wait_ms`).
+        #[serde(default)]
+        params: thread_hijacking::Params,
+    },
+    /// Self-deletion: unlink the running artifact's own image (preparation).
+    SelfDeletion {
+        /// Technique parameters (`mode`).
+        #[serde(default)]
+        params: self_deletion::Params,
+    },
+    /// Stack spoofing: fabricate the top of the stack for every syscall
+    /// (preparation).
+    StackSpoofing {
+        /// Technique parameters (`decoy_bytes`).
+        #[serde(default)]
+        params: stack_spoofing::Params,
     },
     /// Sleep obfuscation: encrypt the image region during a timer-driven
     /// sleep (preparation).
@@ -98,18 +215,65 @@ pub enum RuntimeStep {
         #[serde(default)]
         params: sleep_obfuscation::Params,
     },
+    /// Living off the land: launch a process — a signed Microsoft binary
+    /// (T1218 proxy execution) or any command (control).
+    LivingOffTheLand {
+        /// Technique parameters (`binary`, `args`, `window`, `wait`,
+        /// `timeout_s`).
+        #[serde(default)]
+        params: living_off_the_land::Params,
+    },
+    /// Wait a number of milliseconds (control).
+    Sleep {
+        /// Technique parameters (`ms`).
+        #[serde(default)]
+        params: sleep::Params,
+    },
+    /// Parent-process spoofing: launch a process whose recorded parent is a
+    /// different, legitimate process (control).
+    PpidSpoofing {
+        /// Technique parameters (`binary`, `args`, `parent`, `wait`).
+        #[serde(default)]
+        params: ppid_spoofing::Params,
+    },
+    /// Network stager: fetch the payload over the network at run time (control).
+    NetworkStager {
+        /// Technique parameters (`payload`, `url`, `crypto`, `key`, `nonce`, ...).
+        #[serde(default)]
+        params: network_stager::Params,
+    },
+    /// Guardrail: abort the chain past a deadline or run count (preparation).
+    Guardrail {
+        /// Technique parameters (`expire_on`, `max_runs`, `run_key`).
+        #[serde(default)]
+        params: guardrail::Params,
+    },
+    /// Timestomping: copy a reference file's timestamps onto a target (preparation).
+    Timestomping {
+        /// Technique parameters (`target`, `reference`).
+        #[serde(default)]
+        params: timestomping::Params,
+    },
+    /// DLL hollowing: run the payload from a hollowed signed DLL (execution).
+    DllHollowing {
+        /// Technique parameters (`payload`, `module`).
+        #[serde(default)]
+        params: dll_hollowing::Params,
+    },
+    /// Process ghosting: map the payload from a delete-on-close file (execution).
+    ProcessGhosting {
+        /// Technique parameters (`payload`).
+        #[serde(default)]
+        params: process_ghosting::Params,
+    },
 }
 
-impl RuntimeStep {
-    /// Renders the technique's stub fragment for this step's parameters.
+impl TechniqueKind {
+    /// Renders the technique's stub fragment for its parameters.
     ///
     /// `strings` is the active string-obfuscation configuration, used to
     /// obfuscate any per-build string literal (e.g. the hollowing target).
-    /// `format` and `export` describe the payload (`build.payload.format` and
-    /// `build.payload.export`): only Execution techniques care, since a
-    /// Preparation always modifies the current process whatever the payload is.
-    /// The result is injected verbatim into the generated stub (see
-    /// `engine::stub`).
+    /// `format` and `export` describe the payload the technique loads.
     pub fn render_fragment(
         &self,
         strings: &StringsConfig,
@@ -117,47 +281,135 @@ impl RuntimeStep {
         export: Option<&str>,
     ) -> String {
         match self {
-            RuntimeStep::AntiDebug { params } => params.render_fragment(strings),
-            RuntimeStep::Bouncer { params } => params.render_fragment(strings),
-            RuntimeStep::PatchAmsi { params } => params.render_fragment(strings),
-            RuntimeStep::PatchEtw { params } => params.render_fragment(strings),
-            RuntimeStep::DotnetHosting { params } => params.render_fragment(strings),
-            RuntimeStep::ProcessHollowing { params } => params.render_fragment_for(strings, format),
-            RuntimeStep::ReflectiveLoading { params } => {
+            TechniqueKind::AntiDebug { params } => params.render_fragment(strings),
+            TechniqueKind::Bouncer { params } => params.render_fragment(strings),
+            TechniqueKind::PatchAmsi { params } => params.render_fragment(strings),
+            TechniqueKind::PatchEtw { params } => params.render_fragment(strings),
+            TechniqueKind::DotnetHosting { params } => params.render_fragment(strings),
+            TechniqueKind::ProcessHollowing { params } => {
+                params.render_fragment_for(strings, format)
+            }
+            TechniqueKind::ReflectiveLoading { params } => {
                 params.render_fragment_for(strings, format, export)
             }
-            RuntimeStep::SleepObfuscation { params } => params.render_fragment(strings),
+            TechniqueKind::ExecutionCallbacks { params } => {
+                params.render_fragment_for(strings, format, export)
+            }
+            TechniqueKind::Fibers { params } => params.render_fragment_for(strings, format, export),
+            TechniqueKind::ModuleStomping { params } => {
+                params.render_fragment_for(strings, format, export)
+            }
+            TechniqueKind::SleepObfuscation { params } => params.render_fragment(strings),
+            TechniqueKind::UnhookNtdll { params } => params.render_fragment(strings),
+            TechniqueKind::EarlyBird { params } => {
+                params.render_fragment_for(strings, format, export)
+            }
+            TechniqueKind::PeInjection { params } => {
+                params.render_fragment_for(strings, format, export)
+            }
+            TechniqueKind::ThreadHijacking { params } => {
+                params.render_fragment_for(strings, format, export)
+            }
+            TechniqueKind::SelfDeletion { params } => params.render_fragment(strings),
+            TechniqueKind::StackSpoofing { params } => params.render_fragment(strings),
+            TechniqueKind::PpidSpoofing { params } => params.render_fragment(strings),
+            TechniqueKind::LivingOffTheLand { params } => params.render_fragment(strings),
+            TechniqueKind::Sleep { params } => params.render_fragment(strings),
+            TechniqueKind::NetworkStager { params } => params.render_fragment(strings),
+            TechniqueKind::Guardrail { params } => params.render_fragment(strings),
+            TechniqueKind::Timestomping { params } => params.render_fragment(strings),
+            TechniqueKind::DllHollowing { params } => {
+                params.render_fragment_for(strings, format, export)
+            }
+            TechniqueKind::ProcessGhosting { params } => {
+                params.render_fragment_for(strings, format, export)
+            }
         }
     }
 
     /// The technique's YAML key (used by semantic validation).
     pub fn name(&self) -> &'static str {
         match self {
-            RuntimeStep::AntiDebug { .. } => anti_debug::DEF.name,
-            RuntimeStep::Bouncer { .. } => bouncer::DEF.name,
-            RuntimeStep::PatchAmsi { .. } => patch_amsi::DEF.name,
-            RuntimeStep::PatchEtw { .. } => patch_etw::DEF.name,
-            RuntimeStep::DotnetHosting { .. } => dotnet_hosting::DEF.name,
-            RuntimeStep::ProcessHollowing { .. } => process_hollowing::DEF.name,
-            RuntimeStep::ReflectiveLoading { .. } => reflective_loading::DEF.name,
-            RuntimeStep::SleepObfuscation { .. } => sleep_obfuscation::DEF.name,
+            TechniqueKind::AntiDebug { .. } => anti_debug::DEF.name,
+            TechniqueKind::Bouncer { .. } => bouncer::DEF.name,
+            TechniqueKind::PatchAmsi { .. } => patch_amsi::DEF.name,
+            TechniqueKind::PatchEtw { .. } => patch_etw::DEF.name,
+            TechniqueKind::DotnetHosting { .. } => dotnet_hosting::DEF.name,
+            TechniqueKind::ProcessHollowing { .. } => process_hollowing::DEF.name,
+            TechniqueKind::ReflectiveLoading { .. } => reflective_loading::DEF.name,
+            TechniqueKind::ExecutionCallbacks { .. } => execution_callbacks::DEF.name,
+            TechniqueKind::Fibers { .. } => fibers::DEF.name,
+            TechniqueKind::ModuleStomping { .. } => module_stomping::DEF.name,
+            TechniqueKind::EarlyBird { .. } => early_bird::DEF.name,
+            TechniqueKind::PeInjection { .. } => pe_injection::DEF.name,
+            TechniqueKind::ThreadHijacking { .. } => thread_hijacking::DEF.name,
+            TechniqueKind::SelfDeletion { .. } => self_deletion::DEF.name,
+            TechniqueKind::StackSpoofing { .. } => stack_spoofing::DEF.name,
+            TechniqueKind::PpidSpoofing { .. } => ppid_spoofing::DEF.name,
+            TechniqueKind::UnhookNtdll { .. } => unhook_ntdll::DEF.name,
+            TechniqueKind::SleepObfuscation { .. } => sleep_obfuscation::DEF.name,
+            TechniqueKind::LivingOffTheLand { .. } => living_off_the_land::DEF.name,
+            TechniqueKind::Sleep { .. } => sleep::DEF.name,
+            TechniqueKind::NetworkStager { .. } => network_stager::DEF.name,
+            TechniqueKind::Guardrail { .. } => guardrail::DEF.name,
+            TechniqueKind::Timestomping { .. } => timestomping::DEF.name,
+            TechniqueKind::DllHollowing { .. } => dll_hollowing::DEF.name,
+            TechniqueKind::ProcessGhosting { .. } => process_ghosting::DEF.name,
         }
     }
 
-    /// The technique's [`Category`] (Preparation vs Execution).
+    /// The name of the payload this technique loads, when it loads one.
+    ///
+    /// Only Execution techniques run a payload; a Preparation or Control step
+    /// returns `None`.
+    pub fn payload_name(&self) -> Option<&str> {
+        match self {
+            TechniqueKind::ProcessHollowing { params } => params.payload.as_deref(),
+            TechniqueKind::DotnetHosting { params } => params.payload.as_deref(),
+            TechniqueKind::ReflectiveLoading { params } => params.payload.as_deref(),
+            TechniqueKind::ExecutionCallbacks { params } => params.payload.as_deref(),
+            TechniqueKind::Fibers { params } => params.payload.as_deref(),
+            TechniqueKind::ModuleStomping { params } => params.payload.as_deref(),
+            TechniqueKind::EarlyBird { params } => params.payload.as_deref(),
+            TechniqueKind::PeInjection { params } => params.payload.as_deref(),
+            TechniqueKind::ThreadHijacking { params } => params.payload.as_deref(),
+            TechniqueKind::DllHollowing { params } => params.payload.as_deref(),
+            TechniqueKind::ProcessGhosting { params } => params.payload.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// The technique's [`Category`] (Preparation, Execution or Control).
     ///
     /// Read from the technique's [`TechniqueDef`] so the registry stays the
     /// single source of truth: a technique cannot disagree with itself.
     pub fn category(&self) -> Category {
         match self {
-            RuntimeStep::AntiDebug { .. } => anti_debug::DEF.category,
-            RuntimeStep::Bouncer { .. } => bouncer::DEF.category,
-            RuntimeStep::PatchAmsi { .. } => patch_amsi::DEF.category,
-            RuntimeStep::PatchEtw { .. } => patch_etw::DEF.category,
-            RuntimeStep::DotnetHosting { .. } => dotnet_hosting::DEF.category,
-            RuntimeStep::ProcessHollowing { .. } => process_hollowing::DEF.category,
-            RuntimeStep::ReflectiveLoading { .. } => reflective_loading::DEF.category,
-            RuntimeStep::SleepObfuscation { .. } => sleep_obfuscation::DEF.category,
+            TechniqueKind::AntiDebug { .. } => anti_debug::DEF.category,
+            TechniqueKind::Bouncer { .. } => bouncer::DEF.category,
+            TechniqueKind::PatchAmsi { .. } => patch_amsi::DEF.category,
+            TechniqueKind::PatchEtw { .. } => patch_etw::DEF.category,
+            TechniqueKind::DotnetHosting { .. } => dotnet_hosting::DEF.category,
+            TechniqueKind::ProcessHollowing { .. } => process_hollowing::DEF.category,
+            TechniqueKind::ReflectiveLoading { .. } => reflective_loading::DEF.category,
+            TechniqueKind::ExecutionCallbacks { .. } => execution_callbacks::DEF.category,
+            TechniqueKind::Fibers { .. } => fibers::DEF.category,
+            TechniqueKind::ModuleStomping { .. } => module_stomping::DEF.category,
+            TechniqueKind::EarlyBird { .. } => early_bird::DEF.category,
+            TechniqueKind::PeInjection { .. } => pe_injection::DEF.category,
+            TechniqueKind::ThreadHijacking { .. } => thread_hijacking::DEF.category,
+            TechniqueKind::SelfDeletion { .. } => self_deletion::DEF.category,
+            TechniqueKind::StackSpoofing { .. } => stack_spoofing::DEF.category,
+            TechniqueKind::PpidSpoofing { .. } => ppid_spoofing::DEF.category,
+            TechniqueKind::UnhookNtdll { .. } => unhook_ntdll::DEF.category,
+            TechniqueKind::SleepObfuscation { .. } => sleep_obfuscation::DEF.category,
+            TechniqueKind::LivingOffTheLand { .. } => living_off_the_land::DEF.category,
+            TechniqueKind::Sleep { .. } => sleep::DEF.category,
+            TechniqueKind::NetworkStager { .. } => network_stager::DEF.category,
+            TechniqueKind::Guardrail { .. } => guardrail::DEF.category,
+            TechniqueKind::Timestomping { .. } => timestomping::DEF.category,
+            TechniqueKind::DllHollowing { .. } => dll_hollowing::DEF.category,
+            TechniqueKind::ProcessGhosting { .. } => process_ghosting::DEF.category,
         }
     }
 }
@@ -173,6 +425,9 @@ pub enum Category {
     Preparation,
     /// Executes the decrypted payload.
     Execution,
+    /// Neither prepares state nor runs the payload: it orchestrates the chain
+    /// (launch a process, wait). `living_off_the_land` and `sleep`.
+    Control,
 }
 
 impl Category {
@@ -181,6 +436,7 @@ impl Category {
         match self {
             Category::Preparation => "preparation",
             Category::Execution => "execution",
+            Category::Control => "control",
         }
     }
 }
@@ -191,12 +447,20 @@ impl Category {
 /// currently-registered techniques are constructed.
 ///
 /// Variant order is meaningful: it defines the sort key used by [`list`]
-/// (Stable before Experimental before Deprecated).
+/// (Stable before Experimental before Unimplemented before Deprecated).
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Stability {
+    /// Complete and verified: a measurement baseline or passing runtime checks.
     Stable,
+    /// Works, but a gap or a caveat remains (see the technique's README).
     Experimental,
+    /// Registered and wired (registry arm, metadata, docs, tests) but **not
+    /// finished**: either the stub fragment is a placeholder or a required part
+    /// of the loader contract is missing, so it must not be shipped as-is.
+    /// `plan::validate::advisories` warns when a runtime selects one.
+    Unimplemented,
+    /// Superseded by a better technique; kept for old plans.
     Deprecated,
 }
 
@@ -206,6 +470,7 @@ impl Stability {
         match self {
             Stability::Stable => "stable",
             Stability::Experimental => "experimental",
+            Stability::Unimplemented => "unimplemented",
             Stability::Deprecated => "deprecated",
         }
     }
@@ -224,6 +489,18 @@ pub enum Capability {
     WindowsX86,
     KernelAccess,
     AdminRequired,
+}
+
+impl Capability {
+    /// Lowercase label used by `picaro techniques show`.
+    pub fn label(self) -> &'static str {
+        match self {
+            Capability::WindowsX64 => "windows-x64",
+            Capability::WindowsX86 => "windows-x86",
+            Capability::KernelAccess => "kernel-access",
+            Capability::AdminRequired => "admin-required",
+        }
+    }
 }
 
 /// Static metadata describing one technique.
@@ -268,23 +545,34 @@ pub fn all() -> &'static [TechniqueDef] {
         dotnet_hosting::DEF,
         process_hollowing::DEF,
         reflective_loading::DEF,
+        execution_callbacks::DEF,
+        fibers::DEF,
+        module_stomping::DEF,
+        early_bird::DEF,
+        pe_injection::DEF,
+        thread_hijacking::DEF,
+        ppid_spoofing::DEF,
+        self_deletion::DEF,
+        stack_spoofing::DEF,
+        unhook_ntdll::DEF,
         patch_amsi::DEF,
         anti_debug::DEF,
         patch_etw::DEF,
         sleep_obfuscation::DEF,
         bouncer::DEF,
+        living_off_the_land::DEF,
+        sleep::DEF,
+        network_stager::DEF,
+        guardrail::DEF,
+        timestomping::DEF,
+        dll_hollowing::DEF,
+        process_ghosting::DEF,
     ]
 }
 
 /// Looks up a technique by its YAML key.
 pub fn find(name: &str) -> Option<&'static TechniqueDef> {
     all().iter().find(|def| def.name == name)
-}
-
-/// Returns the [`Category`] of the technique with the given YAML key, if it is
-/// registered. Used by pipeline validation.
-pub fn category_of(name: &str) -> Option<Category> {
-    find(name).map(|def| def.category)
 }
 
 /// Section headings every technique README must contain (see
@@ -302,67 +590,241 @@ const REQUIRED_SECTIONS: &[&str] = &[
     "## References",
 ];
 
+/// The widest cell of a listing column, header included.
+///
+/// The table is measured instead of fixed: a technique name or an ATT&CK list
+/// longer than the rest must not push the remaining columns of its own row out
+/// of line.
+pub(crate) fn column_width(header: &str, values: impl Iterator<Item = String>) -> usize {
+    values
+        .map(|value| value.chars().count())
+        .chain(std::iter::once(header.chars().count()))
+        .max()
+        .unwrap_or(0)
+}
+
+/// Pads a cell to `width`.
+///
+/// The padding happens before the cell is styled: padding an already-colored
+/// string would count the escape codes and misalign the row (see
+/// [`stability_label`], which pads for the same reason).
+pub(crate) fn pad(text: &str, width: usize) -> String {
+    format!("{text:<width$}")
+}
+
 /// Renders the `picaro techniques list` output.
 pub fn list(ui: &Palette) -> String {
     let mut out = String::new();
-    out.push_str(&format!(
-        "{} {} {} {} {}\n",
-        // Pad before styling: applying the width to an already-colored string
-        // would count the escape codes and misalign the header against the rows.
-        ui.dim(format!("{:<18}", "TECHNIQUE")),
-        ui.dim(format!("{:<12}", "CATEGORY")),
-        ui.dim(format!("{:<12}", "STABILITY")),
-        ui.dim(format!("{:<20}", "ATT&CK")),
-        ui.dim("SUMMARY"),
-    ));
+
     // Grouped by category, then maturity, then name: the listing reads as a
     // pipeline (Preparation before Execution) with the most reliable entries
     // first inside each group.
     let mut defs: Vec<&TechniqueDef> = all().iter().collect();
     defs.sort_by_key(|def| (def.category, def.stability, def.name));
+
+    let name_w = column_width("TECHNIQUE", defs.iter().map(|def| def.name.to_string()));
+    let category_w = column_width(
+        "CATEGORY",
+        defs.iter().map(|def| def.category.label().to_string()),
+    );
+    let stability_w = column_width(
+        "STABILITY",
+        defs.iter().map(|def| def.stability.label().to_string()),
+    );
+    let attck_w = column_width("ATT&CK", defs.iter().map(|def| def.attck.join(", ")));
+
+    out.push_str(&format!(
+        "{} {} {} {} {}\n",
+        ui.dim(pad("TECHNIQUE", name_w)),
+        ui.dim(pad("CATEGORY", category_w)),
+        ui.dim(pad("STABILITY", stability_w)),
+        ui.dim(pad("ATT&CK", attck_w)),
+        ui.dim("SUMMARY"),
+    ));
     for def in defs {
+        let name = ui.bold(pad(def.name, name_w));
+        let category = pad(def.category.label(), category_w);
+        let stability = stability_label(def, ui, stability_w);
+        let attck = pad(&def.attck.join(", "), attck_w);
         out.push_str(&format!(
-            "{} {:<12} {} {:<20} {}\n",
-            ui.bold(format!("{:<18}", def.name)),
-            def.category.label(),
-            stability_label(def, ui),
-            def.attck.join(", "),
-            truncate(summary(def), 70),
+            "{name} {category} {stability} {attck} {}\n",
+            truncate(summary(def), 70)
         ));
     }
 
-    let executions = all()
-        .iter()
-        .filter(|d| d.category == Category::Execution)
-        .count();
+    let count = |category: Category| all().iter().filter(|d| d.category == category).count();
     out.push_str(&format!(
         "\n{} {}\n",
         glyph::DOT,
         ui.dim(format!(
-            "{} techniques ({} preparation, {} execution)",
+            "{} techniques ({} preparation, {} execution, {} control)",
             all().len(),
-            all().len() - executions,
-            executions
+            count(Category::Preparation),
+            count(Category::Execution),
+            count(Category::Control),
         ))
     ));
+
+    // Legend: two dim lines. Their first token is never a technique name, so
+    // the table-shape tests keep matching only real rows.
+    out.push_str(&format!(
+        "  {} {}  {}  {}  {}\n",
+        ui.dim("stability:"),
+        ui.ok(Stability::Stable.label()),
+        ui.warn(Stability::Experimental.label()),
+        ui.error(Stability::Unimplemented.label()),
+        ui.error(Stability::Deprecated.label()),
+    ));
+    out.push_str(&format!(
+        "  {} {}\n",
+        ui.dim("show:"),
+        ui.dim("picaro techniques show <name> for the full README"),
+    ));
+
+    // Loader features (`syscalls`, `api_resolution`, `strings`, `args`) are not
+    // runtime steps; they are listed in their own table so the registry view is
+    // complete.
+    out.push('\n');
+    out.push_str(&crate::features::list(ui));
     out
 }
 
-/// The technique's stability label, padded and colored by maturity.
-fn stability_label(def: &TechniqueDef, ui: &Palette) -> String {
-    let label = format!("{:<12}", def.stability.label());
+/// The technique's stability label, padded to `width` and colored by maturity.
+fn stability_label(def: &TechniqueDef, ui: &Palette, width: usize) -> String {
+    let label = format!(
+        "{name:<width$}",
+        name = def.stability.label(),
+        width = width
+    );
     match def.stability {
         Stability::Stable => ui.ok(label),
         Stability::Experimental => ui.warn(label),
+        Stability::Unimplemented => ui.error(label),
         Stability::Deprecated => ui.error(label),
     }
 }
 
-/// Returns the README of `name` for `picaro techniques show`.
-pub fn show(name: &str) -> Result<String> {
-    find(name)
-        .map(|def| def.readme.to_string())
-        .ok_or_else(|| PackerError::Validation(format!("unknown technique '{name}'")))
+/// The technique's README as embedded Markdown, verbatim.
+pub fn readme(name: &str) -> Result<&'static str> {
+    if let Some(def) = find(name) {
+        return Ok(def.readme);
+    }
+    // Not a technique: it may be a loader feature.
+    crate::features::readme(name)
+}
+
+/// Renders `picaro techniques show <name>`: a styled header built from the
+/// technique's metadata, followed by its README rendered as Markdown.
+pub fn show(name: &str, ui: &Palette) -> Result<String> {
+    let Some(def) = find(name) else {
+        // Not a technique: it may be a loader feature (`syscalls`, `strings`, …).
+        return crate::features::show(name, ui);
+    };
+    let width = crate::ui::term_width();
+
+    let mut out = String::new();
+    out.push_str(&ui.heading(readme_title(def.readme).unwrap_or(def.name)));
+    out.push_str("\n\n");
+
+    out.push_str(&ui.meta_bar(&[
+        Meta {
+            key: "CATEGORY",
+            value: def.category.label().to_string(),
+            tone: Tone::Value,
+        },
+        Meta {
+            key: "STABILITY",
+            value: def.stability.label().to_string(),
+            tone: stability_tone(def.stability),
+        },
+        Meta {
+            key: "ATT&CK",
+            value: def.attck.join(", "),
+            tone: Tone::Value,
+        },
+    ]));
+    out.push('\n');
+
+    out.push_str(&ui.field("yaml key", def.name));
+    out.push('\n');
+    out.push_str(&ui.field_wrapped("requires", capabilities(def.requires), width));
+    out.push('\n');
+    if !def.conflicts.is_empty() {
+        out.push_str(&ui.field_wrapped("conflicts", def.conflicts.join(", "), width));
+        out.push('\n');
+    }
+    if !def.syscalls.is_empty() {
+        out.push_str(&ui.field_wrapped("syscalls", def.syscalls.join(", "), width));
+        out.push('\n');
+    }
+    if def.resolves_imports {
+        out.push_str(&ui.field("imports", "shared resolver"));
+        out.push('\n');
+    }
+
+    out.push('\n');
+    out.push_str(&ui.rule(width));
+    out.push_str("\n\n");
+
+    // The styled header replaces the README's title and Metadata section.
+    out.push_str(&markdown::render(&strip_header(def.readme), ui, width));
+
+    out.push('\n');
+    out.push_str(&ui.dim(format!("{} {}", glyph::DOT, def.doc_path)));
+    out.push('\n');
+    Ok(out)
+}
+
+/// The README's `# ` title, when it has one.
+pub(crate) fn readme_title(readme: &str) -> Option<&str> {
+    readme
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("# "))
+}
+
+/// The color role of a maturity (shared with [`stability_label`]).
+fn stability_tone(stability: Stability) -> Tone {
+    match stability {
+        Stability::Stable => Tone::Ok,
+        Stability::Experimental => Tone::Warn,
+        Stability::Unimplemented | Stability::Deprecated => Tone::Bad,
+    }
+}
+
+/// Comma-joined capability labels for the `requires` field.
+fn capabilities(requires: &[Capability]) -> String {
+    requires
+        .iter()
+        .map(|capability| capability.label())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Drops the README's leading `# ` title and its `## Metadata` section, which
+/// the styled header supersedes.
+pub(crate) fn strip_header(readme: &str) -> String {
+    let mut out = String::new();
+    let mut in_metadata = false;
+    for line in readme.lines() {
+        if in_metadata {
+            if line.starts_with("## ") {
+                in_metadata = false;
+            } else {
+                continue;
+            }
+        }
+        if out.is_empty() && line.starts_with("# ") {
+            continue;
+        }
+        if line.trim() == "## Metadata" {
+            in_metadata = true;
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 /// Validates the registry. Returns a list of problems; empty means all good.
@@ -433,6 +895,8 @@ pub fn validate() -> Vec<String> {
             )),
         }
     }
+    // Loader features live in a parallel registry; validate them too.
+    problems.extend(crate::features::validate());
     problems
 }
 
@@ -455,7 +919,7 @@ pub fn summary(def: &TechniqueDef) -> &str {
 
 /// Extracts the one-line summary of a technique README (the first non-empty
 /// line under `## What it does`).
-fn short_description(readme: &str) -> &str {
+pub(crate) fn short_description(readme: &str) -> &str {
     let marker = "## What it does";
     let start = readme.find(marker).map(|i| i + marker.len()).unwrap_or(0);
     for line in readme[start..].lines() {
@@ -468,7 +932,7 @@ fn short_description(readme: &str) -> &str {
 }
 
 /// Shortens a summary to at most `max` characters, appending an ellipsis.
-fn truncate(text: &str, max: usize) -> String {
+pub(crate) fn truncate(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
     }
@@ -501,6 +965,38 @@ mod tests {
         }
     }
 
+    /// Every registered technique must be reachable from the documentation: a
+    /// page under `docs/techniques/ref/`, a link in the overview table and a
+    /// nav entry in `docs/nav.yml`. Adding a technique without updating the docs
+    /// is the recurring drift this guards against.
+    #[test]
+    fn every_technique_is_documented() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let overview = std::fs::read_to_string(root.join("docs/techniques/index.md"))
+            .expect("docs/techniques/index.md must exist");
+        let nav = std::fs::read_to_string(root.join("docs").join("nav.yml"))
+            .expect("docs/nav.yml must exist");
+
+        for def in all() {
+            let docs_page = format!("docs/techniques/ref/{}.md", def.name);
+            assert!(
+                root.join(&docs_page).is_file(),
+                "{}: missing docs page '{docs_page}'",
+                def.name
+            );
+            assert!(
+                overview.contains(&format!("(ref/{}.md)", def.name)),
+                "{}: no link to the technique in docs/techniques/index.md",
+                def.name
+            );
+            assert!(
+                nav.contains(&format!("techniques/ref/{}.md", def.name)),
+                "{}: no nav entry in docs/nav.yml",
+                def.name
+            );
+        }
+    }
+
     #[test]
     fn every_technique_has_a_parseable_yaml_example() {
         for def in all() {
@@ -519,14 +1015,6 @@ mod tests {
     fn find_returns_registered_technique() {
         assert!(find("process_hollowing").is_some());
         assert!(find("does_not_exist").is_none());
-    }
-
-    #[test]
-    fn category_of_reports_preparation_and_execution() {
-        assert_eq!(category_of("patch_amsi"), Some(Category::Preparation));
-        assert_eq!(category_of("process_hollowing"), Some(Category::Execution));
-        assert_eq!(category_of("reflective_loading"), Some(Category::Execution));
-        assert_eq!(category_of("does_not_exist"), None);
     }
 
     #[test]
@@ -564,6 +1052,33 @@ mod tests {
         assert!(!output.contains('\u{1b}'), "escapes leaked: {output:?}");
     }
 
+    /// A long technique name or ATT&CK list must not push the rest of its row.
+    ///
+    /// Regression: the name column was a fixed 18 characters, so the 19-char
+    /// `living_off_the_land` and `execution_callbacks` shifted the columns that
+    /// follow them by one.
+    #[test]
+    fn list_columns_align_across_rows() {
+        let output = list(&Palette::plain());
+        let starts: Vec<usize> = all()
+            .iter()
+            .map(|def| {
+                let line = output
+                    .lines()
+                    .find(|line| line.split_whitespace().next() == Some(def.name))
+                    .unwrap_or_else(|| panic!("no row for {}: {output}", def.name));
+                let last = truncate(summary(def), 70);
+                line.rfind(&last)
+                    .unwrap_or_else(|| panic!("no summary column in {line:?}"))
+            })
+            .collect();
+
+        assert!(
+            starts.windows(2).all(|pair| pair[0] == pair[1]),
+            "the summary column is ragged: {starts:?}\n{output}"
+        );
+    }
+
     /// Long summaries are truncated so the listing stays readable.
     #[test]
     fn truncates_long_summaries() {
@@ -574,8 +1089,42 @@ mod tests {
     }
 
     #[test]
-    fn show_returns_readme() {
-        let readme = show("process_hollowing").expect("known technique");
-        assert!(readme.contains("# Process hollowing"));
+    fn show_renders_metadata_and_readme() {
+        let page = show("process_hollowing", &Palette::plain()).expect("known technique");
+        assert!(page.contains("Process hollowing"), "page: {page}");
+        assert!(page.contains("T1055"), "page: {page}");
+        // The README body is rendered, not dumped raw.
+        assert!(page.contains("What it does"), "page: {page}");
+        assert!(!page.contains("## Metadata"), "page: {page}");
+        assert!(!page.contains('\u{1b}'), "escapes leaked: {page:?}");
+    }
+
+    #[test]
+    fn readme_is_verbatim() {
+        let raw = readme("process_hollowing").expect("known technique");
+        assert!(raw.contains("# Process hollowing"));
+        assert!(raw.contains("## Metadata"));
+    }
+
+    #[test]
+    fn unknown_technique_is_an_error() {
+        assert!(show("does_not_exist", &Palette::plain()).is_err());
+        assert!(readme("does_not_exist").is_err());
+    }
+
+    /// Smoke test: the renderer survives every real README and keeps its
+    /// required section.
+    #[test]
+    fn show_pages_every_technique() {
+        for def in all() {
+            let page = show(def.name, &Palette::plain())
+                .unwrap_or_else(|error| panic!("{}: {error}", def.name));
+            assert!(!page.is_empty(), "{}: empty page", def.name);
+            assert!(
+                page.contains("What it does"),
+                "{}: missing section: {page}",
+                def.name
+            );
+        }
     }
 }
