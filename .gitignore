@@ -10,6 +10,9 @@ code_examples/
 /build
 /dist
 
+# Lab
+/lab
+
 # Documentation site output (MkDocs).
 /site
 
