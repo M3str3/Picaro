@@ -78,15 +78,13 @@ target has that DLL mapped — which step 4 guarantees. API set names
 schema; `LoadLibraryA` therefore returns the contract host's module (with a
 family-based fallback for the CRT contracts).
 
-> **Known limitation (open).** The payload's **TLS callbacks** are not run yet.
-> A callback has to run on a thread, and a freshly created (never started)
-> thread has no TLS array in its TEB, so its slot cannot be provisioned the way
-> the main thread's is. The TLS *index*, the per-thread template copy and the
-> main thread's slot **are** provisioned (step 10), so a payload whose CRT reads
-> thread-local state now runs; a payload that needs its `DLL_PROCESS_ATTACH`
-> callback for something else still loses that init. Taking the callback thread
-> through a started state first (or hand-building its TLS array) is the
-> follow-up; evidence in `docs/techniques/process_hollowing.md`.
+> The payload's **TLS callbacks** run now. The TLS *index*, the per-thread
+> template copy and the main thread's slot **are** provisioned (step 10), and
+> the `DLL_PROCESS_ATTACH` callbacks are invoked on the main thread via a
+> `jmp $` parking stub before the entry-point hand-off, so a payload whose CRT
+> relies on its TLS init completes. Runtime verification of the callbacks on a
+> Defender-off host is still pending; evidence in
+> `docs/techniques/process_hollowing.md`.
 
 ### Payload arguments
 

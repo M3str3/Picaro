@@ -138,11 +138,12 @@ relocations and before writing the image (failures abort before
 replaced by the shared resolver. The hollowing fragment now uses a 16-byte
 aligned `CONTEXT` for `Get/SetThreadContext` (x64 requirement).
 
-**Process hollowing runs a full PE (TLS callbacks pending) — see Known
-limitations.** The loader state is reconstructed (imported DLLs, TLS index +
-per-thread template + main-thread slot, `Rip` hand-off) and the Rust test payload
-exits `0`. A relocation bug (DIR64/HIGHLOW swapped in the fragment) was the real
-blocker. Measured evidence + the remaining callback work:
+**Process hollowing runs a full PE, TLS callbacks included.** The loader state is
+reconstructed (imported DLLs, TLS index + per-thread template + main-thread slot,
+`Rip` hand-off) and the payload's `DLL_PROCESS_ATTACH` TLS callbacks run on the
+main thread via a `jmp $` parking stub before the entry point, so a Rust test
+payload completes (exit `0`). A relocation bug (DIR64/HIGHLOW swapped in the
+fragment) was the real blocker. Measured evidence:
 `docs/techniques/process_hollowing.md`. Every diagnostic the fragment emits is
 obfuscated (`MESSAGES` + `render_fragment`), so no error text — and no technique
 keyword such as `loader` — reaches `.rdata`. `reflective_loading`'s shellcode
@@ -444,11 +445,10 @@ is **not finished**: either the stub fragment is a placeholder or a required par
 of the loader contract is missing. `picaro techniques list` shows it in red, and
 `plan::validate::advisories` warns on every build that selects one — the build
 still succeeds, because an unfinished technique is often still useful in a lab.
-Today **`pe_injection`** carries it (the payload's TLS is not provisioned; the
-rest of the loader contract is in place and verified), so flip it back to
-`Experimental` when TLS lands. A technique that enters as a skeleton (the batch-2
-pre-wiring pattern) should declare it too, which replaces the older "placeholder
-fragment that fails at run time" idiom.
+No registered technique carries it today (`pe_injection` was the last; it moved
+to `Experimental` once its TLS provisioning landed). A technique that enters as
+a skeleton (the batch-2 pre-wiring pattern) should declare it too, which
+replaces the older "placeholder fragment that fails at run time" idiom.
 
 **PE resources (done).** `build.output.resources` embeds an icon (`RT_GROUP_ICON`
 + `RT_ICON`), `VERSIONINFO` (`RT_VERSION`) and the Windows application manifest
@@ -575,15 +575,12 @@ measured** (no JDK on the host) and `dumpbin` was unavailable, so `picaro audit`
   `CreateToolhelp32Snapshot`, `GetSystemInfo`, `GlobalMemoryStatusEx`) are the
   visible static signature; the check literals themselves stay obfuscated.
 
-- **Process hollowing runs a full PE, but not its TLS callbacks.** The IAT
+- **Process hollowing runs a full PE, TLS callbacks included.** The IAT
   (`src/engine/imports.rs`), the imported DLLs, the TLS index/block/slot and the
-  `Rip` hand-off are all provisioned, so a Rust payload completes (exit `0`).
-  What is still missing is running the payload's `DLL_PROCESS_ATTACH` TLS
-  callbacks: a callback needs a thread, and a never-started thread has no TLS
-  array in its TEB to point a slot at (writing one faults the target). Either
-  run them on the main thread (parked on a `jmp $` stub between calls) or build
-  the callback thread's TLS array by hand. Evidence in
-  `docs/techniques/process_hollowing.md`.
+  `Rip` hand-off are all provisioned, and the payload's `DLL_PROCESS_ATTACH`
+  TLS callbacks now run on the main thread via a `jmp $` parking stub before the
+  entry point. Runtime verification of the callbacks on a Defender-off host is
+  still pending; the implementation is compile-verified only.
 - Custom stubs keep the per-step payload keys in the runner: each Execution
   step's key and nonce are emitted as hex literals in `$STEP_RUNNER_BODY$`. A
   stub that wants no key material embedded must decrypt the payloads itself, or
@@ -594,13 +591,11 @@ measured** (no JDK on the host) and `dumpbin` was unavailable, so `picaro audit`
   at the real exports; `plan::validate` rejects the combination. Closing it needs
   a position-independent proxy emitter written into the target
   (`docs/api-resolution.md`, Phase E).
-- **`pe_injection` is the only technique still marked
-  `Stability::Unimplemented`.** Its payload TLS is not provisioned, so a payload
-  that relies on dynamic TLS can misbehave; the rest of the loader contract
-  (image mapping, relocations, imports resolved against the target's bases, the
-  entry thread, the exit code) is in place and verified for TLS-free payloads.
-  `plan::validate::advisories` warns on every build that selects it. Flip it to
-  `Experimental` when TLS lands.
+- **`pe_injection` is now `Experimental`** (TLS is provisioned and the payload's
+  `DLL_PROCESS_ATTACH` callbacks run before the entry thread). Runtime
+  verification of the TLS path on a Defender-off host is still pending; the
+  implementation is compile-verified only, so a payload that relies on dynamic
+  TLS may still misbehave in ways a lab build should confirm.
 - **`unhook_ntdll` silently undoes `patch_etw` if it runs after it** (both
   rewrite ntdll's `.text`); `plan::validate::advisories` warns about the order.
 - **`early_bird` needs a real target image.** The 32-bit `notepad.exe` of recent

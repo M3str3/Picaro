@@ -596,12 +596,12 @@ architecture, which the packer checks).
   hosts the CLR), so a 32-bit .NET assembly such as `SharpHound.exe` packs and
   runs with `arch: x86`. See [`docs/x86.md`](docs/x86.md) and the example
   `examples/plans/x86.yaml`.
-- **Process hollowing runs a full PE, but not its TLS callbacks.** The loader
-  state is provisioned (imported DLLs, a real TLS index, the per-thread `.tls`
-  template, the main thread's TLS slot, and a `Rip`/`Eip` hand-off), and the Rust
-  test payload completes with the payload's own exit code. A payload that needs
-  its `DLL_PROCESS_ATTACH` TLS callback still loses that init: a thread that has
-  never started has no TLS array to point at. Evidence:
+- **Process hollowing runs a full PE, TLS callbacks included.** The loader state
+  is provisioned (imported DLLs, a real TLS index, the per-thread `.tls`
+  template, the main thread's TLS slot, and a `Rip`/`Eip` hand-off), and the
+  payload's `DLL_PROCESS_ATTACH` TLS callbacks run on the main thread via a
+  `jmp $` parking stub before the entry point. Runtime verification of the
+  callbacks on a Defender-off host is still pending. Evidence:
   [`docs/techniques/process_hollowing.md`](docs/techniques/process_hollowing.md).
 - **The syscall layer carries the whole hollowing flow.** The eleven-argument
   trampoline (`NtCreateThreadEx`) plus `NtWaitForSingleObject`,

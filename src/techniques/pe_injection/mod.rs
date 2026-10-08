@@ -57,13 +57,12 @@ pub fn default_target() -> String {
 pub const DEF: TechniqueDef = TechniqueDef {
     name: "pe_injection",
     attck: &["T1055.002"],
-    // Not finished: the payload's TLS is not provisioned (see the README's
-    // implementation notes), so a payload that depends on dynamic TLS can
-    // misbehave. Everything else (image mapping, relocations, imports resolved
-    // against the target's bases, the entry thread, the exit code) is in place,
-    // which is why the state is `Unimplemented` and not a placeholder: a build
-    // with it warns, and it must be flipped to `Experimental` once TLS lands.
-    stability: Stability::Unimplemented,
+    // The payload's TLS (index, template, per-thread slot and
+    // DLL_PROCESS_ATTACH callbacks) is provisioned through a target-resident
+    // prologue, matching process hollowing. Runtime verification of the
+    // callbacks is still pending on the measurement host, which is why the
+    // state is `Experimental` and not `Stable`.
+    stability: Stability::Experimental,
     requires: &[Capability::WindowsX64, Capability::WindowsX86],
     conflicts: &[],
     category: Category::Execution,
@@ -178,6 +177,48 @@ const MESSAGES: &[(&str, &str)] = &[
         "could not read the target's exit status",
     ),
     ("$MSG_THREAD_FAULTED$", "the payload thread faulted"),
+    (
+        "$MSG_TLS_DIR_UNMAPPED$",
+        "the payload's TLS directory is not mapped",
+    ),
+    (
+        "$MSG_TLS_BLOCK_ALLOC_FAILED$",
+        "TLS block allocation failed",
+    ),
+    (
+        "$MSG_TLS_TEMPLATE_UNMAPPED$",
+        "the payload's .tls template is not mapped",
+    ),
+    (
+        "$MSG_TLS_TEMPLATE_OOB$",
+        "the payload's .tls template is out of bounds",
+    ),
+    (
+        "$MSG_TLS_INDEX_FAILED$",
+        "the target could not allocate a TLS index",
+    ),
+    (
+        "$MSG_TLSALLOC_RUN_FAILED$",
+        "could not run TlsAlloc in the target",
+    ),
+    ("$MSG_TLSALLOC_UNFINISHED$", "TlsAlloc did not finish"),
+    ("$MSG_TLSALLOC_FAILED$", "TlsAlloc failed in the target"),
+    (
+        "$MSG_TLS_CALLBACKS_UNMAPPED$",
+        "the payload's TLS callback array is not mapped",
+    ),
+    (
+        "$MSG_TLS_CALLBACKS_UNTERMINATED$",
+        "the payload's TLS callback array is not null-terminated",
+    ),
+    (
+        "$MSG_TLS_PROLOGUE_ALLOC_FAILED$",
+        "TLS prologue allocation failed",
+    ),
+    (
+        "$MSG_TLS_PROLOGUE_PROTECT_FAILED$",
+        "TLS prologue protection failed",
+    ),
     ("$MSG_OFFSET_OVERFLOW$", "offset overflow"),
     ("$MSG_READ_OOB$", "read out of bounds"),
     ("$MSG_WRITE_OOB$", "write out of bounds"),
@@ -206,6 +247,12 @@ impl Params {
         let load_library_def = strings
             .obfuscate("LoadLibraryA")
             .render_stub_expr("load_library_name");
+        let tls_alloc_def = strings
+            .obfuscate("TlsAlloc")
+            .render_stub_expr("tls_alloc_name");
+        let tls_set_value_def = strings
+            .obfuscate("TlsSetValue")
+            .render_stub_expr("tls_set_value_name");
 
         // The error paths get the same treatment as the target path and the
         // resolved names: a `format!` literal is keyword-free, and the message
@@ -215,6 +262,8 @@ impl Params {
             .replace("$TARGET_DEF$", &target_def)
             .replace("$KERNEL32_DEF$", &kernel32_def)
             .replace("$LOAD_LIBRARY_DEF$", &load_library_def)
+            .replace("$TLS_ALLOC_DEF$", &tls_alloc_def)
+            .replace("$TLS_SET_VALUE_DEF$", &tls_set_value_def)
             .replace("$TIMEOUT_MS$", &format!("{}u32", self.timeout_ms));
         for (index, (placeholder, text)) in MESSAGES.iter().enumerate() {
             rendered = rendered.replace(

@@ -3,9 +3,10 @@
 ## Metadata
 
 - **ATT&CK**: T1055.002 (Process Injection: Portable Executable Injection)
-- **Stability**: `unimplemented` — the technique runs, but the payload's TLS is
-  not provisioned (see "Implementation notes"), so it must not be shipped as-is.
-  `picaro techniques list` shows it in red and a build that selects it warns.
+- **Stability**: `experimental` — the technique runs and provisions the
+  payload's TLS (index, template, per-thread slot and `DLL_PROCESS_ATTACH`
+  callbacks), but the callbacks have not yet been runtime-verified on the
+  measurement host (see "Implementation notes").
 - **YAML key**: `pe_injection`
 - **Introduced in**: v0.1.0 (parallel technique batch, schema 6)
 
@@ -62,7 +63,10 @@ runtime:
    `PAGE_EXECUTE_READ`, writable data `PAGE_READWRITE`. The allocation is
    read-write while the image is written and only then narrowed — **no page is
    ever RWX**.
-7. Start a thread at the payload's entry point (`NtCreateThreadEx`; the start
+7. Start the payload on a thread of its own. Without a TLS directory the thread
+   runs the entry point directly; with one it first runs a small target-resident
+   prologue that sets the thread's TLS slot and runs the payload's
+   `DLL_PROCESS_ATTACH` callbacks before jumping to the entry point (the start
    routine returns into `RtlExitUserThread`, so an entry point that returns
    still ends its thread cleanly).
 8. Wait for the thread and relay the exit code: a full PE executable's entry
@@ -155,10 +159,17 @@ path differs only in the 4-byte IAT slots and the smaller
 - **The target's thread stays parked.** A failure after `CreateProcessA` leaves
   the suspended target behind: the syscall layer has no `NtTerminateProcess`
   helper, so closing the handle is the best effort available.
-- **The payload's TLS is not provisioned.** The payload runs on a
-  loader-created native thread, so its own `.tls` directory (if it has one) is
-  not materialized, unlike process hollowing's main-thread provisioning. The
-  test payloads (Rust, MSVC CRT) carry no `.tls` section and do not need it.
+- **The payload's TLS is provisioned via a target-resident prologue.** The
+  payload runs on a loader-created native thread, so its own `.tls` directory
+  (if it has one) is not materialized by the loader. The fragment reserves a
+  `TlsAlloc` index in the target, publishes `_tls_index`, allocates the `.tls`
+  template, and writes a small prologue + null-terminated callback array into a
+  private execute-read page. The payload thread runs that prologue first:
+  `TlsSetValue` points the thread's own TLS slot at the template block, then each
+  relocated callback is called with `DLL_PROCESS_ATTACH`, then control jumps to
+  the entry point. **Runtime verification is still pending**: the callbacks
+  have not been confirmed to fire on the measurement host (the test payloads,
+  Rust/MSVC CRT, carry no `.tls` section and need none).
 - **The payload must end the process.** A payload whose entry point *returns*
   ends only its thread; the loader relays the thread's return value and the
   target remains alive with its main thread still parked. Only a payload that

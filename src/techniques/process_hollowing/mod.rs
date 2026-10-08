@@ -161,6 +161,22 @@ const MESSAGES: &[(&str, &str)] = &[
     ("$MSG_TLSALLOC_UNFINISHED$", "TlsAlloc did not finish"),
     ("$MSG_TLSALLOC_FAILED$", "TlsAlloc failed in the target"),
     (
+        "$MSG_TLS_PARK_ALLOC_FAILED$",
+        "TLS callback parking stub allocation failed",
+    ),
+    (
+        "$MSG_TLS_CALLBACKS_UNMAPPED$",
+        "the payload's TLS callback array is not mapped",
+    ),
+    (
+        "$MSG_TLS_CALLBACKS_UNTERMINATED$",
+        "the payload's TLS callback array is not null-terminated",
+    ),
+    (
+        "$MSG_TLS_CALLBACK_TIMEOUT$",
+        "timed out waiting for a TLS callback to return",
+    ),
+    (
         "$MSG_TEB_READ_FAILED$",
         "could not read the target thread's TEB",
     ),
