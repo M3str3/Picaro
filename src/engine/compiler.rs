@@ -9,7 +9,9 @@
 //!
 //! Note: we do not use `-C lto=fat` because the `.rlib` files produced by
 //! cargo do not carry bitcode (`.llvmbc`), so `lto=fat` with `--extern` fails.
-//! We keep `-O` for optimizing the stub itself.
+//! Size therefore comes from `opt-level="z"` (optimize for size, not speed),
+//! `codegen-units=1`, and `strip=symbols`: the stub is a small shim, so speed
+//! is irrelevant next to a smaller artifact.
 //!
 //! `build.output` reaches this module as [`CompileOptions`]: `strip` maps to
 //! `-C strip=...` and `trim_paths` to `--remap-path-prefix`, so both actually
@@ -551,6 +553,11 @@ fn push_remap(from: &Path, to: &str, flags: &mut Vec<String>) {
 /// remapping is skipped so a debugger can resolve the source files. All of that
 /// is what makes the artifact debuggable, and all of it costs evasion — hence
 /// `build.stub.debug` is for the lab, never for delivery.
+///
+/// A release build trades speed for size: `opt-level="z"` (the smallest code),
+/// `debug-assertions=off` and `overflow-checks=off` drop the assertion and
+/// overflow machinery, and `strip`/`trim_paths` remove symbols and leak-proof
+/// the paths.
 fn hardening_flags(
     options: CompileOptions,
     manifest_dir: &Path,
@@ -560,11 +567,15 @@ fn hardening_flags(
     if options.debug {
         flags.extend(["-C".to_string(), "opt-level=0".to_string()]);
         flags.extend(["-C".to_string(), "debuginfo=2".to_string()]);
+        flags.extend(["-C".to_string(), "debug-assertions=on".to_string()]);
+        flags.extend(["-C".to_string(), "overflow-checks=on".to_string()]);
         flags.extend(["-C".to_string(), strip_flag(false).to_string()]);
         return flags;
     }
 
-    flags.extend(["-O".to_string()]);
+    flags.extend(["-C".to_string(), "opt-level=z".to_string()]);
+    flags.extend(["-C".to_string(), "debug-assertions=off".to_string()]);
+    flags.extend(["-C".to_string(), "overflow-checks=off".to_string()]);
     flags.extend(["-C".to_string(), strip_flag(options.strip).to_string()]);
     match options.trim_paths {
         PathTrim::None => {}
@@ -931,10 +942,39 @@ dependencies = [
         assert!(flags.contains(&"opt-level=0".to_string()));
         assert!(flags.contains(&"debuginfo=2".to_string()));
         assert!(flags.contains(&"strip=none".to_string()));
+        assert!(flags.contains(&"debug-assertions=on".to_string()));
+        assert!(flags.contains(&"overflow-checks=on".to_string()));
         assert!(!flags.contains(&"strip=symbols".to_string()));
         assert!(!flags.contains(&"-O".to_string()));
         // Paths are kept so a debugger can open the generated stub.
         assert!(remaps(&flags).is_empty(), "flags: {flags:?}");
+    }
+
+    /// A release build optimizes for size: the smallest opt level and no
+    /// assertion/overflow machinery. `codegen-units=1` (set in `compile_stub`)
+    /// and `strip=symbols` finish the job.
+    #[test]
+    fn release_build_optimizes_for_size() {
+        let flags = hardening_flags(
+            CompileOptions {
+                strip: true,
+                trim_paths: PathTrim::None,
+                debug: false,
+                arch: Arch::X64,
+                kind: OutputKind::Exe,
+            },
+            Path::new("/proj"),
+            None,
+        );
+        assert!(
+            flags.contains(&"opt-level=z".to_string()),
+            "flags: {flags:?}"
+        );
+        assert!(flags.contains(&"debug-assertions=off".to_string()));
+        assert!(flags.contains(&"overflow-checks=off".to_string()));
+        assert!(flags.contains(&"strip=symbols".to_string()));
+        assert!(!flags.contains(&"-O".to_string()));
+        assert!(!flags.contains(&"opt-level=0".to_string()));
     }
 
     /// Full packing flow with a 1 KB payload.
