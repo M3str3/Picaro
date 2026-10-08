@@ -3,9 +3,23 @@
 This directory holds YARA rules used by `picaro audit` to tag known
 signatures in a binary.
 
-The YARA engine is **not wired yet** (there is no stable, ergonomic YARA crate
-for Rust). `picaro audit` reports `✓ no matches (ruleset empty)` until a rule
-file is added and the engine is integrated.
+## Engine
+
+`picaro audit` scans the binary through the **`yara` CLI as a subprocess** (see
+`src/audit/yara.rs`): the artifact bytes are written to a temporary file under
+the system temp directory, `yara <rule-file> <temp-file>` is run once per rule
+file, and the matching rule names are parsed from stdout. No native libyara
+dependency is required.
+
+The scan is strictly **best-effort**:
+
+- No `.yar` / `.yara` file here → the report shows `ruleset empty`.
+- Rules present but `yara` is not on `PATH` → the report shows
+  `yara not found in PATH`, and the audit still completes (it is a soft note,
+  not a failure).
+
+The `yara` executable can be overridden with the `PICARO_YARA` environment
+variable (empty or unset means `yara` on `PATH`).
 
 ## Adding rules
 
@@ -22,14 +36,6 @@ rule picaro_stub_marker {
 }
 ```
 
-## Integrating the engine (TODO)
-
-Pick one approach:
-
-1. **libyara FFI** — add a `yara`/`yara-sys` crate and compile the rules in
-   `yara/*.yar`, then scan the raw bytes. Requires libyara on the build machine.
-2. **Subprocess** — invoke the `yara` CLI against a temp copy of the file and
-   parse its output. No native dependency, but slower and needs `yara` in PATH.
-
-Until then, `src/audit/yara.rs` is a stub that only reports whether rule files
-exist.
+Rule files are discovered case-insensitively by extension and scanned in a
+deterministic (sorted) order; a rule name is the first whitespace-delimited
+token of each matching output line, deduplicated and sorted in the report.
