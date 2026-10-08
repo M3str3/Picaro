@@ -1,12 +1,17 @@
 # Parent-process spoofing
 
+*Launches a process so Windows records a chosen legitimate parent instead of the
+loader, hiding the loader from the process tree.*
+
 ## Metadata
 
-- **ATT&CK**: T1134.004 (Access Token Manipulation: Parent PID Spoofing)
-- **Stability**: Experimental
-- **Category**: Control
-- **YAML key**: `ppid_spoofing`
-- **Introduced in**: unreleased (control-technique suite)
+| | |
+|---|---|
+| **ATT&CK** | T1134.004 (Access Token Manipulation: Parent PID Spoofing) |
+| **Stability** | Stable |
+| **Category** | Control |
+| **YAML key** | `ppid_spoofing` |
+| **Introduced in** | unreleased (control-technique suite) |
 
 ## What it does
 
@@ -46,6 +51,20 @@ the payload an Execution step runs, not to this control process.
 
 ## How it works
 
+```mermaid
+flowchart TD
+    A[Snapshot the process list] --> B[Find the parent by image name]
+    B --> C[OpenProcess with PROCESS_CREATE_PROCESS]
+    C --> D[Init and update the attribute list]
+    D --> E[CreateProcessA with STARTUPINFOEXA]
+    E --> F[Delete the list, close the handles]
+    F --> G{wait}
+    G -->|true| H[Wait on the child, relay its exit code]
+    G -->|false| I[Return 0, leave the child running]
+```
+
+### 1. Resolve and open the spoofed parent
+
 1. Enumerate the process list
    (`CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS)` + `Process32FirstW`/
    `Process32NextW`) and take the first entry whose executable name matches
@@ -53,6 +72,9 @@ the payload an Execution step runs, not to this control process.
 2. `OpenProcess(PROCESS_CREATE_PROCESS, FALSE, pid)`. The right is required by
    the attribute below, and it is also what the chosen parent has to grant:
    higher-integrity or protected parents (e.g. `lsass.exe`) fail here.
+
+### 2. Attach the parent to the attribute list
+
 3. Build the attribute list:
    `InitializeProcThreadAttributeList(NULL, 1, 0, &size)` to size it (this call
    "fails" by design and only reports `size`), allocate a pointer-aligned
@@ -61,6 +83,9 @@ the payload an Execution step runs, not to this control process.
    &parent_handle, sizeof(HANDLE), NULL, NULL)`. The value is a pointer to a
    **handle**, and the list stores that pointer, so the handle must stay alive
    until `DeleteProcThreadAttributeList` — see the implementation notes.
+
+### 3. Launch the child and relay its exit code
+
 5. `CreateProcessA` with `EXTENDED_STARTUPINFO_PRESENT` and a `STARTUPINFOEXA`
    whose `cb` is `sizeof(STARTUPINFOEXA)` and whose `lpAttributeList` is the
    list. `CREATE_NO_WINDOW` is always set: a console window would give the child

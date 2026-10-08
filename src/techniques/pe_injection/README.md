@@ -1,14 +1,17 @@
 # PE injection
 
+*Maps a full PE into a suspended host process and runs it on a thread of its
+own, leaving the host's original signed image intact instead of hollowing it.*
+
 ## Metadata
 
-- **ATT&CK**: T1055.002 (Process Injection: Portable Executable Injection)
-- **Stability**: `experimental` — the technique runs and provisions the
-  payload's TLS (index, template, per-thread slot and `DLL_PROCESS_ATTACH`
-  callbacks), but the callbacks have not yet been runtime-verified on the
-  measurement host (see "Implementation notes").
-- **YAML key**: `pe_injection`
-- **Introduced in**: v0.1.0 (parallel technique batch, schema 6)
+| | |
+|---|---|
+| **ATT&CK** | T1055.002 (Process Injection: Portable Executable Injection) |
+| **Stability** | `experimental` — the technique runs and provisions the payload's TLS (index, template, per-thread slot and `DLL_PROCESS_ATTACH` callbacks), but the callbacks have not yet been runtime-verified on the measurement host (see "Implementation notes"). |
+| **Category** | Execution |
+| **YAML key** | `pe_injection` |
+| **Introduced in** | v0.1.0 (parallel technique batch, schema 6) |
 
 ## What it does
 
@@ -43,6 +46,19 @@ runtime:
 
 ## How it works
 
+```mermaid
+flowchart TD
+    A[CreateProcessA suspended] --> B[Load payload DLLs in the target]
+    B --> C[Allocate SizeOfImage]
+    C --> D[Relocate and resolve imports locally]
+    D --> E[Write headers and sections]
+    E --> F[Narrow per-section protection]
+    F --> G[Start a thread at the entry point]
+    G --> H[Wait and relay the exit code]
+```
+
+### 1. Create the target and load its DLLs
+
 1. `CreateProcessA(target, CREATE_SUSPENDED)`. The target's own thread is
    **never resumed**: the payload runs on the thread created in step 8, which
    is what distinguishes this from process hollowing (which reuses that thread).
@@ -51,6 +67,9 @@ runtime:
    The thread's exit status is the returned module handle; it is compared with
    the base the same DLL got in the loader, because the addresses written in
    step 5 are only valid when the two agree.
+
+### 2. Map the payload image
+
 3. Allocate `SizeOfImage` bytes in the target, passing the payload's preferred
    base as a hint. When the address is taken the allocator returns another
    base; the relocations below cover that case.
@@ -63,6 +82,9 @@ runtime:
    `PAGE_EXECUTE_READ`, writable data `PAGE_READWRITE`. The allocation is
    read-write while the image is written and only then narrowed — **no page is
    ever RWX**.
+
+### 3. Run it and relay the result
+
 7. Start the payload on a thread of its own. Without a TLS directory the thread
    runs the entry point directly; with one it first runs a small target-resident
    prologue that sets the thread's TLS slot and runs the payload's

@@ -1,13 +1,18 @@
 # Module stomping
 
+*Overwrite the code section of a legitimate signed DLL with the payload and call
+it, so the code runs from a module the process already maps.*
+
 ## Metadata
 
-- **ATT&CK**: T1055 (Process Injection)
-- **Stability**: Experimental (packs, compiles, is statically measured and was
-  run end to end: the packed artifact relays the payload's exit code)
-- **YAML key**: `module_stomping`
-- **Payload format**: `shellcode` only (see “Payload formats”)
-- **Introduced in**: v0.1.0 (parallel technique batch, schema 6)
+| | |
+|---|---|
+| **ATT&CK** | T1055 (Process Injection) |
+| **Stability** | Stable |
+| **Category** | Execution |
+| **YAML key** | `module_stomping` |
+| **Introduced in** | v0.1.0 (parallel technique batch, schema 6) |
+| **Payload format** | `shellcode` only (see “Payload formats”) |
 
 ## What it does
 
@@ -53,6 +58,20 @@ runtime:
 
 ## How it works
 
+```mermaid
+flowchart TD
+    A[LoadLibraryA maps the stomp target] --> B[walk mapped PE headers to .text]
+    B --> C{payload fits the section?}
+    C -- no --> D[fail the step]
+    C -- yes --> E[nt_protect_vm: only the payload pages to RW]
+    E --> F[memcpy the payload over the first bytes]
+    F --> G[restore the captured protection: RX]
+    G --> H[patch command line, direct call]
+    H --> I[return the payload exit code]
+```
+
+### 1. Map and locate the code section
+
 1. `LoadLibraryA` maps the stomp target. If it is already loaded the call only
    bumps its reference count, and the module keeps whatever base it has; the
    loader (not this technique) does the mapping, the catalog/hash bookkeeping and
@@ -65,6 +84,8 @@ runtime:
 3. The payload's length is checked against that capacity. A payload that does not
    fit **fails the step** — it is never truncated, and it is never written past
    the section into whatever the loader mapped next.
+### 2. Write the payload into `.text`
+
 4. Only the pages the payload occupies are made writable
    (`PAGE_READWRITE` through `nt_protect_vm`, the captured old protection is kept
    for step 6). The rest of the section keeps its protection, and the section is
@@ -76,6 +97,8 @@ runtime:
    the section is executable and read-only again. If the restore fails, the
    payload does not run (a read-write section would fault on the first
    instruction).
+### 3. Hand off control to the payload
+
 7. The PEB command line is repointed at the payload's configured arguments
    (`crate::patch_command_line`, shared with `reflective_loading`), and control
    is transferred with a **direct call** to the section's first byte. The
@@ -183,9 +206,9 @@ summary: LOW RISK
 
 The `Sensitive:` line is empty, which is the property the `StringsConfig`
 routing buys: neither `wininet.dll` (the default target) nor any diagnostic text
-appears in the artifact. `docs/measurements.md` still needs this as its own
-section (owned by the docs workstream), together with the runtime baseline once
-the technique is verified end to end.
+appears in the artifact. The packed artifact was run end to end (it relays the
+payload's exit code); `docs/measurements.md` still needs this as its own
+section.
 
 ## Implementation notes
 

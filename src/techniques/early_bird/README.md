@@ -1,11 +1,18 @@
 # Early Bird APC injection
 
+*Create a target suspended, write the payload into it and queue an APC before it
+runs, so the payload executes before the target's entry point and the hooks
+around it.*
+
 ## Metadata
 
-- **ATT&CK**: T1055.004 (Process Injection: Asynchronous Procedure Call)
-- **Stability**: Experimental
-- **YAML key**: `early_bird`
-- **Introduced in**: unreleased (Early Bird injection)
+| | |
+|---|---|
+| **ATT&CK** | T1055.004 (Process Injection: Asynchronous Procedure Call) |
+| **Stability** | Experimental |
+| **Category** | Execution |
+| **YAML key** | `early_bird` |
+| **Introduced in** | unreleased (Early Bird injection) |
 
 ## What it does
 
@@ -38,10 +45,27 @@ runtime:
 
 ## How it works
 
+```mermaid
+sequenceDiagram
+    participant L as Loader
+    participant T as Target (suspended)
+    L->>T: CreateProcessA(CREATE_SUSPENDED)
+    L->>T: nt_alloc_vm RW, nt_write_vm payload, nt_protect_vm RX
+    L->>T: nt_queue_apc (user APC, first in the queue)
+    L->>T: nt_resume_thread
+    T->>T: LdrInitializeThunk -> NtTestAlert flushes the queue
+    T->>T: payload runs before the entry point
+    T-->>L: target keeps running (or exits)
+```
+
+### 1. Create and prepare the target
+
 1. `CreateProcessA` the target with `CREATE_SUSPENDED`: its main thread is parked
    before ntdll's `LdrInitializeThunk` has run.
 2. `nt_alloc_vm` a `PAGE_READWRITE` region in the target (never RWX),
    `nt_write_vm` the payload into it, then `nt_protect_vm` it to read+execute.
+### 2. Queue the APC and resume
+
 3. `nt_queue_apc` the payload as a user APC on the target's main thread while it
    is still suspended, so the APC is first in the queue.
 4. `nt_resume_thread`. The target's loader flushes the APC queue during its own

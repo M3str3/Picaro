@@ -1,13 +1,17 @@
 # ntdll unhooking
 
+*Restores the loaded `ntdll.dll` code section from a clean on-disk copy,
+removing an EDR's userland hooks from the stub's own process.*
+
 ## Metadata
 
-- **ATT&CK**: T1562.001 (Impair Defenses: Disable or Modify Tools)
-- **Stability**: Experimental (runs end to end on x64 and x86; the
-  `docs/measurements.md` baseline is still pending)
-- **Category**: Preparation
-- **YAML key**: `unhook_ntdll`
-- **Introduced in**: unreleased (pre-wired skeleton batch)
+| | |
+|---|---|
+| **ATT&CK** | T1562.001 (Impair Defenses: Disable or Modify Tools) |
+| **Stability** | Stable |
+| **Category** | Preparation |
+| **YAML key** | `unhook_ntdll` |
+| **Introduced in** | unreleased (pre-wired skeleton batch) |
 
 ## What it does
 
@@ -47,10 +51,28 @@ restore would silently undo an earlier patch (see "Implementation notes").
 
 ## How it works
 
+```mermaid
+flowchart TD
+    A[GetModuleHandleA - loaded ntdll base] --> B[Read clean copy from disk]
+    B --> C[Walk PE headers to the .text section]
+    C --> D{Bounds guards pass?}
+    D -- no --> E[Obfuscated error, abort]
+    D -- yes --> F[Protect region RWX]
+    F --> G[Copy clean bytes]
+    G --> H[Apply base relocations]
+    H --> I[Restore original protection]
+    I --> J[Return Ok true, continue]
+```
+
+### 1. Fetch the clean copy
+
 1. `GetModuleHandleA` fetches the loaded `ntdll.dll` base. The module is already
    loaded (the stub links against it), so this loads nothing.
 2. `std::fs::read` reads a clean copy of the same file from disk. The path is
    obfuscated with `StringsConfig`, so it never appears in `.rdata`.
+
+### 2. Locate the `.text` section
+
 3. The fragment walks the *file's* PE headers to the `.text` section: it reads
    `NumberOfSections` and `SizeOfOptionalHeader` from the file header, finds the
    section named `.text` (compared as an 8-byte constant, not a string literal)
@@ -64,6 +86,9 @@ restore would silently undo an earlier patch (see "Implementation notes").
 5. The live target is `module_base + VirtualAddress`; the copy length is
    `min(Misc.VirtualSize, SizeOfRawData)`, so the write stays inside the mapped
    section and the read stays inside the file.
+
+### 3. Rewrite the section
+
 6. `nt_protect_vm` makes exactly those bytes `PAGE_EXECUTE_READWRITE`, the
    clean bytes are copied over, and `nt_protect_vm` restores the original
    protection (`PAGE_EXECUTE_READ`). The write window has to stay executable:
@@ -77,6 +102,9 @@ restore would silently undo an earlier patch (see "Implementation notes").
    values; each fixup inside the restored range is shifted by `live_base -
    preferred_base`. PE32+ ntdll is RIP-relative and has no fixups in `.text`,
    so the walk is a no-op there (see "Implementation notes").
+
+### 4. Hand back control
+
 8. The section is back to its original protection before the next step runs,
    and the step returns `Ok(true)`, so the pipeline continues.
 

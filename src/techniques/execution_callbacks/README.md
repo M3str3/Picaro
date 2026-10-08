@@ -1,11 +1,17 @@
 # Callback execution
 
+*Run the payload as the callback of a legitimate Windows enumeration API, so it
+is entered from a call the system makes itself instead of a new thread.*
+
 ## Metadata
 
-- **ATT&CK**: T1106 (Native API), T1620 (Reflective Code Loading)
-- **Stability**: Experimental
-- **YAML key**: `execution_callbacks`
-- **Introduced in**: v0.1.0 (parallel technique batch, schema 6)
+| | |
+|---|---|
+| **ATT&CK** | T1106 (Native API), T1620 (Reflective Code Loading) |
+| **Stability** | Stable |
+| **Category** | Execution |
+| **YAML key** | `execution_callbacks` |
+| **Introduced in** | v0.1.0 (parallel technique batch, schema 6) |
 
 MITRE documents this exact shape under **T1106**: its procedure examples for
 BOOKWORM, PUBLOAD, CLAIMLOADER and TONESHELL describe running shellcode "through
@@ -49,6 +55,22 @@ runtime:
 
 ## How it works
 
+```mermaid
+sequenceDiagram
+    participant L as Loader
+    participant C as crypt32
+    participant P as Payload (RX region)
+    L->>L: allocate RW, copy payload, flip to RX
+    L->>C: CertEnumSystemStoreLocation(0, ctx, cb)
+    C->>P: invoke callback -> enter payload
+    P->>P: payload runs (returns its exit code)
+    P->>C: return FALSE (stop the enumeration)
+    C->>L: return to the loader
+    L->>L: read the exit code out of the context
+```
+
+### 1. Stage the payload region
+
 1. Allocate the payload region with `NtAllocateVirtualMemory` (through the
    syscall layer's `nt_alloc_vm` helper) as
    `MEM_COMMIT | MEM_RESERVE` + `PAGE_READWRITE`.
@@ -57,6 +79,8 @@ runtime:
 3. Resolve `crypt32.dll!CertEnumSystemStoreLocation` dynamically
    (`LoadLibraryA` + `GetProcAddress`; both names are rebuilt at runtime from
    obfuscated bytes).
+### 2. Run the payload through the enumeration
+
 4. Call it with `dwFlags = 0`, a pointer to a small context
    (`CallbackContext`: the payload's entry point, a ran-once flag, the exit-code
    slot) and the module's own callback function. The system enumerates the

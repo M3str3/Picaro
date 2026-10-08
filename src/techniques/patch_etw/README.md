@@ -1,12 +1,17 @@
 # ETW Patch
 
+*Overwrites the prologue of ntdll's ETW event-writing exports so no Event
+Tracing for Windows events are emitted from the process.*
+
 ## Metadata
 
-- **ATT&CK**: T1562.006 (Impair Defenses: Indicator Blocking)
-- **Stability**: Stable
-- **Category**: Preparation
-- **YAML key**: `patch_etw`
-- **Introduced in**: Phase 7
+| | |
+|---|---|
+| **ATT&CK** | T1562.006 (Impair Defenses: Indicator Blocking) |
+| **Stability** | Stable |
+| **Category** | Preparation |
+| **YAML key** | `patch_etw` |
+| **Introduced in** | Phase 7 |
 
 ## What it does
 
@@ -33,13 +38,35 @@ runtime:
 
 ## How it works
 
+```mermaid
+sequenceDiagram
+    participant L as Loader
+    participant N as ntdll.dll
+    L->>N: LoadLibraryA(ntdll.dll)
+    L->>N: GetProcAddress(EtwEventWrite)
+    L->>N: nt_protect_vm(RWX)
+    L->>N: write 33 C0 C3 (xor eax,eax; ret)
+    L->>N: restore original protection
+    opt full
+        L->>N: same for EtwEventWriteFull
+    end
+```
+
+### 1. Resolve the export
+
 1. Load `ntdll.dll` (`LoadLibraryA`, a no-op if already loaded).
 2. Resolve `EtwEventWrite` with `GetProcAddress`.
+
+### 2. Overwrite the prologue
+
 3. Make the first three bytes writable (`nt_protect_vm` →
    `PAGE_EXECUTE_READWRITE`).
 4. Write `xor eax, eax; ret` (`33 C0 C3`): return `STATUS_SUCCESS` (0) without
    writing an event.
 5. Restore the original page protection.
+
+### 3. Optionally patch the Full variant
+
 6. If `full` is `true`, repeat steps 2–5 for `EtwEventWriteFull`. This second
    patch is best effort: some builds do not export the Full variant, and a
    missing secondary export must not discard a working main patch.

@@ -1,11 +1,17 @@
 # Reflective loading
 
+*Manually maps a PE image (or runs shellcode) into the current process, so the
+payload executes from memory without touching disk or spawning a child.*
+
 ## Metadata
 
-- **ATT&CK**: T1620 (Reflective Code Loading)
-- **Stability**: Experimental
-- **YAML key**: `reflective_loading`
-- **Introduced in**: Phase 6
+| | |
+|---|---|
+| **ATT&CK** | T1620 (Reflective Code Loading) |
+| **Stability** | Experimental |
+| **Category** | Execution |
+| **YAML key** | `reflective_loading` |
+| **Introduced in** | Phase 6 |
 
 ## What it does
 
@@ -56,14 +62,35 @@ runtime:
 
 ## How it works
 
+```mermaid
+flowchart TD
+    A[Validate MZ and PE signatures] --> B[Allocate at the preferred base]
+    B --> C[Copy headers and sections]
+    C --> D[Resolve imports, patch the IAT]
+    D --> E{Landed at preferred base?}
+    E -- no --> F[Apply base relocations]
+    E -- yes --> G[Set section protections]
+    F --> G
+    G --> H[Run TLS callbacks]
+    H --> I[Run the entry point on a new thread]
+```
+
+### 1. Map the image
+
 1. Validate the image (MZ and PE signatures, x64 magic).
 2. Allocate memory at the preferred image base (fall back to any address if it
    is taken) through `nt_alloc_vm`.
 3. Copy the PE headers and each section's raw data into the allocation.
+
+### 2. Fix it up
+
 4. Resolve imports (`LoadLibraryA` + `GetProcAddress`), patching the import
    address table.
 5. Apply base relocations if the image did not land at its preferred base.
 6. Set each section's final memory protection (`nt_protect_vm`).
+
+### 3. Run it
+
 7. Run TLS callbacks, if present.
 8. Run the entry point (`DllMain` for a DLL, `mainCRTStartup`-style for an EXE)
    on a new thread and return its exit code.

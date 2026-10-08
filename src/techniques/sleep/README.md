@@ -1,12 +1,17 @@
 # Sleep
 
+*Waits a fixed number of milliseconds before the pipeline continues, so a plan
+can pace its stages or delay the final exit.*
+
 ## Metadata
 
-- **ATT&CK**: T1497 (Virtualization/Sandbox Evasion; timing only)
-- **Stability**: Stable
-- **Category**: Control
-- **YAML key**: `sleep`
-- **Introduced in**: Multi-stage plans (schema 5)
+| | |
+|---|---|
+| **ATT&CK** | T1497 (Virtualization/Sandbox Evasion; timing only) |
+| **Stability** | Stable |
+| **Category** | Control |
+| **YAML key** | `sleep` |
+| **Introduced in** | Multi-stage plans (schema 5) |
 
 ## What it does
 
@@ -32,6 +37,12 @@ runtime:
 ```
 
 ## How it works
+
+```mermaid
+flowchart TD
+    A[Runner calls run_sleep] --> B["std::thread::sleep blocks"]
+    B --> C[Returns Ok 0, runner continues]
+```
 
 1. The generated runner calls `run_sleep()` for the stage.
 2. `std::thread::sleep(Duration::from_millis(ms))` blocks the current thread.

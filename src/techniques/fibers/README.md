@@ -1,14 +1,17 @@
 # Fiber execution
 
+*Run the payload on a fiber of the loader's own thread, so it never owns a
+thread, control returns to the loader, and the step stays chainable.*
+
 ## Metadata
 
-- **ATT&CK**: T1055 (Process Injection) — ATT&CK has no fiber-specific
-  sub-technique (T1055.001–T1055.015 cover DLL injection, APC, TLS, hollowing,
-  VDSO hijacking, …); scheduling the payload on a fiber of the loader's own
-  thread is a self-injection variant, so the parent is the precise mapping.
-- **Stability**: Experimental
-- **YAML key**: `fibers`
-- **Introduced in**: unreleased (fiber-execution suite)
+| | |
+|---|---|
+| **ATT&CK** | T1055 (Process Injection) — ATT&CK has no fiber-specific sub-technique (T1055.001–T1055.015 cover DLL injection, APC, TLS, hollowing, VDSO hijacking, …); scheduling the payload on a fiber of the loader's own thread is a self-injection variant, so the parent is the precise mapping. |
+| **Stability** | Stable |
+| **Category** | Execution |
+| **YAML key** | `fibers` |
+| **Introduced in** | unreleased (fiber-execution suite) |
 
 ## What it does
 
@@ -49,11 +52,29 @@ with a clear error instead of jumping into a file header.
 
 ## How it works
 
+```mermaid
+sequenceDiagram
+    participant L as Loader thread
+    participant P as Payload fiber
+    L->>L: nt_alloc_vm RW, copy payload, flip to RX
+    L->>L: ConvertThreadToFiber
+    L->>P: CreateFiberEx(trampoline)
+    L->>P: SwitchToFiber
+    P->>P: payload runs as fn() -> u32
+    P->>L: return -> SwitchToFiber back
+    L->>L: DeleteFiber, ConvertFiberToThread
+    Note over L: report the payload exit code
+```
+
+### 1. Stage the payload region
+
 1. Copy the decrypted payload into a private region (`nt_alloc_vm`,
    `PAGE_READWRITE`). The region is dedicated, not the buffer's own heap pages:
    the loader's fiber state is a heap allocation too, and the two can share a
    page — making that page RX breaks the fiber switch (measured, see the
    implementation notes).
+### 2. Schedule the payload fiber
+
 2. Convert the calling thread to a fiber (`ConvertThreadToFiber`): only a fiber
    can schedule another fiber.
 3. Create the payload fiber (`CreateFiberEx`) with `payload_fiber` — a Rust
@@ -63,6 +84,8 @@ with a clear error instead of jumping into a file header.
 5. `SwitchToFiber` to the payload fiber. The trampoline enters the payload as
    `extern "system" fn() -> u32` (no arguments, exit code in `eax`/`rax`), the
    same contract `reflective_loading` gives shellcode.
+### 3. Return to the loader and clean up
+
 6. When the payload returns, the trampoline stores its exit code and schedules
    the loader's fiber again (`SwitchToFiber`) — it never *returns*, because a
    returning fiber function makes the current thread exit.

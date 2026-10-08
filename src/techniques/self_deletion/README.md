@@ -1,11 +1,17 @@
 # Self-deletion
 
+*Deals with the loader's own on-disk image while it runs, so a post-run
+collection or hash lookup at the path finds nothing useful.*
+
 ## Metadata
 
-- **ATT&CK**: T1070.004 (Indicator Removal: File Deletion)
-- **Stability**: Experimental
-- **YAML key**: `self_deletion`
-- **Introduced in**: unreleased (self-deletion)
+| | |
+|---|---|
+| **ATT&CK** | T1070.004 (Indicator Removal: File Deletion) |
+| **Stability** | Stable |
+| **Category** | Preparation |
+| **YAML key** | `self_deletion` |
+| **Introduced in** | unreleased (self-deletion) |
 
 ## What it does
 
@@ -35,7 +41,19 @@ runtime:
 
 ## How it works
 
-### `rename_ads` (default)
+```mermaid
+flowchart TD
+    A[Read the running image's own path] --> B{mode}
+    B -->|rename_ads| C[Open image: DELETE, share READ]
+    C --> D[nt_set_info_file FileRenameInformation]
+    D --> E[Image moves into the :stream ADS]
+    B -->|helper| F[Spawn a detached cmd.exe]
+    F --> G[Wait two seconds, then del the path]
+    E --> H[Preparation returns true, chain continues]
+    G --> H
+```
+
+### 1. Rename the image into an ADS (`rename_ads`, default)
 
 1. Reads the running image's path with `GetModuleFileNameW(NULL)`. Nothing is
    embedded in the stub: the loader acts on whatever file it was launched from.
@@ -47,7 +65,7 @@ runtime:
    executing from the still-mapped section.
 4. Closes the handle. A preparation returns `Ok(true)`, so the chain continues.
 
-### `helper`
+### 2. Spawn a detached helper (`helper`)
 
 1. Reads the path the same way.
 2. `CreateProcessA` a detached `cmd.exe` (`CREATE_NO_WINDOW`, handles closed

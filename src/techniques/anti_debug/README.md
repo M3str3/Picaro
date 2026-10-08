@@ -1,12 +1,17 @@
 # Anti-Debug
 
+*Checks the current process for signs of a debugger and, by default, aborts the
+preparation so the payload never runs.*
+
 ## Metadata
 
-- **ATT&CK**: T1622 (Debugger Evasion)
-- **Stability**: Stable
-- **Category**: Preparation
-- **YAML key**: `anti_debug`
-- **Introduced in**: Phase 7
+| | |
+|---|---|
+| **ATT&CK** | T1622 (Debugger Evasion) |
+| **Stability** | Stable |
+| **Category** | Preparation |
+| **YAML key** | `anti_debug` |
+| **Introduced in** | Phase 7 |
 
 ## What it does
 
@@ -33,6 +38,23 @@ runtime:
 
 ## How it works
 
+```mermaid
+flowchart TD
+    A[Start] --> B{Kernel debug port?}
+    B -->|hit| Z[Detection]
+    B -->|miss| C{Debug object handle?}
+    C -->|hit| Z
+    C -->|miss| D{Hardware breakpoints?}
+    D -->|hit| Z
+    D -->|miss| E[No detection]
+    Z --> F{action?}
+    F -->|abort| G[Fail pipeline]
+    F -->|continue| H[Proceed]
+    E --> H
+```
+
+### 1. Signals checked
+
 Three independent signals are combined; a positive result from any of them is a
 detection:
 
@@ -46,6 +68,8 @@ detection:
    `CONTEXT_DEBUG_REGISTERS_AMD64` reads DR0–DR3 of the current thread; a
    non-zero register means a debugger set a hardware breakpoint (typical for
    single-step / watchpoint based reversing).
+
+### 2. Outcome and `action`
 
 A check that cannot be *read* (an error, rather than a positive hit) is treated
 as "not detected", so an unavailable check never aborts the pipeline on its own.

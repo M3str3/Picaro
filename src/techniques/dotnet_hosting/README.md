@@ -1,11 +1,17 @@
 # .NET hosting
 
+*Hosts the CLR in the stub's own process and runs a managed assembly straight
+from memory, so a .NET payload never needs a file on disk.*
+
 ## Metadata
 
-- MITRE ATT&CK: T1620 — Reflective Code Loading.
-- Category: Execution.
-- Stability: Experimental.
-- Capabilities: `WindowsX64 | WindowsX86`.
+| | |
+|---|---|
+| **ATT&CK** | T1620 — Reflective Code Loading |
+| **Stability** | Experimental |
+| **Category** | Execution |
+| **YAML key** | `dotnet_hosting` |
+| **Capabilities** | `WindowsX64 \| WindowsX86` |
 
 ## What it does
 
@@ -52,12 +58,29 @@ rejects one without the other.
 
 ## How it works
 
+```mermaid
+sequenceDiagram
+    participant L as Loader
+    participant C as CLR
+    L->>C: CoInitializeEx + set COMPLUS_Version
+    L->>C: CLRCreateInstance -> GetRuntime -> Start
+    L->>C: GetDefaultDomain + QueryInterface
+    L->>C: _AppDomain.Load_3(assembly bytes)
+    L->>C: GetEntryPoint + Invoke_3(args)
+    C-->>L: exit code
+```
+
+### 1. Start the CLR
+
 1. `CoInitializeEx(COINIT_MULTITHREADED)` — the hosting interfaces are COM
    objects. An already-initialized thread is fine.
 2. `COMPLUS_Version` is set to the runtime version picaro asks for
    (`v4.0.30319`, obfuscated like every other stub literal), then
    `CLRCreateInstance(CLSID_CLRMetaHost)` → `GetRuntime(version)` →
    `GetInterface(CLSID_CorRuntimeHost)` → `Start()`.
+
+### 2. Load the assembly
+
 3. `GetDefaultDomain()` returns the `_AppDomain` as an `IUnknown`;
    `QueryInterface(IID__AppDomain)` turns it into the managed interface. The
    managed interfaces (`_AppDomain`, `Assembly`, `MethodInfo`) are not in the
@@ -65,6 +88,9 @@ rejects one without the other.
    respectively).
 4. The assembly's bytes are copied into a `SAFEARRAY` of `VT_UI1` and handed to
    `_AppDomain.Load_3`, which returns the `Assembly`.
+
+### 3. Invoke the entry point
+
 5. The arguments become a `string[]` (`SAFEARRAY` of `VT_BSTR`), wrapped in the
    `object[]` that `Invoke_3` expects. A `Main()` without parameters rejects the
    array, so the call is retried with an empty one — the same fallback the CLR's

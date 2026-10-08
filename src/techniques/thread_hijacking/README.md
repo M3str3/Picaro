@@ -1,11 +1,17 @@
 # Thread hijacking
 
+*Redirects an already-running thread into the payload, so no thread is ever
+created and the heavily instrumented NtCreateThreadEx path is avoided.*
+
 ## Metadata
 
-- **ATT&CK**: T1055.003 (Process Injection: Thread Execution Hijacking)
-- **Stability**: Experimental
-- **YAML key**: `thread_hijacking`
-- **Introduced in**: unreleased (thread hijacking)
+| | |
+|---|---|
+| **ATT&CK** | T1055.003 (Process Injection: Thread Execution Hijacking) |
+| **Stability** | Experimental |
+| **Category** | Execution |
+| **YAML key** | `thread_hijacking` |
+| **Introduced in** | unreleased (thread hijacking) |
 
 ## What it does
 
@@ -63,16 +69,38 @@ runtime:
 
 ## How it works
 
+```mermaid
+sequenceDiagram
+    participant L as Loader
+    participant T as Target process
+    L->>T: find pid (ToolHelp snapshot)
+    L->>T: nt_open_process
+    L->>T: nt_alloc_vm / nt_write_vm / nt_protect_vm
+    L->>T: nt_suspend_thread (first thread)
+    L->>T: nt_get_context_thread
+    L->>T: nt_set_context_thread (Rip -> payload)
+    L->>T: nt_resume_thread
+    T->>T: payload runs in place
+```
+
+### 1. Find and open the target
+
 1. **Find the target.** With `pid` set it is used directly; otherwise a ToolHelp
    process snapshot is walked for the first running image whose name matches
    `target` (compared by base name, so a full path works too).
 2. **Open it** with `nt_open_process` (`PROCESS_VM_OPERATION |
    PROCESS_VM_WRITE | PROCESS_QUERY_INFORMATION | SYNCHRONIZE`).
+
+### 2. Place the payload
+
 3. **Place the payload**, exactly as the other injection techniques do:
    `nt_alloc_vm` a `PAGE_READWRITE` region (never RWX), `nt_write_vm` the
    payload into it, `nt_protect_vm` it to read+execute. All of this happens
    *before* any thread is touched, so the window in which the target is frozen
    stays as short as possible.
+
+### 3. Redirect a thread
+
 4. **Pick a thread.** A ToolHelp thread snapshot is walked for the first thread
    owned by the target pid.
 5. **Redirect it.** `nt_suspend_thread`, `nt_get_context_thread`,

@@ -1,11 +1,17 @@
 # Process hollowing
 
+*Replace a suspended process's image with the payload, so the payload runs from
+a legitimate process (`svchost.exe`) it was never loaded into from disk.*
+
 ## Metadata
 
-- **ATT&CK**: T1055.012 (Process Injection: Process Hollowing)
-- **Stability**: Experimental
-- **YAML key**: `process_hollowing`
-- **Introduced in**: Phase 4
+| | |
+|---|---|
+| **ATT&CK** | T1055.012 — Process Injection: Process Hollowing |
+| **Stability** | Experimental |
+| **Category** | Execution |
+| **YAML key** | `process_hollowing` |
+| **Introduced in** | Phase 4 |
 
 ## What it does
 
@@ -31,6 +37,24 @@ runtime:
 
 ## How it works
 
+```mermaid
+sequenceDiagram
+    participant L as Loader
+    participant T as Target (svchost.exe)
+    L->>T: CreateProcessA(CREATE_SUSPENDED)
+    L->>L: read thread ctx -> PEB -> image base
+    L->>T: load payload DLLs (remote LoadLibraryA)
+    L->>T: NtUnmapViewOfSection (hollow)
+    L->>T: NtAllocateVirtualMemory(RWX)
+    L->>T: write headers + sections
+    Note over T: fix relocations · resolve IAT · provision TLS
+    L->>T: NtSetThreadContext(RIP -> entry)
+    L->>T: NtResumeThread
+    T->>T: payload runs as svchost.exe
+```
+
+### 1. Create the target and park its loader
+
 1. Create a legitimate process (`svchost.exe`) suspended with
    `CreateProcessA(..., CREATE_SUSPENDED)`.
 2. Read the suspended thread's context to find the PEB (`Rdx` on x64) and, from
@@ -41,6 +65,9 @@ runtime:
    (so the loader has mapped the process's default DLLs and populated
    `PEB->Ldr`), then suspend it again. The original image is unmapped later, so
    the patched bytes never need restoring.
+
+### 2. Hollow the image and write the payload
+
 4. **Load the payload's imported DLLs in the target.** Each imported DLL name
    is written into the target and loaded there with a remote thread that calls
    `LoadLibraryA` (`NtCreateThreadEx` through the syscall layer), so the target
@@ -49,8 +76,12 @@ runtime:
 6. Allocate memory at the same base (`MEM_COMMIT | MEM_RESERVE`,
    `PAGE_EXECUTE_READWRITE`).
 7. Fix up base relocations if the preferred image base changed.
-8. Resolve the payload's import table and fill in its IAT (see below).
+8. Resolve the payload's import table and fill in its IAT (see
+   [Import resolution](#import-resolution)).
 9. Write the payload's headers and sections.
+
+### 3. Provision TLS and hand the thread off
+
 10. **Provision the payload's TLS** (see below): a real TLS index allocated in
     the target, the index published where the payload reads `_tls_index`, and a
     per-thread copy of the `.tls` template pointed at by the main thread's TLS
@@ -61,7 +92,7 @@ runtime:
 
 ### Import resolution
 
-Step 6 walks the payload's import descriptors and, for every thunk, calls
+Step 8 walks the payload's import descriptors and, for every thunk, calls
 `LoadLibraryA` + `GetProcAddress` and writes the resulting address into the
 payload's IAT slot, before the image is written to the target. This is the same
 walk reflective loading uses; both share the resolver injected as

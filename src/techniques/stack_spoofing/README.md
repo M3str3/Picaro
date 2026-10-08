@@ -1,11 +1,17 @@
 # Stack spoofing
 
+*Fabricates ntdll-shaped frames on the stack around every syscall, so a stack
+walk sees ntdll instead of the loader while the kernel runs.*
+
 ## Metadata
 
-- **ATT&CK**: T1036 (Masquerading)
-- **Stability**: Experimental
-- **YAML key**: `stack_spoofing`
-- **Introduced in**: unreleased (stack spoofing)
+| | |
+|---|---|
+| **ATT&CK** | T1036 (Masquerading) |
+| **Stability** | Stable |
+| **Category** | Preparation |
+| **YAML key** | `stack_spoofing` |
+| **Introduced in** | unreleased (stack spoofing) |
 
 ## What it does
 
@@ -49,14 +55,29 @@ runtime:
 
 ## How it works
 
+```mermaid
+flowchart TD
+    A[nt_invoke called] --> B[Shift Rsp down by decoy_bytes]
+    B --> C[Copy the nine stack arguments down]
+    C --> D[Fill the gap with ntdll ret sites]
+    D --> E[Fabricate the five top return slots]
+    E --> F[syscall + ret unwinds the chain]
+    F --> G[Restore Rsp and Rbx, return the NTSTATUS]
+```
+
 The syscall layer's trampoline (`nt_invoke`) is replaced at link time by a
 sequence that runs *before* every syscall:
+
+### 1. Shift the stack and move the arguments
 
 1. **Move the stack down** by `decoy_bytes` and **copy the syscall's stack
    arguments** (arguments 5-13) so they still sit at `[rsp+0x28]` …
    `[rsp+0x70)` — the offsets the kernel reads them from and the raw trampoline
    reads the SSN and the gadget from. Arguments 1-4 stay in
    `rcx`/`rdx`/`r8`/`r9`, untouched.
+
+### 2. Fabricate the frames and the return chain
+
 2. **Fill the gap** between the new stack pointer and the caller's — a page by
    default, about 4 KB — with ntdll code addresses: real `ret` bytes, taken from
    the live ntdll, cycled through 16 slots. A walker reading upward walks through
@@ -65,6 +86,9 @@ sequence that runs *before* every syscall:
    pointer: four fabricated ntdll addresses and a hop back into the loader. The
    `ret` of the `syscall; ret` gadget unwinds through them one by one, so the
    stack is fabricated for as long as the syscall lasts and then unwinds itself.
+
+### 3. Restore and return
+
 4. **Return normally.** The restore label puts `Rsp` and the caller's `Rbx` back
    exactly where they were and returns the NTSTATUS in `eax`, so the Rust helper
    that called `nt_invoke` cannot tell the difference.
@@ -103,8 +127,8 @@ what it loses is the long decoy run above them.
 
 A full stack walk that reaches the whole thread stack still finds the loader.
 Defeating *that* needs a synthetic unwind chain (SilentMoonwalk-style gadget
-synthesis) rather than a fabricated region, which is why this technique is
-`Experimental` and why it is meant to be combined with `unhook_ntdll` and
+synthesis) rather than a fabricated region — a known improvement, not a defect
+of this technique. It is meant to be combined with `unhook_ntdll` and
 `sleep_obfuscation` rather than to replace them.
 
 ## What it evades

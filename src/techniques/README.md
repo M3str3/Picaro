@@ -127,6 +127,17 @@ correctly. An Execution technique that supports several payload formats gets the
 Copy the fixed template `src/techniques/_template/README.md` and fill in every
 section. All sections are required; `picaro techniques validate` checks them.
 
+The shape is the same for every technique, so the site reads as a catalogue:
+
+1. `# Title`, then one italic **TL;DR** line — a single sentence.
+2. `## Metadata` as a two-column table (empty header): ATT&CK, Stability,
+   Category, YAML key, Introduced in.
+3. `## How it works` opens with a **```mermaid** diagram of the flow, then
+   groups the detail under numbered `### N. <phase>` headings.
+
+Keep the prose terse; the diagram carries the shape, the phases carry the
+substance.
+
 ## 7. Update the measurements page
 
 Add a section to `docs/measurements.md` and link it from the README's
