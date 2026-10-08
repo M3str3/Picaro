@@ -2,11 +2,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
-
-/// Serializes the e2e `picaro build` tests: they share the repo's `build/`
-/// directory (wiped by each build), so two of them must not run concurrently.
-static BUILD_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn techniques_list_lists_all_techniques() {
@@ -77,7 +72,6 @@ fn techniques_show_raw_prints_verbatim_readme() {
 #[test]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn build_with_amsi_patch_produces_pe() {
-    let _guard = BUILD_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_picaro"))
         .args(["build", "tests/plans/amsi-patch.yaml"])
         .output()
@@ -151,7 +145,6 @@ fn quiet_flag_hides_the_banner() {
 #[test]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn build_with_bouncer_produces_pe() {
-    let _guard = BUILD_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_picaro"))
         .args(["build", "tests/plans/bouncer.yaml"])
         .output()
@@ -178,7 +171,6 @@ fn bouncer_gate_blocks_and_allows_on_windows() {
     if !cfg!(windows) {
         return;
     }
-    let _guard = BUILD_LOCK.lock().unwrap();
 
     // Build the plan and run the packed binary, returning its stdout.
     let run = |plan: &str, exe: &str| -> String {
@@ -218,7 +210,6 @@ fn bouncer_gate_blocks_and_allows_on_windows() {
 #[test]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn build_with_custom_stub_produces_pe() {
-    let _guard = BUILD_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_picaro"))
         .args(["build", "examples/plans/custom-stub.yaml"])
         .output()
@@ -383,7 +374,6 @@ fn run_packed(exe: &Path, args: &[&str]) -> Vec<String> {
 #[test]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn payload_receives_yaml_then_runtime_args() {
-    let _guard = BUILD_LOCK.lock().unwrap();
     let payload = build_args_payload();
     let exe = pack_args_payload("test_args_join", &payload, &["yaml-a", "yaml-b"], "join");
 
@@ -401,7 +391,6 @@ fn payload_receives_yaml_then_runtime_args() {
 #[test]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn payload_override_mode_prefers_runtime_args() {
-    let _guard = BUILD_LOCK.lock().unwrap();
     let payload = build_args_payload();
     let exe = pack_args_payload(
         "test_args_override",
@@ -624,7 +613,6 @@ fn build_dry_run_validates_resources() {
 #[test]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn build_with_resources_embeds_a_resource_section() {
-    let _guard = BUILD_LOCK.lock().unwrap();
     let build = picaro(&["build".as_ref(), "tests/plans/resources.yaml".as_ref()]);
     assert!(
         build.status.success(),
@@ -752,7 +740,6 @@ fn packs_and_runs_an_x86_reflective_payload() {
     if !cfg!(windows) {
         return;
     }
-    let _guard = BUILD_LOCK.lock().unwrap();
 
     // 1. Build the 32-bit payload.
     let src = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -937,7 +924,6 @@ fn packs_and_runs_a_hollowed_payload() {
     if !cfg!(windows) {
         return;
     }
-    let _guard = BUILD_LOCK.lock().unwrap();
     let payload = build_hollow_payload(None);
     let artifact = pack_hollowing_payload("hollow_x64", &payload, "x64");
     assert_hollowed_run(&artifact, "hollow_x64");
@@ -953,7 +939,6 @@ fn packs_and_runs_an_x86_hollowed_payload() {
     if !cfg!(windows) {
         return;
     }
-    let _guard = BUILD_LOCK.lock().unwrap();
     let payload = build_hollow_payload(Some(x86_target()));
     let artifact = pack_hollowing_payload("hollow_x86", &payload, "x86");
     assert_hollowed_run(&artifact, "hollow_x86");
@@ -973,7 +958,6 @@ fn x86_preparations_run_before_the_payload() {
     if !cfg!(windows) {
         return;
     }
-    let _guard = BUILD_LOCK.lock().unwrap();
 
     // The plain marker payload: it prints to stdout, which the stub's own
     // console shows (a hollowed payload would not).
@@ -1153,7 +1137,6 @@ fn packs_and_runs_a_managed_payload() {
     if !cfg!(windows) {
         return;
     }
-    let _guard = BUILD_LOCK.lock().unwrap();
     let plan = write_temp_plan(
         "picaro_managed_x86.yaml",
         &managed_plan(
@@ -1210,7 +1193,6 @@ fn packs_and_runs_a_managed_payload_on_x64() {
     if !cfg!(windows) {
         return;
     }
-    let _guard = BUILD_LOCK.lock().unwrap();
     let plan = write_temp_plan(
         "picaro_managed_x64.yaml",
         &managed_plan(
@@ -1251,7 +1233,6 @@ fn packs_and_runs_sharphound() {
     if !cfg!(windows) || !Path::new("SharpHound.exe").exists() {
         return;
     }
-    let _guard = BUILD_LOCK.lock().unwrap();
     let plan = write_temp_plan(
         "picaro_sharphound.yaml",
         &managed_plan(
@@ -1360,7 +1341,6 @@ fn a_dll_artifact_runs_the_chain_when_a_host_loads_it() {
     if !cfg!(windows) {
         return;
     }
-    let _guard = BUILD_LOCK.lock().unwrap();
 
     let build = picaro(&["build".as_ref(), "tests/plans/dll.yaml".as_ref()]);
     assert!(
