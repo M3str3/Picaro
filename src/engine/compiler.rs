@@ -997,8 +997,7 @@ dependencies = [
         std::fs::write(build_dir.join("payload.bin"), &encrypted.ciphertext).unwrap();
 
         let tpl_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("templates")
-            .join("stub")
+            .join("src").join("engine").join("templates")
             .join("main.rs.tpl");
         let template = std::fs::read_to_string(tpl_path).unwrap();
         let pipeline = vec![RuntimeStep::new(TechniqueKind::ProcessHollowing {
@@ -1063,8 +1062,7 @@ dependencies = [
 
         let template = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("templates")
-                .join("stub")
+                .join("src").join("engine").join("templates")
                 .join("main.rs.tpl"),
         )
         .unwrap();
@@ -1153,8 +1151,7 @@ dependencies = [
 
         let template = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("templates")
-                .join("stub")
+                .join("src").join("engine").join("templates")
                 .join("main.rs.tpl"),
         )
         .unwrap();
@@ -1294,8 +1291,7 @@ dependencies = [
 
         let template = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("templates")
-                .join("stub")
+                .join("src").join("engine").join("templates")
                 .join("main.rs.tpl"),
         )
         .unwrap();
@@ -1611,8 +1607,7 @@ dependencies = [
     fn render_builtin(pipeline: &[crate::techniques::RuntimeStep]) -> (String, Vec<u8>) {
         let template = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("templates")
-                .join("stub")
+                .join("src").join("engine").join("templates")
                 .join("main.rs.tpl"),
         )
         .unwrap();

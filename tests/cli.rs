@@ -1222,22 +1222,22 @@ fn packs_and_runs_a_managed_payload_on_x64() {
     assert_eq!(run.status.code(), Some(42));
 }
 
-/// Acceptance case: the real-world managed assembly in the repository root
-/// (`SharpHound.exe`, a 32-bit .NET assembly) packs and runs, and behaves the
-/// same as it does unpacked.
+/// Acceptance case: the real-world managed assembly dropped in
+/// `tests/fixtures/` (`SharpHound.exe`, a 32-bit .NET assembly) packs and runs,
+/// and behaves the same as it does unpacked.
 ///
 /// `#[ignore]`: it needs `SharpHound.exe` (not committed) plus a Windows host.
 #[test]
-#[ignore = "requires SharpHound.exe in the repository root and a Windows host"]
+#[ignore = "requires SharpHound.exe in tests/fixtures/ and a Windows host"]
 fn packs_and_runs_sharphound() {
-    if !cfg!(windows) || !Path::new("SharpHound.exe").exists() {
+    if !cfg!(windows) || !Path::new("tests/fixtures/SharpHound.exe").exists() {
         return;
     }
     let plan = write_temp_plan(
         "picaro_sharphound.yaml",
         &managed_plan(
             "sharphound",
-            "./SharpHound.exe",
+            "./tests/fixtures/SharpHound.exe",
             "dotnet",
             "x86",
             "dotnet_hosting",
@@ -1266,7 +1266,7 @@ fn packs_and_runs_sharphound() {
     // host that loads the assembly but hands it the wrong environment. SharpHound
     // timestamps every line with sub-second precision, so the timestamps are
     // stripped before comparing.
-    let direct = Command::new("./SharpHound.exe")
+    let direct = Command::new("./tests/fixtures/SharpHound.exe")
         .output()
         .expect("run the unpacked SharpHound");
     assert_eq!(

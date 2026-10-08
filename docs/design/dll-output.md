@@ -300,7 +300,7 @@ Advisories (build succeeds, the line is printed):
 - `src/plan/schema.rs` — `OutputPlan.kind`, `OutputPlan.entry`, `OutputKind`,
   `DllEntry`.
 - `src/plan/validate.rs` — `validate_dll` (§5) and the advisories.
-- `templates/stub/main.rs.tpl` — `$ENTRY_BLOCK$` replaces the inline `fn main`.
+- `src/engine/templates/main.rs.tpl` — `$ENTRY_BLOCK$` replaces the inline `fn main`.
 - `src/engine/entry.rs` (new) — renders the entry block; unit tests assert the
   exe variant is byte-identical to today's literal, that the DLL variants carry
   the expected exports, and that no `process::exit` appears in a DLL block.
@@ -319,7 +319,7 @@ Advisories (build succeeds, the line is printed):
 - Docs/examples: `docs/architecture.md`, `docs/custom-stubs.md` (Phase E),
   `examples/plans/dll.yaml` + `examples/plans/dll-shellcode.yaml`,
   `examples/hosts/` (the host-process examples for the matrix in §4.2),
-  `tests/plans/dll.yaml`, `mkdocs.yml`, `AGENTS.md`.
+  `tests/plans/dll.yaml`, `docs/nav.yml`, `AGENTS.md`.
 
 ---
 

@@ -8,23 +8,20 @@ produces a packed PE with the selected evasion techniques applied.
 
 ## Pipeline (build)
 
+```mermaid
+flowchart TD
+    A[YAML plan] --> B[parse + validate]
+    B --> C[read payload: file or URL]
+    C --> D[encrypt: XChaCha20-Poly1305]
+    D --> E[render Rust stub]
+    E --> F[compile with rustc]
+    F --> G[embed PE resources .rsrc]
+    G --> H[sign artifact]
+    H --> I[provenance manifest]
 ```
-picaro build plan.yaml
-    │
-    ├─ 1. Parse YAML, substitute build args, validate   (src/plan)
-    ├─ 2. Read (file or URL) + validate the payload     (src/engine/pe, src/engine/fetch)
-    │      + verify the payload's sha256 when pinned
-    ├─ 3. Encrypt payload              (src/engine/crypto, XChaCha20-Poly1305)
-    ├─ 4. Render Rust stub             (src/engine/stub, templates/stub/main.rs.tpl)
-    ├─ 5. Compile stub with rustc      (src/engine/compiler, --extern from target/)
-    ├─ 5b. Embed PE resources (.rsrc)  (src/engine/resources)
-    ├─ 6. Copy to output path
-    ├─ 6b. Sign the artifact           (src/engine/signing; signtool or osslsigncode)
-    └─ 7. Write the provenance manifest (src/engine/manifest)
 
 `picaro build plan.yaml --dry-run` stops after step 2 (no encryption,
 compilation or output).
-```
 
 The generated stub decrypts the payload in memory and runs it. No cleartext
 payload touches disk.
@@ -164,21 +161,24 @@ the payload's `argv[0]` is the exe and its args start at `argv[1]`. See
 
 ## Pipeline (audit)
 
+```mermaid
+flowchart TD
+    A[binary] --> B[PE header + sections + entropy]
+    A --> C[imports / exports]
+    A --> D[strings scan]
+    A --> E[YARA]
+    A --> F[Defender offline scan]
+    B --> G[report]
+    C --> G
+    D --> G
+    E --> G
+    F --> G
+    G --> H[baseline comparison]
 ```
-picaro audit binary [--focus sections] [--json] [--baseline report.json]
-    │
-    ├─ PE header + sections + entropy  (src/audit/pe_info)
-    ├─ imports / exports              (src/audit/pe_info)
-    ├─ strings scan                   (src/audit/strings)
-    ├─ YARA (stub)                    (src/audit/yara)
-    ├─ Defender offline scan          (src/audit/defender)
-    ├─ report                         (src/audit/report)
-    └─ baseline comparison            (src/audit/baseline)
 
 `--json` emits the same data as a serializable `audit::model::Report`;
 `--baseline` compares it against a saved report and fails (exit 3) on a
 regression. `--focus` only affects the pretty output.
-```
 
 ## PE resources (`build.output.resources`)
 
@@ -246,18 +246,16 @@ src/
   plan/     YAML parsing and validation
   engine/     crypto, pe parsing, stub generation, compilation, syscall layer,
               imports, api_resolution, args, resources (icon/VERSIONINFO/
-              manifest), identity, signing, manifest, hash
+              manifest), identity, signing, manifest, hash, builtin stub template
   audit/      static measurement (pe_info, strings, yara, defender, report)
   techniques/ one directory per technique + the registry (mod.rs)
   error.rs    top-level error types
   ui.rs       terminal output: banner, palette, formatting primitives
-templates/
-  stub/       Rust stub template with $placeholders$
 examples/
   plans/    example YAMLs
   payloads/   test payloads
-yara/         YARA rules (engine not wired yet)
-docs/         this file + the rest of the book
+docs/         this file + the rest of the book; the navigation is docs/nav.yml
+docs/site/    the Starlight site project (assembler, config, Dockerfile)
 build/        (gitignored) intermediate artifacts
 dist/         (gitignored) final packed binaries
 ```

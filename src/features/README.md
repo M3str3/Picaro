@@ -59,15 +59,15 @@ Copy the section set the other feature READMEs use. All sections are required;
 Start with a `# Title` and, optionally, a `## Metadata` block (ATT&CK / YAML /
 scope) that `picaro techniques show` replaces with its styled header. Refer to a
 `docs/` page with a backticked repo path (e.g. `` `docs/measurements.md` ``),
-not a relative link: MkDocs inlines the README into `docs/features/ref/`, so a
-relative link would resolve against the wrong directory.
+not a relative link: the docs build inlines the README into `docs/features/ref/`,
+so a relative link would resolve against the wrong directory.
 
 ## 5. Wire the docs
 
 - Add `docs/features/ref/<name>.md` containing
   `--8<-- "src/features/<name>/README.md"`.
 - Add a row to `docs/features/index.md`.
-- Add a nav entry under `Loader features` in `mkdocs.yml`.
+- Add a nav entry under `Loader features` in `docs/nav.yml`.
 
 The `every_feature_is_documented` test fails if any of the three is missing.
 

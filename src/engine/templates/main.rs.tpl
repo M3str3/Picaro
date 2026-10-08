@@ -38,3 +38,6 @@ $IMPORTS_BLOCK$
 
 // --- API resolution proxies (injected; from build.stub.api_resolution) ---
 $API_RESOLUTION_BLOCK$
+
+// --- Network stager (injected; present when a step uses network_stager) ---
+$STAGER_BLOCK$

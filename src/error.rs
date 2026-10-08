@@ -32,7 +32,7 @@ pub enum PackerError {
     },
 
     /// The stub template could not be read: the custom loader stub
-    /// (`build.stub.path`) or the builtin one (`templates/stub/main.rs.tpl`).
+    /// (`build.stub.path`) or the builtin one (`src/engine/templates/main.rs.tpl`).
     #[error("could not read loader stub '{path}': {source}")]
     ReadLoader {
         path: PathBuf,

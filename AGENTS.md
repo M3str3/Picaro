@@ -54,13 +54,11 @@ Any other use is out of scope and not supported.
 src/
   plan/       YAML parsing and validation
   engine/       crypto, stub generation, compilation, syscall layer,
-                resources, manifest, hash
+                resources, manifest, hash, builtin stub template
   audit/        static measurement (pe_info, strings, yara, defender, report)
   techniques/   one directory per technique + the registry (mod.rs)
   error.rs      top-level error types
   ui.rs         terminal output: banner, palette, formatting helpers
-templates/
-  stub/         Rust stub template with $placeholders$
 examples/
   plans/      curated example YAMLs
   payloads/     test payloads for end-to-end verification
@@ -73,13 +71,18 @@ tests/
   fixtures/     committed PE fixtures
 scripts/        Docker wrappers (picaro.py, docs.py)
 docker-compose.yml  containers: dev (picaro + msfvenom) and run (no toolchain)
-yara/           YARA rules (engine not wired yet)
-docs/           docs source (mkdocs.yml lives at the root)
+docs/           Markdown sources; full-screen or in the site
+  nav.yml         the documentation navigation (single source of truth)
+  site/           the Starlight site project (config, styles, assembler, Dockerfile)
 build/          (gitignored) intermediate artifacts
 dist/           (gitignored) final packed binaries
 exchange/       (gitignored) the one host folder shared writable with the containers
 code_examples/  (gitignored) local reference scratch
 ```
+
+Two data files live inside `src/` (read at runtime from `CARGO_MANIFEST_DIR`):
+the builtin stub template `src/engine/templates/main.rs.tpl` and the YARA rules
+under `src/audit/yara/rules/`.
 
 Each technique lives under `src/techniques/<name>/` (README + stub fragment +
 tests). The registry (`src/techniques/mod.rs`) is metadata-only; inspect it with
@@ -106,7 +109,7 @@ more; only `reflective_loading`/`process_hollowing`/`dotnet_hosting` take one.
 default to `x64`/`true`/`all`, and crypto defaults to `xchacha20poly1305` +
 `random`, so a plan needs no such block — only `output.path`.
 
-`src/engine/steps.rs` renders a single template (`templates/stub/main.rs.tpl`):
+`src/engine/steps.rs` renders a single template (`src/engine/templates/main.rs.tpl`):
 each Execution step's payload is embedded and encrypted with its own key/nonce,
 each step is wrapped in `mod step_<index>` (a Preparation exposes
 `run() -> Result<bool, _>`, an Execution `payload(image)`, `living_off_the_land`
@@ -320,8 +323,9 @@ hosts the CLR in the stub's process and loads the assembly from memory; the
 assembly's bitness is checked against `output.arch` (`32BITREQUIRED` ⇒ `x86`).
 Fixtures: `tests/fixtures/managed_x86.exe` (32BITREQUIRED) and
 `managed_anycpu.exe` (IL-only), from `tests/fixtures/managed_marker.cs` with
-`csc -nologo -target:exe -platform:x86|anycpu`. Acceptance: `SharpHound.exe` in
-the repo root packs with `arch: x86` and its output matches the unpacked run.
+`csc -nologo -target:exe -platform:x86|anycpu`. Acceptance: `SharpHound.exe`
+(dropped in `tests/fixtures/`) packs with `arch: x86` and its output matches the
+unpacked run.
 
 **Phase 8: `bouncer` environment gate (done).** New
 `src/techniques/bouncer/` Preparation technique (T1497.001, T1614.001,
@@ -550,7 +554,7 @@ measured** (no JDK on the host) and `dumpbin` was unavailable, so `picaro audit`
   `tests/fixtures/minimal_x86.exe` (`scripts/build_test_fixture.sh x86`); the
   example plan is `examples/plans/x86.yaml` (payload
   `examples/payloads/test_payload_x86.exe`). Plan and checklist: `.plan.md`
-  (repo root, tracked).
+  (repo root, local only — not published).
 - **A managed (.NET) payload needs `format: dotnet` + `dotnet_hosting`.** A
   managed assembly's entry point calls `mscoree.dll!_CorExeMain`, which starts
   the CLR for the *stub*, not the mapped payload, so `format: pe`/`dll` on a
@@ -660,9 +664,11 @@ them.
 At the **start** of a session:
 - Read this file.
 - Read `.memory.md` for the last session's state.
-- The docs are a Material for MkDocs site (`mkdocs.yml`, `docs_dir: docs`); the
-  nav lives in `mkdocs.yml`. Preview with `python scripts/docs.py` (runs the
-  official container; standard library only) or `mkdocs serve`.
+- The docs are an Astro + Starlight site. The nav lives in `docs/nav.yml` (the
+  single source of truth the Rust doc tests also read); `scripts/docs.py`
+  builds the Node image and serves it, and `docs/site/scripts/assemble-docs.mjs`
+  inlines the READMEs into the pages at build time. Preview with
+  `python scripts/docs.py`.
 
 At the **end** of a session:
 - Update `.memory.md` with what was done, open questions, and next steps.

@@ -152,7 +152,7 @@ is no longer enforced against them.
 
 ## How it is built
 
-The build renders a single template (`templates/stub/main.rs.tpl`):
+The build renders a single template (`src/engine/templates/main.rs.tpl`):
 
 - every Execution step's payload is encrypted with its own key/nonce and
   embedded with `include_bytes!`;

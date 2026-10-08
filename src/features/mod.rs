@@ -328,14 +328,15 @@ mod tests {
 
     /// Every registered feature must be reachable from the documentation: a page
     /// under `docs/features/ref/`, a link in the overview table and a nav entry
-    /// in `mkdocs.yml`. Adding a feature without updating the docs is the drift
+    /// in `docs/nav.yml`. Adding a feature without updating the docs is the drift
     /// this guards against.
     #[test]
     fn every_feature_is_documented() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let overview = std::fs::read_to_string(root.join("docs/features/index.md"))
             .expect("docs/features/index.md must exist");
-        let nav = std::fs::read_to_string(root.join("mkdocs.yml")).expect("mkdocs.yml must exist");
+        let nav = std::fs::read_to_string(root.join("docs").join("nav.yml"))
+            .expect("docs/nav.yml must exist");
 
         for def in all() {
             let docs_page = format!("docs/features/ref/{}.md", def.name);
@@ -351,7 +352,7 @@ mod tests {
             );
             assert!(
                 nav.contains(&format!("features/ref/{}.md", def.name)),
-                "{}: no nav entry in mkdocs.yml",
+                "{}: no nav entry in docs/nav.yml",
                 def.name
             );
         }

@@ -3,9 +3,9 @@
 This is the whole loop: generate a payload, write the YAML, pack it, run it and
 measure the result.
 
-!!! warning "Authorized use only"
-
-    Pack only binaries you own or are explicitly permitted to test.
+:::caution[Authorized use only]
+Pack only binaries you own or are explicitly permitted to test.
+:::
 
 ## Requirements
 
@@ -37,55 +37,55 @@ makes the input larger.
 A build is one schema-6 YAML document. Strict by design: unknown keys are an
 error, so a typo never silently does nothing.
 
-=== "PE payload"
+### PE payload
 
-    ```yaml
-    schema: 6
-    name: demo
+```yaml
+schema: 6
+name: demo
 
-    build:
-      crypto:
-        algo: xchacha20poly1305
-        key: random
-      payloads:
-        implant:
-          source: ./payload.exe
-          format: pe
-      output:
-        path: ./dist/demo.exe
-        arch: x64
-        strip: true
-        trim_paths: all
+build:
+  crypto:
+    algo: xchacha20poly1305
+    key: random
+  payloads:
+    implant:
+      source: ./payload.exe
+      format: pe
+  output:
+    path: ./dist/demo.exe
+    arch: x64
+    strip: true
+    trim_paths: all
 
-    runtime:
-      - technique: reflective_loading
-        params: { payload: implant }
-    ```
+runtime:
+  - technique: reflective_loading
+    params: { payload: implant }
+```
 
-=== "Raw shellcode"
+### Raw shellcode
 
-    ```yaml
-    schema: 6
-    name: demo
+```yaml
+schema: 6
+name: demo
 
-    build:
-      crypto:
-        algo: xchacha20poly1305
-        key: random
-      payloads:
-        beacon:
-          source: ./payload.bin
-          format: shellcode
-      output:
-        path: ./dist/demo.exe
-        arch: x64
-        strip: true
-        trim_paths: all
+build:
+  crypto:
+    algo: xchacha20poly1305
+    key: random
+  payloads:
+    beacon:
+      source: ./payload.bin
+      format: shellcode
+  output:
+    path: ./dist/demo.exe
+    arch: x64
+    strip: true
+    trim_paths: all
 
-    runtime:
-      - technique: reflective_loading
-        params: { payload: beacon }
-    ```
+runtime:
+  - technique: reflective_loading
+    params: { payload: beacon }
+```
 
 Save it as `payload.yaml`. Input and output paths are resolved relative to the
 directory you run `picaro` from (the repo's examples assume the repo root).

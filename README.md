@@ -603,18 +603,18 @@ machine's trust stores.
 ```text
 src/
   plan/       YAML parsing and validation
-  engine/       crypto, PE parsing, stub generation, compilation, syscall layer, imports
+  engine/       crypto, PE parsing, stub generation, compilation, syscall layer,
+                imports, builtin stub template
   audit/        static measurement (pe_info, strings, yara, defender, report)
   techniques/   one directory per technique + the registry (mod.rs)
   error.rs      top-level error types
   ui.rs         terminal output: banner, palette, formatting helpers
-templates/stub/ Rust stub template with $placeholders$
 examples/       curated example plans, test payloads, sample custom stubs
 exchange/       (gitignored) the one host folder shared writable with the containers
-docs/           Markdown sources (Material for MkDocs; nav in mkdocs.yml)
+docs/           Markdown sources; the navigation lives in docs/nav.yml
+docs/site/      the Starlight site project (config, styles, assembler, Dockerfile)
 scripts/        Docker wrappers (picaro.py, docs.py)
 docker-compose.yml  development container (picaro + msfvenom)
-yara/           YARA rules (placeholder for now)
 tests/          CLI integration tests + fixtures (tests/plans/, tests/fixtures/)
 build/  dist/   (gitignored) intermediate artifacts and final binaries
 ```
@@ -721,10 +721,11 @@ architecture, which the packer checks).
 
 ## Documentation
 
-- **The book** — Material for MkDocs; the nav lives in `mkdocs.yml`. Preview
-  with `python scripts/docs.py`, which runs the official container (standard
-  library only, same on Linux/macOS/Windows); `python scripts/docs.py build`
-  writes the static site to `site/`.
+- **The book** — Astro + Starlight; the nav lives in `docs/nav.yml` (the single
+  source of truth the Rust doc tests also read). Preview with
+  `python scripts/docs.py`, which builds a Node image and serves it in a
+  container (standard library only, same on Linux/macOS/Windows);
+  `python scripts/docs.py build` writes the static site to `site/`.
 - [`docs/architecture.md`](docs/architecture.md) — how the pieces fit together
   and why.
 - [`docs/multistage.md`](docs/multistage.md) — schema 6 `runtime:` steps:

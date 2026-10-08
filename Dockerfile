@@ -94,11 +94,10 @@ RUN touch src/main.rs && cargo build --release
 RUN cargo build --target x86_64-pc-windows-gnu --release
 RUN cargo build --target i686-pc-windows-gnu --release
 
-# Copied after the compile: read at runtime, so editing a template or an example
-# must not invalidate the build layers above. `examples/` feeds the smoke tests
-# below; `yara/` is read by `audit`.
-COPY templates ./templates
-COPY yara ./yara
+# Copied after the compile: read at runtime, so editing an example must not
+# invalidate the build layers above. `examples/` feeds the smoke tests below;
+# the stub template and the YARA rules live under `src/` now, so they are copied
+# above with the source.
 COPY examples ./examples
 
 # ---------------------------------------------------------------------------

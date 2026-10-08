@@ -1,0 +1,113 @@
+/*
+ * picaro — Starlight theme overrides.
+ *
+ * Pins the site to the CLI's brand accent (the soft violet #A78BFA the terminal
+ * uses) and adds a few "quiet premium" touches: a refined system font stack,
+ * softer corners, and smooth hover transitions.
+ *
+ * `--sl-color-text-accent` does double duty in Starlight: it is both the link
+ * colour and the background of the sidebar's current-page pill. It therefore
+ * has to be a mid-tone violet that reads as text AND holds a contrasting label
+ * when used as a fill — the exact mistake the previous palette made.
+ */
+
+/* ------------------------------------------------------------------------- */
+/* Brand accent                                                              */
+/* ------------------------------------------------------------------------- */
+
+/* Light theme: a deepened violet; on-accent text is white for contrast. */
+:root {
+  --sl-color-accent-low: #ede9fe;
+  --sl-color-accent: #6d55e0;
+  --sl-color-accent-high: #553fc2;
+  --sl-color-text-accent: #6d55e0;
+  --sl-color-text-invert: #ffffff;
+}
+
+/* Dark theme: the soft violet is the native accent on a dark surface; the
+   current-page pill is a light-violet fill with a near-black label. */
+:root[data-theme='dark'] {
+  --sl-color-accent-low: #2b2350;
+  --sl-color-accent: #a78bfa;
+  --sl-color-accent-high: #c4b5fd;
+  --sl-color-text-accent: #c4b5fd;
+  --sl-color-text-invert: #17121f;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Typography                                                                */
+/* ------------------------------------------------------------------------- */
+
+:root {
+  --sl-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+  --sl-font-mono: ui-monospace, 'SF Mono', 'Cascadia Code', 'JetBrains Mono',
+    Menlo, Consolas, monospace;
+  --sl-content-width: 54rem;
+}
+
+/* Selection echoes the brand instead of the OS default. */
+::selection {
+  background: var(--sl-color-accent);
+  color: var(--sl-color-text-invert);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Quiet premium: corners + transitions                                      */
+/* ------------------------------------------------------------------------- */
+
+/* Links and nav entries ease their colour instead of snapping. */
+a,
+.sidebar-content a,
+.sl-markdown-content a {
+  transition: color 0.15s ease, background-color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+/* Links keep the brand violet and step to a distinct shade on hover (rather
+   than jumping to the plain body-text colour). */
+.sl-markdown-content a:hover:not(:where(.not-content *)) {
+  color: var(--sl-color-accent-high);
+  text-decoration-color: currentColor;
+}
+
+/* Dark mode links brighten by deepening the violet, so the step stays visible. */
+:root[data-theme='dark'] .sl-markdown-content a:hover:not(:where(.not-content *)) {
+  color: var(--sl-color-accent);
+}
+
+/* Code blocks (Expressive Code frames) and tables get softer corners. */
+.expressive-code,
+.expressive-code .frame,
+.sl-markdown-content pre,
+.sl-markdown-content table {
+  border-radius: 12px;
+}
+
+/* Inline code gets a slightly softer pill. */
+.sl-markdown-content :not(pre) > code {
+  border-radius: 6px;
+}
+
+/* Mermaid diagrams: strip the code-block chrome and centre the SVG. */
+.sl-markdown-content pre.mermaid {
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: 1.25rem 0;
+  display: flex;
+  justify-content: center;
+  overflow-x: auto;
+}
+.sl-markdown-content .mermaid svg {
+  max-width: 100%;
+  height: auto;
+  border-radius: 12px;
+}
+
+/* Table headers: a quieter, label-like treatment. */
+.sl-markdown-content th {
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}

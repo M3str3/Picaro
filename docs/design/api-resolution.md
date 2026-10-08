@@ -275,7 +275,7 @@ both execution techniques resolve imports, so the resolver is always emitted.
   (Phase E; the proxies are not mapped in the target).
 - `src/engine/syscalls.rs` — `NtOpenProcess` in `NT_FUNCTIONS` (both bodies), and
   `render_block_with` (merges the `Nt*` names `api_resolution` routes to).
-- `src/engine/stub.rs` + `templates/stub/main.rs.tpl` — `$API_RESOLUTION_BLOCK$`
+- `src/engine/stub.rs` + `src/engine/templates/main.rs.tpl` — `$API_RESOLUTION_BLOCK$`
   and the `render_*_with` variants that thread the config.
 - `src/plan/validate.rs` — section 7.
 - `src/main.rs` — `verify_no_intercepted_imports` (D-21/D-22).

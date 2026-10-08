@@ -21,7 +21,7 @@ pub struct YaraResult {
     pub note: &'static str,
 }
 
-/// Scans `data` against every rule file under `yara/`.
+/// Scans `data` against every rule file under `src/audit/yara/rules/`.
 ///
 /// The `note` explains an empty `matches` list: no rules were present, the
 /// scanner is missing, or (empty) the scan ran and found nothing.
@@ -72,9 +72,9 @@ pub fn scan(data: &[u8]) -> YaraResult {
     }
 }
 
-/// Rule files under `yara/`, sorted for deterministic output.
+/// Rule files under `src/audit/yara/rules/`, sorted for deterministic output.
 fn rule_files() -> Vec<PathBuf> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("yara");
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/audit/yara/rules");
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();
     };

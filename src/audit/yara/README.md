@@ -6,7 +6,7 @@ signatures in a binary.
 ## Engine
 
 `picaro audit` scans the binary through the **`yara` CLI as a subprocess** (see
-`src/audit/yara.rs`): the artifact bytes are written to a temporary file under
+`src/audit/yara/mod.rs`): the artifact bytes are written to a temporary file under
 the system temp directory, `yara <rule-file> <temp-file>` is run once per rule
 file, and the matching rule names are parsed from stdout. No native libyara
 dependency is required.
@@ -23,7 +23,8 @@ variable (empty or unset means `yara` on `PATH`).
 
 ## Adding rules
 
-Drop one or more `.yar` / `.yara` files here, e.g. `yara/picaro.yar`:
+Drop one or more `.yar` / `.yara` files under `src/audit/yara/rules/`, e.g.
+`src/audit/yara/rules/picaro.yar`:
 
 ```yara
 rule picaro_stub_marker {

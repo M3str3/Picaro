@@ -15,7 +15,17 @@ site
 
 # Reference material and notes; not compiled into the tool.
 code_examples
-docs
+# The docs Markdown sources are not part of the tool image, but the docs/site
+# project under docs/site/ IS the build context for the documentation image, so
+# exclude docs/ wholesale and re-include just that project (its own node_modules
+# and dist stay out of the context).
+docs/*
+!docs/site
+docs/site/node_modules
+docs/site/dist
+docs/site/.astro
+docs/site/src/content
+docs/site/src/sidebar.mjs
 
 # Local scratch artifacts (see .gitignore).
 *.pdb
