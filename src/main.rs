@@ -23,7 +23,9 @@ use std::time::Instant;
 
 use clap::{CommandFactory, Parser, Subcommand};
 
-use engine::{api_resolution, compiler, crypto, obfuscation, pe, steps, stub, syscalls};
+use engine::{
+    api_resolution, build_lock, compiler, crypto, obfuscation, pe, steps, stub, syscalls,
+};
 use error::Result;
 use plan::schema::{
     Arch, CryptoAlgorithm, KeySource, OutputKind, PayloadFormat, PayloadPlan, Subsystem, TrimPaths,
@@ -619,7 +621,8 @@ fn build(
             ui.detail(
                 "source",
                 format!(
-                    "build/main.rs {} {} lines",
+                    "{} {} {} lines",
+                    stub_path.display(),
                     ui.faint(glyph::DOT),
                     stub_src.lines().count()
                 )
@@ -698,12 +701,11 @@ fn build(
         }
     }
 
-    // 6. Copy the compiled stub to the output path from the YAML.
-    if let Some(parent) = plan.build.output.path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
+    // 6. Lock the shared output, then copy the compiled stub to the output path
+    //    from the YAML, sign it and write the manifest. The lock is keyed on the
+    //    output path so two concurrent `picaro build` runs cannot interleave
+    //    their copy/sign/manifest writes into the same artifact.
+    let _output_lock = build_lock::OutputLock::acquire(&plan.build.output.path)?;
     std::fs::copy(&out, &plan.build.output.path)?;
     let out_size = std::fs::metadata(&plan.build.output.path)?.len() as usize;
 
@@ -1444,15 +1446,18 @@ fn prepare_build_dir(dir: &Path) -> Result<()> {
 /// The scratch directory for intermediate artifacts (the ciphertexts, the
 /// rendered stub, the compiled `out.exe`).
 ///
-/// Defaults to `build/` next to the manifest, which suits a checkout but not a
-/// read-only installation or a different user than the one that installed the
-/// packer (the Docker image runs as the invoking user, and only the mount is
-/// writable there) — hence the `PICARO_BUILD_DIR` override.
+/// Defaults to a unique `build/run-<pid>-<nanos>` directory next to the
+/// manifest, so concurrent `picaro build` runs never share — and never wipe —
+/// each other's intermediate files. `PICARO_BUILD_DIR`, when set and non-empty,
+/// is used verbatim for reproducible single-directory workflows (e.g. the
+/// read-only Docker source tree).
 fn scratch_dir() -> PathBuf {
-    scratch_dir_in(
-        std::env::var_os("PICARO_BUILD_DIR").map(PathBuf::from),
-        Path::new(env!("CARGO_MANIFEST_DIR")),
-    )
+    let override_dir = std::env::var_os("PICARO_BUILD_DIR").map(PathBuf::from);
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    match &override_dir {
+        Some(dir) if !dir.as_os_str().is_empty() => scratch_dir_in(override_dir, manifest_dir),
+        _ => unique_scratch_dir_in(manifest_dir, &run_nonce()),
+    }
 }
 
 /// Resolves [`scratch_dir`] from an explicit `PICARO_BUILD_DIR` value (when set
@@ -1463,6 +1468,22 @@ fn scratch_dir_in(override_dir: Option<PathBuf>, manifest_dir: &Path) -> PathBuf
         Some(dir) if !dir.as_os_str().is_empty() => dir,
         _ => manifest_dir.join("build"),
     }
+}
+
+/// A unique scratch directory for one build run, derived from `nonce`.
+///
+/// Split from [`scratch_dir`] so tests can inject a deterministic nonce.
+fn unique_scratch_dir_in(manifest_dir: &Path, nonce: &str) -> PathBuf {
+    manifest_dir.join("build").join(format!("run-{nonce}"))
+}
+
+/// A process- and time-unique label (`<pid>-<nanos>`) for a build run.
+fn run_nonce() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("{}-{nanos}", std::process::id())
 }
 
 #[cfg(test)]
@@ -1514,5 +1535,18 @@ mod tests {
     fn an_empty_scratch_override_falls_back_to_the_default() {
         let dir = scratch_dir_in(Some(PathBuf::new()), Path::new("/usr/src/picaro"));
         assert_eq!(dir, Path::new("/usr/src/picaro/build"));
+    }
+
+    #[test]
+    fn unique_scratch_dirs_differ_across_nonces() {
+        let first = unique_scratch_dir_in(Path::new("/usr/src/picaro"), "1-100");
+        let second = unique_scratch_dir_in(Path::new("/usr/src/picaro"), "2-200");
+        assert_ne!(first, second, "each run must get its own scratch directory");
+    }
+
+    #[test]
+    fn unique_scratch_dir_lives_in_a_run_folder_under_build() {
+        let dir = unique_scratch_dir_in(Path::new("/usr/src/picaro"), "42-123");
+        assert_eq!(dir, Path::new("/usr/src/picaro/build/run-42-123"));
     }
 }

@@ -13,6 +13,8 @@
 //! - `api_resolution`: how the loader resolves the payload's imports
 //!   (`build.stub.api_resolution`) — the proxy catalogue and its validation.
 //! - `args`: payload command-line construction and argument spoofing.
+//! - `build_lock`: a dependency-free per-output lock that serializes the
+//!   copy/sign/manifest section of concurrent builds targeting one artifact.
 //! - `manifest`: the build manifest (provenance record written next to the
 //!   artifact).
 //! - `hash`: SHA-256 for provenance and payload pinning.
@@ -24,6 +26,7 @@
 
 pub mod api_resolution;
 pub mod args;
+pub mod build_lock;
 pub mod compiler;
 pub mod crypto;
 pub mod debug;

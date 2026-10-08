@@ -76,6 +76,10 @@ pub enum PackerError {
     #[error("resources: {0}")]
     Resources(#[from] crate::engine::resources::ResourceError),
 
+    /// Error acquiring the per-output build lock.
+    #[error("build lock: {0}")]
+    BuildLock(#[from] crate::engine::build_lock::BuildLockError),
+
     /// Artifact signing error.
     #[error("signing: {0}")]
     Signing(#[from] crate::engine::signing::SigningError),
