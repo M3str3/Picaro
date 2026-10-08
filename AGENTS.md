@@ -11,7 +11,12 @@ Any other use is out of scope and not supported.
 
 ## Architecture principles (non-negotiable)
 
-- **Everything in Rust.** No C, no C++, no Nim. The stub is also Rust.
+- **Rust first, not Rust only.** The packer and the generated stub are Rust,
+  and new code prefers Rust, but a toolchain or runtime in another language is
+  acceptable when it is the pragmatic choice — for example, a subprocess `yara`
+  scanner, or a future C stub that calls the Rust runtime through an ABI.
+  Never reimplement a technique in another language, and never embed a
+  toolchain in the repo.
 - **Compilers live in PATH.** Never embed toolchains in the repo.
   If `rustc` is missing, error out with clear instructions.
 - **FFI via `windows-rs`.** No raw `extern "system"` unless absolutely

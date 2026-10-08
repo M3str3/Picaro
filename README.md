@@ -539,11 +539,12 @@ leak when it appears both in the compiled stub **and** in the generated stub
 source (comments stripped), so names the toolchain embeds regardless of our
 code don't produce false positives.
 
-House rules, in short: everything in Rust, crypto is always XChaCha20-Poly1305,
-no `unsafe` in the packer, errors via `thiserror` (no `panic!`/`unwrap` in
-user-facing paths), every stub string goes through `StringsConfig`, and all
-user-facing output goes through `src/ui.rs`. The full list is in
-[`AGENTS.md`](AGENTS.md).
+House rules, in short: Rust first, not Rust only — a subprocess tool or a
+non-Rust stub is fine when it is the pragmatic choice, but techniques are never
+reimplemented outside Rust — crypto is always XChaCha20-Poly1305, no `unsafe`
+in the packer, errors via `thiserror` (no `panic!`/`unwrap` in user-facing
+paths), every stub string goes through `StringsConfig`, and all user-facing
+output goes through `src/ui.rs`. The full list is in [`AGENTS.md`](AGENTS.md).
 
 ## Status & roadmap
 
