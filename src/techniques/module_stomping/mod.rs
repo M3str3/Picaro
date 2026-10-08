@@ -54,7 +54,7 @@ pub const DEF: TechniqueDef = TechniqueDef {
     // and its own procedure examples put `.text`-section stomping of a system
     // DLL under T1055 (see the README).
     attck: &["T1055"],
-    stability: Stability::Experimental,
+    stability: Stability::Stable,
     requires: &[Capability::WindowsX64, Capability::WindowsX86],
     conflicts: &[],
     category: Category::Execution,

@@ -1366,7 +1366,8 @@ fn default_format(technique: &TechniqueKind) -> PayloadFormat {
         | TechniqueKind::ModuleStomping { .. }
         | TechniqueKind::EarlyBird { .. }
         | TechniqueKind::ThreadHijacking { .. }
-        | TechniqueKind::Fibers { .. } => PayloadFormat::Shellcode,
+        | TechniqueKind::Fibers { .. }
+        | TechniqueKind::DllHollowing { .. } => PayloadFormat::Shellcode,
         _ => PayloadFormat::Pe,
     }
 }

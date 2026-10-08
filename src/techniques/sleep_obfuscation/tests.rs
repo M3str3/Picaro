@@ -199,8 +199,7 @@ fn compiles_sleep_obfuscation_stub_to_pe() {
 
     let template = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("templates")
-            .join("stub")
+            .join("src").join("engine").join("templates")
             .join("main.rs.tpl"),
     )
     .unwrap();

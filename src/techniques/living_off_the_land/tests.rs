@@ -96,6 +96,26 @@ fn render_fragment_obfuscates_the_binary_and_args() {
 }
 
 #[test]
+fn render_fragment_obfuscates_the_launch_fixed_strings() {
+    let strings = StringsConfig::from_yaml(None).expect("default strings");
+    let params = Params {
+        binary: "certutil.exe".to_string(),
+        ..Params::default()
+    };
+    let fragment = params.render_fragment(&strings);
+
+    // The quoted literals must not survive the render: the environment variable
+    // name, the system directory and the diagnostic are rebuilt from obfuscated
+    // bytes. (Bare words may legitimately appear in the fragment's comments.)
+    for literal in ["\"SystemRoot\"", "\"System32\"", "C:\\Windows", "could not launch"] {
+        assert!(
+            !fragment.contains(literal),
+            "the launch's fixed string '{literal}' leaked in cleartext"
+        );
+    }
+}
+
+#[test]
 fn def_is_well_formed() {
     assert_eq!(DEF.name, "living_off_the_land");
     assert_eq!(DEF.attck, &["T1218", "T1105"]);

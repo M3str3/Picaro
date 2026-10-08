@@ -40,6 +40,7 @@ pub fn validate(plan: &Plan) -> Result<()> {
     let steps = steps::resolve(plan)?;
     validate_terminal(&steps)?;
     validate_output(plan, &steps)?;
+    validate_stager(plan, &steps)?;
 
     for step in &steps {
         if let Some(payload) = &step.payload {
@@ -94,15 +95,115 @@ fn validate_terminal(steps: &[ResolvedStep]) -> Result<()> {
 fn terminal_technique(step: &ResolvedStep) -> Option<&'static str> {
     match &step.technique {
         TechniqueKind::DotnetHosting { .. } => Some("dotnet_hosting"),
-        TechniqueKind::ReflectiveLoading { .. } => {
+        TechniqueKind::ReflectiveLoading { .. } | TechniqueKind::ProcessGhosting { .. } => {
             let format = step
                 .payload
                 .as_ref()
                 .map_or(PayloadFormat::Pe, |payload| payload.plan.format);
-            (format == PayloadFormat::Pe).then_some("reflective_loading (a PE executable)")
+            let technique = step.technique.name();
+            (format == PayloadFormat::Pe).then_some(match technique {
+                "process_ghosting" => "process_ghosting (a PE executable)",
+                _ => "reflective_loading (a PE executable)",
+            })
         }
         _ => None,
     }
+}
+
+/// Validates the `network_stager` steps: at most one, its payload must exist,
+/// and the Execution step that runs it must come after it.
+fn validate_stager(plan: &Plan, steps: &[ResolvedStep]) -> Result<()> {
+    let stagers: Vec<&ResolvedStep> = steps
+        .iter()
+        .filter(|step| matches!(step.technique, TechniqueKind::NetworkStager { .. }))
+        .collect();
+
+    if stagers.is_empty() {
+        return Ok(());
+    }
+    if stagers.len() > 1 {
+        return Err(PackerError::Validation(
+            "only one 'network_stager' step is allowed per runtime (it fills a single slot)"
+                .to_string(),
+        ));
+    }
+    let stager = stagers[0];
+    let (payload_name, url, crypto, key, nonce) = match &stager.technique {
+        TechniqueKind::NetworkStager { params } => (
+            params.payload.as_str(),
+            params.url.as_str(),
+            params.crypto,
+            params.key.as_deref(),
+            params.nonce.as_deref(),
+        ),
+        _ => unreachable!("filtered above"),
+    };
+
+    if payload_name.is_empty() {
+        return Err(PackerError::Validation(format!(
+            "step {} ('{}') must name a payload via 'params.payload'",
+            stager.index, stager.label
+        )));
+    }
+    if !plan.build.payloads.contains_key(payload_name) {
+        return Err(PackerError::Validation(format!(
+            "step {} ('{}') stages payload '{payload_name}', which is not declared in 'build.payloads'",
+            stager.index, stager.label
+        )));
+    }
+
+    let consumers: Vec<&ResolvedStep> = steps
+        .iter()
+        .filter(|step| step.is_execution())
+        .filter(|step| {
+            step.payload
+                .as_ref()
+                .map(|payload| payload.name == payload_name)
+                .unwrap_or(false)
+        })
+        .collect();
+    if consumers.len() != 1 {
+        return Err(PackerError::Validation(format!(
+            "step {} ('{}') stages payload '{payload_name}', which must be loaded by exactly one \
+             Execution step (found {})",
+            stager.index,
+            stager.label,
+            consumers.len()
+        )));
+    }
+    if consumers[0].index < stager.index {
+        return Err(PackerError::Validation(format!(
+            "step {} ('{}') stages payload '{payload_name}', but the Execution step that runs it \
+             is earlier in 'runtime:'",
+            stager.index, stager.label
+        )));
+    }
+
+    let known_schemes = ["http://", "https://", "ftp://", "scp://"];
+    if !known_schemes.iter().any(|scheme| url.starts_with(scheme)) {
+        return Err(PackerError::Validation(format!(
+            "step {} ('{}') has an unsupported URL scheme in '{url}'; expected http://, \
+             https://, ftp:// or scp://",
+            stager.index, stager.label
+        )));
+    }
+
+    if crypto.is_encrypted() {
+        let valid_hex = |value: Option<&str>, bytes: usize| {
+            value
+                .map(|v| v.len() == bytes * 2 && v.bytes().all(|b| b.is_ascii_hexdigit()))
+                .unwrap_or(false)
+        };
+        if !valid_hex(key, 32) || !valid_hex(nonce, 24) {
+            return Err(PackerError::Validation(format!(
+                "step {} ('{}') uses 'crypto: xchacha20poly1305' but 'key' (64 hex chars) and \
+                 'nonce' (48 hex chars) are not both set",
+                stager.index, stager.label
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 /// Validates `build.output.kind`/`entry` and their couplings.
@@ -561,6 +662,18 @@ fn validate_payload_format(step: &ResolvedStep, payload: &ResolvedPayload) -> Re
         )));
     }
 
+    if format != PayloadFormat::Pe
+        && matches!(step.technique, TechniqueKind::ProcessGhosting { .. })
+    {
+        return Err(PackerError::Validation(format!(
+            "payload '{}' has 'format: {}', which is not supported by process_ghosting: it maps a \
+             full PE image from a delete-on-close file. Use 'format: pe', or reflective_loading \
+             for dll/shellcode in-process.",
+            payload.name,
+            format.label()
+        )));
+    }
+
     // The in-process runners below enter the payload as flat position-
     // independent code: they have no image mapper, so a PE/DLL has no entry
     // point to call and a managed assembly no CRL to host. (A `dotnet` payload
@@ -572,6 +685,7 @@ fn validate_payload_format(step: &ResolvedStep, payload: &ResolvedPayload) -> Re
         TechniqueKind::EarlyBird { .. } => Some("early_bird"),
         TechniqueKind::Fibers { .. } => Some("fibers"),
         TechniqueKind::ThreadHijacking { .. } => Some("thread_hijacking"),
+        TechniqueKind::DllHollowing { .. } => Some("dll_hollowing"),
         _ => None,
     };
     if let Some(technique) = shellcode_only {

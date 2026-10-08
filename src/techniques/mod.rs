@@ -8,16 +8,20 @@
 
 pub mod anti_debug;
 pub mod bouncer;
+pub mod dll_hollowing;
 pub mod dotnet_hosting;
 pub mod early_bird;
 pub mod execution_callbacks;
 pub mod fibers;
+pub mod guardrail;
 pub mod living_off_the_land;
 pub mod module_stomping;
+pub mod network_stager;
 pub mod patch_amsi;
 pub mod patch_etw;
 pub mod pe_injection;
 pub mod ppid_spoofing;
+pub mod process_ghosting;
 pub mod process_hollowing;
 pub mod reflective_loading;
 pub mod self_deletion;
@@ -25,6 +29,7 @@ pub mod sleep;
 pub mod sleep_obfuscation;
 pub mod stack_spoofing;
 pub mod thread_hijacking;
+pub mod timestomping;
 pub mod unhook_ntdll;
 
 use std::path::Path;
@@ -231,6 +236,36 @@ pub enum TechniqueKind {
         #[serde(default)]
         params: ppid_spoofing::Params,
     },
+    /// Network stager: fetch the payload over the network at run time (control).
+    NetworkStager {
+        /// Technique parameters (`payload`, `url`, `crypto`, `key`, `nonce`, ...).
+        #[serde(default)]
+        params: network_stager::Params,
+    },
+    /// Guardrail: abort the chain past a deadline or run count (preparation).
+    Guardrail {
+        /// Technique parameters (`expire_on`, `max_runs`, `run_key`).
+        #[serde(default)]
+        params: guardrail::Params,
+    },
+    /// Timestomping: copy a reference file's timestamps onto a target (preparation).
+    Timestomping {
+        /// Technique parameters (`target`, `reference`).
+        #[serde(default)]
+        params: timestomping::Params,
+    },
+    /// DLL hollowing: run the payload from a hollowed signed DLL (execution).
+    DllHollowing {
+        /// Technique parameters (`payload`, `module`).
+        #[serde(default)]
+        params: dll_hollowing::Params,
+    },
+    /// Process ghosting: map the payload from a delete-on-close file (execution).
+    ProcessGhosting {
+        /// Technique parameters (`payload`).
+        #[serde(default)]
+        params: process_ghosting::Params,
+    },
 }
 
 impl TechniqueKind {
@@ -280,6 +315,15 @@ impl TechniqueKind {
             TechniqueKind::PpidSpoofing { params } => params.render_fragment(strings),
             TechniqueKind::LivingOffTheLand { params } => params.render_fragment(strings),
             TechniqueKind::Sleep { params } => params.render_fragment(strings),
+            TechniqueKind::NetworkStager { params } => params.render_fragment(strings),
+            TechniqueKind::Guardrail { params } => params.render_fragment(strings),
+            TechniqueKind::Timestomping { params } => params.render_fragment(strings),
+            TechniqueKind::DllHollowing { params } => {
+                params.render_fragment_for(strings, format, export)
+            }
+            TechniqueKind::ProcessGhosting { params } => {
+                params.render_fragment_for(strings, format, export)
+            }
         }
     }
 
@@ -306,6 +350,11 @@ impl TechniqueKind {
             TechniqueKind::SleepObfuscation { .. } => sleep_obfuscation::DEF.name,
             TechniqueKind::LivingOffTheLand { .. } => living_off_the_land::DEF.name,
             TechniqueKind::Sleep { .. } => sleep::DEF.name,
+            TechniqueKind::NetworkStager { .. } => network_stager::DEF.name,
+            TechniqueKind::Guardrail { .. } => guardrail::DEF.name,
+            TechniqueKind::Timestomping { .. } => timestomping::DEF.name,
+            TechniqueKind::DllHollowing { .. } => dll_hollowing::DEF.name,
+            TechniqueKind::ProcessGhosting { .. } => process_ghosting::DEF.name,
         }
     }
 
@@ -324,6 +373,8 @@ impl TechniqueKind {
             TechniqueKind::EarlyBird { params } => params.payload.as_deref(),
             TechniqueKind::PeInjection { params } => params.payload.as_deref(),
             TechniqueKind::ThreadHijacking { params } => params.payload.as_deref(),
+            TechniqueKind::DllHollowing { params } => params.payload.as_deref(),
+            TechniqueKind::ProcessGhosting { params } => params.payload.as_deref(),
             _ => None,
         }
     }
@@ -354,6 +405,11 @@ impl TechniqueKind {
             TechniqueKind::SleepObfuscation { .. } => sleep_obfuscation::DEF.category,
             TechniqueKind::LivingOffTheLand { .. } => living_off_the_land::DEF.category,
             TechniqueKind::Sleep { .. } => sleep::DEF.category,
+            TechniqueKind::NetworkStager { .. } => network_stager::DEF.category,
+            TechniqueKind::Guardrail { .. } => guardrail::DEF.category,
+            TechniqueKind::Timestomping { .. } => timestomping::DEF.category,
+            TechniqueKind::DllHollowing { .. } => dll_hollowing::DEF.category,
+            TechniqueKind::ProcessGhosting { .. } => process_ghosting::DEF.category,
         }
     }
 }
@@ -506,6 +562,11 @@ pub fn all() -> &'static [TechniqueDef] {
         bouncer::DEF,
         living_off_the_land::DEF,
         sleep::DEF,
+        network_stager::DEF,
+        guardrail::DEF,
+        timestomping::DEF,
+        dll_hollowing::DEF,
+        process_ghosting::DEF,
     ]
 }
 
@@ -906,14 +967,15 @@ mod tests {
 
     /// Every registered technique must be reachable from the documentation: a
     /// page under `docs/techniques/ref/`, a link in the overview table and a
-    /// nav entry in `mkdocs.yml`. Adding a technique without updating the docs
+    /// nav entry in `docs/nav.yml`. Adding a technique without updating the docs
     /// is the recurring drift this guards against.
     #[test]
     fn every_technique_is_documented() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let overview = std::fs::read_to_string(root.join("docs/techniques/index.md"))
             .expect("docs/techniques/index.md must exist");
-        let nav = std::fs::read_to_string(root.join("mkdocs.yml")).expect("mkdocs.yml must exist");
+        let nav = std::fs::read_to_string(root.join("docs").join("nav.yml"))
+            .expect("docs/nav.yml must exist");
 
         for def in all() {
             let docs_page = format!("docs/techniques/ref/{}.md", def.name);
@@ -929,7 +991,7 @@ mod tests {
             );
             assert!(
                 nav.contains(&format!("techniques/ref/{}.md", def.name)),
-                "{}: no nav entry in mkdocs.yml",
+                "{}: no nav entry in docs/nav.yml",
                 def.name
             );
         }

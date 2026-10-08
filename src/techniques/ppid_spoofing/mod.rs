@@ -61,7 +61,7 @@ fn default_wait() -> bool {
 pub const DEF: TechniqueDef = TechniqueDef {
     name: "ppid_spoofing",
     attck: &["T1134.004"],
-    stability: Stability::Experimental,
+    stability: Stability::Stable,
     requires: &[Capability::WindowsX64, Capability::WindowsX86],
     conflicts: &[],
     category: Category::Control,

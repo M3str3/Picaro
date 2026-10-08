@@ -64,7 +64,7 @@ fn def_is_well_formed() {
     assert_eq!(DEF.name, "unhook_ntdll");
     assert_eq!(DEF.attck, &["T1562.001"]);
     assert_eq!(DEF.category, Category::Preparation);
-    assert_eq!(DEF.stability, Stability::Experimental);
+    assert_eq!(DEF.stability, Stability::Stable);
     assert!(DEF.conflicts.is_empty());
     assert_eq!(DEF.syscalls, &["NtProtectVirtualMemory"]);
     assert!(DEF.requires.contains(&Capability::WindowsX64));
@@ -256,8 +256,7 @@ fn compiles_unhook_ntdll_stub_for_both_syscall_modes() {
 
     let template = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("templates")
-            .join("stub")
+            .join("src").join("engine").join("templates")
             .join("main.rs.tpl"),
     )
     .unwrap();

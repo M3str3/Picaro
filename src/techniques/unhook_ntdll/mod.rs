@@ -24,7 +24,7 @@ pub struct Params {}
 pub const DEF: TechniqueDef = TechniqueDef {
     name: "unhook_ntdll",
     attck: &["T1562.001"],
-    stability: Stability::Experimental,
+    stability: Stability::Stable,
     requires: &[Capability::WindowsX64, Capability::WindowsX86],
     conflicts: &[],
     category: Category::Preparation,

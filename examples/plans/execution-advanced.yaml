@@ -1,0 +1,41 @@
+# Advanced in-process execution: two Execution techniques chained in one
+# artifact with two payloads (each technique runs a different format).
+#
+#   cargo run -- build examples/plans/execution-advanced.yaml
+#
+#   - `dll_hollowing` (shellcode): loads a signed DLL and runs the payload from
+#     its hollowed `.text`, restoring the original bytes afterwards so the
+#     module keeps proxying its exports. It returns, so the chain continues.
+#   - `process_ghosting` (pe): maps the payload from a delete-on-close file, so
+#     the image runs with no backing file on disk. It runs a full PE
+#     *executable*, so it is terminal and must be the last step.
+#
+# Other Execution techniques, one payload each (match the format):
+#   - `early_bird` / `thread_hijacking`: shellcode, in a target process.
+#   - `pe_injection`: a full PE, in a suspended target process.
+#   - `reflective_loading`: pe, dll or shellcode, in the loader's own process.
+#   - `execution_callbacks` / `module_stomping` / `fibers`: shellcode in-process
+#     (see `in-process-runners.yaml`).
+
+schema: 6
+name: execution-advanced
+
+build:
+  payloads:
+    shellcode:
+      source: ./examples/payloads/demo_shellcode.bin
+      format: shellcode
+    implant:
+      source: ./examples/payloads/test_payload.exe
+  output:
+    path: ./dist/execution_advanced.exe
+
+runtime:
+  - technique: dll_hollowing
+    params:
+      payload: shellcode
+      module: wininet.dll
+
+  - technique: process_ghosting
+    params:
+      payload: implant

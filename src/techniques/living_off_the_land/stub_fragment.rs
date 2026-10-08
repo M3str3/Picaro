@@ -11,8 +11,8 @@
         if name.contains('\\') || name.contains('/') {
             return name.to_string();
         }
-        let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
-        format!("{root}\\System32\\{name}")
+        let root = std::env::var($ENV_SYSTEMROOT$).unwrap_or_else(|_| $WINDOWS_ROOT$);
+        format!("{root}\\{}\\{name}", $SYSTEM32_DIR$)
     }
 
     /// Quotes one argument for a Windows command line (the `CommandLineToArgvW`
@@ -83,7 +83,7 @@
                 &startup,
                 &mut pi,
             )
-            .map_err(|e| format!("could not launch the stage binary: {e}"))?;
+            .map_err(|e| format!("{}: {e}", $MSG_LAUNCH_FAILED$))?;
         }
 
         let code = if $WAIT$ {

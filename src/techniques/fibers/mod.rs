@@ -29,7 +29,7 @@ pub const DEF: TechniqueDef = TechniqueDef {
     // fiber of the loader's own thread is a process-injection variant, so the
     // T1055 parent is the precise mapping.
     attck: &["T1055"],
-    stability: Stability::Experimental,
+    stability: Stability::Stable,
     requires: &[Capability::WindowsX64, Capability::WindowsX86],
     conflicts: &[],
     category: Category::Execution,

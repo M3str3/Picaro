@@ -40,6 +40,7 @@ pub mod obfuscation;
 pub mod pe;
 pub mod resources;
 pub mod signing;
+pub mod stager;
 pub mod steps;
 pub mod stub;
 pub mod syscalls;

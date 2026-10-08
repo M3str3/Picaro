@@ -77,8 +77,8 @@ fn render_fragment_for_returns_the_fragment() {
 }
 
 #[test]
-fn def_is_an_experimental_windows_technique() {
-    assert_eq!(DEF.stability, Stability::Experimental);
+fn def_is_a_stable_windows_technique() {
+    assert_eq!(DEF.stability, Stability::Stable);
     assert!(DEF.requires.contains(&Capability::WindowsX64));
     assert!(DEF.requires.contains(&Capability::WindowsX86));
     assert!(DEF.conflicts.is_empty());

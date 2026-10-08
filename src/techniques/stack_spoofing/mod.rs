@@ -65,7 +65,7 @@ pub fn default_decoy_bytes() -> usize {
 pub const DEF: TechniqueDef = TechniqueDef {
     name: "stack_spoofing",
     attck: &["T1036"],
-    stability: Stability::Experimental,
+    stability: Stability::Stable,
     requires: &[Capability::WindowsX64],
     conflicts: &[],
     category: Category::Preparation,

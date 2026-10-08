@@ -17,7 +17,7 @@ mod techniques;
 mod ui;
 mod wizard;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -31,7 +31,7 @@ use plan::schema::{
     Arch, CryptoAlgorithm, KeySource, OutputKind, PayloadFormat, PayloadPlan, Subsystem, TrimPaths,
 };
 use plan::steps::ResolvedStep;
-use techniques::{Category, RuntimeStep};
+use techniques::{Category, RuntimeStep, TechniqueKind};
 use ui::{format_elapsed, glyph, human_size, Palette};
 
 /// Extra help printed under the generated usage block.
@@ -440,6 +440,16 @@ fn build(
     let mut total_plaintext: usize = 0;
     let mut nonces: Vec<(usize, [u8; 24], [u8; 32])> = Vec::new();
 
+    // Payloads named by a `network_stager` step are fetched at run time, not
+    // embedded, so the build skips reading/encrypting/writing them.
+    let staged_payloads: BTreeSet<String> = steps
+        .iter()
+        .filter_map(|step| match &step.technique {
+            TechniqueKind::NetworkStager { params } => Some(params.payload.clone()),
+            _ => None,
+        })
+        .collect();
+
     for step in &steps {
         let mut record = engine::manifest::StepRecord {
             index: step.index,
@@ -452,6 +462,36 @@ fn build(
         };
 
         let cipher = match &step.payload {
+            Some(payload) if staged_payloads.contains(&payload.name) => {
+                // A payload fetched at run time by a `network_stager` step is not
+                // embedded: nothing is read, encrypted or written for it.
+                anstream::println!(
+                    "{}",
+                    ui.done(
+                        &format!(
+                            "step {} {}",
+                            step.index,
+                            ui.brand(step.technique.name())
+                        ),
+                        dotted(
+                            ui,
+                            &[ui.brand("staged"), ui.dim(payload.plan.format.label())]
+                        )
+                    )
+                );
+                Some(steps::PayloadCipher {
+                    nonce: [0u8; 24],
+                    key: [0u8; 32],
+                    plaintext_len: 0,
+                    path: String::new(),
+                    format: payload.plan.format,
+                    export: payload.plan.export.clone(),
+                    args: payload.plan.args.clone().unwrap_or_default(),
+                    args_override: payload.plan.args_mode == engine::args::ArgsMode::Override,
+                    marker: stub::generate_stub_marker(),
+                    staged: true,
+                })
+            }
             Some(payload) => {
                 // Read the input payload and validate it (fail early, before
                 // encrypting or compiling).
@@ -537,6 +577,7 @@ fn build(
                     args: payload.plan.args.clone().unwrap_or_default(),
                     args_override: payload.plan.args_mode == engine::args::ArgsMode::Override,
                     marker: stub::generate_stub_marker(),
+                    staged: false,
                 })
             }
             None => {
@@ -816,7 +857,7 @@ fn load_stub_template(plan: &plan::Plan) -> Result<(String, String, bool)> {
             ))
         }
         None => {
-            let relative = "templates/stub/main.rs.tpl";
+            let relative = "src/engine/templates/main.rs.tpl";
             let template_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
             let source = std::fs::read_to_string(&template_path).map_err(|source| {
                 error::PackerError::ReadLoader {
