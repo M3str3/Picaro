@@ -1771,6 +1771,22 @@ $IMPORTS_BLOCK$
         assert_eq!(info.arch(), Some(Arch::X86));
     }
 
+    /// M2-bis: the PE-injection fragment compiles for i686 — the PE32 parser and
+    /// the target-resident TLS prologue (hand-written x86 machine code that runs
+    /// `TlsSetValue` + the payload's callbacks before the entry point).
+    #[test]
+    #[ignore = "requires rustc and the workspace built for the i686 target"]
+    fn compiles_a_pe_injection_stub_for_i686() {
+        let pipeline = vec![RuntimeStep::new(TechniqueKind::PeInjection {
+            params: crate::techniques::pe_injection::Params::default(),
+        })];
+        let (source, ciphertext) = render_builtin(&pipeline);
+
+        let info = compile_i686(&source, Some(&ciphertext), "pe_injection");
+        assert_eq!(info.machine, crate::engine::pe::IMAGE_FILE_MACHINE_I386);
+        assert_eq!(info.arch(), Some(Arch::X86));
+    }
+
     /// M3: every x86-capable Preparation compiles for i686 next to an execution
     /// technique — `anti_debug`'s x86 debug-register `CONTEXT`, the arch-neutral
     /// AMSI/ETW patches and the `bouncer`'s Win32 checks.
