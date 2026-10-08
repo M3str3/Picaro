@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  A Task Scheduler definition that runs a packed DLL through rundll32 -- a
+  shell-free launch vector: no cmd.exe and no powershell.exe are involved in
+  either registering or running it.
+
+  Register it from the Task Scheduler GUI (Action -> Import Task), or from any
+  COM host (the Schedule.Service object, e.g. from wsh_host.vbs), or with
+  `schtasks /Create /XML` (which itself needs cmd -- the GUI and the COM path do
+  not). Edit the Command/Arguments below to the artifact's real path.
+
+  rundll32 returns at once and never relays the export's exit code, so the
+  evidence that the chain ran is its output or a side effect, not the task's
+  result. See docs/hosts.md and examples/hosts/regsvr32_host.cmd for the
+  exported-name caveat (this uses the plain `Run` export).
+-->
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Runs a packed DLL through rundll32.</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <!-- No execution time limit: the export can block for the payload's lifetime. -->
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>%SystemRoot%\System32\rundll32.exe</Command>
+      <Arguments>C:\path\to\dll-shellcode.dll,Run</Arguments>
+    </Exec>
+  </Actions>
+</Task>

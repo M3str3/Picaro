@@ -21,3 +21,7 @@ docs
 *.pdb
 *.ilk
 *.exp
+
+# Development container exchange folder (docker-compose.yml): payloads and plans
+# belong on the host, not baked into the image.
+exchange

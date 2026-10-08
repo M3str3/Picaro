@@ -10,7 +10,10 @@ lets the host run is the rule that ends up running the chain. Design:
 Runnable, copy-paste versions of the recipes below live in `examples/hosts/`
 (`ctypes_host.py`, `pinvoke_host.ps1`, `dotnet_host/`, `rundll32_host.ps1`,
 `perl_host.pl`, `ruby_host.rb`, `php_host.php`, `luajit_host.lua`,
-`node_host.js`, `java_host/`). Build one of the two example DLLs first:
+`node_host.js`, `java_host/`, plus the shell-free and document hosts
+`vba_host.bas`, `autoit_host.au3`, `autohotkey_host.ahk`, `regsvr32_host.cmd`,
+`wsh_host.vbs`, `wsh_host.js`, `scheduled_task.xml`, `r_host.R`,
+`julia_host.jl`, `tcl_host.tcl`). Build one of the two example DLLs first:
 
 ```sh
 cargo run -- build examples/plans/dll-shellcode.yaml   # chain returns 42
@@ -25,6 +28,7 @@ cargo run -- build examples/plans/dll.yaml             # chain opens a dialog
 | PowerShell 5.1 | `Add-Type` (P/Invoke) | yes (in-box) | yes | yes (`42`) | **measured** |
 | .NET (`dotnet`) | `NativeLibrary` + delegate | yes (runtime) | yes | yes (`42`) | **measured** |
 | `rundll32.exe` | its own loader | yes (Windows) | yes | **no** (always exits 0) | **measured** |
+| `regsvr32.exe` | its own loader, calls `DllRegisterServer` | yes (Windows) | yes | **no** (exits 0 under `/s`) | documented |
 | Perl (Windows) | `Win32::API` | Strawberry bundles it | yes | yes | documented |
 | Java 22+ | `java.lang.foreign` (FFM) | yes (JDK) | yes | yes | documented |
 | Java (any) | `System.load` → `JNI_OnLoad` | yes (JDK) | no (detached) | no | documented |
@@ -36,8 +40,8 @@ cargo run -- build examples/plans/dll.yaml             # chain opens a dialog
 | AutoIt / AutoHotkey | `DllCall` | yes | yes | yes | documented |
 | R / Julia | `dyn.load` / `ccall` | yes | yes | yes | documented |
 | Tcl | `ffidl` | no | yes | yes | documented |
-| cmd / batch | no FFI — can only *launch* a host (`rundll32`, below) | — | — | — | **measured** |
-| WSH (JScript/VBScript), `mshta`, Lua 5.4 | — | — | — | — | **cannot** |
+| cmd / batch | no FFI — can only *launch* a host (`rundll32`/`regsvr32`, below) | — | — | — | **measured** |
+| WSH (JScript/VBScript), `mshta`, Lua 5.4 | — (WSH can *launch* a host, not call it) | — | — | — | **cannot host** |
 
 *Blocking export* = the host's own thread is held for the payload's lifetime
 (what keeps `rundll32` alive); *detached* = the chain runs on a worker and the
@@ -189,9 +193,14 @@ cannot replace it as a host — but it does not have to:
   which this artifact does not export: measured, the chain did not run and it
   still exited 0, so under `/s` its exit code is not evidence. It would need
   `entry: export:DllRegisterServer` (on x64, where the four-argument shape is
-  harmless against a zero-argument caller).
-- **`wscript`/`cscript` (JScript, VBScript) and `mshta` cannot** — no FFI. "If
-  PowerShell is blocked, use VBScript" does not work.
+  harmless against a zero-argument caller). Runnable:
+  `examples/hosts/regsvr32_host.cmd` with `examples/plans/dll-regsvr32.yaml`.
+- **`wscript`/`cscript` (JScript, VBScript) and `mshta` cannot *host*** — no FFI,
+  so "if PowerShell is blocked, use VBScript" does not let the script call the
+  export. They **can launch**, though: `WScript.Shell.Run`,
+  `Shell.Application.ShellExecute` and WMI `Win32_Process.Create` start
+  `rundll32` (or an interpreter) with no shell in the chain — runnable in
+  `examples/hosts/wsh_host.vbs` and `wsh_host.js`.
 - **What the block is matters more than the host.** A *scripting-host* block
   (ConstrainedLanguage, an AppLocker/WDAC rule against `powershell.exe`) leaves
   every host above untouched; **DLL rules** (AppLocker DLL rules, WDAC code
@@ -200,6 +209,33 @@ cannot replace it as a host — but it does not have to:
   exactly what `kind: dll` sidesteps, as long as the host is one of the allowed
   programs (and the default rules put everything under `%WINDIR%` on that list,
   which is why `rundll32` survives).
+
+### No shell at all (no `cmd`, no `powershell`)
+
+This is the case `kind: dll` exists for, and it is real: a WDAC/AppLocker policy
+(or a GPO) can deny `cmd.exe`, `powershell.exe` and `pwsh.exe` outright, and a
+kiosk / Server-Core / Nano-Server image may ship neither. Two questions have to
+be answered separately, and only the first is about the artifact:
+
+- **Who loads the DLL.** A DLL is not a program, so a *program* allow-list never
+  applies to it; the host just has to be an allowed program. In-process is best:
+  **Office/VBA** (`Declare PtrSafe Function`) loads it straight from the
+  document with no second process at all (`examples/hosts/vba_host.bas`), and any
+  allowed interpreter (Python, Java, .NET, Perl, Ruby, PHP, LuaJIT, AutoIt,
+  AutoHotkey, R, Julia, Tcl) works the same way.
+- **Who starts the host.** This is where a shell is usually assumed and is not
+  needed: a **WSH launcher** (`examples/hosts/wsh_host.vbs` / `wsh_host.js`), the
+  **shell** (`Shell.Application.ShellExecute`), **WMI**
+  (`Win32_Process.Create`), a **shortcut** (`.lnk` to `rundll32.exe`), a
+  **scheduled task** (`examples/hosts/scheduled_task.xml`), or the
+  **document/macro** in the VBA case.
+
+None of it survives the wrong *kind* of block: a **scripting-host** block
+(ConstrainedLanguage, or an AppLocker rule against the script host) kills only
+the script vectors; **DLL rules** and **WDAC code integrity** block the artifact
+itself at load, whoever loads it, so there the variable is the signature, not the
+host (`build.output.sign`); and a program allow-list is exactly what this mode
+sidesteps.
 
 ## Documented hosts
 
@@ -344,6 +380,11 @@ Private Declare PtrSafe Function Run Lib "C:\path\loader.dll" Alias "Run" _
 Office. The three pointer parameters receive `LongPtr` addresses; an `As String`
 parameter receives a pointer to an ANSI buffer, and `vbNullString` passes NULL.
 
+Runnable: `examples/hosts/vba_host.bas`. Import it (Alt+F11 → File → Import
+File) and run `?PicaroRun` from the Immediate window. `Declare ... Lib` needs a
+**literal** path (a variable is rejected) and the artifact must match Office's
+bitness — both noted in the file.
+
 ### AutoIt / AutoHotkey
 
 ```autoit
@@ -356,6 +397,10 @@ DllCall(A_ScriptDir "\loader.dll\Run", "Ptr", 0, "Ptr", 0, "Ptr", 0, "Int", 0, "
 
 Both are in-box interpreters with FFI built in, and both are common on
 workstations.
+
+Runnable: `examples/hosts/autoit_host.au3` (`AutoIt3.exe …`) and
+`examples/hosts/autohotkey_host.ahk` (AutoHotkey **v2**; v1 differs in `DllCall`
+and `A_Args`, as noted inside the file).
 
 ### R, Julia, Tcl
 
@@ -375,11 +420,17 @@ arguments directly. R's `.C` passes pointers to its arguments and returns the
 value the export wrote. Tcl needs `ffidl`/`critcl`: its own `load` command is for
 Tcl extension packages, not for arbitrary DLLs.
 
+Runnable: `examples/hosts/r_host.R`, `examples/hosts/julia_host.jl`,
+`examples/hosts/tcl_host.tcl`.
+
 ## Hosts that cannot do it
 
 Worth knowing, because "just wrap it in a script" is a common plan:
 
-- **cmd / batch** and **WSH (JScript/VBScript)** have no FFI at all.
+- **cmd / batch** and **WSH (JScript/VBScript)** have no FFI at all — neither
+  can call the export. Both can *launch* a program that can (`rundll32`, an
+  interpreter), which is how they matter on a shell-free host
+  (`examples/hosts/wsh_host.vbs`).
 - **Standard Lua 5.4** has no `ffi` (LuaJIT does).
 - **Node.js** needs a package (above).
 - **Python, PowerShell, .NET, Ruby, Java, PHP, Perl, VBA** can all do it in-box

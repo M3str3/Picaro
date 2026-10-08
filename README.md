@@ -124,6 +124,100 @@ How it works:
 > to the `-pc-windows-gnu` target matching `arch`). Run the resulting `.exe` on a
 > Windows host.
 
+### Containers (docker compose)
+
+`docker-compose.yml` defines two services built from the same image:
+
+| service | toolchain | what it is for |
+| --- | --- | --- |
+| `dev` | rustc + cargo + MinGW + `msfvenom` | developing the packer, and AI agents working in an encapsulated environment where the host EDR stays out of the way |
+| `run` | none | packing a payload on a machine with nothing installed |
+
+Both mount exactly one host folder, `exchange/`, which is the only thing they
+write to the host: payloads and plans in, packed artifacts out. Everything else
+stays in the container — the packer's scratch in `/tmp/picaro-build` and Cargo's
+`target/` in the `picaro-target` volume — so compiling the packer never leaves a
+byte on your disk.
+
+```bash
+# Build both images (a few minutes the first time: the dev image also installs
+# Metasploit).
+docker compose build
+```
+
+#### `dev` — develop the packer
+
+```bash
+# Interactive shell. The repo is at /work, `picaro` is on PATH, and `exchange/`
+# is at /work/exchange.
+docker compose run --rm dev
+
+# ...or non-interactively, the way an agent or CI would:
+docker compose run --rm dev bash -lc 'cargo clippy --all-targets'
+docker compose run --rm dev bash -lc 'cargo test'
+```
+
+A round trip (from the shell, or as one `bash -lc`):
+
+```bash
+# 1. Generate a payload with msfvenom (raw shellcode, for reflective loading).
+msfvenom -p windows/x64/exec CMD=calc.exe -f raw -o /work/exchange/payload.bin
+
+# 2. Start from the bundled shellcode plan and point it at the payload.
+sed 's#\./examples/payloads/demo_shellcode\.bin#./payload.bin#' \
+    examples/plans/shellcode.yaml > /work/exchange/plan.yaml
+
+# 3. Build from the exchange folder, so the artifact lands there too
+#    (the plan writes ./dist/test_shellcode.exe).
+cd /work/exchange && picaro build plan.yaml
+
+# 4. Measure it.
+picaro audit dist/test_shellcode.exe
+```
+
+#### `run` — pack without a toolchain
+
+The `run` service uses the production image and mounts only `exchange/`; the repo
+is baked in, and the mounted folder appears as `/work`, so run the packer from
+there:
+
+```bash
+# plan.yaml and payload.bin live in exchange/.
+docker compose run --rm run build plan.yaml
+docker compose run --rm run audit dist/test_shellcode.exe
+```
+
+The artifact and its side files (`dist/…`, `<stem>.ca.cer`,
+`<stem>.manifest.json`, `.picaro/`) appear under `exchange/` on the host.
+
+The containers are Linux, so they build the Windows PE but cannot run it;
+execute the artifact on a Windows host. Both run as uid/gid
+`${PICARO_UID:-1000}:${PICARO_GID:-1000}`; if your host user differs, set
+`PICARO_UID=$(id -u) PICARO_GID=$(id -g)` before `docker compose build` so the
+files stay yours. The Cargo volume is reset with `docker compose down -v`.
+
+If the build fails on the Metasploit step with a certificate error, you are
+behind a TLS-inspecting corporate proxy (Netskope, Zscaler, ...): it re-signs
+`downloads.metasploit.com` with a root the base image does not trust. Trust that
+root once with, eg:
+
+```bash
+# Extract the proxy's self-signed root from the build's own network path and
+# trust it in the image. Trusts whatever root the network presents — a
+# convenience for a locked-down dev box, not for CI.
+PICARO_TRUST_PROXY_CA=1 docker compose build
+```
+
+Or, if you already have the proxy root as a file, drop it in `certs/` (it is
+gitignored) and point the build at it:
+
+```bash
+mkdir -p certs && cp /path/to/proxy-root.crt certs/
+PICARO_EXTRA_CA=certs/proxy-root.crt docker compose build
+```
+
+Both knobs only affect the `dev` image's trust store; neither touches the host.
+
 <!-- --8<-- [start:plan] -->
 ## Plan
 
@@ -516,8 +610,10 @@ src/
   ui.rs         terminal output: banner, palette, formatting helpers
 templates/stub/ Rust stub template with $placeholders$
 examples/       curated example plans, test payloads, sample custom stubs
+exchange/       (gitignored) the one host folder shared writable with the containers
 docs/           Markdown sources (Material for MkDocs; nav in mkdocs.yml)
 scripts/        Docker wrappers (picaro.py, docs.py)
+docker-compose.yml  development container (picaro + msfvenom)
 yara/           YARA rules (placeholder for now)
 tests/          CLI integration tests + fixtures (tests/plans/, tests/fixtures/)
 build/  dist/   (gitignored) intermediate artifacts and final binaries

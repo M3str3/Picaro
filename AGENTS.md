@@ -72,10 +72,12 @@ tests/
   plans/      CI / validation fixtures
   fixtures/     committed PE fixtures
 scripts/        Docker wrappers (picaro.py, docs.py)
+docker-compose.yml  containers: dev (picaro + msfvenom) and run (no toolchain)
 yara/           YARA rules (engine not wired yet)
 docs/           docs source (mkdocs.yml lives at the root)
 build/          (gitignored) intermediate artifacts
 dist/           (gitignored) final packed binaries
+exchange/       (gitignored) the one host folder shared writable with the containers
 code_examples/  (gitignored) local reference scratch
 ```
 

@@ -123,11 +123,12 @@ def container_user() -> str | None:
 def build_command(args: list[str], workdir: Path, interactive: bool) -> list[str]:
     """Assemble the `docker run` argv.
 
-    The current directory is mounted at /work: plans and payloads are read from
-    it and outputs (dist/...) are written back through the same mount. The
-    container runs as the invoking user where that matters (see
-    [`container_user`]) and keeps its scratch files out of the read-only source
-    tree (`PICARO_BUILD_DIR`).
+    The current directory is mounted at /work: it is the exchange folder — plans
+    and payloads are read from it and outputs (dist/...) are written back through
+    the same mount. Run the wrapper from a dedicated folder (not the repo root)
+    to keep the packed artifacts off the source tree. The container runs as the
+    invoking user where that matters (see [`container_user`]) and keeps its
+    scratch files out of the read-only source tree (`PICARO_BUILD_DIR`).
     """
     command = ["docker", "run", "--rm"]
     if interactive:

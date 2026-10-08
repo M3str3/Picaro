@@ -1,0 +1,76 @@
+# Two containers around the picaro image:
+#
+#   * `dev` — the toolchain (rustc, cargo, MinGW) plus Metasploit's `msfvenom`,
+#     for developing the packer and for AI agents working in an encapsulated
+#     environment where the host EDR stays out of the way.
+#   * `run` — the production image (no toolchain), for packing a payload on a
+#     machine with nothing installed.
+#
+#   docker compose build                          # build both images (once)
+#   docker compose run --rm dev                   # shell in the repo (toolchain)
+#   docker compose run --rm dev bash -lc 'cargo test'
+#   docker compose run --rm run build plan.yaml   # pack, no toolchain
+#
+# Both services share exactly one host folder: `exchange/` (created and
+# gitignored). It is the *only* thing they write to the host — payloads and
+# plans in, packed artifacts out. Everything else stays in the container: the
+# packer's scratch in /tmp (PICARO_BUILD_DIR) and Cargo's target/ in the
+# `picaro-target` volume, so compiling the packer never touches your disk.
+#
+# Note: the containers are Linux, so they *build* the Windows PE but cannot run
+# it; execute the artifact on a Windows host.
+
+services:
+  # Development container: toolchain + msfvenom + a shell. The repo is at /work
+  # (writable — you are editing it); the shared folder is /work/exchange.
+  dev:
+    build:
+      context: .
+      target: dev
+      # The dev user's uid/gid. Defaults match the common 1000; if your host
+      # user differs, rebuild with, e.g.:
+      #   PICARO_UID=$(id -u) PICARO_GID=$(id -g) docker compose build
+      args:
+        PICARO_UID: "${PICARO_UID:-1000}"
+        PICARO_GID: "${PICARO_GID:-1000}"
+        # Optional: path (inside this repo) to a CA to trust, for a corporate
+        # TLS-inspecting proxy. Or set PICARO_TRUST_PROXY_CA=1 to extract the
+        # proxy's root automatically. See README.md.
+        PICARO_EXTRA_CA: "${PICARO_EXTRA_CA:-}"
+        PICARO_TRUST_PROXY_CA: "${PICARO_TRUST_PROXY_CA:-}"
+    image: picaro-dev:latest
+    # Reap zombies and forward signals, so Ctrl-C reaches the shell cleanly.
+    init: true
+    stdin_open: true
+    tty: true
+    working_dir: /work
+    environment:
+      # Keep the packer's scratch files off the repo and off the host.
+      PICARO_BUILD_DIR: /tmp/picaro-build
+    volumes:
+      # The repo (writable: you are developing it).
+      - .:/work
+      # Cargo's output lives in a named volume, never on the host. The image
+      # seeds it owned by the dev user, so the build is writable and cached
+      # across runs. Reset with `docker compose down -v`.
+      - picaro-target:/work/target
+    command: ["bash"]
+
+  # Run container: the production image. Nothing from the host is mounted except
+  # `exchange/`, which appears as /work: plans and payloads in, artifacts out.
+  run:
+    build:
+      context: .
+      target: picaro
+    image: picaro:latest
+    working_dir: /work
+    # Same uid/gid as the dev image (see the note in README.md). The production
+    # image runs as root; this keeps files written to exchange/ owned by you.
+    user: "${PICARO_UID:-1000}:${PICARO_GID:-1000}"
+    environment:
+      PICARO_BUILD_DIR: /tmp/picaro-build
+    volumes:
+      - ./exchange:/work
+
+volumes:
+  picaro-target:
