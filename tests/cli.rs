@@ -121,7 +121,7 @@ fn banner_is_printed_by_default() {
     assert!(output.status.success(), "list must exit 0");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("mimicry-based packer"),
+        stdout.contains("The plan is the program"),
         "banner missing: {stdout}"
     );
 }
@@ -254,10 +254,12 @@ fn build_interactive_quit_writes_nothing() {
         .spawn()
         .expect("spawn picaro build interactive");
 
-    // Nine blank answers walk the first pass with their defaults; `3` quits the
-    // review screen, so the wizard stops before writing (or compiling) anything.
+    // Eleven blank answers walk the first pass with their defaults (name, args,
+    // arch, output kind, execution, preparation, strings, syscalls, output path,
+    // strip, trim paths); `3` quits the review screen, so the wizard stops
+    // before writing (or compiling) anything.
     let mut stdin = child.stdin.take().expect("stdin is piped");
-    stdin.write_all(&b"\n".repeat(10)).expect("write answers");
+    stdin.write_all(&b"\n".repeat(11)).expect("write answers");
     stdin.write_all(b"3\n").expect("write the quit choice");
     drop(stdin);
 
