@@ -44,10 +44,9 @@ fn parses_params_from_empty_yaml() {
 
 #[test]
 fn parses_a_payload() {
-    let step: TechniqueKind = serde_yml::from_str(
-        "technique: process_ghosting\nparams:\n  payload: implant\n",
-    )
-    .expect("process_ghosting with a payload should parse");
+    let step: TechniqueKind =
+        serde_yml::from_str("technique: process_ghosting\nparams:\n  payload: implant\n")
+            .expect("process_ghosting with a payload should parse");
     match step {
         TechniqueKind::ProcessGhosting { params } => {
             assert_eq!(params.payload.as_deref(), Some("implant"));
@@ -66,7 +65,11 @@ fn def_is_well_formed() {
     assert!(!DEF.stub_fragment.is_empty());
     assert!(!DEF.readme.is_empty());
     // Ghosting is Win32-only: the section/map/delete flow needs no Nt* helper.
-    assert!(DEF.syscalls.is_empty(), "unexpected syscalls: {:?}", DEF.syscalls);
+    assert!(
+        DEF.syscalls.is_empty(),
+        "unexpected syscalls: {:?}",
+        DEF.syscalls
+    );
 }
 
 #[test]

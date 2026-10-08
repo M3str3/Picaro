@@ -259,7 +259,10 @@ fn the_fragment_hollows_through_the_syscall_layer() {
         4,
         "expected a writable and a restore protection change for both the stomp and the restore"
     );
-    assert!(!fragment.contains("VirtualProtectEx"), "no direct Win32 call");
+    assert!(
+        !fragment.contains("VirtualProtectEx"),
+        "no direct Win32 call"
+    );
     assert!(!fragment.contains("VirtualAlloc"), "no direct Win32 call");
     // Raw shellcode has no import table, so the shared resolver is not wired in
     // (`DEF.resolves_imports` is false).

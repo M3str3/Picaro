@@ -468,11 +468,7 @@ fn build(
                 anstream::println!(
                     "{}",
                     ui.done(
-                        &format!(
-                            "step {} {}",
-                            step.index,
-                            ui.brand(step.technique.name())
-                        ),
+                        &format!("step {} {}", step.index, ui.brand(step.technique.name())),
                         dotted(
                             ui,
                             &[ui.brand("staged"), ui.dim(payload.plan.format.label())]

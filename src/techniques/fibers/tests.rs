@@ -248,7 +248,9 @@ fn render_stub_for(format: PayloadFormat, name: &str) -> String {
 
     let template = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src").join("engine").join("templates")
+            .join("src")
+            .join("engine")
+            .join("templates")
             .join("main.rs.tpl"),
     )
     .expect("template");
@@ -352,7 +354,9 @@ fn compiles_a_fibers_stub_for_i686() {
 
     let template = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src").join("engine").join("templates")
+            .join("src")
+            .join("engine")
+            .join("templates")
             .join("main.rs.tpl"),
     )
     .expect("template");

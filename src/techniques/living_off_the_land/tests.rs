@@ -107,7 +107,12 @@ fn render_fragment_obfuscates_the_launch_fixed_strings() {
     // The quoted literals must not survive the render: the environment variable
     // name, the system directory and the diagnostic are rebuilt from obfuscated
     // bytes. (Bare words may legitimately appear in the fragment's comments.)
-    for literal in ["\"SystemRoot\"", "\"System32\"", "C:\\Windows", "could not launch"] {
+    for literal in [
+        "\"SystemRoot\"",
+        "\"System32\"",
+        "C:\\Windows",
+        "could not launch",
+    ] {
         assert!(
             !fragment.contains(literal),
             "the launch's fixed string '{literal}' leaked in cleartext"

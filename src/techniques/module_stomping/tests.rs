@@ -285,7 +285,9 @@ fn compiles_module_stomping_stub_for_both_syscall_modes() {
 
     let template = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src").join("engine").join("templates")
+            .join("src")
+            .join("engine")
+            .join("templates")
             .join("main.rs.tpl"),
     )
     .unwrap();

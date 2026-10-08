@@ -77,9 +77,10 @@ pub const DEF: TechniqueDef = TechniqueDef {
 /// message at run time through `strings`, so no diagnostic text lands in the
 /// generated stub's `.rdata`. Messages are keyword-free (they never mention the
 /// technique name).
-const MESSAGES: &[(&str, &str)] = &[
-    ("$MSG_LAUNCH_FAILED$", "could not launch the configured binary"),
-];
+const MESSAGES: &[(&str, &str)] = &[(
+    "$MSG_LAUNCH_FAILED$",
+    "could not launch the configured binary",
+)];
 
 impl Params {
     /// Renders the launcher fragment for these parameters.

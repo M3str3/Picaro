@@ -76,7 +76,10 @@ const MESSAGES: &[(&str, &str)] = &[
         "$MSG_SECTION_FAILED$",
         "could not create a section over the temp file",
     ),
-    ("$MSG_MAP_FAILED$", "could not map the section into this process"),
+    (
+        "$MSG_MAP_FAILED$",
+        "could not map the section into this process",
+    ),
     ("$MSG_FILE_TOO_SMALL$", "payload too small to be a PE"),
     ("$MSG_BAD_DOS$", "invalid DOS header (missing MZ signature)"),
     ("$MSG_BAD_NT$", "invalid NT header (missing PE signature)"),
@@ -102,7 +105,9 @@ impl Params {
         for (index, (placeholder, text)) in MESSAGES.iter().enumerate() {
             rendered = rendered.replace(
                 placeholder,
-                &strings.obfuscate(text).render_stub_expr(&format!("msg_{index}")),
+                &strings
+                    .obfuscate(text)
+                    .render_stub_expr(&format!("msg_{index}")),
             );
         }
         rendered

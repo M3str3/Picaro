@@ -74,7 +74,10 @@ pub const DEF: TechniqueDef = TechniqueDef {
 /// technique name).
 const MESSAGES: &[(&str, &str)] = &[
     ("$MSG_DATE_FAILED$", "could not read the current date"),
-    ("$MSG_COUNTER_READ_FAILED$", "could not read the run counter"),
+    (
+        "$MSG_COUNTER_READ_FAILED$",
+        "could not read the run counter",
+    ),
     (
         "$MSG_COUNTER_WRITE_FAILED$",
         "could not write the run counter",

@@ -85,10 +85,7 @@ pub const DEF: TechniqueDef = TechniqueDef {
 /// message at runtime, so no diagnostic text — least of all the hollowing target
 /// or a technique keyword — lands in the generated stub's `.rdata`.
 const MESSAGES: &[(&str, &str)] = &[
-    (
-        "$MSG_EMPTY_PAYLOAD$",
-        "dll_hollowing: the payload is empty",
-    ),
+    ("$MSG_EMPTY_PAYLOAD$", "dll_hollowing: the payload is empty"),
     (
         "$MSG_PE_PAYLOAD$",
         "dll_hollowing: the payload is a PE image, but this technique only runs raw shellcode",

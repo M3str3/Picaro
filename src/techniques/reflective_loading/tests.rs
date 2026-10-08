@@ -110,7 +110,9 @@ fn compiles_reflective_loading_stub_for_every_format() {
 
     let template = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src").join("engine").join("templates")
+            .join("src")
+            .join("engine")
+            .join("templates")
             .join("main.rs.tpl"),
     )
     .unwrap();
@@ -189,7 +191,9 @@ fn compiles_reflective_loading_stub_to_pe() {
 
     let template = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src").join("engine").join("templates")
+            .join("src")
+            .join("engine")
+            .join("templates")
             .join("main.rs.tpl"),
     )
     .unwrap();
@@ -275,8 +279,13 @@ fn run_proxy_case(
         crate::engine::api_resolution::ApiResolutionConfig::from_yaml(Some(&yaml)).unwrap();
 
     // 4. Render (debug) and compile the stub.
-    let template =
-        std::fs::read_to_string(root.join("src").join("engine").join("templates").join("main.rs.tpl")).unwrap();
+    let template = std::fs::read_to_string(
+        root.join("src")
+            .join("engine")
+            .join("templates")
+            .join("main.rs.tpl"),
+    )
+    .unwrap();
     let params = crate::engine::steps::test_params(
         &[RuntimeStep::new(TechniqueKind::ReflectiveLoading {
             params: Params::default(),
