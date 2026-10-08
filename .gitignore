@@ -5,6 +5,11 @@ code_examples/
 # Local session memory: a rolling developer note, not part of the repo.
 .memory.md
 
+# Local working notes: plans, prompts and scratch — never published.
+.plan*.md
+docs/FUTURE_MULTI_STUB_PLAN.md
+docs/site/MERMAID_PROMPT.md
+
 # Host build output.
 /target
 /build
@@ -13,8 +18,15 @@ code_examples/
 # Lab
 /lab
 
-# Documentation site output (MkDocs).
+# Documentation site output.
 /site
+
+# Documentation site (Astro + Starlight) build artifacts and generated sources.
+/docs/site/node_modules/
+/docs/site/.astro/
+/docs/site/dist/
+/docs/site/src/content/docs/
+/docs/site/src/sidebar.mjs
 
 # Development container exchange folder (docker-compose.yml): the one host folder
 # shared writable with the containers — msfvenom payloads, plans and packed

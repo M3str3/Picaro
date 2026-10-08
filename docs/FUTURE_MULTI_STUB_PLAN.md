@@ -463,7 +463,7 @@ touched yet.
 
 ### Phase 2 — Runtime as a library ⬜
 
-- New `templates/runtime/lib.rs.tpl` (today's `main.rs.tpl` minus
+- New `src/engine/templates/runtime/lib.rs.tpl` (today's `main.rs.tpl` minus
   `main`, plus the FFI layer and `picaro_run`).
 - `compiler.rs`: `compile_runtime_lib()` (`--crate-type=staticlib`)
   and `link_c_stub()`; `compile_stub()` stays for
@@ -471,7 +471,7 @@ touched yet.
 - Minimal ABI first: `picaro_init` (singleton), `picaro_marker`,
   `picaro_last_error`, `picaro_print_error`, `picaro_free`,
   `picaro_run`. No granular wrappers yet.
-- Builtin C template `templates/stub/main.c.tpl` = `$PICARO.RUNTIME$`.
+- Builtin C template `src/engine/templates/main.c.tpl` = `$PICARO.RUNTIME$`.
 
 Exit criteria: a C stub built end to end from a YAML, running a
 test payload, with the same observable behaviour as the Rust path
@@ -549,7 +549,7 @@ noise.
 
 - `examples/stubs/loader.c` showing both styles (+ a YAML using it).
 - `docs/` page: the block catalog, a worked C example, toolchain
-  requirements; nav entry in `mkdocs.yml`.
+  requirements; nav entry in `docs/nav.yml`.
 - Manifest fields (`stub.language`, compiler version/path) in
   `engine/manifest.rs`.
 - Wizard: prompt for the language (only after the C path is proven).
@@ -570,9 +570,9 @@ noise.
 | `src/config/schema.rs` | `build.stub.language`, `build.stub.toolchain`, `build.stub.header_out`, top-level `exports:` |
 | `src/config/validate.rs` | language/arch/toolchain validation; `exports:` vs `runtime:` mutual exclusion; block-catalog rules (§5) |
 | `src/main.rs` | dispatch on language in `build()` and `dry_run()`; subsystem for C |
-| `templates/runtime/lib.rs.tpl` | **new** — generated runtime library template |
-| `templates/stub/main.c.tpl` | **new** — builtin C stub (`$PICARO.RUNTIME$`) |
-| `templates/stub/main.rs.tpl` | unchanged |
+| `src/engine/templates/runtime/lib.rs.tpl` | **new** — generated runtime library template |
+| `src/engine/templates/main.c.tpl` | **new** — builtin C stub (`$PICARO.RUNTIME$`) |
+| `src/engine/templates/main.rs.tpl` | unchanged |
 | `src/techniques/**` | fragment text unchanged (verify per technique) |
 | `src/engine/resources/`, `signing.rs` | unchanged (PE post-processing) |
 | `src/audit/**` | unchanged; used as the parity gate |
