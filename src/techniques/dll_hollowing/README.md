@@ -34,7 +34,7 @@ flowchart TD
 
 1. `LoadLibraryA` maps the hollowing target. If it is already loaded the call
    only bumps its reference count, and the module keeps whatever base it has;
-   the loader (not this technique) does the mapping, the catalog/hash
+   the loader (not this technique) does the mapping, the catalogue/hash
    bookkeeping and the `DllMain(DLL_PROCESS_ATTACH)` call.
 2. The module's *mapped* PE headers are copied into a local buffer and walked to
    the `.text` section: `VirtualAddress` gives the section's address in the

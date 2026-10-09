@@ -1,4 +1,4 @@
-# picaro — Agent Instructions
+# Picaro — Agent Instructions
 
 ## What this project is
 
@@ -70,7 +70,7 @@ tests/
   plans/      CI / validation fixtures
   fixtures/     committed PE fixtures
 scripts/        Docker wrappers (picaro.py, docs.py)
-docker-compose.yml  containers: dev (picaro + msfvenom) and run (no toolchain)
+docker-compose.yml  containers: dev (Picaro + msfvenom) and run (no toolchain)
 docs/           Markdown sources; full-screen or in the site
   nav.yml         the documentation navigation (single source of truth)
   site/           the Starlight site project (config, styles, assembler, Dockerfile)
@@ -273,7 +273,7 @@ not mapped in the target — Phase E, D-23). The generated `resolution_policy`
 returns `crate::ImportPolicy` (`Proxy(u64) | Forward | Abort`); `unmatched: abort`
 makes `resolve_imports` fail the load on the first non-catalogue import (with an
 advisory printed at build time). Design, phases and decision log:
-`docs/api-resolution.md` (in the docs nav under Architecture).
+`docs/design/api-resolution.md` (in the docs nav under Architecture).
 
 **`build.stub.debug` (done).** `true` compiles the stub without the hardening
 (`opt-level=0`, `debuginfo=2`, no strip, no path remapping) and makes the
@@ -337,7 +337,7 @@ optional and each activates one check — `hostname`/`username`/`domain`
 (case-insensitive globs), `language` (BCP-47), `keyboard` (4-digit layout
 codes), `not_in_vm` (CPUID hypervisor leaves), `not_in_sandbox` (aggregate
 heuristic, threshold 3), `min_uptime_min`, `min_ram_mb`; `mode: all|any`
-combines them and `on_fail: silent|exit` picks the rejection behaviour. No
+combines them and `on_fail: silent|exit` picks the rejection behavior. No
 field declared is a no-op (surfaced by `plan::validate::advisories` and
 printed as a build warning). **Preparation contract change:** a preparation now
 returns `Result<bool, E>` — `Ok(true)` continues, `Ok(false)` aborts — so
@@ -514,7 +514,7 @@ shape: `--crate-type=cdylib`, a no-op `DllMain`, a non-blocking `JNI_OnLoad`
 shape (CPython `ctypes`, P/Invoke, `rundll32`), the chain on a worker thread
 with `catch_unwind` (`panic=unwind` for DLL builds) and
 `AttachConsole(ATTACH_PARENT_PROCESS)` for output. It drops the reference's argv
-plumbing (picaro's plan is baked in) and rejects, for DLL builds:
+plumbing (Picaro's plan is baked in) and rejects, for DLL builds:
 `subsystem: windows`, `resources.manifest`, `self_deletion`, `sleep_obfuscation`
 (both act on the *running image* — the host, in a DLL), `bouncer` `on_fail: exit`
 and custom stubs. Touchpoints: `src/plan/schema.rs`
@@ -573,11 +573,11 @@ measured** (no JDK on the host) and `dumpbin` was unavailable, so `picaro audit`
 - **A mapped image's TLS index can collide with a loaded module's.** Both
   execution techniques give a manually mapped image a TLS index reserved through
   `TlsAlloc` and write its block into the loader's TLS array (`gs:[0x58]` /
-  `fs:[0x2C]` — *not* the `TlsSetValue` array, which is what picaro used before
+  `fs:[0x2C]` — *not* the `TlsSetValue` array, which is what Picaro used before
   and which left payloads reading another module's block). `TlsAlloc` returns the
   lowest free index, which can be a loaded module's `_tls_index`; that module then
   sees the payload's template bytes in the affected thread. Measurements and the
-  ntdll teardown behaviour that forces this shape: `docs/measurements.md`.
+  ntdll teardown behavior that forces this shape: `docs/measurements.md`.
 
 - **`bouncer` is a fragile gate by construction.** `not_in_sandbox` combines
   five indicators and rejects at a score of 3, deliberately preferring false
@@ -602,7 +602,7 @@ measured** (no JDK on the host) and `dumpbin` was unavailable, so `picaro audit`
   CRT), so a hollowed payload running in another process can only point its IAT
   at the real exports; `plan::validate` rejects the combination. Closing it needs
   a position-independent proxy emitter written into the target
-  (`docs/api-resolution.md`, Phase E).
+  (`docs/design/api-resolution.md`, Phase E).
 - **`pe_injection` is now `Experimental`** (TLS is provisioned and the payload's
   `DLL_PROCESS_ATTACH` callbacks run before the entry thread). Runtime
   verification of the TLS path on a Defender-off host is still pending; the

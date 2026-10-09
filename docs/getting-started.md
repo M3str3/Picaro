@@ -7,28 +7,47 @@ measure the result.
 Pack only binaries you own or are explicitly permitted to test.
 :::
 
-## Requirements
+## Recommended: Docker + the Python wrapper
+
+The preferred way to run Picaro is the bundled Docker wrapper. It needs only
+Docker and Python — nothing is installed on your machine — and the commands are
+the same on Linux, macOS and Windows:
+
+```bash
+python scripts/picaro.py build payload.yaml   # builds the image on first use
+python scripts/picaro.py audit dist/demo.exe
+```
+
+The container cross-compiles the Windows PE, so run the artifact on a Windows
+host. Details, flags and the compose services are in the repository `README.md`.
+The rest of this page shows the equivalent `cargo run -- …` commands and, under
+[Requirements (local build)](#requirements-local-build), what a local build
+needs instead.
+
+## Requirements (local build)
+
+Skip this if you use the wrapper above. To run the packer directly you need:
 
 - **`rustc` on `PATH`** — the stub is compiled with bare `rustc`, not cargo.
   When it is missing the packer stops with instructions.
 - Workspace dependencies built once (`cargo build --release` at the repo root),
   so the stub can link the `.rlib` files under `target/`.
-- **Windows.** The stub is built for `arch: x64` or `arch: x86` (the payload
-  must match). On Linux/WSL it cross-compiles to the matching
-  `-pc-windows-gnu` target (see [How it fits together](architecture.md)); to
-  build with no local toolchain use the Docker workflow in the repository
-  `README.md`.
+- **Windows**, or Linux/WSL to cross-compile to the matching `-pc-windows-gnu`
+  target. The stub is built for `arch: x64` or `arch: x86`, and the payload
+  must match it (see [How it fits together](architecture.md)).
 
 ## 1. Generate a payload
 
-Any x64 PE image, DLL or raw shellcode blob works. With Metasploit's `msfvenom`:
+A PE image, a DLL, a raw shellcode blob or a managed (.NET) assembly works,
+in x64 or x86 (match it with `build.output.arch`). With Metasploit's
+`msfvenom`:
 
 ```bash
 msfvenom -p windows/x64/exec CMD=calc.exe -f exe -o payload.exe   # a PE image
 msfvenom -p windows/x64/exec CMD=calc.exe -f raw -o payload.bin   # raw shellcode
 ```
 
-Do not add an msfvenom encoder (`-e`): `picaro` encrypts the payload with
+Do not add an msfvenom encoder (`-e`): Picaro encrypts the payload with
 XChaCha20-Poly1305 and obfuscates the stub's strings, so an extra encoder only
 makes the input larger.
 
@@ -88,7 +107,7 @@ runtime:
 ```
 
 Save it as `payload.yaml`. Input and output paths are resolved relative to the
-directory you run `picaro` from (the repo's examples assume the repo root).
+directory you run Picaro from (the repo's examples assume the repo root).
 
 The blocks:
 
@@ -98,7 +117,7 @@ The blocks:
   is a local path, `file://`, or an `http(s)://` URL fetched in memory.
 - **`build.stub`** — optional: a custom stub template, the syscall layer and
   string obfuscation. Omitted here, so the builtin stub and the defaults apply.
-- **`build.output`** — where the packed PE lands and how it is finalised.
+- **`build.output`** — where the packed PE lands and how it is finalized.
 - **`runtime`** — the ordered steps: Preparation and Control techniques plus the
   Execution techniques that run the payloads (see
   [Runtime steps](multistage.md)).
@@ -118,8 +137,9 @@ runners take shellcode only and return control to the loader (so they chain in a
 `runtime:` list): `execution_callbacks` (a legitimate enumeration API invokes
 the payload), `module_stomping` (a signed DLL's code section is overwritten) and
 `fibers` (the payload runs on a fiber). `process_hollowing` only
-runs `format: pe`; it runs a full PE (imports, TLS state, entry hand-off) but not
-the payload's TLS callbacks — see
+runs `format: pe`; it runs a full PE (imports, TLS state, entry hand-off), with
+the payload's `DLL_PROCESS_ATTACH` TLS callbacks run on the main thread before
+the entry point (runtime verification pending) — see
 [Process hollowing evidence](techniques/process_hollowing.md). A managed
 assembly is not native code: it needs `format: dotnet` and the `dotnet_hosting`
 technique, which hosts the CLR in the stub and loads the assembly from memory
@@ -130,23 +150,26 @@ technique, which hosts the CLR in the stub and loads the assembly from memory
 
 ```bash
 # Validate the plan and the payload without compiling anything:
-cargo run -- build payload.yaml --dry-run
+python scripts/picaro.py build payload.yaml --dry-run
 
 # Pack it:
-cargo run -- build payload.yaml
+python scripts/picaro.py build payload.yaml
 ```
+
+This is the Docker wrapper from above; for a local build, use
+`cargo run -- build …` instead.
 
 `-v`/`--verbose` prints the resolved plan and per-step detail; the manifest
 (`dist/demo.manifest.json`) records the artifact, payload and plan hashes.
-`picaro` prints a banner before every subcommand; `-q`/`--quiet` skips it.
+Picaro prints a banner before every subcommand; `-q`/`--quiet` skips it.
 
 ```powershell
 .\dist\demo.exe                       # run it
 ```
 
 ```bash
-cargo run -- audit dist/demo.exe      # measure it
-cargo run -- techniques list          # look around the registry
+python scripts/picaro.py audit dist/demo.exe      # measure it
+python scripts/picaro.py techniques list          # look around the registry
 ```
 
 `audit` reports headers, sections and their entropy, imports/exports, a strings
@@ -160,14 +183,14 @@ offline Defender scan.
 - Unknown keys are an error.
 - Only Execution techniques take a `params.payload`; with two or more payloads it
   is required.
-- A terminal step (`reflective_loading` of a PE executable, `dotnet_hosting`) must
-  be last.
+- A terminal step (`reflective_loading`/`process_ghosting` of a PE executable,
+  `dotnet_hosting`) must be last.
 - `build.output.arch` is `x64` or `x86`, and the payload must match it: the stub
   and the payload share one address space. Both execution techniques and the
   preparations support `x86` (see [x86 support](x86.md)); `sleep_obfuscation`,
-  `syscalls.mode: indirect` and `api_resolution` stay `x64`-only, and an `x86`
-  pipeline that needs one of them is rejected at validation with a message
-  naming the technique.
+  `stack_spoofing`, `syscalls.mode: indirect` and `api_resolution` stay
+  `x64`-only, and an `x86` pipeline that needs one of them is rejected at
+  validation with a message naming the technique.
 - Positional CLI args after the plan path are substituted as `$arg.0$`,
   `$arg.1$`, … (and `name=value` as `$arg.name$`), so one plan can target
   several hosts.

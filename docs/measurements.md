@@ -140,7 +140,7 @@ teardown code are the same on both architectures, only the offsets differ:
 | The array `TlsAlloc`/`TlsSetValue` use | `TEB->TlsSlots`, `gs:[0x1480]` | `fs:[0xE10]` |
 
 1. **`TlsSetValue` is not what a CRT reads.** Provisioning a mapped image with
-   `TlsAlloc` + `TlsSetValue` (what picaro did) makes its `thread_local` reads
+   `TlsAlloc` + `TlsSetValue` (what Picaro did) makes its `thread_local` reads
    return *another module's* data: the payload printed
    `tls=1526337116` instead of `42` on x86 and `tls=1809635094` on x64. Writing
    the block into the loader's array at the same index fixes the value on both
@@ -152,7 +152,7 @@ teardown code are the same on both architectures, only the offsets differ:
    `TlsAlloc` first (which sets its bit in `PEB->TlsBitmap`) makes the teardown
    leave the entry alone — the process then exits with the payload's own code.
 3. **`TlsAlloc` returns the lowest free index**, which can be a loaded module's
-   `_tls_index` (`1` for `KERNELBASE` on both architectures). picaro accepts the
+   `_tls_index` (`1` for `KERNELBASE` on both architectures). Picaro accepts the
    collision — it costs that module its thread-locals in that thread — because
    the alternative (hand-picking a free index) is exactly the unreserved entry
    that (2) rules out. `build.stub.debug` logs the index.
@@ -424,4 +424,5 @@ placeholder until rules exist.
   and API hashing resolve the same from the clean on-disk copy
   (`GetModuleFileNameW` path, `TimeDateStamp` matched).
 - Covered by the e2e `indirect_syscall_resolvers_run_the_payload` (`tests/cli.rs`).
-- Reorg + fixes: `.plan-syscall-resolvers.md` §8.
+- The three resolvers were reorganized under `src/engine/syscalls/resolvers/<name>/`
+  (each self-contained; the registry drives `techniques list`/`show`/`validate`).

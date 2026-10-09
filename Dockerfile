@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-# picaro — build and run the packer inside a container.
+# Picaro — build and run the packer inside a container.
 #
 # This image bundles the full toolchain the packer needs to turn its generated
 # Rust stub into a Windows PE, so a machine without Rust + MinGW-w64 can still

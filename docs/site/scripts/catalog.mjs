@@ -19,7 +19,7 @@ const SELECT_OPTIONS = {
   action: ['abort', 'continue'],
   variant: ['ekko'],
   window: ['hidden', 'normal'],
-  downloader: ['curl', 'certutil'],
+  downloader: ['auto', 'curl', 'certutil', 'powershell', 'bitsadmin'],
 };
 
 /** Payload formats a technique accepts, read from `TechniqueDef::formats`. */
@@ -98,6 +98,10 @@ function scanTechniques(root) {
       formats: def.formats,
       fields: params,
       paramDocs,
+      // Whether the technique's `Params` struct takes a `payload` (an Execution
+      // technique, or the control-plane `network_stager`). The builder renders a
+      // payload picker for it instead of a free-text field.
+      takes_payload: paramDocs.some((field) => field.key === 'payload'),
       needs_indirect: def.requiresIndirect,
       doc: `/techniques/ref/${def.name}/`,
     });
@@ -126,7 +130,12 @@ function toCatalog(tech) {
     category: tech.category,
     stability: tech.stability,
     formats: tech.formats,
+    // `fields` is the curated shape from `params_example` (a fallback for a
+    // technique without a `Params` struct); `paramDocs` is the full struct with
+    // types, defaults and allowed values. The builder prefers the latter.
     fields: tech.fields,
+    paramDocs: tech.paramDocs,
+    takes_payload: tech.takes_payload,
     needs_indirect: tech.needs_indirect,
     doc: tech.doc,
   };
@@ -538,7 +547,10 @@ function paramsFromStruct(mod, exampleText, fallbackFields) {
         ? null
         : itemToText(exampleParams[field.key]),
     description: field.description || null,
-    options: field.options,
+    // An enum defined outside the technique's module (for example `window`, a
+    // `WindowMode` from the plan schema) has no local variants to read; fall back
+    // to the curated option set the builder would otherwise use.
+    options: field.options.length ? field.options : (SELECT_OPTIONS[field.key] ?? []),
   }));
 }
 

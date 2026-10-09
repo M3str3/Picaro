@@ -1,4 +1,4 @@
-// picaro documentation site configuration.
+// Picaro documentation site configuration.
 //
 // The sidebar is not written by hand: it is generated from `docs/nav.yml` (the
 // single source of navigation truth, which the Rust test suite also reads) by
@@ -13,7 +13,7 @@ export default defineConfig({
   site: 'https://picaro.dev',
   integrations: [
     starlight({
-      title: 'picaro',
+      title: 'Picaro',
       logo: {
         src: './src/assets/picaro_logo.png',
         replacesTitle: false,

@@ -15,7 +15,7 @@ the runtime arguments as a `string[]`.
 This is not reflective loading: a managed assembly's entry point is a stub that
 calls `mscoree.dll!_CorExeMain`, which starts the CLR for the process's **main
 module** — the packed binary — so mapping the image and jumping to its entry
-point does not run the assembly (picaro used to fail there with an opaque
+point does not run the assembly (Picaro used to fail there with an opaque
 runtime error; the build now rejects it, see below).
 
 ## How it works
@@ -36,7 +36,7 @@ sequenceDiagram
 
 1. `CoInitializeEx(COINIT_MULTITHREADED)` — the hosting interfaces are COM
    objects. An already-initialized thread is fine.
-2. `COMPLUS_Version` is set to the runtime version picaro asks for
+2. `COMPLUS_Version` is set to the runtime version Picaro asks for
    (`v4.0.30319`, obfuscated like every other stub literal), then
    `CLRCreateInstance(CLSID_CLRMetaHost)` → `GetRuntime(version)` →
    `GetInterface(CLSID_CorRuntimeHost)` → `Start()`.

@@ -1,4 +1,4 @@
-# AMSI Patch
+# AMSI patch
 
 *Patches `AmsiScanBuffer` in the current process so every scan returns clean,
 disabling in-process AMSI inspection of scripts and .NET content.*

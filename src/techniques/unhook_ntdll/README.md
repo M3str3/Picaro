@@ -223,8 +223,10 @@ documented, and available in every configuration.
   `LoadLibraryA` elsewhere; only the protection change goes through the syscall
   layer (`nt_protect_vm`), so `mode: indirect` removes the `VirtualProtect`
   import.
-- **No relocations are applied.** ntdll's `.text` has none, and the headers are
-  not restored, so this is correct for this target.
+- **Relocations are a no-op on x64, applied on x86.** PE32+ ntdll's `.text`
+  has no fixups, so the walk does nothing there; PE32 ntdll's HIGHLOW fixups
+  *are* applied (see "x86 needs the section's base relocations" above). The
+  headers are not restored, which is correct for this target.
 
 ## References
 

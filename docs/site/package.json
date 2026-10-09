@@ -3,11 +3,12 @@
   "type": "module",
   "version": "0.1.0",
   "private": true,
-  "description": "picaro documentation site (Astro + Starlight)",
+  "description": "Picaro documentation site (Astro + Starlight)",
   "scripts": {
     "dev": "astro dev",
     "build": "astro build",
     "build:docs": "node scripts/assemble-docs.mjs --root ../.. && astro build",
+    "test": "node --test",
     "preview": "astro preview"
   },
   "dependencies": {

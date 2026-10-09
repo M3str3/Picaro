@@ -112,11 +112,10 @@ away are not in the file:
 
 ## Implementation notes
 
-- **Preparation contract.** Preparations now return `Result<bool, E>`:
+- **Preparation contract.** Preparations return `Result<bool, E>`:
   `Ok(true)` continues the pipeline, `Ok(false)` aborts it before the payload
-  runs. See `src/techniques/README.md`. The existing preparations
-  (`patch_amsi`, `patch_etw`, `anti_debug`, `sleep_obfuscation`) return
-  `Ok(true)`; only the bouncer gate returns `Ok(false)`.
+  runs. See `src/techniques/README.md`. The `bouncer` and `guardrail` gates
+  return `Ok(false)`; every other Preparation returns `Ok(true)`.
 - `on_fail: exit` is handled inside the fragment (`std::process::exit(1)`), so
   the exit code is preserved even though the dispatcher's `false` means "exit
   silently" in the builtin template.

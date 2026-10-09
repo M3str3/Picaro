@@ -138,7 +138,7 @@ exists in the target process.
 - **Stack inspection at the target.** With `dedicated_stack: true` the first
   frames of the hijacked thread point into private memory instead of into
   the thread's original call chain.
-- **The crash artefact.** A payload that faults leaves an `Application Error`
+- **The crash artifact.** A payload that faults leaves an `Application Error`
   (id 1000) record naming the target with `ModuleName = unknown` and a fault
   offset inside private, unbacked memory — an unusual combination for an editor
   or a ping. The smoke tests manufacture it on purpose.

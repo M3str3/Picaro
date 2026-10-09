@@ -1,4 +1,4 @@
-# picaro documentation site — Astro + Starlight.
+# Picaro documentation site — Astro + Starlight.
 #
 # Build context is the repository root, and the image is invoked by
 # `scripts/docs.py`, which bind-mounts the repository at /docs. Content and the

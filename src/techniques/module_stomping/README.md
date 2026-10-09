@@ -28,8 +28,8 @@ flowchart TD
 
 1. `LoadLibraryA` maps the stomp target. If it is already loaded the call only
    bumps its reference count, and the module keeps whatever base it has; the
-   loader (not this technique) does the mapping, the catalog/hash bookkeeping and
-   the `DllMain(DLL_PROCESS_ATTACH)` call.
+   loader (not this technique) does the mapping, the catalogue/hash bookkeeping
+   and the `DllMain(DLL_PROCESS_ATTACH)` call.
 2. The module's *mapped* PE headers are copied into a local buffer and walked to
    the `.text` section: `VirtualAddress` gives the section's address in the
    mapped image, `max(VirtualSize, SizeOfRawData)` its capacity. The walk is
@@ -109,7 +109,7 @@ section.
   module the image already maps.
 - No private executable allocation and no `VirtualAlloc`/`VirtualAllocEx` for the
   payload, so a “fresh executable memory” heuristic has nothing new to flag.
-- No `Add-Type`-style child process, no remote target, no new thread.
+- No child process, no remote target, no new thread.
 - The pages the payload runs from belong to a Microsoft-signed module: a memory
   scan that groups executable regions by module reports the payload under
   `wininet.dll`'s image, not under an anonymous region.

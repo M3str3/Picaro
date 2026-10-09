@@ -1,8 +1,8 @@
-// picaro — client-side Mermaid initialisation (theme-aware, brand colours).
+// Picaro — client-side Mermaid initialization (theme-aware, brand colors).
 //
 // `rehype` (via `scripts/assemble-docs.mjs`) turns each ```mermaid fence into a
 // `<pre class="mermaid">` block; this script tells Mermaid to render them on
-// load with a palette that matches the site's violet/cyan theme. The colours
+// load with a palette that matches the site's violet/cyan theme. The colors
 // are re-read once at load from the `data-theme` attribute Starlight sets.
 
 (function () {

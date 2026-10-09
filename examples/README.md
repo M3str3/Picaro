@@ -26,8 +26,9 @@ default `format: pe` applies) and build as usual.
 
 ```yaml
 build:
-  payload:
-    source: ./examples/payloads/msgbox.exe
+  payloads:
+    msgbox:
+      source: ./examples/payloads/msgbox.exe
 ```
 
 ## Process hollowing
@@ -128,7 +129,7 @@ The three runners added for `format: shellcode` (`fibers`, `module_stomping`,
 `execution_callbacks`) return control to the loader, so several can run in one
 artifact. The example chains all three with the demo blob and exits `42`:
 
-```sh
+```powershell
 cargo run -- build examples/plans/in-process-runners.yaml
 .\dist\test_in_process.exe ; echo $LASTEXITCODE
 ```
@@ -226,9 +227,11 @@ plan:
 
 ```yaml
 build:
-  payload:
-    args: ["yaml-a", "yaml-b"]
-    args_mode: override
+  payloads:
+    my_payload:
+      source: ./examples/payloads/test_args_payload.exe
+      args: ["yaml-a", "yaml-b"]
+      args_mode: override
 ```
 
 Packing that plan produces an exe that behaves like this:
@@ -242,10 +245,11 @@ Packing that plan produces an exe that behaves like this:
 
 ```yaml
 build:
-  payload:
-    source: "./mimikatz.exe"
-    args: ["privilege::debug", "log", "C:\\temp\\out.log"]
-    args_mode: join
+  payloads:
+    mimikatz:
+      source: "./mimikatz.exe"
+      args: ["privilege::debug", "log", "C:\\temp\\out.log"]
+      args_mode: join
 ```
 
 ```powershell

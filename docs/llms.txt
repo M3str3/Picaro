@@ -1,39 +1,44 @@
-# picaro
+# Picaro
 
-> picaro is a declarative PE packer for authorized red team research. It takes
+> Picaro is a declarative PE packer for authorized red team research. It takes
 > a PE (or DLL / shellcode) and a YAML plan and emits a packed PE with the
 > selected evasion techniques baked into a generated Rust stub.
 
 ## Getting started
 
-- [Introduction](/): what picaro is and its authorized-use scope.
+- [Introduction](/): what Picaro is and its authorized-use scope.
 - [Getting started](/getting-started/): requirements, a first plan, and the build/run/measure commands.
 - [Plan](/plan/): every block and field, plus the interactive wizard.
 - [Examples](/examples/): the runnable plans, recipes and end-to-end tests.
 
 ## Techniques
 
-- [Techniques overview](/techniques/): the Preparation/Execution model and the registry table.
+- [Techniques overview](/techniques/): the Preparation / Execution / Control model and the registry table.
+- [anti_debug](/techniques/ref/anti_debug/)
+- [bouncer](/techniques/ref/bouncer/)
+- [dll_hollowing](/techniques/ref/dll_hollowing/)
+- [dotnet_hosting](/techniques/ref/dotnet_hosting/)
+- [early_bird](/techniques/ref/early_bird/)
+- [execution_callbacks](/techniques/ref/execution_callbacks/)
+- [fibers](/techniques/ref/fibers/)
+- [guardrail](/techniques/ref/guardrail/)
+- [living_off_the_land](/techniques/ref/living_off_the_land/)
+- [module_stomping](/techniques/ref/module_stomping/)
+- [network_stager](/techniques/ref/network_stager/)
 - [patch_amsi](/techniques/ref/patch_amsi/)
 - [patch_etw](/techniques/ref/patch_etw/)
-- [anti_debug](/techniques/ref/anti_debug/)
-- [sleep_obfuscation](/techniques/ref/sleep_obfuscation/)
-- [bouncer](/techniques/ref/bouncer/)
+- [pe_injection](/techniques/ref/pe_injection/)
+- [ppid_spoofing](/techniques/ref/ppid_spoofing/)
+- [process_ghosting](/techniques/ref/process_ghosting/)
 - [process_hollowing](/techniques/ref/process_hollowing/)
 - [reflective_loading](/techniques/ref/reflective_loading/)
-- [dotnet_hosting](/techniques/ref/dotnet_hosting/)
-- [execution_callbacks](/techniques/ref/execution_callbacks/)
-- [module_stomping](/techniques/ref/module_stomping/)
-- [fibers](/techniques/ref/fibers/)
-- [unhook_ntdll](/techniques/ref/unhook_ntdll/)
-- [early_bird](/techniques/ref/early_bird/)
-- [pe_injection](/techniques/ref/pe_injection/)
-- [living_off_the_land](/techniques/ref/living_off_the_land/)
-- [sleep](/techniques/ref/sleep/)
-- [ppid_spoofing](/techniques/ref/ppid_spoofing/)
-- [thread_hijacking](/techniques/ref/thread_hijacking/)
 - [self_deletion](/techniques/ref/self_deletion/)
+- [sleep](/techniques/ref/sleep/)
+- [sleep_obfuscation](/techniques/ref/sleep_obfuscation/)
 - [stack_spoofing](/techniques/ref/stack_spoofing/)
+- [thread_hijacking](/techniques/ref/thread_hijacking/)
+- [timestomping](/techniques/ref/timestomping/)
+- [unhook_ntdll](/techniques/ref/unhook_ntdll/)
 - [Adding a technique](/techniques/adding-a-technique/): the four-file ritual.
 
 ## Loader features
@@ -57,7 +62,8 @@
 ## Reference
 
 - [Measurements](/measurements/): phase-by-phase static/dynamic results and the EDR report.
-- [Process hollowing evidence](/techniques/process_hollowing/): measured behaviour and remaining work.
+- [Host programs](/hosts/): loading a packed DLL from a JVM, CPython, .NET, `rundll32` and more.
+- [Process hollowing evidence](/techniques/process_hollowing/): measured behavior and remaining work.
 
 ## Notes
 

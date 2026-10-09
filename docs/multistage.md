@@ -22,6 +22,10 @@ build:
       source: ./examples/payloads/test_payload.exe
       format: pe
       args: ["--phase=implant"]
+    final:
+      source: ./examples/payloads/demo_shellcode.bin
+      format: shellcode
+      args: ["--phase=final"]
   stub: { path: null, debug: false, strings: { strategy: xor }, syscalls: { mode: indirect } }
   output:
     path: ./dist/advanced.exe
@@ -76,8 +80,10 @@ EXE, a sleep, a detached `rundll32` proxy and a terminal reflective step).
   clear error (`plan::steps::resolve`).
 
 Only the Execution techniques (`reflective_loading`, `process_hollowing`,
-`dotnet_hosting`, `execution_callbacks`, `module_stomping`, `fibers`) take a
-payload; Preparation and Control steps never do. The
+`pe_injection`, `early_bird`, `thread_hijacking`, `dll_hollowing`,
+`process_ghosting`, `dotnet_hosting`, `execution_callbacks`,
+`module_stomping`, `fibers`) take a payload; Preparation and Control steps
+never do. The
 crypto comes from the payload's own `crypto` block, falling back to
 `build.crypto`; with neither it defaults to `xchacha20poly1305` with a random
 key. `build.output.arch` (`x64`), `strip` (`true`) and `trim_paths` (`all`) also
@@ -104,14 +110,18 @@ Each step is `technique:` + optional `params:` + the orchestration fields:
 
 Techniques fall into three categories:
 
-- **Preparation** (`bouncer`, `anti_debug`, `patch_amsi`, `patch_etw`,
-  `sleep_obfuscation`): modify the process state. A preparation returns
-  `Result<bool, _>`; `Ok(false)` aborts the chain before the payload runs (the
-  `bouncer` gate does this).
-- **Execution** (`reflective_loading`, `process_hollowing`, `dotnet_hosting`,
-  `execution_callbacks`, `module_stomping`, `fibers`): run an embedded payload.
-- **Control** (`living_off_the_land`, `sleep`): orchestrate the chain — launch a
-  process and capture its exit code, or wait.
+- **Preparation** (`bouncer`, `guardrail`, `anti_debug`, `patch_amsi`,
+  `patch_etw`, `unhook_ntdll`, `sleep_obfuscation`, `stack_spoofing`,
+  `timestomping`, `self_deletion`): modify the process state. A preparation
+  returns `Result<bool, _>`; `Ok(false)` aborts the chain before the payload
+  runs (the `bouncer` and `guardrail` gates do this).
+- **Execution** (`reflective_loading`, `process_hollowing`, `pe_injection`,
+  `early_bird`, `thread_hijacking`, `dll_hollowing`, `process_ghosting`,
+  `dotnet_hosting`, `execution_callbacks`, `module_stomping`, `fibers`): run an
+  embedded payload.
+- **Control** (`living_off_the_land`, `network_stager`, `ppid_spoofing`,
+  `sleep`): orchestrate the chain — launch a process and capture its exit code,
+  fetch a payload at run time, or wait.
 
 `living_off_the_land` launches a process: `binary` (a bare name is resolved
 against `System32` at run time), `args`, `window` (`hidden`/`normal`), `wait`
@@ -144,9 +154,9 @@ property of the technique and the payload, not a flag:
 | `module_stomping` | **If the shellcode returns** | The payload is called from the loader's thread after its code section is overwritten. |
 | `fibers` | **If the shellcode returns** | The payload runs on a fiber; control comes back to the loader's fiber when it returns. |
 
-So a **terminal** step (`reflective_loading` of a PE executable, or
-`dotnet_hosting`) can only be the **last** one; `plan::validate` rejects it
-otherwise. Everything else chains. Two Execution techniques can coexist as
+So a **terminal** step (`reflective_loading` or `process_ghosting` of a PE
+executable, or `dotnet_hosting`) can only be the **last** one; `plan::validate`
+rejects it otherwise. Everything else chains. Two Execution techniques can coexist as
 separate steps (each with its own payload); the registry's `conflicts` metadata
 is no longer enforced against them.
 
@@ -181,8 +191,8 @@ reference the same blocks; see [Custom stubs](custom-stubs.md).
 
 ## Limitations
 
-- **A terminal step must be last.** `reflective_loading` of a PE executable and
-  `dotnet_hosting` hand the process over.
+- **A terminal step must be last.** `reflective_loading`/`process_ghosting` of a
+  PE executable and `dotnet_hosting` hand the process over.
 - **In-process chaining leaves the process dirty** (an unfreed mapped image, a
   leaked `TlsAlloc` index, a repatched PEB command line). Prefer process-based
   steps (`living_off_the_land`, `process_hollowing`) when chaining more than one

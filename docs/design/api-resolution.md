@@ -2,7 +2,7 @@
 
 Status: **implemented for `reflective_loading` (Phases A–D, 2026-09-27); Phase E
 (`process_hollowing`) is parked as not viable without a redesign and the mode is
-rejected at validation there.** All five catalogue entries work end to end, and
+rejected at validation time.** All five catalogue entries work end to end, and
 `unmatched: abort` fails the load on the first import outside the catalogue.
 
 The goal: let the **loader** (the generated stub) own how the payload's Windows
@@ -88,7 +88,7 @@ runs the payload), so it does **not** go in `src/techniques/`.
 
 Placement: **`build.stub.api_resolution`**. It sits next to
 `build.stub.syscalls`, which it depends on (the coupling is then inside one
-block). `build.payload.api_resolution` was considered — the content is
+block). `build.payloads.<name>.api_resolution` was considered — the content is
 payload-relative — but the generated code and the validation coupling are both
 stub concerns, so `build.stub` wins.
 
@@ -108,7 +108,7 @@ build:
       unmatched: forward      # forward | abort
 ```
 
-- `mode: none` (default) — no behaviour change; the block is a no-op.
+- `mode: none` (default) — no behavior change; the block is a no-op.
 - `apis` — only names present in the catalogue; an unknown name is a **validation
   error**, never silently ignored. An empty list with `mode: proxy` is a no-op
   (surfaced as an advisory, like a `bouncer` with no checks).
@@ -286,7 +286,7 @@ both execution techniques resolve imports, so the resolver is always emitted.
 
 ## 10. Phases
 
-- [x] **Phase A — schema + validation, no behaviour change.** `mode: none` only;
+- [x] **Phase A — schema + validation, no behavior change.** `mode: none` only;
   parse, default, validate the coupling and the catalogue names. *Implemented
   2026-09-27: `build.stub.api_resolution` (`YamlApiResolutionPlan`), the
   `CATALOGUE` const (`src/engine/api_resolution.rs`), and

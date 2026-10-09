@@ -34,7 +34,7 @@ The DLL runs **in the host's process**, so:
 Three example plans, the first two `entry: auto` (the artifact exports
 `DllMain`, `JNI_OnLoad` and `Run`, so one file works from every host):
 
-| Plan | Payload | Behaviour |
+| Plan | Payload | Behavior |
 |---|---|---|
 | `examples/plans/dll-shellcode.yaml` | `demo_shellcode.bin` (`mov eax, 42; ret`) | the chain **returns 42**; every host below prints it |
 | `examples/plans/dll.yaml` | `msgbox.exe` | the chain opens a **modal dialog** from the host process (the visible check); `Run` blocks until you dismiss it, then returns 0 |

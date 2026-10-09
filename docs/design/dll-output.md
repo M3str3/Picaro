@@ -12,7 +12,7 @@ rules never apply to it. The payload still runs in-process, on the loader's own
 techniques and syscall layer.
 
 Reference implementation: `void-loader` (`code_examples/void-loader`, branch
-`origin/experimental`, commit `00c93ce` *"x32 and Dll"`),
+`origin/experimental`, commit `00c93ce` *"x32 and Dll"*),
 `crates/mountercli/{Cargo.toml,mounter.def,build.rs,src/lib.rs}`. It splits the
 crate into lib + bin, compiles the same code as `cdylib` and as an `.exe`, and
 exposes `DllMain` + `JNI_OnLoad`; the JNI entry spawns a worker thread and
@@ -22,10 +22,10 @@ returns to the JVM at once.
 
 ## 1. What we take from the reference and what we drop
 
-| void-loader | picaro |
+| void-loader | Picaro |
 |---|---|
-| args file in `%TEMP%` + scraping the host's command line | **dropped**: picaro's configuration is baked into the stub at build time; a DLL build needs no argv (§10 D-2) |
-| `.def` file + `build.rs` link args | **dropped**: picaro drives `rustc` directly, so the exports come from the generated source (or `-C link-arg=/DEF:` if it ever proves necessary) |
+| args file in `%TEMP%` + scraping the host's command line | **dropped**: Picaro's configuration is baked into the stub at build time; a DLL build needs no argv (§10 D-2) |
+| `.def` file + `build.rs` link args | **dropped**: Picaro drives `rustc` directly, so the exports come from the generated source (or `-C link-arg=/DEF:` if it ever proves necessary) |
 | `DllMain` = `DisableThreadLibraryCalls` only | **kept**: the chain never runs under the loader lock (§10 D-3) |
 | work on a worker thread; the entry returns immediately | **kept for `jni_on_load`**, deliberately inverted for `export:<name>` (§4.3) |
 | `AttachConsole(ATTACH_PARENT_PROCESS)` + `CONOUT$` + `SetStdHandle` | **kept** (§4.4) |
@@ -50,7 +50,7 @@ returns to the JVM at once.
 
 ### Non-goals (explicitly rejected)
 
-- **Reading arguments from the host.** picaro's plan is compiled in; an args
+- **Reading arguments from the host.** Picaro's plan is compiled in; an args
   file is a disk artifact and a race the reference only needs because its
   loader takes its configuration from a CLI (§10 D-2).
 - **`entry: dll_main`.** Running the chain from `DllMain` means running it under
@@ -115,7 +115,7 @@ fn run() -> Result<i32, String> { /* unchanged */ }
 
 `entry.rs` renders one of two blocks.
 
-**Exe (today's behaviour, moved out of the template verbatim):**
+**Exe (today's behavior, moved out of the template verbatim):**
 
 ```rust
 fn main() {
@@ -351,7 +351,7 @@ Steps 1–4 of the build are unchanged; what changes is compile and after:
 
 ## 8. Phases
 
-- [x] **Phase A — schema, validation, entry plumbing; no behaviour change.**
+- [x] **Phase A — schema, validation, entry plumbing; no behavior change.**
   `kind`/`entry` parse and round-trip, `$ENTRY_BLOCK$` in the builtin template,
   `entry.rs` renders the exe block, §5 validation and advisories.
   *Acceptance:* the rendered stub for an `exe` plan is byte-identical to the
@@ -383,7 +383,7 @@ Steps 1–4 of the build are unchanged; what changes is compile and after:
 - [x] **Phase D — host matrix, measured.** Run one plan three ways — Java
   (`System.load` + a latch), CPython (`ctypes`), `rundll32` — and record:
   console output, the returned value, the module list of the host, the artifact
-  as seen by `dumpbin /exports`, Defender's behaviour on the file before and
+  as seen by `dumpbin /exports`, Defender's behavior on the file before and
   after `output.sign`, and one negative case (a host that exits immediately
   after `System.load`, to document the lifetime rule).
   *Acceptance:* a new "DLL output" subsection in `docs/measurements.md` with
@@ -448,7 +448,7 @@ Declared, not hidden:
 | # | Decision | Rationale | Status |
 |---|---|---|---|
 | D-1 | `output.kind: exe \| dll`, one artifact per build (no `both`) | The chain, the blocks and the techniques are identical; only the entry and the compile shape differ. Two artifacts would double resources/signing for no new capability | accepted |
-| D-2 | No argv plumbing (no args file, no host command-line scraping) | picaro's plan is baked in; the reference needs it only because its loader reads a CLI. An args file is an extra disk IoC plus a polling race | accepted |
+| D-2 | No argv plumbing (no args file, no host command-line scraping) | Picaro's plan is baked in; the reference needs it only because its loader reads a CLI. An args file is an extra disk IoC plus a polling race | accepted |
 | D-3 | `DllMain` is a no-op; no `entry: dll_main` | The loader lock plus `LoadLibraryA` in every execution technique is a deadlock shape | accepted |
 | D-4 | `JNI_OnLoad` only, no `Java_*` exports | Covers load-and-go without binding the build to a class/package name | accepted |
 | D-5 | `entry: export:<name>` uses the four-argument rundll32 shape and returns `i32` | Compatible with `rundll32` (natively four arguments, `stdcall` on x86) and harmless for zero-argument x64 callers; a zero-argument `stdcall` export would be the one that breaks `rundll32` | accepted |

@@ -1,14 +1,12 @@
+hidden/
+
 # Local scratch: reference material kept out of the project.
 code_examples/
-/payload_decrypted.bin
-
 # Local session memory: a rolling developer note, not part of the repo.
 .memory.md
 
 # Local working notes: plans, prompts and scratch — never published.
 .plan*.md
-docs/FUTURE_MULTI_STUB_PLAN.md
-docs/site/MERMAID_PROMPT.md
 
 # Host build output.
 /target
@@ -70,6 +68,7 @@ examples/hosts/dotnet_host/obj/
 
 # Keep the checked-in test payloads and PE fixtures (all of them are read by
 # tests or named by an example plan, so a fresh clone must have them).
+!examples/payloads/msgbox.exe
 !examples/payloads/test_payload.exe
 !examples/payloads/test_payload_x86.exe
 !tests/fixtures/minimal_x64.exe

@@ -2,60 +2,83 @@
 /**
  * In-docs plan builder.
  *
- * Wide two-column page: the plan on the left, the YAML on the right.
- * Techniques are picked from a large modal with a section sidebar
+ * Full-width single column: payloads, loader, runtime, output — in the order a
+ * plan reads. The YAML is behind a "Preview" button (a modal), so the builder
+ * owns the page. Techniques are picked from a modal with a section sidebar
  * (preparation / execution / control). The catalogue is /plan-catalog.json.
  */
 ---
 
 <div class="pb" id="pb-root" data-pb>
   <header class="pb-top">
-    <p class="pb-lede">
-      Build the chain from the registry. A new directory under
-      <code>src/techniques/</code> shows up after the next docs assemble.
-    </p>
-    <p class="pb-meta" data-meta></p>
+    <div class="pb-top-text">
+      <p class="pb-lede">
+        Compose a schema-6 plan from the registry. A new directory under
+        <code>src/techniques/</code> shows up after the next docs assemble.
+      </p>
+      <p class="pb-meta" data-meta></p>
+    </div>
+    <div class="pb-top-actions">
+      <span class="pb-status" data-status></span>
+      <button type="button" class="pb-btn pb-btn-ghost" data-open-yaml>Preview YAML</button>
+    </div>
   </header>
 
-  <div class="pb-board">
-    <div class="pb-compose">
-      <section class="pb-section" aria-labelledby="pb-payload-label">
-        <h2 id="pb-payload-label" class="pb-kicker">Payload</h2>
-        <div class="pb-card" data-payload></div>
-      </section>
+  <div class="pb-compose">
+    <section class="pb-section" aria-labelledby="pb-payload-label">
+      <div class="pb-section-head">
+        <h2 id="pb-payload-label" class="pb-kicker">1 · Payloads</h2>
+        <span class="pb-count" data-payload-count></span>
+      </div>
+      <div class="pb-card" data-payload></div>
+    </section>
 
-      <section class="pb-section" aria-labelledby="pb-chain-label">
-        <div class="pb-section-head">
-          <h2 id="pb-chain-label" class="pb-kicker">Chain</h2>
-          <span class="pb-count" data-count></span>
-        </div>
-        <ol class="pb-chain" data-chain></ol>
-        <button type="button" class="pb-add" data-open-picker>Add a technique</button>
-        <div class="pb-notes" data-notes></div>
-      </section>
+    <section class="pb-section" aria-labelledby="pb-loader-label">
+      <div class="pb-section-head">
+        <h2 id="pb-loader-label" class="pb-kicker">2 · Loader</h2>
+        <span class="pb-stub-badge" data-stub></span>
+      </div>
+      <div class="pb-card" data-loader></div>
+    </section>
 
-      <details class="pb-fold">
-        <summary>Build settings <span>output and loader</span></summary>
-        <div class="pb-fold-body" data-settings></div>
-      </details>
-    </div>
+    <section class="pb-section" aria-labelledby="pb-chain-label">
+      <div class="pb-section-head">
+        <h2 id="pb-chain-label" class="pb-kicker">3 · Runtime</h2>
+        <span class="pb-count" data-count></span>
+      </div>
+      <ol class="pb-chain" data-chain></ol>
+      <button type="button" class="pb-add" data-open-picker>Add a technique</button>
+      <div class="pb-notes" data-notes></div>
+    </section>
 
-    <aside class="pb-yaml-col" aria-labelledby="pb-yaml-label">
-      <div class="pb-yaml-card">
-        <div class="pb-yaml-head">
-          <h2 id="pb-yaml-label" class="pb-kicker">plan.yaml</h2>
-        </div>
+    <section class="pb-section" aria-labelledby="pb-output-label">
+      <div class="pb-section-head">
+        <h2 id="pb-output-label" class="pb-kicker">4 · Output</h2>
+      </div>
+      <div class="pb-card" data-output></div>
+    </section>
+  </div>
+
+  <dialog class="pb-dialog pb-yaml-dialog" data-yaml-dialog aria-labelledby="pb-yaml-title">
+    <div class="pb-dialog-form">
+      <header class="pb-dialog-head">
+        <h2 id="pb-yaml-title">plan.yaml</h2>
+        <button type="button" class="pb-icon" data-close-yaml aria-label="Close">×</button>
+      </header>
+      <div class="pb-yaml-body">
+        <pre class="pb-yaml" data-yaml tabindex="0"></pre>
+      </div>
+      <footer class="pb-yaml-foot">
+        <span class="pb-plan-foot">Check it with <code>picaro build --dry-run plan.yaml</code></span>
         <div class="pb-pair">
           <button type="button" class="pb-btn pb-btn-ghost" data-copy>Copy</button>
           <button type="button" class="pb-btn" data-download>Download</button>
         </div>
-        <pre class="pb-yaml" data-yaml tabindex="0"></pre>
-        <p class="pb-plan-foot">Check it with <code>picaro build --dry-run plan.yaml</code></p>
-      </div>
-    </aside>
-  </div>
+      </footer>
+    </div>
+  </dialog>
 
-  <dialog class="pb-dialog" data-picker aria-labelledby="pb-picker-label">
+  <dialog class="pb-dialog pb-picker-dialog" data-picker aria-labelledby="pb-picker-label">
     <form method="dialog" class="pb-dialog-form">
       <header class="pb-dialog-head">
         <h2 id="pb-picker-label">Add a technique</h2>
@@ -85,6 +108,8 @@
   :root:has(#pb-root) {
     --sl-content-width: 100%;
   }
+  /* The builder is the page: give it the room the table of contents would take. */
+  :root:has(#pb-root) .right-sidebar-container { display: none; }
 
   .pb {
     --pb-line: var(--sl-color-gray-5);
@@ -98,10 +123,18 @@
     color: inherit;
   }
 
-  .pb-top { margin-bottom: 1.25rem; }
+  .pb-top {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 0.75rem 1.5rem;
+    margin-bottom: 1.25rem;
+  }
+  .pb-top-text { min-width: 0; }
   .pb-lede {
     margin: 0 0 0.3rem;
-    max-width: 46rem;
+    max-width: 48rem;
     color: var(--sl-color-gray-2);
     line-height: 1.55;
   }
@@ -111,15 +144,46 @@
     font-size: 0.72rem;
     color: var(--pb-muted);
   }
+  .pb-top-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    flex: none;
+  }
+  .pb-top-actions .pb-btn { width: auto; }
 
-  .pb-board {
-    display: grid;
-    grid-template-columns: minmax(0, 1.2fr) minmax(22rem, 0.8fr);
-    gap: 1.5rem;
-    align-items: start;
+  .pb-status {
+    font-size: 0.8rem;
+    font-weight: 600;
+    border-radius: 999px;
+    padding: 0.3rem 0.7rem;
+    border: 1px solid var(--pb-line);
+    color: var(--pb-muted);
+    white-space: nowrap;
+  }
+  .pb-status.is-ok {
+    color: var(--pb-ok);
+    border-color: color-mix(in oklab, var(--pb-ok) 45%, var(--pb-line));
+    background: color-mix(in oklab, var(--pb-ok) 10%, transparent);
+  }
+  .pb-status.is-warn {
+    color: var(--pb-warn);
+    border-color: color-mix(in oklab, var(--pb-warn) 45%, var(--pb-line));
+    background: color-mix(in oklab, var(--pb-warn) 10%, transparent);
+  }
+  .pb-status.is-err {
+    color: var(--pb-err);
+    border-color: color-mix(in oklab, var(--pb-err) 45%, var(--pb-line));
+    background: color-mix(in oklab, var(--pb-err) 10%, transparent);
   }
 
-  .pb-section { margin: 0 0 1.25rem; }
+  .pb-compose {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 1.5rem;
+  }
+
+  .pb-section { margin: 0; }
   .pb-section-head {
     display: flex;
     align-items: center;
@@ -141,26 +205,63 @@
     font-size: 0.72rem;
     color: var(--pb-muted);
   }
+  .pb-stub-badge {
+    font-family: var(--sl-font-mono);
+    font-size: 0.68rem;
+    color: var(--pb-muted);
+    border: 1px solid var(--pb-line);
+    border-radius: 999px;
+    padding: 0.15rem 0.6rem;
+    max-width: 60%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 
   .pb-card,
   .pb-step-card,
-  .pb-fold,
   .pb-yaml-card,
   .pb-dialog {
     border: 1px solid var(--pb-line);
     border-radius: 12px;
     background: var(--pb-surface);
   }
+  .pb-card { padding: 1rem; }
 
   .pb-grid {
     display: grid;
     grid-template-columns: minmax(0, 1.4fr) minmax(8rem, 0.6fr) minmax(0, 0.9fr);
     gap: 0.75rem 1rem;
-    padding: 1rem;
     align-items: end;
   }
+  .pb-card .pb-grid { padding: 0; }
   .pb-span-2 { grid-column: span 2; }
   .pb-span-3 { grid-column: 1 / -1; }
+
+  /* The payload card holds one block per `build.payloads` entry. */
+  .pb-card[data-payload] { display: flex; flex-direction: column; }
+  .pb-payload { display: flex; flex-direction: column; }
+  .pb-payload + .pb-payload {
+    border-top: 1px solid var(--pb-line);
+    margin-top: 1rem;
+    padding-top: 1rem;
+  }
+  .pb-payload-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 0.65rem;
+  }
+  .pb-payload-n {
+    font-family: var(--sl-font-mono);
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--pb-muted);
+  }
+  .pb-add-payload { margin-top: 1rem; align-self: flex-start; }
 
   .pb-field {
     display: flex;
@@ -261,7 +362,7 @@
     flex-direction: column;
     gap: 0.55rem;
   }
-  .pb-step { margin: 0; }
+  .pb-step { position: relative; margin: 0; }
   .pb-step-card { padding: 0.8rem 0.9rem; }
   .pb-step-top {
     display: grid;
@@ -330,6 +431,31 @@
   .pb-icon:hover:not(:disabled) { color: inherit; border-color: var(--sl-color-gray-2); }
   .pb-icon:disabled { opacity: 0.35; cursor: default; }
   .pb-icon.is-danger:hover { color: var(--pb-err); border-color: var(--pb-err); }
+  .pb .pb-drag {
+    cursor: grab;
+    border-style: dashed;
+    color: var(--sl-color-gray-3);
+    letter-spacing: -0.12em;
+    touch-action: none;
+  }
+  .pb-drag:active { cursor: grabbing; }
+
+  /* Drag-to-reorder feedback. Only the step header is a drag source. */
+  .pb-step-title[draggable='true'] { cursor: grab; user-select: none; }
+  .pb-step-title[draggable='true']:active { cursor: grabbing; }
+  .pb-step.is-dragging { opacity: 0.4; }
+  .pb-step.drop-above::before,
+  .pb-step.drop-below::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--sl-color-accent);
+  }
+  .pb-step.drop-above::before { top: -0.4rem; }
+  .pb-step.drop-below::after { bottom: -0.4rem; }
 
   .pb-params {
     display: grid;
@@ -381,81 +507,15 @@
     border-color: color-mix(in oklab, var(--pb-err) 40%, var(--pb-line));
     background: color-mix(in oklab, var(--pb-err) 10%, transparent);
   }
+  .pb-note.is-info {
+    border-color: color-mix(in oklab, var(--sl-color-accent) 45%, var(--pb-line));
+    background: color-mix(in oklab, var(--sl-color-accent) 8%, transparent);
+  }
 
-  .pb-fold { background: transparent; }
-  .pb-fold summary {
-    cursor: pointer;
-    font-weight: 650;
-    min-height: var(--pb-h);
-    padding: 0 0.9rem;
-    list-style: none;
-    display: flex;
-    align-items: center;
-    gap: 0.6rem;
-  }
-  .pb-fold summary::-webkit-details-marker { display: none; }
-  .pb-fold summary span { font-weight: 450; font-size: 0.8rem; color: var(--pb-muted); }
-  .pb-fold-body { padding: 0 0.9rem 1rem; }
-  .pb-settings-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 1rem 1.25rem;
-    align-items: start;
-  }
-  .pb-settings-grid h3 {
-    margin: 0 0 0.65rem;
-    font-size: 0.72rem;
-    font-weight: 650;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--pb-muted);
-  }
-  .pb-settings-grid .pb-grid { padding: 0; grid-template-columns: 1fr 1fr; }
-
-  .pb-yaml-col { position: sticky; top: 1rem; }
-  .pb-yaml-card {
-    display: flex;
-    flex-direction: column;
-    gap: 0.65rem;
-    padding: 0.85rem;
-  }
-  .pb-yaml-head {
-    display: flex;
-    align-items: center;
-    min-height: 1.25rem;
-  }
-  .pb-pair {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 0.5rem;
-  }
-  .pb-btn {
-    font: inherit;
-    font-weight: 600;
-    font-size: 0.85rem;
-    border-radius: 8px;
-    border: 1px solid var(--sl-color-accent);
-    background: var(--sl-color-accent);
-    color: var(--sl-color-text-invert);
-    padding: 0 0.75rem;
-    cursor: pointer;
-    width: 100%;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    line-height: 1;
-  }
-  .pb-btn:hover { filter: brightness(1.06); }
-  .pb-btn-ghost {
-    background: transparent;
-    color: var(--sl-color-text-accent);
-  }
   .pb-yaml {
     margin: 0;
     padding: 0.9rem 1rem;
     overflow: auto;
-    max-height: min(70vh, 40rem);
-    min-height: 16rem;
     font-family: var(--sl-font-mono);
     font-size: 0.8rem;
     line-height: 1.55;
@@ -472,12 +532,38 @@
   .pb-yaml .tok-cmt { color: var(--pb-muted); font-style: italic; }
   .pb-plan-foot { margin: 0; font-size: 0.78rem; color: var(--pb-muted); }
 
+  .pb-pair {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+  }
+  .pb-btn {
+    font: inherit;
+    font-weight: 600;
+    font-size: 0.85rem;
+    border-radius: 8px;
+    border: 1px solid var(--sl-color-accent);
+    background: var(--sl-color-accent);
+    color: var(--sl-color-text-invert);
+    padding: 0 0.9rem;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+    white-space: nowrap;
+  }
+  .pb-btn:hover { filter: brightness(1.06); }
+  .pb-btn-ghost {
+    background: transparent;
+    color: var(--sl-color-text-accent);
+  }
+
+  /* ---- dialogs (YAML preview + technique picker) ---- */
   .pb-dialog[open] {
     position: fixed;
     inset: 0;
     margin: auto;
-    width: min(68rem, calc(100vw - 2rem));
-    height: min(40rem, calc(100vh - 2.5rem));
     max-width: calc(100vw - 2rem);
     max-height: calc(100vh - 2.5rem);
     padding: 0;
@@ -514,6 +600,33 @@
     text-transform: none;
     color: inherit;
   }
+
+  .pb-picker-dialog[open] {
+    width: min(68rem, calc(100vw - 2rem));
+    height: min(40rem, calc(100vh - 2.5rem));
+  }
+  .pb-yaml-dialog[open] {
+    width: min(58rem, calc(100vw - 2rem));
+    height: min(46rem, calc(100vh - 2.5rem));
+  }
+  .pb-yaml-body {
+    flex: 1;
+    min-height: 0;
+    padding: 0.85rem;
+    display: flex;
+  }
+  .pb-yaml-body .pb-yaml { flex: 1; min-height: 0; }
+  .pb-yaml-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.75rem 0.85rem;
+    border-top: 1px solid var(--pb-line);
+    flex: none;
+  }
+  .pb-yaml-foot .pb-pair { grid-template-columns: auto auto; }
+
   .pb-dialog-body {
     display: grid;
     grid-template-columns: 14.5rem minmax(0, 1fr);
@@ -635,12 +748,9 @@
     color: var(--pb-err);
   }
 
-  @media (max-width: 960px) {
-    .pb-board { grid-template-columns: 1fr; }
-    .pb-yaml-col { position: static; }
+  @media (max-width: 720px) {
     .pb-grid { grid-template-columns: 1fr 1fr; }
     .pb-span-2, .pb-span-3 { grid-column: 1 / -1; }
-    .pb-settings-grid { grid-template-columns: 1fr; }
     .pb-dialog[open] { width: calc(100vw - 1rem); height: calc(100vh - 1rem); }
     .pb-dialog-body { grid-template-columns: 1fr; }
     .pb-dialog-nav { flex-direction: row; border-right: 0; border-bottom: 1px solid var(--pb-line); }

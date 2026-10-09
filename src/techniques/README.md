@@ -6,17 +6,25 @@ one.
 
 ## Categories
 
-Every technique is either Preparation or Execution (`TechniqueDef.category`):
+Every technique has one of three categories (`TechniqueDef.category`):
 
 - **Preparation** (`Category::Preparation`) — modifies the current process
-  state (e.g. patches AMSI) but never runs the payload. The stub runs these
-  first, in YAML order, and they take no payload argument.
-- **Execution** (`Category::Execution`) — runs the decrypted payload. The stub
-  runs exactly one of these, after all Preparation techniques.
+  state (e.g. patches AMSI) but never runs the payload. It takes no payload
+  argument.
+- **Execution** (`Category::Execution`) — runs the decrypted payload.
+- **Control** (`Category::Control`) — neither prepares state nor runs the
+  payload: it orchestrates the chain (`living_off_the_land` launches a process,
+  `sleep` pauses).
 
-The pipeline validation (`src/plan/validate.rs`) enforces `0..N` Preparation
-followed by exactly one Execution. Preparation techniques must appear before
-the Execution technique in the YAML.
+The runtime is a flat `runtime:` list of `0..N` steps, run in YAML order; each
+step is one technique. There is no fixed Preparation-before-Execution shape and
+several Execution steps may appear. The one ordering rule is the *terminal
+step*: a step that hands the whole process to the payload never returns, so it
+must be last. `reflective_loading` of a PE executable, `dotnet_hosting` and
+`process_ghosting` are terminal; `living_off_the_land`, `process_hollowing` and
+`reflective_loading` of a DLL or shellcode all return control, so the steps
+after them still run. `src/plan/validate.rs` rejects a terminal step that is not
+last.
 
 ## 1. Copy the template
 
@@ -57,7 +65,7 @@ copied files.
 
 An **Execution** technique also gets the payload's binary format
 (`build.payloads.<name>.format`) and export (`build.payloads.<name>.export`) through
-`RuntimeStep::render_fragment`. A technique that runs more than one payload
+`TechniqueKind::render_fragment`. A technique that runs more than one payload
 format exposes `Params::render_fragment_for(&self, strings, format, export)` and
 picks the fragment or substitutes the format-specific values there (see
 `reflective_loading`, which ships a PE mapper and a shellcode runner); one that
@@ -84,41 +92,45 @@ built through `StringsConfig::obfuscate` (the `TODO`/`docs` convention; the
  the fragment must not care which mode is active. See
  `src/features/syscalls/README.md`.
 
-A Preparation fragment must expose a `pub fn <name>() -> Result<bool, E>` entry
-point (where `<name>` is the technique key); the stub wraps each Preparation
-fragment in its own module and calls that entry point from the generated
-`run_preparations` dispatcher. `Ok(true)` continues the pipeline; `Ok(false)`
-aborts it, so the payload never runs. An Execution fragment must expose
-`execute_payload(&mut [u8]) -> Result<i32, String>` (the stub calls it
-unqualified).
+The engine wraps every step in its own `mod step_<index>`, so a fragment defines
+an entry point and the module re-exports it under a fixed name:
+
+- **Preparation** — `pub fn <name>() -> Result<bool, E>` (where `<name>` is the
+  technique key); the module wraps it as `run() -> Result<bool, String>`.
+- **Execution** — `execute_payload(&mut [u8]) -> Result<i32, String>`; the
+  module wraps it as `payload(image) -> Result<i32, String>`.
+- **Control** — `run_exec() -> Result<i32, E>`; the module wraps it as
+  `run() -> Result<i32, String>`. `sleep` is the exception: it renders as one
+  inline line, not a module.
 
 ### Preparation contract: `Ok(true)` continues, `Ok(false)` aborts
 
-The generated `run_preparations` runs every Preparation in YAML order and
-returns `Result<bool, String>`:
+The generated runner walks the `runtime:` steps in order, one straight-line
+block per step. For a Preparation it matches on `step_<index>::run()`:
 
-- `Ok(true)` — every preparation accepted the host; the stub goes on to run the
-  Execution technique.
-- `Ok(false)` — a preparation declined the host; `run_preparations` stops and
-the stub exits without touching the payload (the builtin template exits `0`).
-- `Err(_)` — a preparation failed while doing its work (not a policy decision);
-the stub reports the error and exits `1`.
+- `Ok(true)` — the step accepted the host; the runner goes on to the next step.
+- `Ok(false)` — the step declined the host; the runner returns `Ok(0)` and the
+  stub exits without running any later step, so the payload never runs (the
+  builtin template exits `0`).
+- `Err(_)` — the step failed while doing its work (not a policy decision); the
+  runner takes the step's `on_fail` action.
 
 Most preparations always return `Ok(true)` (e.g. `patch_amsi`, `patch_etw`).
-The `bouncer` gate is the one that returns `Ok(false)`, or, when configured with
-`on_fail: exit`, exits the process with code `1` itself.
+The `bouncer` and `guardrail` gates return `Ok(false)`; `bouncer` configured
+with `on_fail: exit` exits the process with code `1` itself.
 
 ## 4. Register the technique
 
 In `src/techniques/mod.rs`:
 
 1. `pub mod my_technique;`
-2. A `RuntimeStep` variant: `MyTechnique(my_technique::Params)`.
+2. A `TechniqueKind` variant: `MyTechnique(my_technique::Params)`.
 3. An entry in `all()`: `&[process_hollowing::DEF, my_technique::DEF]`.
 
-Also add match arms to `RuntimeStep::render_fragment`, `RuntimeStep::name`
-and `RuntimeStep::category` so the stub renderer and validation dispatch
-correctly. An Execution technique that supports several payload formats gets the
+Also add match arms to `TechniqueKind::render_fragment`, `TechniqueKind::name`
+and `TechniqueKind::category` so the stub renderer and validation dispatch
+correctly. The variant's metadata (including `formats`) lives in `DEF`. An
+Execution technique that supports several payload formats gets the
 `format`/`export` arguments in `render_fragment` (see step 2).
 
 ## 5. Write tests

@@ -78,7 +78,7 @@ allocation: the anomaly an EDR sees is "an RX private region is entered", not
 | `EnumDesktopWindows` / `EnumWindows` | user32 | an interactive desktop with windows | per window | **Not used:** a Session 0 service desktop has no windows, so the callback never fires and the payload never runs |
 | `CreateTimerQueueTimer` | kernel32 | a timer queue | one per timer | Already used by `sleep_obfuscation`; it is a *thread* (the timer dispatch thread), so it is not "no new thread" |
 
-Cert32's enumeration is the only candidate that (a) runs in any process,
+crypt32's enumeration is the only candidate that (a) runs in any process,
 including a service without a window station, and (b) has a fixed, documented
 set of callbacks, so the payload is guaranteed to be invoked exactly once.
 
@@ -130,7 +130,7 @@ and returns.
   from `code_examples/execution_callbacks/smoke.yaml`; the fragment's IAT
   footprint with `syscalls.mode: none` is `VirtualAllocEx`, `VirtualProtectEx`,
   `LoadLibraryA` and `GetProcAddress` plus the runtime's own imports).
-- API behaviour measured on `x86_64-pc-windows-msvc`, Windows 10.0.26200
+- API behavior measured on `x86_64-pc-windows-msvc`, Windows 10.0.26200
   (scratch probes, `code_examples/execution_callbacks/probe1.rs` and
   `probe2.rs`):
   - `CertEnumSystemStoreLocation(0, NULL, cb)` invokes the callback **8 times**

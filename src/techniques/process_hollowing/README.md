@@ -130,10 +130,13 @@ process. It relays the hollowed process's exit code, so another step may follow.
   `syscalls.mode: none`).
 - **ETW-TI** (`Microsoft-Windows-Threat-Intelligence`) reports the cross-process
   memory write to a signed process.
-- **Static**: the stub still statically imports `CreateProcessA`,
-  `CreateRemoteThread`, `LoadLibraryA`, `GetProcAddress`, `GetThreadContext`,
-  `SetThreadContext`, `WaitForSingleObject`, `GetExitCodeProcess` and
-  `CloseHandle`. The Nt* calls (`NtUnmapViewOfSection`, `NtAllocateVirtualMemory`,
+- **Static**: with `syscalls.mode: indirect` the stub imports only
+  `CreateProcessA`, `GetModuleHandleA`, `LoadLibraryA`, `GetProcAddress` and
+  `VirtualProtect` (the shared resolver's IAT page protection). With `mode: none`
+  the syscall layer's Win32 mapping adds `VirtualAllocEx`, `WriteProcessMemory`,
+  `ReadProcessMemory`, `VirtualProtectEx`, `ResumeThread`, `SuspendThread`,
+  `CreateRemoteThread`, `WaitForSingleObject` and `CloseHandle`. The Nt* calls
+  (`NtUnmapViewOfSection`, `NtAllocateVirtualMemory`,
   `NtWriteVirtualMemory`, `NtReadVirtualMemory`, `NtResumeThread`,
   `NtProtectVirtualMemory`, `NtSuspendThread`) go through the syscall layer and
   never appear as imports or cleartext strings in `mode: indirect`.
@@ -182,11 +185,11 @@ What differs from the x64 path:
 - Import resolution is shared with reflective loading
   (`src/engine/imports.rs`); the fragment only supplies an RVA→file-offset
   mapper.
-- `CreateRemoteThread` (remote `LoadLibraryA`) and
-  `GetModuleHandleA`/`GetProcAddress` (to resolve its address) stay Win32
-  imports: `NtCreateThreadEx` takes eleven arguments, more stack arguments than
-  the indirect-syscall trampoline currently shuffles. Migrating them is a
-  follow-up.
+- `CreateProcessA` and `GetModuleHandleA`/`GetProcAddress` stay Win32 imports:
+  they are userland/loader entry points, not syscalls the stub issues itself.
+  The remote `LoadLibraryA` thread is created with the syscall layer's
+  `nt_create_thread_ex` — `NtCreateThreadEx`'s eleven arguments are the widest
+  the indirect-syscall trampoline carries.
 - The payload command line is shared with reflective loading
   (`src/engine/args.rs`, `$ARGS_BLOCK$`) and passed as `lpCommandLine`;
   `build_command_line` returns it with the target's file name as token 0.
@@ -196,9 +199,10 @@ What differs from the x64 path:
   reads `_tls_index`, and the main thread's TLS array slot is pointed at a
   private copy of the `.tls` template. The index has to be *reserved* through
   `TlsAlloc` — see `docs/measurements.md` for what ntdll does at thread exit to
-  an unreserved entry. The TLS *callbacks* (`DLL_PROCESS_ATTACH`) are still not
-  run (a never-started thread has no TLS array to point at; see the
-  limitations in `AGENTS.md`).
+  an unreserved entry. The TLS *callbacks* (`DLL_PROCESS_ATTACH`) run on the
+  main thread via a `jmp $` parking stub before the entry-point hand-off (see
+  the blockquote above); runtime verification of the callbacks on a Defender-off
+  host is still pending.
 
 ## References
 

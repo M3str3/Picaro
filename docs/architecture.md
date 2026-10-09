@@ -229,7 +229,7 @@ so it is rejected on x86.
 
 ## Cross-compilation from Linux
 
-When `picaro` runs on Linux/WSL the stub is cross-compiled to
+When Picaro runs on Linux/WSL the stub is cross-compiled to
 `x86_64-pc-windows-gnu`. Two `-L` flags are required and easy to forget:
 
 - `-L native=<...>/windows_x86_64_gnu-<ver>/lib` — `windows-rs` links via

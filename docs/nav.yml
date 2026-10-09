@@ -1,4 +1,4 @@
-# picaro — documentation navigation (single source of truth).
+# Picaro — documentation navigation (single source of truth).
 #
 # This file holds only the navigation, which two consumers read:
 #   1. `docs/site/scripts/assemble-docs.mjs`, which generates the Starlight
@@ -24,23 +24,23 @@ nav:
     - Overview: features/index.md
     - Adding a feature: features/adding-a-feature.md
   - Hosts:
-      - Host catalogue: hosts.md
+    - Host programs: hosts.md
   # The technique pages under techniques/ref/ are NOT listed here: the site
   # sidebar groups and badges them from the registry at assemble time, and the
   # assembler copies `src/techniques/<name>/README.md` into a page for each. The
   # Rust tests assert that each technique has a `techniques/ref/<name>.md` page.
   - Techniques:
-      - Overview: techniques/index.md
-      - Adding a technique: techniques/adding-a-technique.md
+    - Overview: techniques/index.md
+    - Adding a technique: techniques/adding-a-technique.md
   - Architecture:
-      - How it fits together: architecture.md
-      - Runtime steps: multistage.md
-      - Custom stubs: custom-stubs.md
-      - Syscall layer design: design/syscalls.md
-      - API resolution design: design/api-resolution.md
-      - DLL output design: design/dll-output.md
-      - Network stager design: design/network-stager.md
-      - x86 support: x86.md
+    - How it fits together: architecture.md
+    - Runtime steps: multistage.md
+    - Custom stubs: custom-stubs.md
+    - Syscall layer design: design/syscalls.md
+    - API resolution design: design/api-resolution.md
+    - DLL output design: design/dll-output.md
+    - Network stager design: design/network-stager.md
+    - x86 support: x86.md
   - Reference:
-      - Measurements: measurements.md
-      - Process hollowing evidence: techniques/process_hollowing.md
+    - Measurements: measurements.md
+    - Process hollowing evidence: techniques/process_hollowing.md

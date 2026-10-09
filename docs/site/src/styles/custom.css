@@ -1,12 +1,12 @@
 /*
- * picaro — Starlight theme overrides.
+ * Picaro — Starlight theme overrides.
  *
  * Pins the site to the CLI's brand accent (the soft violet #A78BFA the terminal
  * uses) and adds a few "quiet premium" touches: a refined system font stack,
  * softer corners, and smooth hover transitions.
  *
  * `--sl-color-text-accent` does double duty in Starlight: it is both the link
- * colour and the background of the sidebar's current-page pill. It therefore
+ * color and the background of the sidebar's current-page pill. It therefore
  * has to be a mid-tone violet that reads as text AND holds a contrasting label
  * when used as a fill — the exact mistake the previous palette made.
  */
@@ -56,7 +56,7 @@
     padding-block: unset!important;
 }
 
-/* Technique stability in the sidebar: a colour dot, the word stays for
+/* Technique stability in the sidebar: a color dot, the word stays for
    screen readers. */
 .sidebar-content .sl-badge.stab {
   width: 0.45rem;
@@ -81,7 +81,7 @@
 /* Quiet premium: corners + transitions                                      */
 /* ------------------------------------------------------------------------- */
 
-/* Links and nav entries ease their colour instead of snapping. */
+/* Links and nav entries ease their color instead of snapping. */
 a,
 .sidebar-content a,
 .sl-markdown-content a {
@@ -90,7 +90,7 @@ a,
 }
 
 /* Links keep the brand violet and step to a distinct shade on hover (rather
-   than jumping to the plain body-text colour). */
+   than jumping to the plain body-text color). */
 .sl-markdown-content a:hover:not(:where(.not-content *)) {
   color: var(--sl-color-accent-high);
   text-decoration-color: currentColor;

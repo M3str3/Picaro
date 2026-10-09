@@ -1,10 +1,12 @@
 # Examples
 
 Small, runnable plans live in `examples/plans/`. Run any of them from the
-repository root:
+repository root — through the Docker wrapper (recommended; needs only Docker and
+Python) or a local build:
 
 ```bash
-cargo run -- build examples/plans/<name>.yaml
+python scripts/picaro.py build examples/plans/<name>.yaml   # recommended
+cargo run -- build examples/plans/<name>.yaml               # local build
 ```
 
 | Plan | What it demonstrates |
@@ -22,7 +24,7 @@ cargo run -- build examples/plans/<name>.yaml
 | `lab-signed.yaml` | A self-signed (`mode: lab`) Authenticode signature and an embedded VERSIONINFO. |
 | `dll.yaml` | `output.kind: dll`: the chain ships as a DLL a host process loads (JVM `System.load`, CPython `ctypes`, `rundll32`) instead of a standalone executable. Its payload opens a modal dialog (the visible check). |
 | `dll-shellcode.yaml` | The same `kind: dll` build with a shellcode payload: the chain returns 42, so every host example in `examples/hosts/` reports a value. |
-| `mimikatz.yaml` | A full-featured plan: remote payload URL, indirect syscalls, API resolution (import proxying), `patch_etw`, randomised VERSIONINFO and a lab signature. |
+| `mimikatz.yaml` | A full-featured plan: remote payload URL, indirect syscalls, API resolution (import proxying), `patch_etw`, randomized VERSIONINFO and a lab signature. |
 
 ## Recipe: pack an msfvenom payload
 

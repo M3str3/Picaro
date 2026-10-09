@@ -46,7 +46,7 @@ sequenceDiagram
 
 4. When `wait` is `true`, `WaitForSingleObject` (with `timeout_s * 1000` ms, or
    `INFINITE` when `0`) and `GetExitCodeProcess` return the child's exit code.
-   When `false`, the handles are closed and the stage returns `0` immediately.
+   When `false`, the handles are closed and the step returns `0` immediately.
 5. Both process handles are closed.
 
 ## Integration
@@ -93,7 +93,7 @@ the chain.
   `StringsConfig` at render time, so none of them appears in cleartext in the
   generated stub.
 - `wait: false` is fire-and-forget: the child is not terminated and its exit
-  code is never read. `timeout_s` only bounds a waiting stage; on timeout the
+  code is never read. `timeout_s` only bounds a waiting step; on timeout the
   child keeps running and its current exit code (`STILL_ACTIVE`) is returned.
 - `CreateProcessA` stays Win32: launching a process is a loader entry point, not
   a syscall the stub issues through the indirect-syscall layer.

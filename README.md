@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/picaro_logo.png" alt="picaro logo" width="320" />
+  <img src="docs/assets/picaro_logo.png" alt="Picaro logo" width="320" />
 </p>
 
 **mimicry-based packer**
@@ -8,13 +8,14 @@
 > colors of something trusted, waved through every gate that would stop the
 > real thing. This is that idea, but for PEs.
 
-`picaro` takes a PE file and a YAML plan, and emits a packed PE with the
+Picaro takes a PE file and a YAML plan, and emits a packed PE with the
 selected evasion techniques baked into a freshly generated Rust stub. No
 cleartext payload ever touches disk: the payload is authenticated-encrypted at
 build time and only ever exists decrypted in memory at run time.
 
 Everything — packer and stub — is Rust. Nothing is embedded: if `rustc` is not
-on your `PATH`, it tells you so and stops.
+on your `PATH`, it tells you so and stops. No toolchain at all? Use the Docker
+wrapper in [Quick start](#quick-start).
 
 ## Authorized use only
 
@@ -27,14 +28,34 @@ control.
 
 ## Quick start
 
-Requirements:
+**The recommended way to use Picaro is the Docker wrapper**
+([`scripts/picaro.py`](scripts/picaro.py)): it needs only Docker and Python,
+installs nothing else on your machine, and behaves the same on Linux, macOS and
+Windows.
+
+```bash
+# Builds the image on first use (a few minutes), then packs the plan.
+python scripts/picaro.py build examples/plans/process-hollowing.yaml
+
+# The artifact lands where the plan says (here, dist/test_packed.exe); run it
+# on a Windows host.
+python scripts/picaro.py audit dist/test_packed.exe
+python scripts/picaro.py techniques list
+```
+
+The container cross-compiles the Windows PE, so the artifact must be run on a
+Windows host. Full details — what the image ships, the flags, the compose
+services — are in [Docker](#docker) below.
+
+### Local build (from source)
+
+To run the packer directly instead, you need:
 
 - **`rustc` on `PATH`** (the stub is compiled with bare `rustc`, not cargo).
 - Workspace dependencies already built: run `cargo build` once at the repo
   root so the stub can link the `.rlib` files out of `target/`.
-- Windows. The stub is built for `arch: x64` or `arch: x86`; on Linux/WSL it is
-  cross-compiled to the matching `-pc-windows-gnu` target (see
-  [`docs/architecture.md`](docs/architecture.md)).
+- Windows, or Linux/WSL to cross-compile to the matching `-pc-windows-gnu`
+  target (see [`docs/architecture.md`](docs/architecture.md)).
 
 ```bash
 # Pack the bundled test payload: hollow it into a suspended svchost.exe.
@@ -50,20 +71,37 @@ cargo run -- audit dist/test_packed.exe
 cargo run -- techniques list
 ```
 
-`picaro` prints a banner before every subcommand; `-q`/`--quiet` skips it,
+Picaro prints a banner before every subcommand; `-q`/`--quiet` skips it,
 `-v`/`--verbose` adds per-step detail (resolved plan, paths, sizes, timings),
 and `--no-color` (or `NO_COLOR=1`) turns off color — it is disabled
 automatically when output is redirected.
 
-## Docker (no local toolchain)
+## Docker
 
-No Rust, MinGW-w64 or Windows target installed? The bundled image ships the
-whole toolchain (rustc, cargo, the `x86_64-pc-windows-gnu` and
-`i686-pc-windows-gnu` targets, the MinGW linkers) plus the prebuilt workspace
-`.rlib` files for both architectures, so one command is enough. It
-also carries `osslsigncode` and `openssl`, so it can sign the artifact itself
-(see [Signing](#signing)); only `mode: store` needs Windows, because it reads the
-certificate store.
+The bundled image is the recommended way to run Picaro (see
+[Quick start](#quick-start)). It ships the whole toolchain (rustc, cargo, the
+`x86_64-pc-windows-gnu` and `i686-pc-windows-gnu` targets, the MinGW linkers)
+plus the prebuilt workspace `.rlib` files for both architectures, so one command
+is enough. It also carries `osslsigncode` and `openssl`, so it can sign the
+artifact itself (see [Signing](#signing)); only `mode: store` needs Windows,
+because it reads the certificate store.
+
+Use the wrapper, which builds the image on first use, handles the ownership and
+scratch-directory flags for you, and passes every other argument through
+unchanged. It is one standard-library-only Python script, the same on Linux,
+macOS and Windows:
+
+```bash
+python scripts/picaro.py build examples/plans/reflective-loading.yaml
+python scripts/picaro.py audit dist/test_packed_reflective.exe
+python scripts/picaro.py techniques list
+```
+
+Pass `--rebuild` (or `--build`) anywhere in the arguments to force a rebuild of
+the image, and set `PICARO_IMAGE` to use a different tag.
+
+Or drive Docker yourself — `docker build` once, then `docker run` with the
+current directory mounted as `/work`:
 
 ```bash
 # One-time build (a few minutes the first time).
@@ -75,19 +113,6 @@ docker build -t picaro .
 docker run --rm -it --user "$(id -u):$(id -g)" -e PICARO_BUILD_DIR=/tmp/picaro-build \
   -v "$PWD:/work" -w /work picaro build examples/plans/reflective-loading.yaml
 ```
-
-Or use the wrapper, which builds the image on first use, handles the flags
-above, and passes every argument through unchanged. It is one
-standard-library-only Python script, the same on Linux, macOS and Windows:
-
-```bash
-python scripts/picaro.py build examples/plans/reflective-loading.yaml
-python scripts/picaro.py audit dist/test_packed_reflective.exe
-python scripts/picaro.py techniques list
-```
-
-Pass `--rebuild` (or `--build`) anywhere in the arguments to force a rebuild of
-the image, and set `PICARO_IMAGE` to use a different tag.
 
 On Linux the container runs as your user (`--user "$(id -u):$(id -g)"`), so the
 artifacts it writes through the mount stay yours instead of becoming
@@ -199,7 +224,7 @@ files stay yours. The Cargo volume is reset with `docker compose down -v`.
 If the build fails on the Metasploit step with a certificate error, you are
 behind a TLS-inspecting corporate proxy (Netskope, Zscaler, ...): it re-signs
 `downloads.metasploit.com` with a root the base image does not trust. Trust that
-root once with, eg:
+root once with, e.g.:
 
 ```bash
 # Extract the proxy's self-signed root from the build's own network path and
@@ -299,7 +324,7 @@ runtime:                  # ordered technique steps
 | `build.output.subsystem` | `console` (default) or `windows` (GUI, no console window). |
 | `build.output.resources` | Optional PE resources embedded into the artifact: `icon` (a `.ico` path or `random`), `version_info` and `manifest` (Windows app manifest / UAC). Built in Rust and written into a `.rsrc` section. |
 | `build.output.sign` | Optional Authenticode signing: `lab` (self-signed), `store` (an existing cert, Windows only) or `file` (a `.pfx`). Uses `signtool` on Windows and `osslsigncode` elsewhere. |
-| `runtime` | The ordered technique steps. Only Execution techniques (`reflective_loading`, `process_hollowing`, `dotnet_hosting`, `execution_callbacks`, `module_stomping`, `fibers`) take `params.payload` (optional with one payload, required with several); Preparation and Control steps never do. A technique's parameters go under a nested `params:` mapping, and each step carries the loader's own `on_success`/`on_fail`/`delay_ms`. See [Runtime steps](docs/multistage.md). |
+| `runtime` | The ordered technique steps. Only Execution techniques (`reflective_loading`, `process_hollowing`, `pe_injection`, `early_bird`, `thread_hijacking`, `dll_hollowing`, `process_ghosting`, `dotnet_hosting`, `execution_callbacks`, `module_stomping`, `fibers`) take `params.payload` (optional with one payload, required with several); Preparation and Control steps never do. A technique's parameters go under a nested `params:` mapping, and each step carries the loader's own `on_success`/`on_fail`/`delay_ms`. See [Runtime steps](docs/multistage.md). |
 
 **Build arguments.** Positional args after the plan path are substituted in
 the YAML as `$arg.N$` (0-based); an arg of the form `name=value` is available
@@ -353,20 +378,40 @@ The fancy prompts require a real terminal; when stdin or stdout is redirected
 <!-- --8<-- [end:interactive] -->
 ## Techniques
 
-Techniques are split into two categories. **Preparation** techniques change the
-current process state but never run the payload; **Execution** techniques run
-the decrypted payload. A valid pipeline is `0..N` Preparation techniques in
-order, followed by exactly one Execution technique.
+Techniques are split into three categories. **Preparation** techniques change
+the current process state but never run the payload, **Execution** techniques
+run a decrypted payload, and **Control** techniques orchestrate the chain. A
+chain only continues if the loader gets control back after a step, so a
+**terminal** step (`reflective_loading`/`process_ghosting` of a PE executable,
+`dotnet_hosting`) must be last; everything else chains.
 
 | YAML key | Category | ATT&CK | Stability | What it does |
 | --- | --- | --- | --- | --- |
 | `anti_debug` | preparation | T1622 | stable | Detects a debugger and, by default, aborts before the payload runs. |
-| `bouncer` | preparation | T1497.001, T1614.001 | experimental | Gates the payload on host checks (hostname, locale, uptime, RAM, VM/sandbox); aborts the pipeline when they fail. |
+| `bouncer` | preparation | T1497.001, T1614.001 | stable | Gates the payload on host checks (hostname, locale, uptime, RAM, VM/sandbox); aborts when they fail. |
+| `guardrail` | preparation | T1480 | stable | Aborts the chain once a deadline passes or a persisted run count is exceeded. |
 | `patch_amsi` | preparation | T1562.001 | stable | Patches `AmsiScanBuffer` in the current process. |
 | `patch_etw` | preparation | T1562.006 | stable | Patches the ETW event-writing exports in the current process. |
-| `process_hollowing` | execution | T1055.012 | experimental | Runs the payload inside a suspended, legitimate process instead of on disk. |
-| `reflective_loading` | execution | T1620 | experimental | Maps the payload into the current process and runs its entry point. |
+| `self_deletion` | preparation | T1070.004 | stable | Moves the running image into an alternate data stream, or deletes it through a helper. |
 | `sleep_obfuscation` | preparation | T1027 | experimental | Encrypts the image region during a timer-driven sleep so memory scans see ciphertext. |
+| `stack_spoofing` | preparation | T1036 | stable | Fabricates the stack around every indirect syscall (x64 only). |
+| `timestomping` | preparation | T1070.006 | stable | Copies a legitimate file's timestamps onto the artifact. |
+| `unhook_ntdll` | preparation | T1562.001 | stable | Restores the live ntdll's `.text` from a clean on-disk copy. |
+| `dll_hollowing` | execution | T1574.002 | experimental | Overwrites a signed DLL's `.text` with the payload and restores it afterwards. |
+| `dotnet_hosting` | execution | T1620 | experimental | Hosts the CLR and runs a managed assembly from memory (`format: dotnet`). |
+| `early_bird` | execution | T1055.004 | experimental | Spawns a suspended process, writes the payload and queues an APC before resuming it. |
+| `execution_callbacks` | execution | T1106, T1620 | stable | Runs the payload as the callback of a legitimate enumeration API. |
+| `fibers` | execution | T1055 | stable | Runs the payload on a fiber of the loader's own thread. |
+| `module_stomping` | execution | T1055 | stable | Overwrites a signed module's `.text` with the payload. |
+| `pe_injection` | execution | T1055.002 | experimental | Maps a full PE into a suspended process without unmapping the target's image. |
+| `process_ghosting` | execution | T1055.012 | experimental | Runs the payload from a delete-on-close file mapped as a section. |
+| `process_hollowing` | execution | T1055.012 | experimental | Runs the payload inside a suspended, legitimate process. |
+| `reflective_loading` | execution | T1620 | experimental | Maps the payload into the current process and runs it. |
+| `thread_hijacking` | execution | T1055.003 | experimental | Places the payload and redirects a thread the target process already has. |
+| `living_off_the_land` | control | T1218, T1105 | stable | Launches a signed system binary (`certutil`, `rundll32`, `bitsadmin`, …). |
+| `network_stager` | control | T1105, T1071 | experimental | Fetches a payload over the network at run time. |
+| `ppid_spoofing` | control | T1134.004 | stable | Launches a child with a spoofed parent process. |
+| `sleep` | control | T1497 | stable | Waits a fixed interval before the next step. |
 
 The registry is metadata-only. Inspect it, don't guess:
 
@@ -609,7 +654,9 @@ src/
   engine/       crypto, PE parsing, stub generation, compilation, syscall layer,
                 imports, builtin stub template
   audit/        static measurement (pe_info, strings, yara, defender, report)
+  features/     the loader-feature registry (syscalls, api_resolution, args, strings)
   techniques/   one directory per technique + the registry (mod.rs)
+  wizard.rs     the interactive `build interactive` flow
   error.rs      top-level error types
   ui.rs         terminal output: banner, palette, formatting helpers
 examples/       curated example plans, test payloads, sample custom stubs
@@ -617,7 +664,7 @@ exchange/       (gitignored) the one host folder shared writable with the contai
 docs/           Markdown sources; the navigation lives in docs/nav.yml
 docs/site/      the Starlight site project (config, styles, assembler, Dockerfile)
 scripts/        Docker wrappers (picaro.py, docs.py)
-docker-compose.yml  development container (picaro + msfvenom)
+docker-compose.yml  containers: `dev` (Picaro + msfvenom) and `run` (no toolchain)
 tests/          CLI integration tests + fixtures (tests/plans/, tests/fixtures/)
 build/  dist/   (gitignored) intermediate artifacts and final binaries
 ```
@@ -686,11 +733,12 @@ Planned:
   Windows builds is a launcher shim on which `QueueUserAPC` fails with
   `ERROR_INVALID_HANDLE` (the default `svchost.exe` and `cmd.exe` are fine).
 - **`arch: x86` is supported, with one parked workstream.** Every technique
-except `sleep_obfuscation` accepts `arch: x86` (the stub, the payload and — for
-the techniques that spawn their own target — the target must share the
-architecture, which the packer checks).
-  `sleep_obfuscation` stays x64-only, and `syscalls.mode: indirect` (and
-  therefore `api_resolution`) is x64-only until a Heaven's Gate layer exists. A
+except `sleep_obfuscation` and `stack_spoofing` accepts `arch: x86` (the stub,
+the payload and — for the techniques that spawn their own target — the target
+must share the architecture, which the packer checks).
+  `sleep_obfuscation` and `stack_spoofing` stay x64-only, and
+  `syscalls.mode: indirect` (and therefore `api_resolution`) is x64-only until a
+  Heaven's Gate layer exists.
   managed assembly runs through `format: dotnet` + `dotnet_hosting` (the stub
   hosts the CLR), so a 32-bit .NET assembly such as `SharpHound.exe` packs and
   runs with `arch: x86`. See [`docs/x86.md`](docs/x86.md) and the example

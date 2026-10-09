@@ -1,15 +1,15 @@
 # Sleep
 
 *Waits a fixed number of milliseconds before the pipeline continues, so a plan
-can pace its stages or delay the final exit.*
+can pace its steps or delay the final exit.*
 
 ## What it does
 
 Waits for a fixed duration before the pipeline continues.
 
 A Control technique: it neither modifies the current process state nor runs the
-payload. It exists so a multi-stage plan can pace its chain — a deliberate delay
-between two stages, or a final delay before the process exits.
+payload. It exists so a multi-step plan can pace its chain — a deliberate delay
+between two steps, or a final delay before the process exits.
 
 ## How it works
 
@@ -19,9 +19,9 @@ flowchart TD
     B --> C[Returns Ok 0, runner continues]
 ```
 
-1. The generated runner calls `run_sleep()` for the stage.
+1. The generated runner calls `run_sleep()` for the step.
 2. `std::thread::sleep(Duration::from_millis(ms))` blocks the current thread.
-3. It returns `Ok(0)`; the runner continues with the next stage.
+3. It returns `Ok(0)`; the runner continues with the next step.
 
 ## Integration
 
@@ -38,7 +38,7 @@ finishes, so the steps around it keep running. It pauses the chain for `ms` mill
 ## What detects it
 
 - Nothing specific to the pause itself. A long, unexplained sleep is only a
-  hunting signal when correlated with other behaviour (an idle process with a
+  hunting signal when correlated with other behavior (an idle process with a
   suspended thread, a suspicious child launched minutes after the parent).
 
 ## Measurements

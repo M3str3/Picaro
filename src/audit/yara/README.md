@@ -29,7 +29,7 @@ Drop one or more `.yar` / `.yara` files under `src/audit/yara/rules/`, e.g.
 ```yara
 rule picaro_stub_marker {
     meta:
-        description = "picaro packed stub"
+        description = "Picaro packed stub"
     strings:
         $a = "STUB_MARKER_" ascii
     condition:

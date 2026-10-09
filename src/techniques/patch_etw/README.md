@@ -1,4 +1,4 @@
-# ETW Patch
+# ETW patch
 
 *Overwrites the prologue of ntdll's ETW event-writing exports so no Event
 Tracing for Windows events are emitted from the process.*

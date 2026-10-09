@@ -8,7 +8,7 @@ payload executes from memory without touching disk or spawning a child.*
 Maps a PE image into the current process's memory (manual mapping): allocates
 at the image's preferred base, copies headers and sections, resolves imports,
 applies base relocations, fixes section memory protections, runs TLS callbacks
-and then executes the payload's entry point in a separate thread. No external
+and then executes the payload's entry point on the calling thread. No external
 target process is required.
 
 For a `format: shellcode` payload there is no image to map: the decrypted bytes
@@ -27,7 +27,7 @@ flowchart TD
     E -- yes --> G[Set section protections]
     F --> G
     G --> H[Run TLS callbacks]
-    H --> I[Run the entry point on a new thread]
+    H --> I[Run the entry point on the calling thread]
 ```
 
 ### 1. Map the image
@@ -48,12 +48,12 @@ flowchart TD
 
 7. Run TLS callbacks, if present.
 8. Run the entry point (`DllMain` for a DLL, `mainCRTStartup`-style for an EXE)
-   on a new thread and return its exit code.
+   on the calling thread and return its exit code.
 
 With `build.payloads.<name>.export` (DLLs only), step 8 changes: the entry point is
 called once with `DLL_PROCESS_ATTACH` — the loader step a mapped DLL needs so
 its CRT and global constructors initialize — and then the named export is called
-with no arguments instead of running the entry point on a thread. The process
+with no arguments instead of running the entry point. The process
 exits 0 once the export returns.
 
 ## Payload formats
@@ -146,20 +146,23 @@ index.
 
 ## Measurements
 
-- TODO — pending a static/dynamic baseline (see `docs/measurements.md`).
+- A dedicated static/dynamic baseline for this technique has not been recorded
+  yet; see `docs/measurements.md` for the measurements that do exist.
 
 ## Implementation notes
 
-- The entry point runs on a separate thread so the stub can wait for it and
-  capture its exit code. If the payload calls `ExitProcess`, it terminates the
-  whole stub process (and its thread).
+- The mapped PE's entry point runs on the calling thread and its return value
+  is captured directly; the `shellcode` runner is the one that needs a thread.
+  If the payload calls `ExitProcess`, it terminates the whole stub process (and
+  its thread).
 - Payload arguments are rewritten into the PEB and `kernelbase`'s cached
   command-line pointer before the payload runs, so the payload's `argv` is what
   the operator configured (`build.payloads.<name>.args` + runtime args).
 - Allocation and page protection go through the syscall layer
-  (`nt_alloc_vm`/`nt_protect_vm`); `CreateThread` stays Win32 because
-  `NtCreateThreadEx` takes eleven arguments, more stack arguments than the
-  indirect-syscall trampoline currently shuffles.
+  (`nt_alloc_vm`/`nt_protect_vm`); the `shellcode` runner's `CreateThread` stays
+  Win32 — the technique's syscall requirements (`NtAllocateVirtualMemory`,
+  `NtProtectVirtualMemory`) include no thread call, so the layer renders no
+  `nt_create_thread_ex` helper here.
 
 ## References
 

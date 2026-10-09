@@ -43,7 +43,7 @@ part of the loader:
 5. **Redirect the entry point.** `Rip` — not just `Rcx` — is set to the payload's
    entry. Without that the thread resumed inside the replaced image.
 
-## Measured behaviour
+## Measured behavior
 
 All runs on the development host, `svchost.exe` as the target, the Rust test
 payload (`examples/payloads/test_payload.exe`):
