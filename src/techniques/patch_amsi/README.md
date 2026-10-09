@@ -19,7 +19,7 @@ sequenceDiagram
     L->>A: LoadLibraryA(amsi.dll)
     L->>A: GetProcAddress(AmsiScanBuffer)
     L->>A: nt_protect_vm(RWX)
-    L->>A: write 29 C0 C3 (sub eax,eax; ret)
+    L->>A: write 29 C0 C3 (sub eax, eax / ret)
     L->>A: restore original protection
     Note over L,A: AmsiScanBuffer now returns S_OK
 ```
