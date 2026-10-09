@@ -2,17 +2,17 @@
 /**
  * Assemble the Starlight docs from the repository's single source of truth.
  *
- * Two things happen here:
+ * Three things happen here:
  *   1. The navigation in `docs/nav.yml` (which the Rust test suite also reads) is
  *      turned into a Starlight `sidebar` and written to `src/sidebar.mjs`.
+ *      Technique pages are then split by category and badged with stability.
  *   2. Every Markdown page under `docs/` is copied into Starlight's content
- *      directory, with the `--8<--` snippet directives inlined from the
- *      READMEs (the same single-source-of-truth trick MkDocs used), a `title`
- *      frontmatter injected from the first heading, and every local `.md`
- *      link rewritten to the Starlight slug it maps to (`foo.md` -> `/foo/`,
- *      `ref/bar.md` -> `/<dir>/ref/bar/`). Links resolve relative to the file
- *      that writes them — the including page for its own links, the snippet's
- *      own directory for links inside an included README.
+ *      directory. A page that is only `--8<-- "src/…/README.md"` is that README
+ *      copied across, with a `title` taken from its first heading and local
+ *      `.md` links rewritten to Starlight slugs (`foo.md` -> `/foo/`).
+ *   3. Each technique's `mod.rs` is scanned into `/techniques.json` (the
+ *      registry: params, stability, ATT&CK, syscalls, …). The README is not
+ *      rewritten from that data; it is the other artifact.
  *
  * The script is editor-agnostic: it never writes to the repository, only to the
  * output directories passed on the command line (in the container those live
@@ -21,18 +21,166 @@
 
 import {
   readFileSync,
+  readdirSync,
   writeFileSync,
   mkdirSync,
   rmSync,
   watch,
   existsSync,
 } from 'node:fs';
-import { dirname, join, posix, resolve } from 'node:path';
+import { dirname, join, posix, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
-import { buildTechniqueCatalog } from './technique-catalog.mjs';
+import { loadTechniques } from './catalog.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+const STABILITY_RANK = { stable: 0, experimental: 1, unimplemented: 2, deprecated: 3 };
+
+const STABILITY_BADGE = {
+  stable: { text: 'stable', variant: 'success', class: 'stab' },
+  experimental: { text: 'experimental', variant: 'caution', class: 'stab' },
+  unimplemented: { text: 'unimplemented', variant: 'danger', class: 'stab' },
+  deprecated: { text: 'deprecated', variant: 'danger', class: 'stab' },
+};
+
+const CATEGORY_LABEL = {
+  preparation: 'Preparation',
+  execution: 'Execution',
+  control: 'Control',
+};
+
+/**
+ * The nav lists only the Techniques overview and the guide; the technique entries
+ * are generated from the registry. The sidebar splits them by
+ * `TechniqueDef.category` and badges each one with its stability, both read
+ * from the registry (`techniques.json`).
+ */
+function groupTechniqueSidebar(sidebar, byName) {
+  return sidebar.map((item) => {
+    if (item.label !== 'Techniques' || !Array.isArray(item.items)) return item;
+
+    // The nav keeps only the overview and the guide; the technique entries come
+    // from the registry (label, link and stability badge), grouped by category
+    // and ordered by maturity, so adding a technique needs no nav edit.
+    const head = item.items.filter((child) => !child.link?.includes('adding-a-technique'));
+    const tail = item.items.filter((child) => child.link?.includes('adding-a-technique'));
+
+    const buckets = new Map(Object.keys(CATEGORY_LABEL).map((key) => [key, []]));
+    for (const tech of byName.values()) {
+      const list = buckets.get(tech.category) ?? buckets.get('preparation');
+      list.push({
+        label: tech.label,
+        link: tech.page,
+        badge: STABILITY_BADGE[tech.stability] ?? {
+          text: tech.stability,
+          variant: 'default',
+          class: 'stab',
+        },
+        rank: STABILITY_RANK[tech.stability] ?? 9,
+      });
+    }
+
+    for (const list of buckets.values()) {
+      list.sort((a, b) => a.rank - b.rank || a.label.localeCompare(b.label));
+      for (const entry of list) delete entry.rank;
+    }
+
+    const groups = Object.entries(CATEGORY_LABEL)
+      .filter(([key]) => buckets.get(key).length > 0)
+      .map(([key, label]) => ({ label, items: buckets.get(key) }));
+
+    return { label: item.label, items: [...head, ...groups, ...tail] };
+  });
+}
+
+/**
+ * The "Registered techniques" overview table, generated from the registry so
+ * `docs/techniques/index.md` keeps only its prose. The page carries a
+ * `<!-- techniques-table -->` marker that this replaces; the links are relative
+ * (`ref/<name>.md`) and the page processor rewrites them to slugs.
+ */
+function techniquesTable(registry) {
+  const order = { preparation: 0, execution: 1, control: 2 };
+  const rows = [...registry.techniques].sort(
+    (a, b) =>
+      (order[a.category] ?? 9) - (order[b.category] ?? 9) || a.name.localeCompare(b.name),
+  );
+  const lines = [
+    '| Technique | Category | ATT&CK | Stability | Summary |',
+    '| --- | --- | --- | --- | --- |',
+  ];
+  for (const tech of rows) {
+    const summary = tech.summary.replace(/\|/g, '\\|');
+    lines.push(
+      `| [${tech.name}](ref/${tech.name}.md) | ${tech.category} | ${tech.attck.join(', ')} | `
+        + `${tech.stability} | ${summary} |`,
+    );
+  }
+  return lines.join('\n');
+}
+
+/**
+ * The loader-features sidebar group, generated from the feature registry (label,
+ * link, stability badge), ordered by maturity then name. A feature with
+ * children in `resolversByParent` (currently `syscalls`, which owns the SSN
+ * resolvers) becomes an expanded sub-tree: an `Overview` link to the feature
+ * page plus one child per resolver. The nav keeps only the overview and the
+ * guide.
+ */
+function groupFeatureSidebar(sidebar, byFeature, resolversByParent) {
+  const badgeFor = (stability) =>
+    STABILITY_BADGE[stability] ?? { text: stability, variant: 'default', class: 'stab' };
+  const rank = (stability) => STABILITY_RANK[stability] ?? 9;
+
+  return sidebar.map((item) => {
+    if (item.label !== 'Loader features' || !Array.isArray(item.items)) return item;
+
+    const head = item.items.filter((child) => !child.link?.includes('adding-a-feature'));
+    const tail = item.items.filter((child) => child.link?.includes('adding-a-feature'));
+
+    const list = [...byFeature.values()]
+      .sort((a, b) => rank(a.stability) - rank(b.stability) || a.label.localeCompare(b.label))
+      .map((feature) => {
+        const children = (resolversByParent.get(feature.name) ?? []).sort(
+          (a, b) => rank(a.stability) - rank(b.stability) || a.label.localeCompare(b.label),
+        );
+        if (children.length === 0) {
+          return { label: feature.label, link: feature.page, badge: badgeFor(feature.stability) };
+        }
+        return {
+          label: feature.label,
+          collapsed: false,
+          items: [
+            { label: 'Overview', link: feature.page, badge: badgeFor(feature.stability) },
+            ...children.map((child) => ({
+              label: child.label,
+              link: child.doc,
+              badge: badgeFor(child.stability),
+            })),
+          ],
+        };
+      });
+
+    return { label: item.label, items: [...head, ...list, ...tail] };
+  });
+}
+
+/** The "Registered features" overview table, generated from the feature registry. */
+function featuresTable(features) {
+  const lines = [
+    '| Feature | Scope | ATT&CK | Stability | Summary |',
+    '| --- | --- | --- | --- | --- |',
+  ];
+  for (const feature of features) {
+    const summary = feature.summary.replace(/\|/g, '\\|');
+    lines.push(
+      `| [${feature.name}](ref/${feature.name}.md) | ${feature.scope} | `
+        + `${feature.attck.join(', ')} | ${feature.stability} | ${summary} |`,
+    );
+  }
+  return lines.join('\n');
+}
 
 /** Parse `--name value` / `--flag` arguments into a plain object. */
 function parseArgs(argv) {
@@ -265,7 +413,37 @@ function transformMermaid(content) {
 /* Page processing                                                           */
 /* ------------------------------------------------------------------------- */
 
-function processPage(raw, root, fallbackTitle, rel) {
+/* ------------------------------------------------------------------------- */
+/* Registry data for the technique panel                                     */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * Write the registry to a module the site imports.
+ *
+ * The metadata panel above a technique page ("Metadata", "Example", …) is a
+ * real Starlight component (`src/components/TechniqueMeta.astro`), so it cannot
+ * be inlined into the generated Markdown. It imports the registry from this
+ * module instead, written next to `sidebar.mjs` (both live under Starlight's
+ * `src/`).
+ */
+function writeTechniquesModule(sidebarOut, registry, features) {
+  const dest = join(dirname(sidebarOut), 'techniques.generated.mjs');
+  const text =
+    '// Generated by scripts/assemble-docs.mjs from src/techniques/*/mod.rs and '
+    + 'src/features/*/mod.rs. Do not edit.\n'
+    + `export const techniques = ${JSON.stringify(registry.techniques, null, 2)};\n`
+    + `export const features = ${JSON.stringify(features, null, 2)};\n`;
+  const wrote = writeIfChanged(dest, text);
+  if (wrote) {
+    // eslint-disable-next-line no-console
+    console.log(
+      `${registry.techniques.length} techniques, ${features.length} features → ${dest}`,
+    );
+  }
+  return wrote;
+}
+
+function processPage(raw, root, fallbackTitle, rel, generated) {
   // Normalise Windows CRLF line endings so frontmatter detection and heading
   // extraction work regardless of how the source file was saved.
   raw = raw.replace(/\r\n/g, '\n');
@@ -279,6 +457,9 @@ function processPage(raw, root, fallbackTitle, rel) {
     .some((line) => line.trim() !== '' && !SNIPPET_LINE.test(line));
 
   let content = inlineSnippets(body, root, hasOwnContent);
+  // A generated block (the registry overview table) replaces its marker in the
+  // page source, before links are rewritten.
+  if (generated) content = content.replace('<!-- registry-table -->', generated);
   // The page's own links resolve against the page's directory under docs/.
   // `rel` comes from `docs/nav.yml` with forward slashes, so resolve with posix.
   content = rewriteMdLinks(content, posix.dirname(posix.join('docs', rel)));
@@ -313,21 +494,50 @@ function collectPages(nav) {
   return pages;
 }
 
-/** Write `/plan-catalog.json` for the in-docs plan builder. */
-function writePlanCatalog(root, publicOut) {
-  const catalog = buildTechniqueCatalog(root);
-  mkdirSync(publicOut, { recursive: true });
-  const dest = join(publicOut, 'plan-catalog.json');
-  writeFileSync(dest, `${JSON.stringify(catalog, null, 2)}\n`);
-  // eslint-disable-next-line no-console
-  console.log(
-    `plan catalog: ${catalog.techniques.length} techniques → ${dest}`,
-  );
+/** Write `text` only when the file differs, so a no-op assemble does not touch mtimes. */
+function writeIfChanged(dest, text) {
+  if (existsSync(dest) && readFileSync(dest, 'utf8') === text) return false;
+  mkdirSync(dirname(dest), { recursive: true });
+  writeFileSync(dest, text);
+  return true;
 }
 
-/** Copy exactly the pages the navigation references (orphans are not built). */
-function copyDocs(root, outDir, pages) {
-  rmSync(outDir, { recursive: true, force: true });
+/** Write a JSON document under the site's public dir. */
+function writePublicJson(publicOut, name, data) {
+  const dest = join(publicOut, name);
+  const wrote = writeIfChanged(dest, `${JSON.stringify(data, null, 2)}\n`);
+  if (wrote) {
+    // eslint-disable-next-line no-console
+    console.log(`${data.techniques.length} techniques → ${dest}`);
+  }
+  return wrote;
+}
+
+/** Every `.md` path under `dir`, relative and using forward slashes. */
+function markdownFiles(dir) {
+  const found = [];
+  const walk = (current) => {
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const path = join(current, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else if (entry.name.endsWith('.md')) found.push(relative(dir, path).replaceAll('\\', '/'));
+    }
+  };
+  if (existsSync(dir)) walk(dir);
+  return found;
+}
+
+/**
+ * Copy exactly the pages the navigation references.
+ *
+ * Files are updated in place. Wiping the content directory makes Starlight's
+ * dev loader drop `getStaticPaths()` and every route 404s until the server
+ * restarts — which is what a second assemble did a few seconds after startup.
+ */
+function copyDocs(root, outDir, pages, generatedByRel) {
+  mkdirSync(outDir, { recursive: true });
+  const keep = new Set();
+  let wrote = 0;
   for (const [rel, label] of pages) {
     const src = join(root, 'docs', rel);
     if (!existsSync(src)) {
@@ -335,11 +545,17 @@ function copyDocs(root, outDir, pages) {
       console.warn(`nav references a missing page: docs/${rel}`);
       continue;
     }
-    const dest = join(outDir, rel);
-    mkdirSync(dirname(dest), { recursive: true });
+    keep.add(rel);
     const raw = readFileSync(src, 'utf8');
-    writeFileSync(dest, processPage(raw, root, label, rel));
+    const generated = generatedByRel[rel] ?? null;
+    if (writeIfChanged(join(outDir, rel), processPage(raw, root, label, rel, generated))) {
+      wrote += 1;
+    }
   }
+  for (const rel of markdownFiles(outDir)) {
+    if (!keep.has(rel)) rmSync(join(outDir, rel));
+  }
+  return wrote;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -348,24 +564,48 @@ function copyDocs(root, outDir, pages) {
 
 function assemble(root, outDir, sidebarOut, publicOut) {
   const nav = yaml.load(readFileSync(join(root, 'docs', 'nav.yml'), 'utf8'));
-  const sidebar = buildSidebar(nav.nav);
+  const { registry, catalog, features, resolvers } = loadTechniques(root);
+  const byName = new Map(registry.techniques.map((tech) => [tech.name, tech]));
+  const byFeature = new Map(features.map((feature) => [feature.name, feature]));
+  const resolversByParent = new Map();
+  for (const resolver of resolvers) {
+    if (!resolversByParent.has(resolver.parent)) resolversByParent.set(resolver.parent, []);
+    resolversByParent.get(resolver.parent).push(resolver);
+  }
+  let sidebar = buildSidebar(nav.nav);
+  sidebar = groupTechniqueSidebar(sidebar, byName);
+  sidebar = groupFeatureSidebar(sidebar, byFeature, resolversByParent);
 
-  mkdirSync(dirname(sidebarOut), { recursive: true });
-  writeFileSync(
-    sidebarOut,
-    `// Generated by scripts/assemble-docs.mjs from docs/nav.yml. Do not edit.\nexport default ${JSON.stringify(
+  const sidebarText =
+    `// Generated by scripts/assemble-docs.mjs from docs/nav.yml and the registries. Do not edit.\nexport default ${JSON.stringify(
       sidebar,
       null,
       2,
-    )};\n`,
-  );
-
-  copyDocs(root, outDir, collectPages(nav.nav));
-  writePlanCatalog(root, publicOut);
-  // eslint-disable-next-line no-console
-  console.log(
-    `assembled ${sidebar.length} sidebar groups into ${outDir}`,
-  );
+    )};\n`;
+  const sidebarChanged = writeIfChanged(sidebarOut, sidebarText);
+  const dataChanged = writeTechniquesModule(sidebarOut, registry, features);
+  const pages = collectPages(nav.nav);
+  // Technique and feature pages are not in the nav; add them from the registries.
+  for (const tech of registry.techniques) {
+    pages.set(`techniques/ref/${tech.name}.md`, tech.label);
+  }
+  for (const feature of features) {
+    pages.set(`features/ref/${feature.name}.md`, feature.label);
+  }
+  for (const resolver of resolvers) {
+    pages.set(`features/ref/syscalls/${resolver.id}.md`, resolver.label);
+  }
+  const generated = {
+    'techniques/index.md': techniquesTable(registry),
+    'features/index.md': featuresTable(features),
+  };
+  const pagesChanged = copyDocs(root, outDir, pages, generated);
+  const registryChanged = writePublicJson(publicOut, 'techniques.json', registry);
+  const catalogChanged = writePublicJson(publicOut, 'plan-catalog.json', catalog);
+  if (sidebarChanged || dataChanged || pagesChanged || registryChanged || catalogChanged) {
+    // eslint-disable-next-line no-console
+    console.log(`assembled ${sidebar.length} sidebar groups into ${outDir}`);
+  }
 }
 
 const args = parseArgs(process.argv.slice(2));
@@ -394,13 +634,16 @@ if (args.watch) {
     join(root, 'examples/README.md'),
     join(root, 'src/techniques'),
     join(root, 'src/features'),
+    join(root, 'src/engine/syscalls/resolvers'),
   ].filter((p) => existsSync(p));
   for (const path of watched) {
     watch(path, { recursive: true }, schedule);
   }
+  // The serve command already assembled once. Re-running here deletes and
+  // rewrites the content tree while Astro is starting, and Starlight then
+  // serves 404s for routes it just had.
   // eslint-disable-next-line no-console
   console.log('watching for changes…');
-  schedule();
 } else {
   assemble(root, outDir, sidebarOut, publicOut);
 }

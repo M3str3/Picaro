@@ -3,33 +3,12 @@
 *Patches `AmsiScanBuffer` in the current process so every scan returns clean,
 disabling in-process AMSI inspection of scripts and .NET content.*
 
-## Metadata
-
-| | |
-|---|---|
-| **ATT&CK** | T1562.001 (Impair Defenses: Disable or Modify Tools) |
-| **Stability** | Stable |
-| **Category** | Preparation |
-| **YAML key** | `patch_amsi` |
-| **Introduced in** | Phase 7 |
-
 ## What it does
 
 Patches AmsiScanBuffer in the current process so it always returns S_OK
 (clean), disabling AMSI for any code that invokes it in-process: PowerShell,
 WMI, VBScript, JScript, and .NET assembly loading. It does not run the payload;
 it only modifies process state, which is why it is a Preparation technique.
-
-## YAML parameters
-
-None.
-
-## YAML example
-
-```yaml
-runtime:
-  - technique: patch_amsi
-```
 
 ## How it works
 
@@ -59,6 +38,11 @@ sequenceDiagram
 
 If `amsi.dll` cannot be loaded (e.g. AMSI is unavailable), the preparation
 returns a clear error and the pipeline fails with a useful message.
+
+## Integration
+
+A **Preparation** step: the stub runs it before the Execution and it never
+receives the payload. Place it earlier in `runtime:` than the Execution step.
 
 ## What it evades
 

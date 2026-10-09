@@ -47,6 +47,13 @@ copied files.
 
 - Implement `Params::render_fragment` — substitute the technique's
   `$PLACEHOLDER$` values into `DEF.stub_fragment`.
+- Set `formats` — the payload formats an Execution technique accepts (`&[]` for a
+  Preparation/Control step, which runs no payload). `plan::validate` checks the
+  loaded payload against it and the docs/plan builder read it, so it is the
+  single source for the accepted formats.
+- Set `requires_indirect_syscalls` — `true` only when the technique works *only*
+  with `build.stub.syscalls.mode: indirect` (the renderer skips its step and
+  `advisories` warns otherwise). `false` for everything else.
 
 An **Execution** technique also gets the payload's binary format
 (`build.payloads.<name>.format`) and export (`build.payloads.<name>.export`) through
@@ -125,15 +132,27 @@ correctly. An Execution technique that supports several payload formats gets the
 ## 6. Write the README
 
 Copy the fixed template `src/techniques/_template/README.md` and fill in every
-section. All sections are required; `picaro techniques validate` checks them.
+section. `picaro techniques validate` checks them.
 
-The shape is the same for every technique, so the site reads as a catalogue:
+The README is the **explanation** of the technique, not its datasheet. Its
+metadata — category, stability, ATT&CK, platforms, conflicts, syscalls, the
+payload formats, the YAML parameters and the example — lives once in `DEF`
+(`mod.rs`) and is rendered from the registry by `picaro techniques show` and by
+the docs site, which panels and badges the technique page from the same source.
+The README must not repeat it: `validate` rejects the `## Metadata`,
+`## YAML parameters` and `## YAML example` headings.
+
+Required sections (checked by `validate`): *What it does*, *How it works*,
+*Integration*, *What it evades*, *What detects it*, *Measurements*,
+*Implementation notes*, *References* — and `## How it works` must contain a
+**```mermaid** diagram. The shape is the same for every technique, so the site
+reads as a catalogue:
 
 1. `# Title`, then one italic **TL;DR** line — a single sentence.
-2. `## Metadata` as a two-column table (empty header): ATT&CK, Stability,
-   Category, YAML key, Introduced in.
-3. `## How it works` opens with a **```mermaid** diagram of the flow, then
+2. `## How it works` opens with a **```mermaid** diagram of the flow, then
    groups the detail under numbered `### N. <phase>` headings.
+3. `## Integration` says where the step belongs in `runtime:`, which formats an
+   Execution accepts, and how it interacts with the steps around it.
 
 Keep the prose terse; the diagram carries the shape, the phases carry the
 substance.

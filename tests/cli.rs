@@ -608,6 +608,46 @@ fn build_dry_run_validates_resources() {
     );
 }
 
+/// `icon: random` is generated during `--dry-run` (no `rustc` needed), so the
+/// generator runs hermetically.
+#[test]
+fn build_dry_run_generates_a_random_icon() {
+    let output = picaro(&[
+        "--quiet".as_ref(),
+        "build".as_ref(),
+        "tests/plans/resources-random-icon.yaml".as_ref(),
+        "--dry-run".as_ref(),
+    ]);
+    assert!(
+        output.status.success(),
+        "random-icon dry run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("icon random"), "not shown: {stdout}");
+}
+
+// --- network_stager ---
+
+/// A staged payload is fetched at run time, so `--dry-run` must not read its
+/// `source` (here an unreachable URL) — the build skips it too.
+#[test]
+fn build_dry_run_does_not_fetch_a_staged_payload() {
+    let output = picaro(&[
+        "--quiet".as_ref(),
+        "build".as_ref(),
+        "tests/plans/network-stager-dry-run.yaml".as_ref(),
+        "--dry-run".as_ref(),
+    ]);
+    assert!(
+        output.status.success(),
+        "a staged payload must not be fetched by the dry run: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("staged"), "not shown: {stdout}");
+}
+
 /// End-to-end: a plan with icon + version info + manifest embeds a `.rsrc`
 /// section, which `audit --json` reports. Marked `#[ignore]` (compiles a stub).
 #[test]
@@ -1358,4 +1398,49 @@ fn a_dll_artifact_runs_the_chain_when_a_host_loads_it() {
         42,
         "the chain must run through the export"
     );
+}
+
+/// Every SSN resolver builds a stub that reaches the kernel and runs the
+/// payload: `mode: indirect` with reflective loading, once per resolver
+/// (`hells_gate`, `tartarus_gate`, `api_hash`). Windows-only, since the stub is
+/// a Windows PE and indirect syscalls are x64-only.
+#[test]
+fn indirect_syscall_resolvers_run_the_payload() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    const MARKER: &str = "PAYLOAD_MARKER_7f3a9c2e";
+
+    for resolver in ["hells_gate", "tartarus_gate", "api_hash"] {
+        let artifact = format!("dist/picaro_resolver_{resolver}.exe");
+        let _ = std::fs::remove_file(&artifact);
+        let plan = write_temp_plan(
+            &format!("picaro_resolver_{resolver}.yaml"),
+            &format!(
+                "schema: 6\nname: resolver-{resolver}\nbuild:\n  payloads:\n    payload:\n      \
+                 source: ./examples/payloads/test_payload.exe\n  stub:\n    syscalls:\n      mode: \
+                 indirect\n      resolver: {resolver}\n  output:\n    path: ./{artifact}\nruntime:\n  - \
+                 technique: reflective_loading\n"
+            ),
+        );
+
+        let build = picaro(&["--quiet".as_ref(), "build".as_ref(), plan.as_os_str()]);
+        assert!(
+            build.status.success(),
+            "build {resolver} failed: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+
+        let run = Command::new(&artifact)
+            .output()
+            .expect("run the packed binary");
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        assert!(
+            run.status.success() && stdout.contains(MARKER),
+            "{resolver}: the payload did not run: status={:?} stdout={stdout} stderr={}",
+            run.status,
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
 }

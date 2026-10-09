@@ -3,7 +3,7 @@
 //! Metadata only (see [`crate::features`]). The block and the PEB patching live
 //! in [`crate::engine::args`].
 
-use crate::techniques::Stability;
+use crate::techniques::{ParamDef, ParamKind, Stability};
 
 use super::{FeatureDef, FeatureScope};
 
@@ -18,6 +18,24 @@ pub const DEF: FeatureDef = FeatureDef {
     yaml: "build.payloads.<name>.args",
     doc_path: "src/features/args/README.md",
     readme: include_str!("README.md"),
+    params: &[
+        ParamDef {
+            key: "args",
+            description: "Arguments fixed at build time; each token is quoted per the Windows \
+                          `CommandLineToArgvW` rules.",
+            required: false,
+            default: None,
+            kind: ParamKind::List,
+        },
+        ParamDef {
+            key: "args_mode",
+            description: "`join` appends the runtime args to the YAML args; `override` lets the \
+                          runtime args replace them.",
+            required: false,
+            default: Some("join"),
+            kind: ParamKind::Enum(&["join", "override"]),
+        },
+    ],
     params_example: "args:\n  - privilege::debug\n  - log\nargs_mode: join\n",
 };
 

@@ -27,6 +27,10 @@ pub fn guardrail() -> Result<bool, String> {
     if let Some(deadline) = expire_on {
         let today = current_date()?;
         if today > deadline {
+            crate::tech_dbg!(
+                "guardrail",
+                "today {today} is past the deadline {deadline}; aborting the chain"
+            );
             return Ok(false);
         }
     }
@@ -35,8 +39,13 @@ pub fn guardrail() -> Result<bool, String> {
         let path = std::env::temp_dir().join(run_key);
         let runs = bump_counter(&path)?;
         if runs > limit {
+            crate::tech_dbg!(
+                "guardrail",
+                "run {runs} exceeds the limit {limit}; aborting the chain"
+            );
             return Ok(false);
         }
+        crate::tech_dbg!("guardrail", "run {runs}/{limit} allowed");
     }
 
     Ok(true)

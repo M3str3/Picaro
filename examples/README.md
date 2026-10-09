@@ -3,7 +3,8 @@
 The test payload (`test_payload.exe`) **prints** the fixed marker
 `PAYLOAD_MARKER_7f3a9c2e` to stdout and exits `0`. It opens no dialog, so a run
 never blocks and its output can be captured from a terminal (or by an agent).
-The stub itself prints its per-build `STUB_MARKER_<hex>` to stderr.
+A debug build (`build.stub.debug: true`) also makes the stub print a per-build
+`STUB_MARKER_<hex>` to stderr; a delivery build prints nothing.
 
 ## Visible payload (`msgbox.exe`)
 
@@ -63,7 +64,8 @@ the payload.
 .\dist\test_packed.exe
 ```
 
-The terminal shows the stub's marker on stderr, e.g.:
+A debug build (`build.stub.debug: true`) shows the stub's marker on stderr,
+e.g.:
 
 ```
 STUB_MARKER_<hex>
@@ -94,7 +96,8 @@ strings dist/test_packed.exe | grep -i svchost        # should print nothing
 ```
 
 - `PAYLOAD_MARKER` is encrypted (does not appear).
-- `STUB_MARKER` and the target path (`svchost.exe`) are XOR-obfuscated.
+- `STUB_MARKER` and the target path (`svchost.exe`) are XOR-obfuscated, and a
+  delivery build never prints the marker in the first place.
 
 ## Reflective loading
 
@@ -154,9 +157,12 @@ Then load it from a host — the scripts take the DLL and export as arguments:
 | CPython | `python examples/hosts/ctypes_host.py` | `Run() -> 42` |
 | PowerShell | `powershell -ExecutionPolicy Bypass -File examples/hosts/pinvoke_host.ps1` | `Run() -> 42` + the DLL in the host's module list |
 | .NET | `dotnet run --project examples/hosts/dotnet_host -- dist/dll-shellcode.dll Run` | `Run() -> 42` |
-| `rundll32` | `powershell -ExecutionPolicy Bypass -File examples/hosts/rundll32_host.ps1` | the stub's `STUB_MARKER_<hex>` on the captured stderr (`rundll32` exits 0) |
-| `rundll32` (cmd) | `examples\hosts\rundll32_host.cmd` | the marker in cmd's console — the PowerShell-free path |
+| `rundll32` | `powershell -ExecutionPolicy Bypass -File examples/hosts/rundll32_host.ps1` | a debug build's `STUB_MARKER_<hex>` on the captured stderr (`rundll32` exits 0) |
+| `rundll32` (cmd) | `examples\hosts\rundll32_host.cmd` | a debug build's marker in cmd's console — the PowerShell-free path |
 | Java | `java -cp examples/hosts/java_host JavaHost dist/dll-shellcode.dll 10000` | `JNI_OnLoad` returns at once; the latch keeps the JVM alive |
+
+The `rundll32` rows read the stub's marker, which only a debug build
+(`build.stub.debug: true`) emits.
 
 Java (compile it first with
 `javac -d examples/hosts/java_host examples/hosts/java_host/FfmHost.java`),

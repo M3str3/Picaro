@@ -775,6 +775,7 @@ fn build(
             engine::manifest::BuildManifest::new(plan, plan_path, &plan.build.output.path)?;
         manifest.signature = signature;
         manifest.version_info = resources.as_ref().and_then(|r| r.version_info.clone());
+        manifest.generated_icon = generated_icon(resources.as_ref());
         manifest.steps = step_records;
         manifest.write(&manifest_path)?;
         if verbose {
@@ -882,6 +883,13 @@ fn dry_run(plan: &plan::Plan, plan_path: &Path, ui: &Palette) -> Result<()> {
     let resources = resolve_resources(plan);
 
     let steps = plan::steps::resolve(plan)?;
+    let staged_payloads: BTreeSet<String> = steps
+        .iter()
+        .filter_map(|step| match &step.technique {
+            TechniqueKind::NetworkStager { params } => Some(params.payload.clone()),
+            _ => None,
+        })
+        .collect();
     for step in &steps {
         let Some(payload) = &step.payload else {
             anstream::println!(
@@ -897,6 +905,21 @@ fn dry_run(plan: &plan::Plan, plan_path: &Path, ui: &Palette) -> Result<()> {
             );
             continue;
         };
+        // A staged payload is fetched at run time, so there are no bytes to read
+        // or validate here (the build skips it too).
+        if staged_payloads.contains(&payload.name) {
+            anstream::println!(
+                "{}",
+                ui.done(
+                    &format!("step {} {}", step.index, ui.brand(step.technique.name())),
+                    dotted(
+                        ui,
+                        &[ui.brand("staged"), ui.dim(payload.plan.format.label())]
+                    )
+                )
+            );
+            continue;
+        }
         let bytes = load_source(&payload.plan.source)?;
         verify_payload_hash(&bytes, payload.plan.sha256.as_deref())?;
         let summary = inspect_payload(payload.plan.format, &bytes, plan.build.output.arch)?;
@@ -1347,8 +1370,13 @@ fn sign_label(sign: &plan::schema::SignPlan) -> String {
 }
 
 /// The `api_resolution` echo: `proxy (5 APIs, unmatched forward)`.
+///
+/// The count is the *resolved* catalogue size (so `apis: all` reports every
+/// entry), not the number of selectors written in the YAML.
 fn api_resolution_label(yaml: &engine::api_resolution::YamlApiResolutionPlan) -> String {
-    let apis = yaml.apis.len();
+    let apis = engine::api_resolution::ApiResolutionConfig::from_yaml(Some(yaml))
+        .map(|config| config.apis.len())
+        .unwrap_or_else(|_| yaml.apis.len());
     format!("proxy ({apis} APIs, unmatched {})", yaml.unmatched)
 }
 
@@ -1356,7 +1384,10 @@ fn api_resolution_label(yaml: &engine::api_resolution::YamlApiResolutionPlan) ->
 fn resources_label(resources: &plan::schema::ResourcesPlan) -> String {
     let mut parts = Vec::new();
     if let Some(icon) = &resources.icon {
-        parts.push(format!("icon {}", icon.display()));
+        parts.push(match icon {
+            plan::schema::IconPlan::Random { .. } => "icon random".to_string(),
+            plan::schema::IconPlan::Path(path) => format!("icon {}", path.display()),
+        });
     }
     if resources.version_info.is_some() {
         parts.push("version info".to_string());
@@ -1377,13 +1408,27 @@ fn resources_label(resources: &plan::schema::ResourcesPlan) -> String {
 /// artifact carries plausible company/product/version metadata instead of empty
 /// strings. The generated company is later reused as the lab certificate
 /// subject (see [`resolve_sign`]).
+///
+/// `icon: random` is given a concrete seed here, so the embedded icon and the
+/// seed recorded in the manifest agree.
 fn resolve_resources(plan: &plan::Plan) -> Option<plan::schema::ResourcesPlan> {
     let resources = plan.build.output.resources.as_ref()?;
     let mut resolved = resources.clone();
     if let Some(info) = &resolved.version_info {
         resolved.version_info = Some(engine::identity::apply(info));
     }
+    if let Some(icon) = resolved.icon.take() {
+        resolved.icon = Some(icon.with_seed(rand::random::<u64>()));
+    }
     Some(resolved)
+}
+
+/// The seed of a generated icon, for the build manifest.
+fn generated_icon(
+    resources: Option<&plan::schema::ResourcesPlan>,
+) -> Option<engine::manifest::GeneratedIcon> {
+    let seed = resources?.icon.as_ref()?.seed()?;
+    Some(engine::manifest::GeneratedIcon { seed })
 }
 
 /// Resolves `output.sign`, deriving the lab certificate subject from the

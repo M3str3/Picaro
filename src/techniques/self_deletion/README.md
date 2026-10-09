@@ -3,41 +3,12 @@
 *Deals with the loader's own on-disk image while it runs, so a post-run
 collection or hash lookup at the path finds nothing useful.*
 
-## Metadata
-
-| | |
-|---|---|
-| **ATT&CK** | T1070.004 (Indicator Removal: File Deletion) |
-| **Stability** | Stable |
-| **Category** | Preparation |
-| **YAML key** | `self_deletion` |
-| **Introduced in** | unreleased (self-deletion) |
-
 ## What it does
 
 Deals with the running artifact's own image while the loader executes from it:
 by default it renames the file into an alternate data stream of its own path, so
 the loader's bytes leave the file that the path names; with `mode: helper` it
 spawns a detached child that deletes the file once the loader has exited.
-
-## YAML parameters
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `mode` | string | no | `rename_ads` | `rename_ads` (moves the image into an ADS of its own path) or `helper` (a detached `cmd.exe` deletes the file after the loader exits) |
-| `stream` | string | no | random per build | `mode: rename_ads` only: the alternate data stream name, starting with `:` |
-
-## YAML example
-
-```yaml
-runtime:
-  - technique: self_deletion
-    params:
-      mode: rename_ads
-  - technique: thread_hijacking
-    params:
-      target: notepad.exe
-```
 
 ## How it works
 
@@ -109,6 +80,12 @@ decides *when* the file is dealt with:
   `process_hollowing`, the shellcode runners): the file is dealt with once the
   payload has returned. With `mode: helper` this is also when the loader is about
   to exit, which is what the helper's sleep budget assumes.
+
+## Integration
+
+A **Preparation** step: the stub runs it before the Execution and it never
+receives the payload. Place it earlier in `runtime:` than the Execution step. Its position in `runtime:` decides *when* the loader's own image is
+dealt with; before a terminal step is the usual placement.
 
 ## What it evades
 

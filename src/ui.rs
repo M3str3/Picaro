@@ -106,6 +106,7 @@ pub const ASCII_ART: &str = "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
 ⠀⠀⠀⡾⠟⠋⠀⠀⠀⠀⠀⠀⠀⠀⠈⠉⠉⠀⠀⠀⠸⢿⣧⣄⠀⠀⠀⠀⠀⠀
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠁⠀⠀⠀⠀⠀";
 
+
 /// Glyphs used across the CLI.
 ///
 /// Deliberately few, and all of them render in the common Windows terminals

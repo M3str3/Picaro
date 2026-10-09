@@ -3,16 +3,6 @@
 *Overwrite a signed DLL's code section with the payload, then restore the
 original bytes, so the module keeps working after the payload runs.*
 
-## Metadata
-
-| | |
-|---|---|
-| **ATT&CK** | T1574.002 (DLL Side-Loading) |
-| **Stability** | experimental |
-| **Category** | Execution |
-| **YAML key** | `dll_hollowing` |
-| **Payload format** | `shellcode` only (see “Payload formats”) |
-
 ## What it does
 
 Loads a legitimate, signed DLL, saves the first bytes of its code section
@@ -24,42 +14,6 @@ The difference from `module_stomping` is the **restore**: module stomping
 overwrites the section and leaves it broken; phantom DLL hollowing keeps a copy
 of the overwritten bytes and puts them back once the payload has run, so the
 sacrificial module is still a working, proxy-able DLL afterwards.
-
-## YAML parameters
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `payload` | string | no | the only declared payload | Name of the payload in `build.payloads` to run |
-| `module` | string | no | `wininet.dll` | Module to load and hollow: a name the loader resolves or a full path |
-
-The payload's binary format comes from `build.payloads.<name>`; see “Payload
-formats”. `build.output.arch` selects the stub's bitness, and the module is
-loaded by the stub's own loader, so it must be of that bitness too.
-
-Do not name a module another step patches or hooks — `patch_amsi` (which patches
-`amsi.dll`) is the obvious example, and `unhook_ntdll`/`patch_etw` rewrite
-`ntdll.dll`: the restore would silently put back the bytes those steps changed.
-
-## YAML example
-
-```yaml
-build:
-  payloads:
-    implant:
-      source: ./beacon.bin
-      format: shellcode
-runtime:
-  - technique: dll_hollowing
-    params:
-      payload: implant
-      module: wininet.dll
-```
-
-```yaml
-# Defaults: the only payload, and wininet.dll as the hollowing target.
-runtime:
-  - technique: dll_hollowing
-```
 
 ## How it works
 
@@ -153,6 +107,12 @@ section as-is and called with a no-argument contract, exactly like
 `pe`/`dll`/`dotnet` for this technique at build time, and the fragment also
 detects a PE payload at runtime (`MZ` + `PE\0\0`) and fails the step with a clear
 message instead of jumping into a DOS header.
+
+## Integration
+
+An **Execution** step: it runs a `shellcode` payload from the loader's own
+process. The payload runs from a hollowed DLL's code section, whose
+original bytes are restored afterwards.
 
 ## What it evades
 

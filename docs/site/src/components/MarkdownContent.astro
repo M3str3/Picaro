@@ -1,0 +1,19 @@
+---
+/**
+ * Starlight `MarkdownContent` override.
+ *
+ * Renders the catalogue metadata panel (`CatalogMeta`) above the page body,
+ * inside `.sl-markdown-content` so the panel inherits the site's prose styles.
+ * On any page that is not a `techniques/ref/*` or `features/ref/*` page,
+ * `CatalogMeta` renders nothing, so the markup is unchanged.
+ */
+import '@astrojs/starlight/style/markdown.css';
+import CatalogMeta from './CatalogMeta.astro';
+
+const route = Astro.locals.starlightRoute;
+---
+
+<div class="sl-markdown-content">
+  <CatalogMeta slug={route?.entry?.slug} />
+  <slot />
+</div>

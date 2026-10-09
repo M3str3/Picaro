@@ -42,6 +42,8 @@ pub const DEF: TechniqueDef = TechniqueDef {
     category: Category::Control,
     doc_path: "src/techniques/sleep/README.md",
     stub_fragment: include_str!("stub_fragment.rs"),
+    formats: &[],
+    requires_indirect_syscalls: false,
     params_example: "technique: sleep\nparams:\n  ms: 1000\n",
     readme: include_str!("README.md"),
     syscalls: &[],

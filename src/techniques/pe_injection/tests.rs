@@ -272,7 +272,7 @@ fn validate_rejects_a_non_pe_payload_format() {
         .expect_err("shellcode must be rejected")
         .to_string();
     assert!(error.contains("pe_injection"), "unexpected error: {error}");
-    assert!(error.contains("format: pe"), "unexpected error: {error}");
+    assert!(error.contains("it runs: pe"), "unexpected error: {error}");
 }
 
 #[test]

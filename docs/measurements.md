@@ -412,3 +412,16 @@ its absolute install path (falling back to the versioned engine directory, then
 `PATH`) and the target is passed as an absolute path too — a relative `-File`
 fails with `hr = 0x80508023`. The YARA ruleset is still empty, so its line is a
 placeholder until rules exist.
+
+## Syscall resolvers — runtime verification (2026-10-09)
+
+- Host: Windows x64, rustc 1.90, `x86_64-pc-windows-msvc`.
+- Artifacts: `mode: indirect` + `reflective_loading`, one per resolver
+  (`hells_gate`, `tartarus_gate`, `api_hash`), ~579–580 KB each.
+- Result: all three reach the kernel and run the payload (exit `0`,
+  `PAYLOAD_MARKER_7f3a9c2e`). Hell's Gate resolves `NtAllocateVirtualMemory` →
+  SSN 24 and `NtProtectVirtualMemory` → SSN 80 from the live prologues; Tartarus
+  and API hashing resolve the same from the clean on-disk copy
+  (`GetModuleFileNameW` path, `TimeDateStamp` matched).
+- Covered by the e2e `indirect_syscall_resolvers_run_the_payload` (`tests/cli.rs`).
+- Reorg + fixes: `.plan-syscall-resolvers.md` §8.

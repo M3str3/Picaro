@@ -32,8 +32,9 @@ export default defineConfig({
       ],
       sidebar,
       components: {
-        // The default Starlight components are kept; overrides go here if the
-        // design ever needs one.
+        // The technique metadata panel is a real Starlight component; this
+        // override places it just under the title, above the page body.
+        MarkdownContent: './src/components/MarkdownContent.astro',
       },
     }),
   ],

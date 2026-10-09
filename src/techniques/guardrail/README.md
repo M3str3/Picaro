@@ -3,15 +3,6 @@
 *Aborts the chain once a configured deadline has passed or a stored run count
 is exceeded, so a build can be time- or use-limited.*
 
-## Metadata
-
-| | |
-|---|---|
-| **ATT&CK** | T1480 |
-| **Stability** | Stable |
-| **Category** | Preparation |
-| **YAML key** | `guardrail` |
-
 ## What it does
 
 `guardrail` is a killswitch / gate that runs as a Preparation step *before* the
@@ -26,23 +17,6 @@ trips, returns `Ok(false)` to abort the chain so the payload never runs:
 With neither field set the technique is a no-op (it always continues). Both
 gates are deliberately self-contained: the deadline needs only the system
 clock, and the counter needs only the standard library's file I/O.
-
-## YAML parameters
-
-| Field       | Type   | Default | Meaning                                                                 |
-| ----------- | ------ | ------- | ----------------------------------------------------------------------- |
-| `expire_on` | string | none    | ISO date (`YYYY-MM-DD`) after which the payload must not run.           |
-| `max_runs`  | int    | none    | Maximum number of times the loader may run before it aborts.            |
-| `run_key`   | string | `runs`  | File name under the per-user temporary directory holding the counter.   |
-
-## YAML example
-
-```yaml
-technique: guardrail
-params:
-  expire_on: "2027-01-01"
-  max_runs: 3
-```
 
 ## How it works
 
@@ -77,6 +51,12 @@ The fragment exposes `guardrail() -> Result<bool, String>`:
 A check that cannot be evaluated — the clock is before the epoch, or the
 counter file cannot be read, parsed or written — is an `Err`, not a silent
 pass, so the chain stops with a diagnostic instead of guessing.
+
+## Integration
+
+A **Preparation** step: the stub runs it before the Execution and it never
+receives the payload. Place it earlier in `runtime:` than the Execution step. Once the deadline has passed or the run count is exceeded it aborts
+the chain, so the payload does not run out of scope.
 
 ## What it evades
 

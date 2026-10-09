@@ -1,0 +1,25 @@
+schema: 6
+name: test-resources-random-icon
+
+build:
+  crypto:
+    algo: xchacha20poly1305
+    key: random
+  payloads:
+    payload:
+      source: ./examples/payloads/test_payload.exe
+  output:
+    path: ./dist/test_resources_random_icon.exe
+    arch: x64
+    strip: true
+    trim_paths: all
+    resources:
+      # A procedurally generated icon (the seed is chosen at build time and
+      # recorded in the manifest).
+      icon: random
+      version_info:
+        randomize: true
+
+runtime:
+  - technique: reflective_loading
+    params: { payload: payload }

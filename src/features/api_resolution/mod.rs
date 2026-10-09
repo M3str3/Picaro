@@ -3,7 +3,7 @@
 //! Metadata only (see [`crate::features`]). The catalogue and the rendering live
 //! in [`crate::engine::api_resolution`].
 
-use crate::techniques::{Capability, Stability};
+use crate::techniques::{Capability, ParamDef, ParamKind, Stability};
 
 use super::{FeatureDef, FeatureScope};
 
@@ -20,6 +20,32 @@ pub const DEF: FeatureDef = FeatureDef {
     yaml: "build.stub.api_resolution",
     doc_path: "src/features/api_resolution/README.md",
     readme: include_str!("README.md"),
+    params: &[
+        ParamDef {
+            key: "mode",
+            description: "`none` leaves import resolution untouched; `proxy` serves catalogue \
+                          hits from proxies generated in the loader.",
+            required: false,
+            default: Some("none"),
+            kind: ParamKind::Enum(&["none", "proxy"]),
+        },
+        ParamDef {
+            key: "apis",
+            description: "Catalogue entries to proxy, written as `dll!function` (the module side \
+                          is normalized on lookup).",
+            required: false,
+            default: None,
+            kind: ParamKind::List,
+        },
+        ParamDef {
+            key: "unmatched",
+            description: "What an import outside the catalogue does: `forward` resolves it \
+                          normally, `abort` fails the load on the first one.",
+            required: false,
+            default: Some("forward"),
+            kind: ParamKind::Enum(&["forward", "abort"]),
+        },
+    ],
     params_example: "mode: proxy\napis:\n  - \"kernel32!ReadProcessMemory\"\nunmatched: abort\n",
 };
 

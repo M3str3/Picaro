@@ -6,6 +6,7 @@
 //! the section placement.
 
 pub mod icon;
+pub mod icon_gen;
 pub mod inject;
 pub mod manifest;
 pub mod tree;
@@ -13,7 +14,7 @@ pub mod version;
 
 use std::path::PathBuf;
 
-use crate::plan::schema::ResourcesPlan;
+use crate::plan::schema::{IconPlan, ResourcesPlan};
 use tree::{Resource, RT_GROUP_ICON, RT_ICON, RT_MANIFEST, RT_VERSION};
 
 /// Language id attached to every resource we emit (en-US).
@@ -83,12 +84,20 @@ pub fn embed(pe: &[u8], plan: &ResourcesPlan) -> Result<Vec<u8>, ResourceError> 
 pub fn build(plan: &ResourcesPlan, rva_base: u32) -> Result<Vec<u8>, ResourceError> {
     let mut resources = Vec::new();
 
-    if let Some(path) = &plan.icon {
-        let bytes = std::fs::read(path).map_err(|source| ResourceError::IconRead {
-            path: path.clone(),
-            source,
-        })?;
-        let parsed = icon::parse(&bytes)?;
+    if let Some(icon_plan) = &plan.icon {
+        let parsed = match icon_plan {
+            IconPlan::Path(path) => {
+                let bytes = std::fs::read(path).map_err(|source| ResourceError::IconRead {
+                    path: path.clone(),
+                    source,
+                })?;
+                icon::parse(&bytes)?
+            }
+            // A generated icon is seeded by `resolve_resources`; a direct caller
+            // (a test, or `--dry-run`) may still pass an unresolved `random`,
+            // which is seeded here.
+            IconPlan::Random { seed } => icon_gen::generate(seed.unwrap_or_else(rand::random)),
+        };
         // The group icon (id 1) is the one the shell shows; the images follow.
         resources.push(Resource {
             type_id: RT_GROUP_ICON,
@@ -136,7 +145,7 @@ pub fn build(plan: &ResourcesPlan, rva_base: u32) -> Result<Vec<u8>, ResourceErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::schema::{ExecutionLevel, ManifestPlan, VersionInfoPlan};
+    use crate::plan::schema::{ExecutionLevel, IconPlan, ManifestPlan, VersionInfoPlan};
 
     #[test]
     fn an_empty_plan_produces_an_empty_blob() {
@@ -171,5 +180,15 @@ mod tests {
         };
         let blob = build(&plan, 0).expect("build");
         assert!(blob.len().is_multiple_of(4) && !blob.is_empty());
+    }
+
+    #[test]
+    fn a_generated_icon_produces_a_blob() {
+        let plan = ResourcesPlan {
+            icon: Some(IconPlan::Random { seed: Some(7) }),
+            version_info: None,
+            manifest: None,
+        };
+        assert!(!build(&plan, 0).expect("build").is_empty());
     }
 }

@@ -21,8 +21,8 @@ use std::path::Path;
 
 use crate::error::{PackerError, Result};
 use crate::techniques::{
-    column_width, pad, readme_title, short_description, strip_header, truncate, Capability,
-    Stability,
+    capabilities, column_width, pad, params_markdown, readme_title, short_description,
+    stability_label, stability_tone, strip_header, truncate, Capability, ParamDef, Stability,
 };
 use crate::ui::{glyph, markdown, Meta, Palette, Tone};
 
@@ -70,6 +70,8 @@ pub struct FeatureDef {
     pub readme: &'static str,
     /// A YAML snippet documenting the feature's block.
     pub params_example: &'static str,
+    /// Catalog metadata for the feature's YAML parameters (see [`ParamDef`]).
+    pub params: &'static [ParamDef],
 }
 
 /// All registered loader features.
@@ -88,14 +90,17 @@ pub fn find(name: &str) -> Option<&'static FeatureDef> {
 /// no per-build marker, so those sections do not apply.
 const REQUIRED_SECTIONS: &[&str] = &[
     "## What it does",
-    "## YAML parameters",
-    "## YAML example",
     "## How it works",
+    "## Integration",
     "## What it evades",
     "## What detects it",
     "## Implementation notes",
     "## References",
 ];
+
+/// Headings that must NOT appear in a README: the same data lives in
+/// [`FeatureDef`] and is rendered from it.
+const FORBIDDEN_SECTIONS: &[&str] = &["## Metadata", "## YAML parameters", "## YAML example"];
 
 /// Renders the `LOADER FEATURES` table, appended to `picaro techniques list`.
 ///
@@ -131,7 +136,7 @@ pub fn list(ui: &Palette) -> String {
     for def in defs {
         let name = ui.bold(pad(def.name, name_w));
         let scope = pad(def.scope.label(), scope_w);
-        let stability = stability_label(def, ui, stability_w);
+        let stability = stability_label(def.stability, ui, stability_w);
         let attck = pad(&def.attck.join(", "), attck_w);
         out.push_str(&format!(
             "{name} {scope} {stability} {attck} {}\n",
@@ -148,25 +153,6 @@ pub fn list(ui: &Palette) -> String {
         ))
     ));
     out
-}
-
-/// The feature's stability label, padded to `width` and colored by maturity.
-fn stability_label(def: &FeatureDef, ui: &Palette, width: usize) -> String {
-    let label = format!("{name:<width$}", name = def.stability.label());
-    match def.stability {
-        Stability::Stable => ui.ok(label),
-        Stability::Experimental => ui.warn(label),
-        Stability::Unimplemented | Stability::Deprecated => ui.error(label),
-    }
-}
-
-/// The color role of a maturity (shared with [`stability_label`]).
-fn stability_tone(stability: Stability) -> Tone {
-    match stability {
-        Stability::Stable => Tone::Ok,
-        Stability::Experimental => Tone::Warn,
-        Stability::Unimplemented | Stability::Deprecated => Tone::Bad,
-    }
 }
 
 /// The feature's one-line summary, taken from its README.
@@ -225,8 +211,14 @@ pub fn show(name: &str, ui: &Palette) -> Result<String> {
     out.push_str(&ui.rule(width));
     out.push_str("\n\n");
 
-    // The styled header replaces the README's title and Metadata section.
-    out.push_str(&markdown::render(&strip_header(def.readme), ui, width));
+    // The styled header replaces the README's title; the README is prose-only,
+    // so the registry's parameter table and example are always prepended.
+    let body = format!(
+        "{}{}",
+        params_markdown(def.params, def.params_example),
+        strip_header(def.readme)
+    );
+    out.push_str(&markdown::render(&body, ui, width));
 
     out.push('\n');
     out.push_str(&ui.dim(format!("{} {}", glyph::DOT, def.doc_path)));
@@ -285,17 +277,20 @@ pub fn validate() -> Vec<String> {
                 ));
             }
         }
+        for section in FORBIDDEN_SECTIONS {
+            if def.readme.contains(section) {
+                problems.push(format!(
+                    "{}: README.md must not contain '{section}' — that data is rendered from the \
+                     registry (FeatureDef)",
+                    def.name
+                ));
+            }
+        }
+        if !def.readme.contains("```mermaid") {
+            problems.push(format!("{}: README.md has no ```mermaid diagram", def.name));
+        }
     }
     problems
-}
-
-/// Comma-joined capability labels for the `requires` field.
-fn capabilities(requires: &[Capability]) -> String {
-    requires
-        .iter()
-        .map(|capability| capability.label())
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 /// The error for a name that is neither a technique nor a feature.
@@ -326,33 +321,17 @@ mod tests {
         }
     }
 
-    /// Every registered feature must be reachable from the documentation: a page
-    /// under `docs/features/ref/`, a link in the overview table and a nav entry
-    /// in `docs/nav.yml`. Adding a feature without updating the docs is the drift
-    /// this guards against.
+    /// Every registered feature must have a docs page. The site sidebar and the
+    /// `docs/features/index.md` overview table are generated from this registry
+    /// at assemble time, so they need no per-feature entry.
     #[test]
     fn every_feature_is_documented() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let overview = std::fs::read_to_string(root.join("docs/features/index.md"))
-            .expect("docs/features/index.md must exist");
-        let nav = std::fs::read_to_string(root.join("docs").join("nav.yml"))
-            .expect("docs/nav.yml must exist");
-
         for def in all() {
             let docs_page = format!("docs/features/ref/{}.md", def.name);
             assert!(
                 root.join(&docs_page).is_file(),
                 "{}: missing docs page '{docs_page}'",
-                def.name
-            );
-            assert!(
-                overview.contains(&format!("(ref/{}.md)", def.name)),
-                "{}: no link to the feature in docs/features/index.md",
-                def.name
-            );
-            assert!(
-                nav.contains(&format!("features/ref/{}.md", def.name)),
-                "{}: no nav entry in docs/nav.yml",
                 def.name
             );
         }

@@ -3,16 +3,6 @@
 *Hosts the CLR in the stub's own process and runs a managed assembly straight
 from memory, so a .NET payload never needs a file on disk.*
 
-## Metadata
-
-| | |
-|---|---|
-| **ATT&CK** | T1620 — Reflective Code Loading |
-| **Stability** | Experimental |
-| **Category** | Execution |
-| **YAML key** | `dotnet_hosting` |
-| **Capabilities** | `WindowsX64 \| WindowsX86` |
-
 ## What it does
 
 Runs a managed (.NET) assembly from memory. The stub hosts the CLR **in its own
@@ -27,34 +17,6 @@ calls `mscoree.dll!_CorExeMain`, which starts the CLR for the process's **main
 module** — the packed binary — so mapping the image and jumping to its entry
 point does not run the assembly (picaro used to fail there with an opaque
 runtime error; the build now rejects it, see below).
-
-## YAML parameters
-
-None. The technique is selected by name.
-
-## YAML example
-
-```yaml
-schema: 4
-name: managed
-build:
-  payload:
-    source: ./SharpHound.exe
-    format: dotnet
-    crypto:
-      algo: xchacha20poly1305
-      key: random
-  output:
-    path: ./dist/managed.exe
-    arch: x86
-    strip: true
-    trim_paths: all
-runtime:
-  - technique: dotnet_hosting
-```
-
-`format: dotnet` and `technique: dotnet_hosting` imply each other: validation
-rejects one without the other.
 
 ## How it works
 
@@ -115,6 +77,11 @@ decides which stub it needs:
 
 `build` enforces that table from the CLR header: a payload that needs a 32-bit
 runtime is rejected with `arch: x64`, and vice versa.
+
+## Integration
+
+An **Execution** step: it runs a `dotnet` assembly on the CLR it hosts. It is
+**terminal**, so it must be the last step.
 
 ## What it evades
 

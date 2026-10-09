@@ -7,6 +7,10 @@ navigation sidebar are generated *inside the container* by
 ``docs/site/scripts/assemble-docs.mjs`` from ``docs/`` + ``docs/nav.yml``, so no
 local Node install is needed beyond Docker and the Python standard library.
 
+Assemble also writes ``/plan-catalog.json`` for the in-docs plan builder
+(``/plan-builder/``), scanned from ``src/techniques``. On ``serve``, the
+assembler keeps watching so new techniques refresh the catalogue live.
+
 Usage:
     python scripts/docs.py                 # live server on http://localhost:8000
     python scripts/docs.py build           # static site into ./site
@@ -33,16 +37,26 @@ PORT = 8000
 # sidebar are generated there from the /docs bind mount at run time.
 APP_CONTENT = "/app/src/content/docs"
 APP_SIDEBAR = "/app/src/sidebar.mjs"
+APP_PUBLIC = "/app/public"
 
 
-def assemble_command() -> str:
-    """The shell command that regenerates content + sidebar inside the container."""
-    return (
+def assemble_command(*, watch: bool = False) -> str:
+    """The shell command that regenerates content + sidebar inside the container.
+
+    Also writes ``/plan-catalog.json`` for the in-docs plan builder (scanned
+    from ``src/techniques``). With ``watch=True`` the assembler keeps running
+    so new techniques refresh the catalogue without restarting the server.
+    """
+    cmd = (
         "node scripts/assemble-docs.mjs"
         f" --root {CONTAINER_DIR}"
         f" --out {APP_CONTENT}"
         f" --sidebar-out {APP_SIDEBAR}"
+        f" --public-out {APP_PUBLIC}"
     )
+    if watch:
+        cmd += " --watch"
+    return cmd
 
 
 def build_image(no_cache: bool) -> None:
@@ -118,10 +132,16 @@ def main(argv: list[str]) -> int:
 
     if action == "serve":
         print(f"http://localhost:{PORT}")
+        # Assemble once so Astro starts with a sidebar, then keep watching
+        # (techniques / nav / docs) in the background while the dev server runs.
         command = [
             "sh",
             "-c",
-            f"{assemble_command()} && npm run dev -- --port {PORT} --host 0.0.0.0",
+            (
+                f"{assemble_command()} && "
+                f"{assemble_command(watch=True)} & "
+                f"npm run dev -- --port {PORT} --host 0.0.0.0"
+            ),
         ]
     else:
         command = ["sh", "-c", f"{assemble_command()} && npm run build"]

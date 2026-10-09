@@ -21,7 +21,7 @@ The module is **metadata only**: the implementation stays in `crate::engine`
 (e.g. `engine::syscalls`). Define a `DEF` describing the feature:
 
 ```rust
-use crate::techniques::Stability;
+use crate::techniques::{ParamDef, ParamKind, Stability};
 use super::{FeatureDef, FeatureScope};
 
 pub const DEF: FeatureDef = FeatureDef {
@@ -35,6 +35,18 @@ pub const DEF: FeatureDef = FeatureDef {
     doc_path: "src/features/my_feature/README.md",
     readme: include_str!("README.md"),
     params_example: "mode: on\n",
+    // Catalog metadata: one ParamDef per key the block accepts. Rendered as the
+    // docs page's `Parameter | Type | Required | Default | Description` table
+    // and by `techniques show`, so the README never repeats it.
+    params: &[
+        ParamDef {
+            key: "mode",
+            description: "What `mode` does.",
+            required: false,
+            default: Some("off"),
+            kind: ParamKind::Enum(&["off", "on"]),
+        },
+    ],
 };
 ```
 
@@ -49,27 +61,26 @@ In `src/features/mod.rs`:
 
 ## 4. Write the README
 
-Copy the section set the other feature READMEs use. All sections are required;
-`picaro techniques validate` checks them:
+Copy the section set the other feature READMEs use. The README is the prose
+explanation; the metadata (ATT&CK, YAML path, scope, params) lives in `DEF` and
+is rendered from the registry, so the README must not repeat it. Required
+sections (checked by `picaro techniques validate`): `## What it does`,
+`## How it works`, `## Integration`, `## What it evades`, `## What detects it`,
+`## Implementation notes`, `## References` — and `## How it works` must contain
+a **```mermaid** diagram. `validate` rejects `## Metadata`, `## YAML parameters`
+and `## YAML example`.
 
-`## What it does`, `## YAML parameters`, `## YAML example`, `## How it works`,
-`## What it evades`, `## What detects it`, `## Implementation notes`,
-`## References`.
-
-Start with a `# Title` and, optionally, a `## Metadata` block (ATT&CK / YAML /
-scope) that `picaro techniques show` replaces with its styled header. Refer to a
-`docs/` page with a backticked repo path (e.g. `` `docs/measurements.md` ``),
-not a relative link: the docs build inlines the README into `docs/features/ref/`,
-so a relative link would resolve against the wrong directory.
+Start with a `# Title`. Refer to a `docs/` page with a backticked repo path
+(e.g. `` `docs/measurements.md` ``), not a relative link: the docs build inlines
+the README into `docs/features/ref/`, so a relative link would resolve against
+the wrong directory.
 
 ## 5. Wire the docs
 
-- Add `docs/features/ref/<name>.md` containing
-  `--8<-- "src/features/<name>/README.md"`.
-- Add a row to `docs/features/index.md`.
-- Add a nav entry under `Loader features` in `docs/nav.yml`.
-
-The `every_feature_is_documented` test fails if any of the three is missing.
+Add `docs/features/ref/<name>.md` containing
+`--8<-- "src/features/<name>/README.md"`. The sidebar entry and the overview row
+are generated from the registry at assemble time, so there is nothing else to
+update; the `every_feature_is_documented` test checks the page exists.
 
 ## 6. Run
 
@@ -89,4 +100,4 @@ cargo run -- techniques validate
   a caveat remains; `Unimplemented` while the implementation is not finished.
 - **ATT&CK**: use the specific sub-technique ID when available.
 - Keep `yaml` accurate: it is what `techniques show` prints as the feature's
-  configuration path.
+  configuration path, and the docs panel shows it as the YAML location.

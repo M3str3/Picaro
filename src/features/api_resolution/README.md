@@ -1,9 +1,5 @@
 # API resolution
 
-- ATT&CK: T1106 (Native API)
-- YAML: `build.stub.api_resolution`
-- Scope: loader-wide (configures the generated loader)
-
 ## What it does
 
 In `mode: proxy` the loader serves selected payload imports from proxies
@@ -12,56 +8,16 @@ proxy is rebuilt on the native `Nt*` call through the syscall layer, so the
 shadowed functions never enter the loader's IAT and the payload's calls are
 answered from loader code.
 
-## YAML parameters
-
-```yaml
-build:
-  stub:
-    api_resolution:
-      mode: none | proxy                 # default: none
-      apis: ["kernel32!ReadProcessMemory"]  # catalogue selections
-      unmatched: forward | abort         # default: forward
-```
-
-- `mode` — `none` leaves import resolution untouched; `proxy` rewrites the
-  payload's IAT so catalogue hits land on the generated proxies.
-- `apis` — the selected catalogue entries, written as `dll!function`. The module
-  side is normalized on lookup.
-- `unmatched` — what an import *outside* the catalogue does: `forward` (default)
-  resolves it normally; `abort` fails the load on the first non-catalogue import
-  (with an advisory printed at build time).
-
-The catalogue is deliberately small — the `lsass` critical path of a
-mimikatz-style payload:
-
-| Selector | Strategy |
-| --- | --- |
-| `ntdll!NtReadVirtualMemory` | route to `NtReadVirtualMemory` |
-| `ntdll!NtOpenProcess` | route to `NtOpenProcess` |
-| `kernel32!ReadProcessMemory` | route to `NtReadVirtualMemory` |
-| `kernel32!OpenProcess` | route to `NtOpenProcess` |
-| `kernel32!GetProcAddress` | handler (answers catalogue hits with the matching proxy) |
-
-## YAML example
-
-```yaml
-build:
-  stub:
-    syscalls:
-      mode: indirect
-    api_resolution:
-      mode: proxy
-      apis:
-        - "kernel32!ReadProcessMemory"
-        - "kernel32!OpenProcess"
-      unmatched: abort
-runtime:
-  - technique: reflective_loading
-    params:
-      payload: implant
-```
-
 ## How it works
+
+```mermaid
+flowchart TD
+    A[Payload import] --> B{in the catalogue?}
+    B -->|yes| C[Loader proxy on the Nt* call]
+    B -->|no| D{unmatched}
+    D -->|forward| E[real export]
+    D -->|abort| F[fail the load]
+```
 
 1. The selected `Nt*` names are merged into the syscall block, so `Nt*` proxies
    call through the same `nt_*` helpers everything else uses.
@@ -72,6 +28,12 @@ runtime:
    with `unmatched: abort`, refused, failing the load.
 4. A build-time check (`verify_no_intercepted_imports`) confirms the shadowed
    names never entered the loader's IAT.
+
+## Integration
+
+Configured under `build.stub.api_resolution`. It needs `syscalls.mode: indirect` and a
+`pe`/`dll` payload, and is rejected with `process_hollowing` — the proxies live in the
+loader image, which is not mapped in the target.
 
 ## What it evades
 

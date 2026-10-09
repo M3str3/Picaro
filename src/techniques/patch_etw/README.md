@@ -3,16 +3,6 @@
 *Overwrites the prologue of ntdll's ETW event-writing exports so no Event
 Tracing for Windows events are emitted from the process.*
 
-## Metadata
-
-| | |
-|---|---|
-| **ATT&CK** | T1562.006 (Impair Defenses: Indicator Blocking) |
-| **Stability** | Stable |
-| **Category** | Preparation |
-| **YAML key** | `patch_etw` |
-| **Introduced in** | Phase 7 |
-
 ## What it does
 
 Overwrites the prologue of the ETW event-writing exports in the current process
@@ -20,21 +10,6 @@ so no Event Tracing for Windows events are emitted from it. It does not run the
 payload; it only modifies process state, which is why it is a Preparation
 technique. Blinding ETW complements `patch_amsi`: AMSI gates script and .NET
 content before it runs, ETW is the telemetry channel that reports what ran.
-
-## YAML parameters
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `full`    | bool | no       | `true`  | Also patch `EtwEventWriteFull` (best effort). |
-
-## YAML example
-
-```yaml
-runtime:
-  - technique: patch_etw
-    params:
-      full: true
-```
 
 ## How it works
 
@@ -73,6 +48,11 @@ sequenceDiagram
 
 If the main export cannot be resolved (or the page cannot be made writable), the
 preparation returns a clear error and the pipeline fails with a useful message.
+
+## Integration
+
+A **Preparation** step: the stub runs it before the Execution and it never
+receives the payload. Place it earlier in `runtime:` than the Execution step.
 
 ## What it evades
 

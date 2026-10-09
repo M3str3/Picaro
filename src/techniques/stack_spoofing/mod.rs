@@ -71,6 +71,8 @@ pub const DEF: TechniqueDef = TechniqueDef {
     category: Category::Preparation,
     doc_path: "src/techniques/stack_spoofing/README.md",
     stub_fragment: include_str!("stub_fragment.rs"),
+    formats: &[],
+    requires_indirect_syscalls: true,
     params_example: "technique: stack_spoofing\nparams:\n  decoy_bytes: 4096\n",
     readme: include_str!("README.md"),
     // The technique issues no syscall of its own: it rewrites the trampoline the

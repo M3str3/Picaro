@@ -3,58 +3,12 @@
 *Overwrite the code section of a legitimate signed DLL with the payload and call
 it, so the code runs from a module the process already maps.*
 
-## Metadata
-
-| | |
-|---|---|
-| **ATT&CK** | T1055 (Process Injection) |
-| **Stability** | Stable |
-| **Category** | Execution |
-| **YAML key** | `module_stomping` |
-| **Introduced in** | v0.1.0 (parallel technique batch, schema 6) |
-| **Payload format** | `shellcode` only (see “Payload formats”) |
-
 ## What it does
 
 Loads a legitimate, signed DLL, overwrites the first bytes of its code section
 (`.text`) with the decrypted payload and calls it, so the executing code lives
 inside a module the process already maps instead of in a private executable
 allocation.
-
-## YAML parameters
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `payload` | string | no | the only declared payload | Name of the payload in `build.payloads` to run |
-| `module` | string | no | `wininet.dll` | Module to load and stomp: a name the loader resolves or a full path |
-
-The payload's binary format comes from `build.payloads.<name>`; see “Payload
-formats”. `build.output.arch` selects the stub's bitness, and the module is
-loaded by the stub's own loader, so it must be of that bitness too.
-
-Do not name a module another step patches or hooks — `patch_amsi` (which patches
-`amsi.dll`) is the obvious example: the stomp would overwrite the patched code.
-
-## YAML example
-
-```yaml
-build:
-  payloads:
-    implant:
-      source: ./beacon.bin
-      format: shellcode
-runtime:
-  - technique: module_stomping
-    params:
-      payload: implant
-      module: wininet.dll
-```
-
-```yaml
-# Defaults: the only payload, and wininet.dll as the stomp target.
-runtime:
-  - technique: module_stomping
-```
 
 ## How it works
 
@@ -142,6 +96,12 @@ section as-is and called with a no-argument contract, exactly like
 `pe`/`dll`/`dotnet` for this technique at build time, and the fragment also
 detects a PE payload at runtime (`MZ` + `PE\0\0`) and fails the step with a clear
 message instead of jumping into a DOS header.
+
+## Integration
+
+An **Execution** step: it runs a `shellcode` payload from the loader's own
+process. The payload runs from a stomped signed module's code
+section.
 
 ## What it evades
 

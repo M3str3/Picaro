@@ -1,0 +1,22 @@
+schema: 6
+name: test-stager-dry-run
+
+build:
+  payloads:
+    implant:
+      # A staged payload's `source` is ignored (the stager fetches at run time),
+      # so `--dry-run` must not reach out to it. This URL is deliberately
+      # unreachable: fetching it would fail the dry run.
+      source: "http://127.0.0.1:9/nope.bin"
+      format: pe
+  output:
+    path: ./dist/test_stager_dry_run.exe
+
+runtime:
+  - technique: network_stager
+    params:
+      payload: implant
+      url: "http://127.0.0.1:9/nope.bin"
+      crypto: none
+  - technique: reflective_loading
+    params: { payload: implant }

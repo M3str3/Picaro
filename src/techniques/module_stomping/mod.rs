@@ -60,6 +60,8 @@ pub const DEF: TechniqueDef = TechniqueDef {
     category: Category::Execution,
     doc_path: "src/techniques/module_stomping/README.md",
     stub_fragment: include_str!("stub_fragment.rs"),
+    formats: &[super::PayloadFormat::Shellcode],
+    requires_indirect_syscalls: false,
     params_example: "technique: module_stomping\nparams:\n  module: wininet.dll\n",
     readme: include_str!("README.md"),
     // Only the page-protection change is a kernel call; `LoadLibraryA` stays a

@@ -55,11 +55,11 @@ payload (`examples/payloads/test_payload.exe`):
 | Hollowing, DIR64 relocations applied | TLS write hung on a low-half address |
 | Hollowing, relocations + TLS provisioned | payload runs; the stub relays exit `0` |
 
-The last row is the current state: `.\dist\test_packed.exe` prints its
-`STUB_MARKER_<hex>` and exits with the payload's own exit code (`0`). The
-end-to-end test still asserts only "the stub did not fail through its own error
-path"; the marker itself still needs Process Explorer, because the hollowed
-`svchost.exe` has no console attached.
+The last row is the current state: `.\.dist\test_packed.exe` exits with the
+payload's own exit code (`0`). In a debug build (`build.stub.debug: true`) the
+stub also prints its `STUB_MARKER_<hex>`, which has to be read in Process
+Explorer, because the hollowed `svchost.exe` has no console attached. The
+end-to-end test asserts only "the stub did not fail through its own error path".
 
 ## Remaining work
 

@@ -3,15 +3,6 @@
 *Copies a legitimate reference file's timestamps onto the artifact, so it looks
 as old as the reference rather than freshly dropped.*
 
-## Metadata
-
-| | |
-|---|---|
-| **ATT&CK** | T1070.006 |
-| **Stability** | Stable |
-| **Category** | Preparation |
-| **YAML key** | `timestomping` |
-
 ## What it does
 
 Copies the creation, last-access and last-write timestamps of a legitimate
@@ -19,25 +10,6 @@ reference file onto a target file. By default the target is the running
 artifact's own image, so the packed loader looks like it has been sitting on
 disk as long as the reference (for example a system DLL) rather than from the
 moment it was dropped.
-
-## YAML parameters
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `reference` | string | yes | — | Legitimate file whose creation, last-access and last-write times are copied |
-| `target` | string | no | the running artifact's own image path | File to write the timestamps onto |
-
-## YAML example
-
-```yaml
-runtime:
-  - technique: timestomping
-    params:
-      reference: "C:\\Windows\\System32\\kernel32.dll"
-  - technique: reflective_loading
-    params:
-      payload: main
-```
 
 ## How it works
 
@@ -71,6 +43,11 @@ flowchart TD
 The reference and (when configured) the target path are obfuscated at pack time
 through `StringsConfig`, and every diagnostic is rebuilt at run time from
 obfuscated bytes, so none of them appears in the artifact's `.rdata`.
+
+## Integration
+
+A **Preparation** step: the stub runs it before the Execution and it never
+receives the payload. Place it earlier in `runtime:` than the Execution step. It rewrites the artifact's timestamps from the reference file.
 
 ## What it evades
 

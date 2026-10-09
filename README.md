@@ -264,7 +264,7 @@ build:
     manifest: true        # write <stem>.manifest.json (provenance)
     subsystem: console    # console | windows (GUI; no console window)
     resources:            # optional PE resources (no rc.exe/windres needed)
-      icon: ./app.ico
+      icon: ./app.ico     # a .ico path, or "random" to generate one
       version_info:
         randomize: true    # fill unset fields with generated values
         company: "Contoso" # explicit fields always win
@@ -297,7 +297,7 @@ runtime:                  # ordered technique steps
 | `build.output` | Where the packed artifact goes and how it is finalized. `arch` selects the stub's architecture (`x64` or `x86`) and the payload must match it. `manifest` writes the provenance file. |
 | `build.output.kind` | `exe` (default) or `dll`. A DLL the host process loads — a JVM (`System.load`), CPython (`ctypes`), .NET (`[DllImport]`), `rundll32` — which is what makes the chain usable where application whitelisting only allows the host program. `entry` picks the exports: `auto`, `jni_on_load` or `export:<name>`. See [DLL output design](docs/design/dll-output.md). |
 | `build.output.subsystem` | `console` (default) or `windows` (GUI, no console window). |
-| `build.output.resources` | Optional PE resources embedded into the artifact: `icon`, `version_info` and `manifest` (Windows app manifest / UAC). Built in Rust and written into a `.rsrc` section. |
+| `build.output.resources` | Optional PE resources embedded into the artifact: `icon` (a `.ico` path or `random`), `version_info` and `manifest` (Windows app manifest / UAC). Built in Rust and written into a `.rsrc` section. |
 | `build.output.sign` | Optional Authenticode signing: `lab` (self-signed), `store` (an existing cert, Windows only) or `file` (a `.pfx`). Uses `signtool` on Windows and `osslsigncode` elsewhere. |
 | `runtime` | The ordered technique steps. Only Execution techniques (`reflective_loading`, `process_hollowing`, `dotnet_hosting`, `execution_callbacks`, `module_stomping`, `fibers`) take `params.payload` (optional with one payload, required with several); Preparation and Control steps never do. A technique's parameters go under a nested `params:` mapping, and each step carries the loader's own `on_success`/`on_fail`/`delay_ms`. See [Runtime steps](docs/multistage.md). |
 
@@ -525,8 +525,11 @@ tell. `build.output.resources` embeds the three resources a normal Windows
 binary carries, all generated in Rust (no `rc.exe`/`windres`, so the build stays
 cross-platform):
 
-- **`icon`** — a `.ico` file, split into `RT_ICON` images plus the
-  `RT_GROUP_ICON` directory the shell reads.
+- **`icon`** — a `.ico` file (split into `RT_ICON` images plus the
+  `RT_GROUP_ICON` directory the shell reads) or `random`, which generates a
+  fresh icon at build time. The render is deterministic in a seed the build
+  picks and records in the manifest; the 16/32/48/64 sizes are BMP `DIB`s, so
+  no PNG encoder (and no extra dependency) is needed.
 - **`version_info`** — `VERSIONINFO` strings (`company`, `product`,
   `description`, `copyright`, `original_filename`, `internal_name`,
   `file_version`, `product_version`) as `RT_VERSION`. With `randomize: true`,

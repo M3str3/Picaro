@@ -49,6 +49,8 @@ pub const DEF: TechniqueDef = TechniqueDef {
     doc_path: "src/techniques/timestomping/README.md",
     readme: include_str!("README.md"),
     stub_fragment: include_str!("stub_fragment.rs"),
+    formats: &[],
+    requires_indirect_syscalls: false,
     params_example: r#"technique: timestomping
 params:
   reference: "C:\\Windows\\System32\\kernel32.dll""#,

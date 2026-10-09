@@ -27,6 +27,9 @@ docs/site/MERMAID_PROMPT.md
 /docs/site/dist/
 /docs/site/src/content/docs/
 /docs/site/src/sidebar.mjs
+/docs/site/src/techniques.generated.mjs
+/docs/site/public/plan-catalog.json
+/docs/site/public/techniques.json
 
 # Development container exchange folder (docker-compose.yml): the one host folder
 # shared writable with the containers — msfvenom payloads, plans and packed

@@ -46,6 +46,8 @@ pub const DEF: TechniqueDef = TechniqueDef {
     doc_path: "src/techniques/patch_etw/README.md",
     readme: include_str!("README.md"),
     stub_fragment: include_str!("stub_fragment.rs"),
+    formats: &[],
+    requires_indirect_syscalls: false,
     params_example: "technique: patch_etw\nparams:\n  full: true\n",
     // The page protection changes go through the syscall layer, so
     // `mode: indirect` removes the `VirtualProtect` import.

@@ -17,6 +17,7 @@ fn parses_minimal_params_with_defaults() {
             params: Params {
                 payload: "implant".to_string(),
                 url: "https://example.invalid/a.bin".to_string(),
+                downloader: super::Downloader::Auto,
                 crypto: super::StagerCrypto::None,
                 key: None,
                 nonce: None,
@@ -40,6 +41,31 @@ fn parses_encrypted_params() {
             assert_eq!(params.nonce.as_deref(), Some("bb"));
             assert_eq!(params.timeout_ms, 1000);
             assert_eq!(params.retries, 2);
+        }
+        other => panic!("expected network_stager, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_the_downloader() {
+    let step: TechniqueKind = serde_yml::from_str(
+        "technique: network_stager\nparams:\n  payload: implant\n  url: \"http://host/a.bin\"\n  downloader: certutil\n",
+    )
+    .expect("network_stager should parse");
+    match step {
+        TechniqueKind::NetworkStager { params } => {
+            assert_eq!(params.downloader, super::Downloader::Certutil);
+        }
+        other => panic!("expected network_stager, got {other:?}"),
+    }
+    // Absent, the downloader defaults to `auto`.
+    let default: TechniqueKind = serde_yml::from_str(
+        "technique: network_stager\nparams:\n  payload: implant\n  url: \"http://host/a.bin\"\n",
+    )
+    .expect("network_stager should parse");
+    match default {
+        TechniqueKind::NetworkStager { params } => {
+            assert_eq!(params.downloader, super::Downloader::Auto);
         }
         other => panic!("expected network_stager, got {other:?}"),
     }
@@ -81,6 +107,7 @@ fn render_fragment_substitutes_every_placeholder_and_leaks_nothing() {
     let fragment = Params {
         payload: "implant".to_string(),
         url: "https://example.invalid/implant.bin".to_string(),
+        downloader: super::Downloader::Curl,
         crypto: super::StagerCrypto::XChaCha20Poly1305,
         key: Some("aa".to_string()),
         nonce: Some("bb".to_string()),

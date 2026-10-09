@@ -93,6 +93,8 @@ pub const DEF: TechniqueDef = TechniqueDef {
     category: Category::Execution,
     doc_path: "src/techniques/thread_hijacking/README.md",
     stub_fragment: include_str!("stub_fragment.rs"),
+    formats: &[super::PayloadFormat::Shellcode],
+    requires_indirect_syscalls: false,
     params_example: "technique: thread_hijacking\nparams:\n  target: notepad.exe\n",
     readme: include_str!("README.md"),
     syscalls: &[

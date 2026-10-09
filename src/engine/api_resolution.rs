@@ -35,8 +35,13 @@ pub struct YamlApiResolutionPlan {
     pub mode: String,
 
     /// Catalogue selections, written as `dll!function` (e.g.
-    /// `kernel32!ReadProcessMemory`). The module side is normalized on lookup.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// `kernel32!ReadProcessMemory`), a list of them, or `all` to proxy every
+    /// catalogue entry. The module side is normalized on lookup.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_apis"
+    )]
     pub apis: Vec<String>,
 
     /// What to do with imports not in the catalogue (`forward` or `abort`).
@@ -50,6 +55,38 @@ fn default_mode() -> String {
 
 fn default_unmatched() -> String {
     "forward".to_string()
+}
+
+/// Deserializes `apis` from a bare string (`apis: all`) or a list of strings.
+fn deserialize_apis<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct ApisVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for ApisVisitor {
+        type Value = Vec<String>;
+
+        fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+            formatter.write_str("a selector string or a list of selector strings")
+        }
+
+        fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(vec![value.to_string()])
+        }
+
+        fn visit_seq<A>(self, seq: A) -> std::result::Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            Vec::<String>::deserialize(serde::de::value::SeqAccessDeserializer::new(seq))
+        }
+    }
+
+    deserializer.deserialize_any(ApisVisitor)
 }
 
 /// Whether the loader proxies the payload's API resolution at all.
@@ -198,11 +235,21 @@ impl ApiResolutionConfig {
             }
         };
 
+        // `all` proxies every catalogue entry; otherwise each `dll!function`
+        // selector is looked up (an unknown name is a validation error).
         let mut apis: Vec<&'static ApiEntry> = Vec::new();
-        for selector in &yaml.apis {
-            let entry = lookup(selector).ok_or_else(|| unknown_api(selector))?;
-            if !apis.iter().any(|e| std::ptr::eq(*e, entry)) {
-                apis.push(entry);
+        if yaml
+            .apis
+            .iter()
+            .any(|selector| selector.eq_ignore_ascii_case("all"))
+        {
+            apis.extend(CATALOGUE.iter());
+        } else {
+            for selector in &yaml.apis {
+                let entry = lookup(selector).ok_or_else(|| unknown_api(selector))?;
+                if !apis.iter().any(|e| std::ptr::eq(*e, entry)) {
+                    apis.push(entry);
+                }
             }
         }
 
@@ -682,6 +729,31 @@ mod tests {
         assert_eq!(config.apis[0].func, "ReadProcessMemory");
         assert_eq!(config.apis[1].func, "NtOpenProcess");
         assert!(!config.is_noop());
+    }
+
+    #[test]
+    fn apis_all_selects_the_whole_catalogue() {
+        // Bare scalar form.
+        let config =
+            ApiResolutionConfig::from_yaml(Some(&yaml("mode: proxy\napis: all\n"))).expect("valid");
+        assert_eq!(config.apis.len(), CATALOGUE.len());
+        assert!(config.apis.iter().any(|e| e.func == "GetProcAddress"));
+        assert!(!config.is_noop());
+
+        // List form is equivalent.
+        let config = ApiResolutionConfig::from_yaml(Some(&yaml("mode: proxy\napis:\n  - all\n")))
+            .expect("valid");
+        assert_eq!(config.apis.len(), CATALOGUE.len());
+    }
+
+    #[test]
+    fn api_accepts_a_bare_scalar_selector() {
+        let config = ApiResolutionConfig::from_yaml(Some(&yaml(
+            "mode: proxy\napis: \"kernel32!OpenProcess\"\n",
+        )))
+        .expect("valid");
+        assert_eq!(config.apis.len(), 1);
+        assert_eq!(config.apis[0].func, "OpenProcess");
     }
 
     #[test]

@@ -58,6 +58,8 @@ pub const DEF: TechniqueDef = TechniqueDef {
     doc_path: "src/techniques/guardrail/README.md",
     readme: include_str!("README.md"),
     stub_fragment: include_str!("stub_fragment.rs"),
+    formats: &[],
+    requires_indirect_syscalls: false,
     params_example: "technique: guardrail\nparams:\n  expire_on: \"2027-01-01\"\n  max_runs: 3\n",
     // The fragment uses only the standard library (clock, environment, file
     // I/O); no syscall and no payload import resolution are involved.

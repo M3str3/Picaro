@@ -68,6 +68,8 @@ pub const DEF: TechniqueDef = TechniqueDef {
     category: Category::Execution,
     doc_path: "src/techniques/pe_injection/README.md",
     stub_fragment: include_str!("stub_fragment.rs"),
+    formats: &[super::PayloadFormat::Pe],
+    requires_indirect_syscalls: false,
     params_example: r#"technique: pe_injection
 params:
   target: "C:\\Windows\\System32\\notepad.exe"

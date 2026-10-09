@@ -9,15 +9,17 @@ This page is the implementation and decision record behind it.
 it changes how every `nt_*` helper reaches the kernel, so it applies to the
 whole generated stub rather than to one ordered step. The registry entry is
 metadata only (`src/features/syscalls/mod.rs`); the implementation is
-`src/engine/syscalls.rs`.
+`src/engine/syscalls/`, and each SSN resolver is a self-contained module under
+`src/engine/syscalls/resolvers/<name>/`
+(see the [syscalls feature](../features/ref/syscalls.md)).
 
 ## Phases
 
 | Phase | Resolver | What it added |
 | --- | --- | --- |
-| 6a | Hell's Gate | SSN read from the live `Nt*` export prologue; trampoline through the ntdll gadget |
-| 6b | Tartarus Gate | SSN read from a clean on-disk copy of ntdll, so live hooks do not hide it; gadget still from live ntdll |
-| 6c | API hashing | Same clean copy, matched by FNV-1a 64-bit hash of the export name (no `GetProcAddress`, no name string) |
+| 6a | [Hell's Gate](../features/ref/syscalls/hells_gate.md) | SSN read from the live `Nt*` export prologue; trampoline through the ntdll gadget |
+| 6b | [Tartarus Gate](../features/ref/syscalls/tartarus_gate.md) | SSN read from a clean on-disk copy of ntdll, so live hooks do not hide it; gadget still from live ntdll |
+| 6c | [API hashing](../features/ref/syscalls/api_hash.md) | Same clean copy, matched by FNV-1a 64-bit hash of the export name (no `GetProcAddress`, no name string) |
 
 ## Design notes
 

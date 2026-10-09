@@ -3,16 +3,6 @@
 *Waits a fixed number of milliseconds before the pipeline continues, so a plan
 can pace its stages or delay the final exit.*
 
-## Metadata
-
-| | |
-|---|---|
-| **ATT&CK** | T1497 (Virtualization/Sandbox Evasion; timing only) |
-| **Stability** | Stable |
-| **Category** | Control |
-| **YAML key** | `sleep` |
-| **Introduced in** | Multi-stage plans (schema 5) |
-
 ## What it does
 
 Waits for a fixed duration before the pipeline continues.
@@ -20,21 +10,6 @@ Waits for a fixed duration before the pipeline continues.
 A Control technique: it neither modifies the current process state nor runs the
 payload. It exists so a multi-stage plan can pace its chain — a deliberate delay
 between two stages, or a final delay before the process exits.
-
-## YAML parameters
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `ms` | integer | no | `1000` | Milliseconds to wait. |
-
-## YAML example
-
-```yaml
-runtime:
-  - technique: sleep
-    params:
-      ms: 1000
-```
 
 ## How it works
 
@@ -47,6 +22,11 @@ flowchart TD
 1. The generated runner calls `run_sleep()` for the stage.
 2. `std::thread::sleep(Duration::from_millis(ms))` blocks the current thread.
 3. It returns `Ok(0)`; the runner continues with the next stage.
+
+## Integration
+
+A **Control** step: it orchestrates the chain and returns control when it
+finishes, so the steps around it keep running. It pauses the chain for `ms` milliseconds between the steps around it.
 
 ## What it evades
 

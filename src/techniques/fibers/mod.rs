@@ -35,6 +35,8 @@ pub const DEF: TechniqueDef = TechniqueDef {
     category: Category::Execution,
     doc_path: "src/techniques/fibers/README.md",
     stub_fragment: include_str!("stub_fragment.rs"),
+    formats: &[super::PayloadFormat::Shellcode],
+    requires_indirect_syscalls: false,
     params_example: "technique: fibers\n",
     readme: include_str!("README.md"),
     // The payload is copied into a private region and made executable through

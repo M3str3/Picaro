@@ -30,6 +30,8 @@ pub const DEF: TechniqueDef = TechniqueDef {
     category: Category::Preparation,
     doc_path: "src/techniques/unhook_ntdll/README.md",
     stub_fragment: include_str!("stub_fragment.rs"),
+    formats: &[],
+    requires_indirect_syscalls: false,
     params_example: "technique: unhook_ntdll\n",
     readme: include_str!("README.md"),
     // Only the page-protection change is a kernel call; `GetModuleHandleA` and

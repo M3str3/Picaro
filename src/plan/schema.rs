@@ -533,6 +533,80 @@ fn default_sign_mode() -> String {
     "none".to_string()
 }
 
+/// `output.resources.icon`: an existing `.ico` file or a procedurally generated
+/// icon.
+///
+/// In YAML it is a single string: `random` (case-insensitive) generates an icon
+/// at build time, anything else is a path to a `.ico` file. A generated icon's
+/// seed is chosen by the build and written to the manifest, so the icon can be
+/// reproduced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum IconPlan {
+    /// `icon: random` — a procedurally generated icon. `seed` is `None` in the
+    /// plan as written; the build resolves it to a concrete value so the icon
+    /// and the manifest agree.
+    Random {
+        /// The seed the icon was (or will be) rendered from.
+        seed: Option<u64>,
+    },
+    /// `icon: <path>` — embed an existing `.ico` file.
+    Path(PathBuf),
+}
+
+impl IconPlan {
+    /// The seed of a generated icon, once the build has resolved it.
+    pub fn seed(&self) -> Option<u64> {
+        match self {
+            IconPlan::Random { seed } => *seed,
+            IconPlan::Path(_) => None,
+        }
+    }
+
+    /// Returns this icon with a concrete seed, if it is a generated one that has
+    /// none yet. A path or an already-seeded icon is returned unchanged.
+    pub fn with_seed(self, seed: u64) -> Self {
+        match self {
+            IconPlan::Random { seed: None } => IconPlan::Random { seed: Some(seed) },
+            other => other,
+        }
+    }
+}
+
+impl std::str::FromStr for IconPlan {
+    type Err = String;
+
+    /// Parses `random` or a `.ico` path.
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        if value.trim().eq_ignore_ascii_case("random") {
+            Ok(IconPlan::Random { seed: None })
+        } else if value.trim().is_empty() {
+            Err("empty icon value; expected 'random' or a path to a .ico file".to_string())
+        } else {
+            Ok(IconPlan::Path(PathBuf::from(value)))
+        }
+    }
+}
+
+impl From<IconPlan> for String {
+    fn from(icon: IconPlan) -> Self {
+        match icon {
+            // The seed is deliberately not serialized: it is recorded separately
+            // (in the manifest) so the resolved plan stays stable.
+            IconPlan::Random { .. } => "random".to_string(),
+            IconPlan::Path(path) => path.to_string_lossy().into_owned(),
+        }
+    }
+}
+
+impl TryFrom<String> for IconPlan {
+    type Error = String;
+
+    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+
 /// `output.resources`: the PE resources to embed into the artifact.
 ///
 /// All fields are optional; each one that is set adds the matching resource
@@ -541,9 +615,10 @@ fn default_sign_mode() -> String {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourcesPlan {
-    /// Path to a `.ico` file, embedded as `RT_GROUP_ICON` + `RT_ICON`.
+    /// Icon to embed as `RT_GROUP_ICON` + `RT_ICON`: `random` (generated) or a
+    /// path to a `.ico` file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub icon: Option<PathBuf>,
+    pub icon: Option<IconPlan>,
 
     /// `VERSIONINFO` strings, embedded as `RT_VERSION`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -829,6 +904,71 @@ runtime:
         assert_eq!(plan.build.output.arch, Arch::X64);
         assert!(plan.build.output.strip);
         assert_eq!(plan.build.output.trim_paths, TrimPaths::All);
+    }
+
+    #[test]
+    fn parses_a_generated_icon() {
+        let yaml = VALID_YAML.replace(
+            "  output:\n",
+            "  output:\n    resources:\n      icon: random\n",
+        );
+        let plan: Plan = serde_yml::from_str(&yaml).expect("icon: random should parse");
+        let icon = plan
+            .build
+            .output
+            .resources
+            .expect("resources")
+            .icon
+            .expect("icon");
+        assert_eq!(icon, IconPlan::Random { seed: None });
+        assert_eq!(icon.seed(), None);
+    }
+
+    #[test]
+    fn parses_an_icon_path() {
+        let yaml = VALID_YAML.replace(
+            "  output:\n",
+            "  output:\n    resources:\n      icon: ./app.ico\n",
+        );
+        let plan: Plan = serde_yml::from_str(&yaml).expect("an icon path should parse");
+        let icon = plan
+            .build
+            .output
+            .resources
+            .expect("resources")
+            .icon
+            .expect("icon");
+        assert_eq!(icon, IconPlan::Path(PathBuf::from("./app.ico")));
+    }
+
+    #[test]
+    fn an_icon_round_trips_as_a_string() {
+        assert_eq!(String::from(IconPlan::Random { seed: Some(7) }), "random");
+        assert_eq!(
+            String::from(IconPlan::Path(PathBuf::from("./app.ico"))),
+            "./app.ico"
+        );
+    }
+
+    #[test]
+    fn with_seed_only_fills_an_unresolved_generated_icon() {
+        assert_eq!(
+            IconPlan::Random { seed: None }.with_seed(9),
+            IconPlan::Random { seed: Some(9) }
+        );
+        assert_eq!(
+            IconPlan::Random { seed: Some(1) }.with_seed(9),
+            IconPlan::Random { seed: Some(1) }
+        );
+        assert_eq!(
+            IconPlan::Path(PathBuf::from("a.ico")).with_seed(9),
+            IconPlan::Path(PathBuf::from("a.ico"))
+        );
+    }
+
+    #[test]
+    fn rejects_an_empty_icon_value() {
+        assert!(serde_yml::from_str::<IconPlan>("").is_err());
     }
 
     #[test]

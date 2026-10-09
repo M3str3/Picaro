@@ -3,37 +3,12 @@
 *Replace a suspended process's image with the payload, so the payload runs from
 a legitimate process (`svchost.exe`) it was never loaded into from disk.*
 
-## Metadata
-
-| | |
-|---|---|
-| **ATT&CK** | T1055.012 — Process Injection: Process Hollowing |
-| **Stability** | Experimental |
-| **Category** | Execution |
-| **YAML key** | `process_hollowing` |
-| **Introduced in** | Phase 4 |
-
 ## What it does
 
 Runs the decrypted payload inside a legitimate, suspended process
 (`svchost.exe` by default) by unmapping its original image and replacing it
 with the payload's image, so the payload never executes from disk under its own
 name.
-
-## YAML parameters
-
-| Parameter | Type   | Required | Default                          | Description                     |
-|-----------|--------|----------|----------------------------------|---------------------------------|
-| `target`  | string | no       | `C:\Windows\System32\svchost.exe` | Process to create, suspend and hollow |
-
-## YAML example
-
-```yaml
-runtime:
-  - technique: process_hollowing
-    params:
-      target: "C:\\Windows\\System32\\svchost.exe"
-```
 
 ## How it works
 
@@ -134,6 +109,11 @@ built its `argv` from it, so `GetCommandLineW` inside the payload returns it.
 > The command line is ANSI (`CreateProcessA`), so non-ASCII arguments are
 > converted to the active code page; keep payload arguments ASCII.
 
+## Integration
+
+An **Execution** step: it runs a `pe` payload from the loader's own
+process. It relays the hollowed process's exit code, so another step may follow.
+
 ## What it evades
 
 - The payload never touches disk in cleartext (no drop, no `CreateProcess` on
@@ -222,4 +202,7 @@ What differs from the x64 path:
 
 ## References
 
-- MITRE ATT&CK T1055.012 — Process Injection: Process Hollowing.
+- Runtime evidence for the full-PE path (TLS callbacks included):
+  `docs/techniques/process_hollowing.md`.
+- The shared payload import resolver: `src/engine/imports.rs`.
+- Measurement baseline: `docs/measurements.md`.

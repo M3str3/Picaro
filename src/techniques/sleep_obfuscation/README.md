@@ -3,16 +3,6 @@
 *Encrypts the process's executable image for the duration of a sleep, so a
 memory scan during the sleep sees RC4 ciphertext instead of the payload.*
 
-## Metadata
-
-| | |
-|---|---|
-| **ATT&CK** | T1027 (Obfuscated Files or Information) |
-| **Stability** | Experimental |
-| **Category** | Preparation |
-| **YAML key** | `sleep_obfuscation` |
-| **Introduced in** | phase 6 (ekko variant) |
-
 ## What it does
 
 Encrypts the executable image region of the current process for the duration
@@ -26,25 +16,6 @@ This phase ships the **ekko** variant (timer queue + ROP chain + `NtContinue`),
 which is the canonical, best-documented sleep-obfuscation technique. `foliage`
 (APC-based) and `cronos` (waitable timers) are recognized by the parser but
 rejected with a "not implemented yet" error; they arrive in later phases.
-
-## YAML parameters
-
-| Parameter        | Type    | Required | Default     | Description                                          |
-|------------------|---------|----------|-------------|------------------------------------------------------|
-| `variant`        | string  | no       | `ekko`      | Mechanism: `ekko` \| `foliage` \| `cronos` (only `ekko` implemented) |
-| `sleep_ms`       | u64     | no       | `5000`      | Length of the obfuscated sleep, in milliseconds      |
-| `encrypt_regions`| list    | no       | `[payload]` | Region classes: `[payload]` \| `[payload, stack]` \| `all` (only `[payload]` implemented) |
-
-## YAML example
-
-```yaml
-runtime:
-  - technique: sleep_obfuscation
-    params:
-      variant: ekko
-      sleep_ms: 5000
-      encrypt_regions: [payload]
-```
 
 ## How it works
 
@@ -104,6 +75,12 @@ encrypted image):
 All API and DLL names (`NtContinue`, `RtlCaptureContext`, `SystemFunction032`,
 the timer-queue family, …) are resolved at runtime and obfuscated through
 `StringsConfig`, so none of them reaches the import table.
+
+## Integration
+
+A **Preparation** step: the stub runs it before the Execution and it never
+receives the payload. Place it earlier in `runtime:` than the Execution step. It encrypts the image region for the duration of the sleep and
+restores it afterwards.
 
 ## What it evades
 

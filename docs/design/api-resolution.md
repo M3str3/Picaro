@@ -273,7 +273,7 @@ both execution techniques resolve imports, so the resolver is always emitted.
   with `crate::resolution_policy`.
 - `src/techniques/process_hollowing/stub_fragment.rs` — passes a no-op policy
   (Phase E; the proxies are not mapped in the target).
-- `src/engine/syscalls.rs` — `NtOpenProcess` in `NT_FUNCTIONS` (both bodies), and
+- `src/engine/syscalls/` — `NtOpenProcess` in `NT_FUNCTIONS` (both bodies), and
   `render_block_with` (merges the `Nt*` names `api_resolution` routes to).
 - `src/engine/stub.rs` + `src/engine/templates/main.rs.tpl` — `$API_RESOLUTION_BLOCK$`
   and the `render_*_with` variants that thread the config.
@@ -411,5 +411,5 @@ Declared, not hidden:
 - Syscall layer: `src/features/syscalls/README.md` (Hell's Gate / Tartarus
   Gate / API hashing; the `nt_*` helpers).
 - Shared import resolver: `src/engine/imports.rs`.
-- Sibling loader config: `build.stub.syscalls` (`src/engine/syscalls.rs`).
+- Sibling loader config: `build.stub.syscalls` (`src/engine/syscalls/`).
 - Malproxy (djhohnstein) — the remote-proxy variant that is explicitly parked.

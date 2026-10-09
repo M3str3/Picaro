@@ -4,44 +4,12 @@
 runs, so the payload executes before the target's entry point and the hooks
 around it.*
 
-## Metadata
-
-| | |
-|---|---|
-| **ATT&CK** | T1055.004 (Process Injection: Asynchronous Procedure Call) |
-| **Stability** | Experimental |
-| **Category** | Execution |
-| **YAML key** | `early_bird` |
-| **Introduced in** | unreleased (Early Bird injection) |
-
 ## What it does
 
 Creates a legitimate process suspended, writes the payload into it and queues an
 APC to its main thread before the process has run, so the payload executes
 during the target's own initialization — before the target's entry point, and
 before the anti-malware hooks placed around it.
-
-## YAML parameters
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `payload` | string | no | the only declared payload | Name of the payload in `build.payloads` to run |
-| `target` | string | no | `C:\Windows\System32\svchost.exe` | Process to create, suspend and inject into |
-| `wait_ms` | integer | no | `0` | Bounded wait, in milliseconds, for the *target* to exit; `0` does not wait |
-
-The payload must be `format: shellcode`; `plan::validate` rejects a `pe`, `dll`
-or `dotnet` payload for this technique at build time, and checks that the
-target's architecture matches `build.output.arch`.
-
-## YAML example
-
-```yaml
-runtime:
-  - technique: early_bird
-    params:
-      target: "C:\\Windows\\System32\\svchost.exe"
-      wait_ms: 0
-```
 
 ## How it works
 
@@ -115,6 +83,12 @@ behave as for any other Execution technique.
   the three arguments the native call has. The payload is entered as the APC
   routine and ignores both shapes. `mode: indirect` is x64-only, like the rest
   of the syscall layer.
+
+## Integration
+
+An **Execution** step: it runs a `shellcode` payload from the loader's own
+process. The payload runs in a spawned target via an APC; because it
+runs in another process the loader cannot relay its result directly.
 
 ## What it evades
 

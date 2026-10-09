@@ -1,0 +1,172 @@
+---
+/**
+ * Catalogue metadata panel.
+ *
+ * The intrinsic metadata of a registry item — a technique or a loader feature —
+ * read from `src/techniques/<name>/mod.rs` / `src/features/<name>/mod.rs` at
+ * assemble time into `techniques.generated.mjs`. The page's README is the prose;
+ * this is the datasheet, so a README never repeats it.
+ *
+ * Rendered by the `MarkdownContent` override, just under the page title, and
+ * built only from Starlight components (`Badge`, `Card`, `Code`) so a technique
+ * and a feature page read the same way.
+ */
+import { Badge, Card, Code } from '@astrojs/starlight/components';
+import { techniques, features } from '../techniques.generated.mjs';
+
+interface Props {
+  slug?: string;
+}
+
+const { slug } = Astro.props;
+const match = /^(techniques|features)\/ref\/([a-z0-9_]+)$/.exec(slug ?? '');
+const kind = match?.[1];
+const name = match?.[2];
+const isFeature = kind === 'features';
+const item = isFeature
+  ? features.find((entry) => entry.name === name)
+  : techniques.find((entry) => entry.name === name);
+
+const CATEGORY_LABEL = {
+  preparation: 'Preparation',
+  execution: 'Execution',
+  control: 'Control',
+};
+const CATEGORY_VARIANT = { preparation: 'note', execution: 'tip', control: 'default' };
+const STABILITY_VARIANT = {
+  stable: 'success',
+  experimental: 'caution',
+  unimplemented: 'danger',
+  deprecated: 'danger',
+};
+
+/** The context badge: a technique's category, a feature's scope. */
+const context = item
+  ? isFeature
+    ? { text: item.scope === 'payload' ? 'Payload' : 'Loader', variant: item.scope === 'payload' ? 'note' : 'tip' }
+    : {
+        text: CATEGORY_LABEL[item.category] ?? item.category,
+        variant: CATEGORY_VARIANT[item.category] ?? 'default',
+      }
+  : null;
+
+/** Official ATT&CK page for `T1055` / `T1055.012`, or `null`. */
+function attackHref(id) {
+  const attack = /^T(\d+)(?:\.(\d+))?$/.exec(id);
+  if (!attack) return null;
+  const base = `https://attack.mitre.org/techniques/T${attack[1]}`;
+  return attack[2] ? `${base}/${attack[2]}/` : `${base}/`;
+}
+
+const params = (item?.params ?? []).filter((param) => param.key);
+const example = item?.params_example?.trim();
+const requiredLabel = (value) => (value === true ? 'yes' : value === false ? 'no' : '—');
+const typeLabel = (param) =>
+  param.options?.length ? `${param.type} (${param.options.join(' | ')})` : param.type;
+---
+
+{
+  item && (
+    <Card title="Metadata">
+      <p>
+        <Badge text={context.text} variant={context.variant} />{' '}
+        <Badge
+          text={item.stability}
+          variant={STABILITY_VARIANT[item.stability] ?? 'default'}
+        />
+      </p>
+      <ul>
+        {item.attck.length > 0 && (
+          <li>
+            <strong>ATT&amp;CK:</strong>{' '}
+            {item.attck.map((id, index) => {
+              const href = attackHref(id);
+              return (
+                <>
+                  {index > 0 && ', '}
+                  {href ? <a href={href}>{id}</a> : id}
+                </>
+              );
+            })}
+          </li>
+        )}
+        {isFeature && item.yaml && (
+          <li>
+            <strong>YAML:</strong> <code>{item.yaml}</code>
+          </li>
+        )}
+        {item.requires.length > 0 && (
+          <li>
+            <strong>Platforms:</strong>{' '}
+            {item.requires.join(', ')}
+          </li>
+        )}
+        {!isFeature && item.resolves_imports && (
+          <li>
+            <strong>Imports:</strong> shared resolver
+          </li>
+        )}
+        {item.conflicts.length > 0 && (
+          <li>
+            <strong>Conflicts:</strong>{' '}
+            {item.conflicts.join(', ')}
+          </li>
+        )}
+        {!isFeature && item.syscalls.length > 0 && (
+          <li>
+            <strong>Syscalls:</strong>{' '}
+            {item.syscalls.map((syscall, index) => (
+              <>
+                {index > 0 && ', '}
+                <code>{syscall}</code>
+              </>
+            ))}
+          </li>
+        )}
+        {item.doc_path && (
+          <li>
+            <strong>Source:</strong> <code>{item.doc_path}</code>
+          </li>
+        )}
+      </ul>
+    </Card>
+  )
+}
+
+{
+  item && (params.length > 0 || example) && (
+    <Card title="YAML">
+      {params.length > 0 && (
+        <table>
+          <thead>
+            <tr>
+              <th>Parameter</th>
+              <th>Type</th>
+              <th>Required</th>
+              <th>Default</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            {params.map((param) => (
+              <tr>
+                <td>
+                  <code>{param.key}</code>
+                </td>
+                <td>{typeLabel(param)}</td>
+                <td>{requiredLabel(param.required)}</td>
+                <td>{param.default ? <code>{param.default}</code> : '—'}</td>
+                <td>
+                  {(param.description ?? '')
+                    .split('`')
+                    .map((part, index) => (index % 2 === 1 ? <code>{part}</code> : part))}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {example && <Code code={example} lang="yaml" />}
+    </Card>
+  )
+}

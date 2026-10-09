@@ -3,55 +3,11 @@
 *Run the payload as the callback of a legitimate Windows enumeration API, so it
 is entered from a call the system makes itself instead of a new thread.*
 
-## Metadata
-
-| | |
-|---|---|
-| **ATT&CK** | T1106 (Native API), T1620 (Reflective Code Loading) |
-| **Stability** | Stable |
-| **Category** | Execution |
-| **YAML key** | `execution_callbacks` |
-| **Introduced in** | v0.1.0 (parallel technique batch, schema 6) |
-
-MITRE documents this exact shape under **T1106**: its procedure examples for
-BOOKWORM, PUBLOAD, CLAIMLOADER and TONESHELL describe running shellcode "through
-the callback function" of a legitimate API (`EnumChildWindows`,
-`EnumSystemLanguageGroupsA`, `EnumSystemLocalesA`, `EnumFontsW`, ...). **T1620**
-covers the other half — the payload is executed from an in-process allocation
-that never existed on disk. **T1055** (the skeleton's placeholder) is *not*
-used: no other process is touched, and the sub-techniques cover TLS callbacks
-and window procedures, not enumeration callbacks.
-
 ## What it does
 
 Runs the decrypted payload as the callback of a legitimate Windows enumeration
 API in the current process, so the code is entered from a call the system makes
 itself instead of from a dedicated thread.
-
-## YAML parameters
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `payload` | string | no | the only declared payload | Name of the payload in `build.payloads` to run |
-
-The payload must be `format: shellcode`: the callback is entered as flat
-position-independent code. `plan::validate` rejects any other format at build
-time, and the fragment additionally refuses a payload that looks like a PE image
-at run time (see "Implementation notes").
-
-## YAML example
-
-```yaml
-build:
-  payloads:
-    implant:
-      source: ./payload.bin
-      format: shellcode
-runtime:
-  - technique: execution_callbacks
-    params:
-      payload: implant
-```
 
 ## How it works
 
@@ -125,6 +81,12 @@ allocation: the anomaly an EDR sees is "an RX private region is entered", not
 Cert32's enumeration is the only candidate that (a) runs in any process,
 including a service without a window station, and (b) has a fixed, documented
 set of callbacks, so the payload is guaranteed to be invoked exactly once.
+
+## Integration
+
+An **Execution** step: it runs a `shellcode` payload from the loader's own
+process. The payload runs as the callback of an enumeration API
+and returns.
 
 ## What it evades
 

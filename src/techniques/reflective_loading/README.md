@@ -3,16 +3,6 @@
 *Manually maps a PE image (or runs shellcode) into the current process, so the
 payload executes from memory without touching disk or spawning a child.*
 
-## Metadata
-
-| | |
-|---|---|
-| **ATT&CK** | T1620 (Reflective Code Loading) |
-| **Stability** | Experimental |
-| **Category** | Execution |
-| **YAML key** | `reflective_loading` |
-| **Introduced in** | Phase 6 |
-
 ## What it does
 
 Maps a PE image into the current process's memory (manual mapping): allocates
@@ -24,41 +14,6 @@ target process is required.
 For a `format: shellcode` payload there is no image to map: the decrypted bytes
 are copied into an executable allocation and run on a thread instead (see
 “Payload formats” below).
-
-## YAML parameters
-
-None. The payload format and, for a DLL, its exported entry point come from
-`build.payloads.<name>` (`format`, `export`), and the command-line arguments from
-`build.payloads.<name>.args` / `build.payloads.<name>.args_mode`.
-
-## YAML example
-
-```yaml
-# A PE payload (default).
-runtime:
-  - technique: reflective_loading
-```
-
-```yaml
-# A shellcode payload.
-build:
-  payload:
-    source: ./beacon.bin
-    format: shellcode
-runtime:
-  - technique: reflective_loading
-```
-
-```yaml
-# A DLL payload with an exported entry point.
-build:
-  payload:
-    source: ./payload.dll
-    format: dll
-    export: Run
-runtime:
-  - technique: reflective_loading
-```
 
 ## How it works
 
@@ -135,6 +90,12 @@ Two places are updated (see `src/features/args/README.md`):
 The line's token 0 is the executable name (the stub's own path), never an
 argument, so the payload's `argv[0]` is the stub exe and the payload args start
 at `argv[1]`.
+
+## Integration
+
+An **Execution** step: it runs a `pe`, `dll` or `shellcode` payload in-process. It is
+**terminal** when the payload is a PE executable (that takes over the entry point), so
+it must be the last step; for a DLL or shellcode it returns, and another step may follow.
 
 ## What it evades
 

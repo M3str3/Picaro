@@ -1,9 +1,5 @@
 # Syscall layer
 
-- ATT&CK: T1106 (Native API)
-- YAML: `build.stub.syscalls`
-- Scope: loader-wide (configures the generated stub)
-
 ## What it does
 
 Replaces the stub's suspicious Win32 API calls with NT syscalls whose SSN is
@@ -12,44 +8,18 @@ a `syscall; ret` gadget inside `ntdll`, so the call always appears to originate
 in `ntdll` (not in private stub code), userland hooks in `ntdll` are bypassed,
 and the stub's IAT no longer contains the suspicious imports.
 
-## YAML parameters
-
-```yaml
-build:
-  stub:
-    syscalls:
-      mode: none | indirect        # default: none
-      resolver: hells_gate | tartarus_gate | api_hash   # default: hells_gate
-```
-
-- `mode` — `none` maps the `nt_*` helpers to the plain Win32 APIs; `indirect`
-  resolves SSNs at runtime and calls the kernel through the ntdll gadget.
-- `resolver` — only meaningful with `mode: indirect`:
-  - **Hell's Gate** (default) reads each SSN out of the Nt* stub prologue in the
-    *live* `ntdll`. Fails with `PatternMismatch` when an EDR has hooked an export
-    stub.
-  - **Tartarus Gate** reads each SSN from a clean copy of `ntdll` read from disk,
-    so hooks in the live stubs do not hide the SSN. The gadget still comes from
-    the live `ntdll`'s `.text`.
-  - **API hashing** walks the same clean copy but matches each export by a
-    precomputed FNV-1a 64-bit hash of its name, so neither `GetProcAddress` nor
-    any function-name string is needed.
-
-## YAML example
-
-```yaml
-build:
-  stub:
-    syscalls:
-      mode: indirect
-      resolver: hells_gate
-runtime:
-  - technique: process_hollowing
-    params:
-      target: "C:\\Windows\\System32\\svchost.exe"
-```
-
 ## How it works
+
+```mermaid
+flowchart TD
+    A[Technique fragment] --> B[nt_* helper]
+    B --> C{syscalls.mode}
+    C -->|none| D[Win32 call]
+    C -->|indirect| E["nt_invoke: r10 / eax / r11"]
+    E --> F["ntdll: syscall; ret"]
+    F --> G[Kernel]
+    D --> G
+```
 
 1. **Fragment contract.** Technique fragments always call the `nt_*` helpers
    (`nt_alloc_vm`, `nt_write_vm`, `nt_read_vm`, `nt_resume_thread`,
@@ -75,6 +45,24 @@ runtime:
    straight to the Rust caller.
 5. **Helpers.** Each `nt_*` helper wraps `nt_invoke` with the NT function's
    signature and returns `NTSTATUS` (`i32`); fragments treat `< 0` as an error.
+
+## Resolvers
+
+`build.stub.syscalls.resolver` selects how the SSNs are learned. Three are
+implemented; each is a self-contained module under
+`src/engine/syscalls/resolvers/<name>/` with its own page:
+
+| Resolver | Phase | Reads the SSN from |
+| --- | --- | --- |
+| `hells_gate` | 6a | the live `Nt*` stub prologue (falls back to the on-disk copy if hooked) |
+| `tartarus_gate` | 6b | a clean on-disk copy of `ntdll` |
+| `api_hash` | 6c | the clean copy, matching exports by a per-build FNV-1a hash |
+
+## Integration
+
+Configured under `build.stub.syscalls` (loader-wide), **not** in `runtime:`. It shapes the
+`nt_*` helpers the technique fragments call, so it is orthogonal to the chain order;
+`mode: indirect` is x64-only (see `docs/x86.md`).
 
 ## What it evades
 
@@ -102,15 +90,30 @@ runtime:
 - **Why indirect over direct.** A direct syscall fails the syscall-origin check
   (the instruction must reside in a Microsoft-signed module); jumping to a
   `syscall; ret` gadget inside `ntdll` passes it.
-- Rendering is programmatic (`src/engine/syscalls.rs`): a new technique only
+- Rendering is programmatic (`src/engine/syscalls/`): a new technique only
   declares its Nt* functions in `TechniqueDef::syscalls`, and its helpers are
   emitted only when needed.
 - The Nt* names never reach the binary: Hell's/Tartarus Gate rebuild them at
   runtime via `StringsConfig`; API hashing never emits them. The
   `no_sensitive_literals_in_generated_stubs` guardrail covers these strings.
+- Each resolver is a self-contained module under
+  `src/engine/syscalls/resolvers/<name>/`; its README is rendered into
+  `docs/features/ref/syscalls/<name>.md`.
 - `mode: indirect` is x64-only; see `docs/x86.md`. The
   PE-file walk helpers (`rva_to_offset`, `pe16_at`, `pe32_at`) are shared between
   the Tartarus Gate and API-hashing resolvers via `$FILE_PE_HELPERS$`.
+
+## Adding a resolver
+
+A resolver is a deliberate code change, not a config-only edit:
+
+1. Create `src/engine/syscalls/resolvers/<name>/` with a `mod.rs` (a
+   `ResolverDef` and the stub fragment) and a `README.md`.
+2. Register it in `src/engine/syscalls/resolvers/mod.rs` (`ALL`).
+3. Add the matching arm to the `Resolver` enum and `SyscallsConfig::from_yaml`.
+
+The docs page and the feature sub-tree are generated from the registry at
+assemble time; the test `every_resolver_is_documented` checks the page exists.
 
 ## References
 

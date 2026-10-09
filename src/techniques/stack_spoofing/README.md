@@ -3,16 +3,6 @@
 *Fabricates ntdll-shaped frames on the stack around every syscall, so a stack
 walk sees ntdll instead of the loader while the kernel runs.*
 
-## Metadata
-
-| | |
-|---|---|
-| **ATT&CK** | T1036 (Masquerading) |
-| **Stability** | Stable |
-| **Category** | Preparation |
-| **YAML key** | `stack_spoofing` |
-| **Introduced in** | unreleased (stack spoofing) |
-
 ## What it does
 
 Fabricates the top of the thread's stack for the duration of every syscall, so a
@@ -23,35 +13,6 @@ addresses instead of the loader's own frames. Indirect syscalls put the
 
 It is not a step: nothing runs at pipeline time. The technique rewrites the
 syscall layer's trampoline, so every `nt_*` helper in the stub goes through it.
-
-## YAML parameters
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `decoy_bytes` | integer | no | `4096` | Bytes of fabricated stack below the real stack pointer on every syscall. Values are clamped to `128`..`32768` and rounded down to a multiple of 16 |
-
-`plan::validate` requires `build.output.arch: x64` (the sequence is x64
-assembly) and warns when the technique is selected without
-`build.stub.syscalls.mode: indirect`: under `mode: none` there is no trampoline
-to replace and nothing goes through it.
-
-## YAML example
-
-```yaml
-build:
-  stub:
-    syscalls:
-      mode: indirect
-      resolver: tartarus_gate
-runtime:
-  - technique: stack_spoofing
-    params:
-      decoy_bytes: 4096
-  - technique: unhook_ntdll
-  - technique: thread_hijacking
-    params:
-      target: notepad.exe
-```
 
 ## How it works
 
@@ -130,6 +91,12 @@ Defeating *that* needs a synthetic unwind chain (SilentMoonwalk-style gadget
 synthesis) rather than a fabricated region — a known improvement, not a defect
 of this technique. It is meant to be combined with `unhook_ntdll` and
 `sleep_obfuscation` rather than to replace them.
+
+## Integration
+
+A **Preparation** step: the stub runs it before the Execution and it never
+receives the payload. Place it earlier in `runtime:` than the Execution step. It requires `build.stub.syscalls.mode: indirect`; it is installed with
+the syscall layer at load time and runs nothing at pipeline time.
 
 ## What it evades
 

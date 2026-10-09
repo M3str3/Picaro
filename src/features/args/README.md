@@ -1,9 +1,5 @@
 # Payload arguments
 
-- ATT&CK: T1036 (Masquerading), T1055 (Process Injection) context
-- YAML: `build.payloads.<name>.args`, `build.payloads.<name>.args_mode`
-- Scope: per-payload (under `build.payloads.<name>`)
-
 ## What it does
 
 A packed binary is a stub, not the payload: the operator runs the stub, which
@@ -12,40 +8,18 @@ explicit command line. `args` fixes arguments at build time and `args_mode`
 decides how they combine with the arguments the operator passes to the packed
 binary.
 
-## YAML parameters
-
-```yaml
-build:
-  payloads:
-    implant:
-      source: "./mimikatz.exe"
-      args:                          # optional
-        - "privilege::debug"
-        - "log"
-        - "C:\\temp\\out.log"
-      args_mode: join                # join (default) | override
-```
-
-- `args` — the arguments fixed at build time (each token is quoted per the
-  Windows `CommandLineToArgvW` rules).
-- `args_mode` — `join` (default): the payload gets the YAML args followed by the
-  runtime args; `override`: the runtime args replace the YAML args, falling back
-  to the YAML ones when no runtime args are present.
-
-## YAML example
-
-With `join`, running `./dist/mimi.exe "sekurlsa::logonpasswords"` yields:
-
-```
-privilege::debug
-log C:\temp\out.log
-sekurlsa::logonpasswords
-```
-
-The first token of a Windows command line is always the executable name, so the
-payload's `argv[0]` is the exe and its args start at `argv[1]`.
-
 ## How it works
+
+```mermaid
+flowchart TD
+    A[YAML args] --> C{args_mode}
+    B[runtime args] --> C
+    C -->|join| D[YAML args then runtime args]
+    C -->|override| E[runtime args, else YAML]
+    D --> F[CommandLineToArgvW quoting]
+    E --> F
+    F --> G[PEB / lpCommandLine]
+```
 
 `src/engine/args.rs` renders `$ARGS_BLOCK$` once, and both execution techniques
 consume it:
@@ -64,6 +38,11 @@ therefore repoints the PEB field **and** finds `kernelbase`'s cached pointer by
 value (the original buffer address) and repoints it too. The scan uses
 `SizeOfImage` from `kernelbase`'s PE header, so no version-specific offset is
 hardcoded.
+
+## Integration
+
+Configured per payload under `build.payloads.<name>`; every Execution step builds its
+command line from it, so it is part of the payload's configuration, not a `runtime:` step.
 
 ## What it evades
 

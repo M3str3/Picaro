@@ -3,16 +3,6 @@
 *Checks the current process for signs of a debugger and, by default, aborts the
 preparation so the payload never runs.*
 
-## Metadata
-
-| | |
-|---|---|
-| **ATT&CK** | T1622 (Debugger Evasion) |
-| **Stability** | Stable |
-| **Category** | Preparation |
-| **YAML key** | `anti_debug` |
-| **Introduced in** | Phase 7 |
-
 ## What it does
 
 Checks the current process for signs of a debugger and, by default, aborts the
@@ -20,21 +10,6 @@ preparation so the payload never runs. It does not execute the payload, which is
 why it is a Preparation technique. The goal is to stop interactive analysis of
 the packed binary: a debugger that is attached when the stub starts makes the
 stub fail closed instead of handing over a decrypted payload.
-
-## YAML parameters
-
-| Parameter | Type   | Required | Default | Description |
-|-----------|--------|----------|---------|-------------|
-| `action`  | string | no       | `abort` | `abort` fails the preparation; `continue` notes the detection and keeps going. |
-
-## YAML example
-
-```yaml
-runtime:
-  - technique: anti_debug
-    params:
-      action: abort
-```
 
 ## How it works
 
@@ -78,6 +53,11 @@ With `action: abort`, a detection makes the preparation return an error, which
 fails the run before the payload is executed. With `action: continue`, the run
 proceeds regardless — useful when the packed binary is itself being tested under
 a debugger.
+
+## Integration
+
+A **Preparation** step: the stub runs it before the Execution and it never
+receives the payload. Place it earlier in `runtime:` than the Execution step.
 
 ## What it evades
 

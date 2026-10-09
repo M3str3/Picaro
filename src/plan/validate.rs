@@ -342,6 +342,11 @@ pub fn advisories(plan: &Plan) -> Vec<String> {
     // step before it (which patches `EtwEventWrite`, also in ntdll's `.text`) is
     // silently undone. The order is the fix, so the warning names it.
     let mut patched_ntdll_text = false;
+    // A technique that requires the indirect syscall layer (registry:
+    // `requires_indirect_syscalls`) does nothing under `mode: none`.
+    let indirect_active = SyscallsConfig::from_yaml(plan.build.stub.syscalls.as_ref())
+        .map(|config| config.mode == SyscallsMode::Indirect)
+        .unwrap_or(false);
 
     for step in &steps {
         match &step.technique {
@@ -371,21 +376,6 @@ pub fn advisories(plan: &Plan) -> Vec<String> {
                 }
             }
             TechniqueKind::AntiDebug { .. } => has_anti_debug = true,
-            // Stack spoofing rewrites the trampoline the `mode: indirect` layer
-            // emits; under `mode: none` that trampoline does not exist, so the
-            // technique silently does nothing.
-            TechniqueKind::StackSpoofing { .. }
-                if SyscallsConfig::from_yaml(plan.build.stub.syscalls.as_ref())
-                    .map(|config| config.mode != SyscallsMode::Indirect)
-                    .unwrap_or(true) =>
-            {
-                warnings.push(format!(
-                    "step {}: 'stack_spoofing' only affects the indirect syscall layer, but \
-                     build.stub.syscalls.mode is not 'indirect' (or the runtime uses no syscalls at \
-                     all), so it is a no-op",
-                    step.index
-                ));
-            }
             _ => {}
         }
     }
@@ -400,6 +390,17 @@ pub fn advisories(plan: &Plan) -> Vec<String> {
                     "step {}: technique '{}' is marked 'unimplemented' in the registry — its \
                      implementation is not finished, so the artifact will not do everything the \
                      plan asks for",
+                    step.index, def.name
+                ));
+            }
+            // e.g. `stack_spoofing` rewrites the trampoline only the indirect
+            // layer emits; under `mode: none` that trampoline does not exist, so
+            // the technique silently does nothing.
+            if def.requires_indirect_syscalls && !indirect_active {
+                warnings.push(format!(
+                    "step {}: '{}' only affects the indirect syscall layer, but \
+                     build.stub.syscalls.mode is not 'indirect' (or the runtime uses no syscalls at \
+                     all), so it is a no-op",
                     step.index, def.name
                 ));
             }
@@ -640,62 +641,23 @@ fn validate_payload_format(step: &ResolvedStep, payload: &ResolvedPayload) -> Re
         )));
     }
 
-    if format != PayloadFormat::Pe
-        && matches!(step.technique, TechniqueKind::ProcessHollowing { .. })
-    {
-        return Err(PackerError::Validation(format!(
-            "payload '{}' has 'format: {}', which is not supported by process_hollowing yet: it \
-             only runs 'format: pe'. Use reflective_loading, which runs pe, dll and shellcode \
-             in-process.",
-            payload.name,
-            format.label()
-        )));
-    }
-
-    if format != PayloadFormat::Pe && matches!(step.technique, TechniqueKind::PeInjection { .. }) {
-        return Err(PackerError::Validation(format!(
-            "payload '{}' has 'format: {}', which is not supported by pe_injection: it maps a full \
-             PE image into the target. Use 'format: pe', or reflective_loading for dll/shellcode \
-             in-process.",
-            payload.name,
-            format.label()
-        )));
-    }
-
-    if format != PayloadFormat::Pe
-        && matches!(step.technique, TechniqueKind::ProcessGhosting { .. })
-    {
-        return Err(PackerError::Validation(format!(
-            "payload '{}' has 'format: {}', which is not supported by process_ghosting: it maps a \
-             full PE image from a delete-on-close file. Use 'format: pe', or reflective_loading \
-             for dll/shellcode in-process.",
-            payload.name,
-            format.label()
-        )));
-    }
-
-    // The in-process runners below enter the payload as flat position-
-    // independent code: they have no image mapper, so a PE/DLL has no entry
-    // point to call and a managed assembly no CRL to host. (A `dotnet` payload
-    // without `dotnet_hosting` is rejected above; a `dotnet` payload with one is
-    // rejected here because none of the three is `dotnet_hosting`.)
-    let shellcode_only = match &step.technique {
-        TechniqueKind::ExecutionCallbacks { .. } => Some("execution_callbacks"),
-        TechniqueKind::ModuleStomping { .. } => Some("module_stomping"),
-        TechniqueKind::EarlyBird { .. } => Some("early_bird"),
-        TechniqueKind::Fibers { .. } => Some("fibers"),
-        TechniqueKind::ThreadHijacking { .. } => Some("thread_hijacking"),
-        TechniqueKind::DllHollowing { .. } => Some("dll_hollowing"),
-        _ => None,
-    };
-    if let Some(technique) = shellcode_only {
-        if format != PayloadFormat::Shellcode {
+    // Every technique declares the payload formats it accepts in the registry
+    // (`TechniqueDef::formats`); that is the single source for this check, so a
+    // new technique states its formats once and both the build and the docs read
+    // it.
+    if let Some(def) = crate::techniques::find(step.technique.name()) {
+        if !def.formats.contains(&format) {
+            let accepts = def
+                .formats
+                .iter()
+                .map(|accepted| accepted.label())
+                .collect::<Vec<_>>()
+                .join(", ");
             return Err(PackerError::Validation(format!(
-                "payload '{}' has 'format: {}', which is not supported by {technique}: it runs \
-                 raw position-independent code ('format: shellcode'). Use reflective_loading for \
-                 pe/dll payloads and dotnet_hosting for a managed assembly.",
+                "payload '{}' has 'format: {}', which '{}' does not accept (it runs: {accepts})",
                 payload.name,
-                format.label()
+                format.label(),
+                def.name
             )));
         }
     }

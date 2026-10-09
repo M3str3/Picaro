@@ -54,8 +54,6 @@ pub enum BouncerError {
     LocaleFailed(u32),
     #[error("could not read the active keyboard layouts (error {0})")]
     KeyboardFailed(u32),
-    #[error("the CPU does not report a usable hypervisor leaf")]
-    CpuIdFailed,
     #[error("could not enumerate the running processes (error {0})")]
     ProcessEnumerationFailed(u32),
     #[error("could not query the physical memory (error {0})")]
@@ -86,21 +84,30 @@ pub fn bouncer() -> Result<bool, BouncerError> {
 
     if let Some(pattern) = hostname_pattern.as_ref() {
         declared += 1;
-        if glob_match(pattern, &computer_name()?) {
+        let actual = computer_name()?;
+        let ok = glob_match(pattern, &actual);
+        crate::tech_dbg!("bouncer", "hostname '{actual}' ~ '{pattern}' -> {ok}");
+        if ok {
             passed += 1;
         }
     }
 
     if let Some(pattern) = username_pattern.as_ref() {
         declared += 1;
-        if glob_match(pattern, &user_name()?) {
+        let actual = user_name()?;
+        let ok = glob_match(pattern, &actual);
+        crate::tech_dbg!("bouncer", "username '{actual}' ~ '{pattern}' -> {ok}");
+        if ok {
             passed += 1;
         }
     }
 
     if let Some(pattern) = domain_pattern.as_ref() {
         declared += 1;
-        if glob_match(pattern, &dns_domain()?) {
+        let actual = dns_domain()?;
+        let ok = glob_match(pattern, &actual);
+        crate::tech_dbg!("bouncer", "domain '{actual}' ~ '{pattern}' -> {ok}");
+        if ok {
             passed += 1;
         }
     }
@@ -108,10 +115,11 @@ pub fn bouncer() -> Result<bool, BouncerError> {
     if !languages.is_empty() {
         declared += 1;
         let locale = locale_name()?;
-        if languages
+        let ok = languages
             .iter()
-            .any(|accepted| accepted.eq_ignore_ascii_case(&locale))
-        {
+            .any(|accepted| accepted.eq_ignore_ascii_case(&locale));
+        crate::tech_dbg!("bouncer", "language '{locale}' in {languages:?} -> {ok}");
+        if ok {
             passed += 1;
         }
     }
@@ -119,40 +127,56 @@ pub fn bouncer() -> Result<bool, BouncerError> {
     if !keyboards.is_empty() {
         declared += 1;
         let active = keyboard_layouts()?;
-        let matched = active.iter().any(|layout| {
+        let ok = active.iter().any(|layout| {
             keyboards
                 .iter()
                 .any(|accepted| normalize_klid(accepted) == *layout)
         });
-        if matched {
+        crate::tech_dbg!("bouncer", "keyboard {active:?} in {keyboards:?} -> {ok}");
+        if ok {
             passed += 1;
         }
     }
 
     if REQUIRE_NOT_VM {
         declared += 1;
-        if !hypervisor_vendor_present(&vendor_tokens)? {
+        let present = hypervisor_vendor_present(&vendor_tokens);
+        let ok = !present;
+        crate::tech_dbg!("bouncer", "hypervisor present: {present} -> {ok}");
+        if ok {
             passed += 1;
         }
     }
 
     if REQUIRE_NOT_ANALYSIS_ENV {
         declared += 1;
-        if env_score(&env_processes, &env_tokens)? < ENV_SCORE_THRESHOLD {
+        let score = env_score(&env_processes, &env_tokens)?;
+        let ok = score < ENV_SCORE_THRESHOLD;
+        crate::tech_dbg!(
+            "bouncer",
+            "environment score {score} (limit {ENV_SCORE_THRESHOLD}) -> {ok}"
+        );
+        if ok {
             passed += 1;
         }
     }
 
     if let Some(minimum) = min_uptime {
         declared += 1;
-        if uptime_minutes() >= minimum as u64 {
+        let uptime = uptime_minutes();
+        let ok = uptime >= minimum as u64;
+        crate::tech_dbg!("bouncer", "uptime {uptime} min (min {minimum}) -> {ok}");
+        if ok {
             passed += 1;
         }
     }
 
     if let Some(minimum) = min_ram {
         declared += 1;
-        if total_ram_mb()? >= minimum as u64 {
+        let ram = total_ram_mb()?;
+        let ok = ram >= minimum as u64;
+        crate::tech_dbg!("bouncer", "ram {ram} MiB (min {minimum}) -> {ok}");
+        if ok {
             passed += 1;
         }
     }
@@ -345,22 +369,25 @@ use core::arch::x86_64 as arch_intrinsics;
 #[cfg(target_arch = "x86")]
 use core::arch::x86 as arch_intrinsics;
 
-/// Whether CPUID reports a known hypervisor vendor.
+/// Whether CPUID reports a hypervisor the check should reject.
 ///
-/// Uses the standard hypervisor leaves: `CPUID.1:ECX[31]` is the "running under
-/// a hypervisor" bit and leaf `0x40000000` returns the 12-byte vendor string.
-/// A CPU without the leaf, or one that returns an empty vendor, is reported as
-/// [`BouncerError::CpuIdFailed`] rather than assumed to be bare metal.
-fn hypervisor_vendor_present(vendor_tokens: &[String]) -> Result<bool, BouncerError> {
+/// `CPUID.1:ECX[31]` is the "running under a hypervisor" bit and leaf
+/// `0x40000000` returns the 12-byte vendor string. Once the bit is set the host
+/// is a guest, so a claim without a usable vendor leaf (no leaf, or an empty
+/// vendor) counts as *present* rather than as an error: that is a gate decision,
+/// not a failure to evaluate, so it must not abort the loader loudly. Only a
+/// vendor that resolves and does *not* match a known token passes the check.
+fn hypervisor_vendor_present(vendor_tokens: &[String]) -> bool {
     let features = unsafe { arch_intrinsics::__cpuid(1) };
     if features.ecx & (1 << 31) == 0 {
         // Bare metal: no hypervisor present bit.
-        return Ok(false);
+        return false;
     }
 
     let max_leaf = unsafe { arch_intrinsics::__cpuid(0) }.eax;
     if max_leaf < 0x4000_0000 {
-        return Err(BouncerError::CpuIdFailed);
+        // Claims a hypervisor but exposes no vendor leaf: treat as present.
+        return true;
     }
 
     let leaf = unsafe { arch_intrinsics::__cpuid(0x4000_0000) };
@@ -369,13 +396,13 @@ fn hypervisor_vendor_present(vendor_tokens: &[String]) -> Result<bool, BouncerEr
         vendor.extend_from_slice(&register.to_le_bytes());
     }
     if vendor.iter().all(|byte| *byte == 0) {
-        return Err(BouncerError::CpuIdFailed);
+        return true;
     }
 
     let vendor = String::from_utf8_lossy(&vendor).to_ascii_lowercase();
-    Ok(vendor_tokens
+    vendor_tokens
         .iter()
-        .any(|token| vendor.contains(&token.to_ascii_lowercase())))
+        .any(|token| vendor.contains(&token.to_ascii_lowercase()))
 }
 
 /// Aggregate environment heuristic.

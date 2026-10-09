@@ -3,7 +3,7 @@
 //! Metadata only (see [`crate::features`]). The strategy and the rendering live
 //! in [`crate::engine::obfuscation`].
 
-use crate::techniques::Stability;
+use crate::techniques::{ParamDef, ParamKind, Stability};
 
 use super::{FeatureDef, FeatureScope};
 
@@ -18,6 +18,25 @@ pub const DEF: FeatureDef = FeatureDef {
     yaml: "build.stub.strings",
     doc_path: "src/features/strings/README.md",
     readme: include_str!("README.md"),
+    params: &[
+        ParamDef {
+            key: "strategy",
+            description: "`xor` XORs each literal with a 32-byte key and rebuilds it at runtime; \
+                          `stack` emits one store per byte and needs no decoder.",
+            required: false,
+            default: Some("xor"),
+            kind: ParamKind::Enum(&["xor", "stack"]),
+        },
+        ParamDef {
+            key: "key",
+            description:
+                "`random` (per build) or `literal:<64 hex chars>` for a fixed 32-byte XOR \
+                          key.",
+            required: false,
+            default: Some("random"),
+            kind: ParamKind::Str,
+        },
+    ],
     params_example: "strategy: xor\nkey: random\n",
 };
 

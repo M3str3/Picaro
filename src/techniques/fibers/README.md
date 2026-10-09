@@ -3,42 +3,12 @@
 *Run the payload on a fiber of the loader's own thread, so it never owns a
 thread, control returns to the loader, and the step stays chainable.*
 
-## Metadata
-
-| | |
-|---|---|
-| **ATT&CK** | T1055 (Process Injection) — ATT&CK has no fiber-specific sub-technique (T1055.001–T1055.015 cover DLL injection, APC, TLS, hollowing, VDSO hijacking, …); scheduling the payload on a fiber of the loader's own thread is a self-injection variant, so the parent is the precise mapping. |
-| **Stability** | Stable |
-| **Category** | Execution |
-| **YAML key** | `fibers` |
-| **Introduced in** | unreleased (fiber-execution suite) |
-
 ## What it does
 
 Runs the decrypted payload on a fiber created in the loader's own process, so
 the payload never owns a thread: control returns to the loader when the payload
 returns, and the step stays chainable. The payload needs no external process,
 no `CreateProcess` and no new thread.
-
-## YAML parameters
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `payload` | string | no | the only declared payload (required with two or more) | Name of the payload in `build.payloads` to run |
-
-## YAML example
-
-```yaml
-build:
-  payloads:
-    implant:
-      source: ./beacon.bin
-      format: shellcode
-runtime:
-  - technique: fibers
-    params:
-      payload: implant
-```
 
 ## Payload format
 
@@ -92,6 +62,12 @@ sequenceDiagram
 7. The loader deletes the payload fiber (`DeleteFiber`, safe: it is suspended
    inside its switch back), converts the thread back (`ConvertFiberToThread`,
    after the last fiber call) and reports the payload's exit code.
+
+## Integration
+
+An **Execution** step: it runs a `shellcode` payload from the loader's own
+process. It schedules the payload on a fiber of the loader's own
+thread and returns.
 
 ## What it evades
 

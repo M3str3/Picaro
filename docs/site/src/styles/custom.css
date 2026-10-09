@@ -52,6 +52,31 @@
   color: var(--sl-color-text-invert);
 }
 
+.hero {
+    padding-block: unset!important;
+}
+
+/* Technique stability in the sidebar: a colour dot, the word stays for
+   screen readers. */
+.sidebar-content .sl-badge.stab {
+  width: 0.45rem;
+  height: 0.45rem;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  font-size: 0;
+  line-height: 0;
+  overflow: hidden;
+  color: transparent;
+  flex: none;
+}
+.sidebar-content .sl-badge.stab.success { background-color: var(--sl-color-green); }
+.sidebar-content .sl-badge.stab.caution { background-color: var(--sl-color-orange); }
+.sidebar-content .sl-badge.stab.danger { background-color: var(--sl-color-red); }
+.sidebar-content a[aria-current='page'] > .sl-badge.stab.success { background-color: var(--sl-color-green); }
+.sidebar-content a[aria-current='page'] > .sl-badge.stab.caution { background-color: var(--sl-color-orange); }
+.sidebar-content a[aria-current='page'] > .sl-badge.stab.danger { background-color: var(--sl-color-red); }
+
 /* ------------------------------------------------------------------------- */
 /* Quiet premium: corners + transitions                                      */
 /* ------------------------------------------------------------------------- */

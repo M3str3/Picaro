@@ -3,16 +3,6 @@
 *Launches a process so Windows records a chosen legitimate parent instead of the
 loader, hiding the loader from the process tree.*
 
-## Metadata
-
-| | |
-|---|---|
-| **ATT&CK** | T1134.004 (Access Token Manipulation: Parent PID Spoofing) |
-| **Stability** | Stable |
-| **Category** | Control |
-| **YAML key** | `ppid_spoofing` |
-| **Introduced in** | unreleased (control-technique suite) |
-
 ## What it does
 
 Launches the configured process so that Windows records a *different* process —
@@ -23,31 +13,6 @@ child under a legitimate process, and the loader is not in the chain.
 It is a Control technique: it decrypts and runs no payload of its own. It
 starts a process, returns that process's exit code to the chain when `wait` is
 set, and nothing else.
-
-## YAML parameters
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `binary` | string | yes | — | Executable to launch. A bare name is resolved against `System32`; a path is used as is |
-| `args` | list | no | `[]` | Arguments for the executable |
-| `parent` | string | no | `explorer.exe` | Process whose PID becomes the new process's recorded parent (case-insensitive; a path is compared by its file name) |
-| `wait` | bool | no | `true` | Wait for the child and relay its exit code. `false` leaves the child running and returns `0` |
-
-## YAML example
-
-```yaml
-runtime:
-  - technique: ppid_spoofing
-    params:
-      binary: cmd.exe
-      args: ["/c", "whoami"]
-      parent: explorer.exe
-      wait: true
-```
-
-The child's command line is built from this step's `binary` and `args`. The
-payload's own `build.payloads.<name>.args` do **not** reach it: those belong to
-the payload an Execution step runs, not to this control process.
 
 ## How it works
 
@@ -93,6 +58,11 @@ flowchart TD
 6. Delete the attribute list, close the parent handle and the child's thread
    handle. With `wait: true`, wait on the child (`INFINITE`) and return its exit
    code; with `wait: false`, return `0` and leave the child running.
+
+## Integration
+
+A **Control** step: it orchestrates the chain and returns control when it
+finishes, so the steps around it keep running. It launches a child whose recorded parent is a different process.
 
 ## What it evades
 

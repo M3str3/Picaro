@@ -3,16 +3,6 @@
 *Restores the loaded `ntdll.dll` code section from a clean on-disk copy,
 removing an EDR's userland hooks from the stub's own process.*
 
-## Metadata
-
-| | |
-|---|---|
-| **ATT&CK** | T1562.001 (Impair Defenses: Disable or Modify Tools) |
-| **Stability** | Stable |
-| **Category** | Preparation |
-| **YAML key** | `unhook_ntdll` |
-| **Introduced in** | unreleased (pre-wired skeleton batch) |
-
 ## What it does
 
 Restores the code section of the loaded `ntdll.dll` from a clean copy read from
@@ -23,31 +13,6 @@ modifies process state, which is why it is a Preparation technique.
 
 The restore covers the whole code section, not just the `Nt*` syscall stubs, so
 hooks on any other ntdll export (`Ldr*`, `Rtl*`, the `Etw*` family) go with it.
-
-## YAML parameters
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| — | — | — | — | No parameters: the target is always the loaded `ntdll.dll`, and the clean copy comes from the same path the syscall layer reads (`C:\Windows\System32\ntdll.dll`) |
-
-The technique is deliberately parameterless. Letting a plan point the restore at
-a different file would let the restored `.text` disagree with the SSN table
-`init_syscalls()` resolved from the disk copy (see the interaction notes below),
-and the loaded module is always the right target.
-
-## YAML example
-
-```yaml
-runtime:
-  - technique: unhook_ntdll
-  - technique: patch_etw
-  - technique: reflective_loading
-    params:
-      payload: implant
-```
-
-`unhook_ntdll` runs first: `patch_etw` writes into ntdll's `.text`, and the
-restore would silently undo an earlier patch (see "Implementation notes").
 
 ## How it works
 
@@ -111,6 +76,12 @@ flowchart TD
 Only the section is touched. The PE headers keep the offsets the system loader
 already resolved, and the rest of the image (data, relocations, the export
 directory) is left alone, so every export still points where it did.
+
+## Integration
+
+A **Preparation** step: the stub runs it before the Execution and it never
+receives the payload. Place it earlier in `runtime:` than the Execution step. Put it before `patch_etw`: it restores ntdll's `.text` from disk and
+would undo an earlier patch of the same section.
 
 ## What it evades
 

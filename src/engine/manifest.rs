@@ -48,6 +48,9 @@ pub struct BuildManifest {
     /// Resolved `VERSIONINFO` (after any `randomize`), when the artifact has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version_info: Option<crate::plan::schema::VersionInfoPlan>,
+    /// Generated-icon provenance, when `output.resources.icon: random`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generated_icon: Option<GeneratedIcon>,
     /// Compiler that produced the stub.
     pub toolchain: Toolchain,
     /// The plan after build-arg substitution and defaults.
@@ -80,6 +83,16 @@ pub struct StepRecord {
     pub nonce: Option<String>,
 }
 
+/// Provenance of a generated icon (`output.resources.icon: random`).
+///
+/// The seed reproduces the icon: `icon::generate(seed)` is deterministic, so the
+/// same seed yields the same images.
+#[derive(Debug, Serialize)]
+pub struct GeneratedIcon {
+    /// The seed the icon was rendered from.
+    pub seed: u64,
+}
+
 /// The compiler that produced the stub.
 #[derive(Debug, Serialize)]
 pub struct Toolchain {
@@ -106,6 +119,7 @@ impl BuildManifest {
             plan_sha256: plan_hash(plan)?,
             signature: None,
             version_info: None,
+            generated_icon: None,
             toolchain: Toolchain {
                 rustc: compiler::rustc_version()?,
                 target: compiler::stub_target(plan.build.output.arch).to_string(),

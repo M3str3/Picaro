@@ -31,6 +31,8 @@ pub const DEF: TechniqueDef = TechniqueDef {
     category: Category::Execution,
     doc_path: "src/techniques/dotnet_hosting/README.md",
     stub_fragment: include_str!("stub_fragment.rs"),
+    formats: &[super::PayloadFormat::Dotnet],
+    requires_indirect_syscalls: false,
     params_example: "technique: dotnet_hosting",
     readme: include_str!("README.md"),
     // The CLR does its own memory management; the fragment issues no Nt* call.

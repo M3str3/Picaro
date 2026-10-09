@@ -1,41 +1,22 @@
 # String obfuscation
 
-- ATT&CK: T1027 (Obfuscated Files or Information)
-- YAML: `build.stub.strings`
-- Scope: loader-wide (configures the generated stub)
-
 ## What it does
 
 Obfuscates every sensitive string literal the packer embeds into the generated
 stub and emits code that rebuilds the string at runtime, so the literals do not
 sit in cleartext in `.rdata`.
 
-## YAML parameters
-
-```yaml
-build:
-  stub:
-    strings:          # optional; omitted => xor + random key (with a warning)
-      strategy: xor   # xor | stack
-      key: random     # random | literal:<64 hex chars>  (xor only)
-```
-
-- `strategy` — `xor` (default) or `stack`.
-- `key` — `random` (default) or `literal:<hex>` for a fixed 32-byte XOR key.
-
-An unknown strategy, or a `literal:` key that is not valid hex or not exactly 32
-bytes, is a clear error.
-
-## YAML example
-
-```yaml
-build:
-  stub:
-    strings:
-      strategy: stack
-```
-
 ## How it works
+
+```mermaid
+flowchart TD
+    A[String literal] --> B{strategy}
+    B -->|xor| C[byte array + 32-byte key]
+    B -->|stack| D[one store per byte]
+    C --> E[dec_xor at runtime]
+    D --> F[String at the point of use]
+    E --> F
+```
 
 The packer intercepts each literal, obfuscates it according to the configured
 strategy and substitutes the result into a placeholder
@@ -49,6 +30,11 @@ obfuscation flows through `src/engine/obfuscation.rs`.
 - **`stack`** — the literal is emitted as one byte store per character into a
   local stack array, then converted to a `String` at the point of use. No
   decoder, no key.
+
+## Integration
+
+Configured under `build.stub.strings`; it applies to every literal the packer embeds into
+the stub, independent of the `runtime:` steps.
 
 ## What it evades
 

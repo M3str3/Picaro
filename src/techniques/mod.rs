@@ -503,6 +503,47 @@ impl Capability {
     }
 }
 
+/// One YAML parameter of a registry item.
+///
+/// The shared vocabulary for the catalog: a technique derives its parameters
+/// from its `Params` struct at docs-build time, while a loader feature declares
+/// them here directly (it has no `Params` struct). Both render as the same
+/// `Parameter | Type | Required | Default | Description` table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParamDef {
+    /// Key as it appears under `params:` (or in the feature's YAML block).
+    pub key: &'static str,
+    /// One sentence shown to the reader.
+    pub description: &'static str,
+    /// Whether omitting it is an error (as opposed to falling back to `default`).
+    pub required: bool,
+    /// Default value as written in YAML (e.g. `0x1000`, `wininet.dll`).
+    pub default: Option<&'static str>,
+    /// The value's shape.
+    pub kind: ParamKind,
+}
+
+/// The shape of a [`ParamDef`] value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParamKind {
+    /// A string.
+    Str,
+    /// A YAML sequence.
+    List,
+    /// One of a fixed set of strings.
+    Enum(&'static [&'static str]),
+}
+
+impl ParamKind {
+    /// The YAML type label shown in `techniques show` and the docs table.
+    pub fn label(self) -> &'static str {
+        match self {
+            ParamKind::Str | ParamKind::Enum(_) => "string",
+            ParamKind::List => "list",
+        }
+    }
+}
+
 /// Static metadata describing one technique.
 ///
 /// No logic here — only data consumed by the `techniques` CLI, the `validate`
@@ -520,6 +561,14 @@ pub struct TechniqueDef {
     pub conflicts: &'static [&'static str],
     /// Pipeline role: Preparation (modifies state) or Execution (runs payload).
     pub category: Category,
+    /// Payload formats this Execution technique accepts (`&[]` for a
+    /// Preparation/Control step, which runs no payload). `plan::validate` reads
+    /// it, and the docs derive the plan builder's accepted formats from it — so
+    /// the accepted formats live here, once.
+    pub formats: &'static [PayloadFormat],
+    /// Whether the technique only works with `build.stub.syscalls.mode: indirect`
+    /// (the renderer skips its step; `advisories` warns otherwise).
+    pub requires_indirect_syscalls: bool,
     /// Path to the human-readable README (relative to the repo root).
     pub doc_path: &'static str,
     /// The technique's stub fragment source (embedded via `include_str!`).
@@ -577,18 +626,26 @@ pub fn find(name: &str) -> Option<&'static TechniqueDef> {
 
 /// Section headings every technique README must contain (see
 /// `_template/README.md`).
+///
+/// The README is the prose explanation only: the technique's metadata
+/// (category, stability, ATT&CK, platforms, syscalls, params, example) lives in
+/// its `TechniqueDef` and is rendered from the registry by `picaro techniques
+/// show` and the docs site, so a README never repeats it.
 const REQUIRED_SECTIONS: &[&str] = &[
-    "## Metadata",
     "## What it does",
-    "## YAML parameters",
-    "## YAML example",
     "## How it works",
+    "## Integration",
     "## What it evades",
     "## What detects it",
     "## Measurements",
     "## Implementation notes",
     "## References",
 ];
+
+/// Headings that must NOT appear in a README: the same data lives in
+/// [`TechniqueDef`] and is rendered from it (the docs page and `techniques
+/// show`), so duplicating it in the README is the drift this split avoids.
+const FORBIDDEN_SECTIONS: &[&str] = &["## Metadata", "## YAML parameters", "## YAML example"];
 
 /// The widest cell of a listing column, header included.
 ///
@@ -644,7 +701,7 @@ pub fn list(ui: &Palette) -> String {
     for def in defs {
         let name = ui.bold(pad(def.name, name_w));
         let category = pad(def.category.label(), category_w);
-        let stability = stability_label(def, ui, stability_w);
+        let stability = stability_label(def.stability, ui, stability_w);
         let attck = pad(&def.attck.join(", "), attck_w);
         out.push_str(&format!(
             "{name} {category} {stability} {attck} {}\n",
@@ -686,17 +743,17 @@ pub fn list(ui: &Palette) -> String {
     // complete.
     out.push('\n');
     out.push_str(&crate::features::list(ui));
+    out.push('\n');
+    out.push_str(&crate::engine::syscalls::resolvers::list(ui));
     out
 }
 
-/// The technique's stability label, padded to `width` and colored by maturity.
-fn stability_label(def: &TechniqueDef, ui: &Palette, width: usize) -> String {
-    let label = format!(
-        "{name:<width$}",
-        name = def.stability.label(),
-        width = width
-    );
-    match def.stability {
+/// A stability label padded to `width` and colored by maturity.
+///
+/// Shared by the technique and loader-feature listings.
+pub(crate) fn stability_label(stability: Stability, ui: &Palette, width: usize) -> String {
+    let label = format!("{name:<width$}", name = stability.label(), width = width);
+    match stability {
         Stability::Stable => ui.ok(label),
         Stability::Experimental => ui.warn(label),
         Stability::Unimplemented => ui.error(label),
@@ -709,16 +766,18 @@ pub fn readme(name: &str) -> Result<&'static str> {
     if let Some(def) = find(name) {
         return Ok(def.readme);
     }
-    // Not a technique: it may be a loader feature.
-    crate::features::readme(name)
+    // Not a technique: it may be a loader feature or an SSN resolver.
+    crate::features::readme(name).or_else(|_| crate::engine::syscalls::resolvers::readme(name))
 }
 
 /// Renders `picaro techniques show <name>`: a styled header built from the
 /// technique's metadata, followed by its README rendered as Markdown.
 pub fn show(name: &str, ui: &Palette) -> Result<String> {
     let Some(def) = find(name) else {
-        // Not a technique: it may be a loader feature (`syscalls`, `strings`, …).
-        return crate::features::show(name, ui);
+        // Not a technique: it may be a loader feature (`syscalls`, `strings`, …)
+        // or an SSN resolver (`hells_gate`, …).
+        return crate::features::show(name, ui)
+            .or_else(|_| crate::engine::syscalls::resolvers::show(name, ui));
     };
     let width = crate::ui::term_width();
 
@@ -766,13 +825,55 @@ pub fn show(name: &str, ui: &Palette) -> Result<String> {
     out.push_str(&ui.rule(width));
     out.push_str("\n\n");
 
-    // The styled header replaces the README's title and Metadata section.
-    out.push_str(&markdown::render(&strip_header(def.readme), ui, width));
+    // The styled header replaces the README's title; the README is prose-only,
+    // so the registry's parameter table and example are always prepended.
+    let body = format!(
+        "{}{}",
+        params_markdown(&[], def.params_example),
+        strip_header(def.readme)
+    );
+    out.push_str(&markdown::render(&body, ui, width));
 
     out.push('\n');
     out.push_str(&ui.dim(format!("{} {}", glyph::DOT, def.doc_path)));
     out.push('\n');
     Ok(out)
+}
+
+/// The Markdown preamble `techniques show`/`features show` prepends: a parameter
+/// table (when the registry declares one) followed by the copy-paste example.
+///
+/// Shared by both registries, so a technique and a loader feature render their
+/// parameters the same way.
+pub(crate) fn params_markdown(params: &[ParamDef], example: &str) -> String {
+    let mut out = String::new();
+    if !params.is_empty() {
+        out.push_str("## Parameters\n\n");
+        out.push_str("| Parameter | Type | Required | Default | Description |\n");
+        out.push_str("| --- | --- | --- | --- | --- |\n");
+        for param in params {
+            let required = if param.required { "yes" } else { "no" };
+            let default = match param.default {
+                Some(value) => format!("`{value}`"),
+                None => "—".to_string(),
+            };
+            out.push_str(&format!(
+                "| `{}` | {} | {} | {} | {} |\n",
+                param.key,
+                param.kind.label(),
+                required,
+                default,
+                param.description,
+            ));
+        }
+        out.push('\n');
+    }
+    if !example.trim().is_empty() {
+        out.push_str("## Example\n\n```yaml\n");
+        out.push_str(example.trim());
+        out.push_str("\n```\n\n");
+    }
+    out
 }
 
 /// The README's `# ` title, when it has one.
@@ -784,7 +885,7 @@ pub(crate) fn readme_title(readme: &str) -> Option<&str> {
 }
 
 /// The color role of a maturity (shared with [`stability_label`]).
-fn stability_tone(stability: Stability) -> Tone {
+pub(crate) fn stability_tone(stability: Stability) -> Tone {
     match stability {
         Stability::Stable => Tone::Ok,
         Stability::Experimental => Tone::Warn,
@@ -793,7 +894,7 @@ fn stability_tone(stability: Stability) -> Tone {
 }
 
 /// Comma-joined capability labels for the `requires` field.
-fn capabilities(requires: &[Capability]) -> String {
+pub(crate) fn capabilities(requires: &[Capability]) -> String {
     requires
         .iter()
         .map(|capability| capability.label())
@@ -883,6 +984,22 @@ pub fn validate() -> Vec<String> {
                 ));
             }
         }
+        for section in FORBIDDEN_SECTIONS {
+            if def.readme.contains(section) {
+                problems.push(format!(
+                    "{}: README.md must not contain '{section}' — that data is rendered from the \
+                     registry (TechniqueDef); keep the README prose-only",
+                    def.name
+                ));
+            }
+        }
+        if !def.readme.contains("```mermaid") {
+            problems.push(format!(
+                "{}: README.md has no ```mermaid diagram (the 'How it works' section should open \
+                 with one)",
+                def.name
+            ));
+        }
 
         let tests_path = tests_path(def);
         match std::fs::read_to_string(&tests_path) {
@@ -895,8 +1012,10 @@ pub fn validate() -> Vec<String> {
             )),
         }
     }
-    // Loader features live in a parallel registry; validate them too.
+    // Loader features and SSN resolvers live in parallel registries; validate
+    // them too.
     problems.extend(crate::features::validate());
+    problems.extend(crate::engine::syscalls::resolvers::validate());
     problems
 }
 
@@ -965,33 +1084,18 @@ mod tests {
         }
     }
 
-    /// Every registered technique must be reachable from the documentation: a
-    /// page under `docs/techniques/ref/`, a link in the overview table and a
-    /// nav entry in `docs/nav.yml`. Adding a technique without updating the docs
-    /// is the recurring drift this guards against.
+    /// Every registered technique must have a docs page. The site sidebar and the
+    /// `docs/techniques/index.md` overview table are generated from this registry
+    /// at assemble time (see `docs/site/scripts/assemble-docs.mjs`), so they
+    /// cannot drift and need no per-technique nav or overview entry.
     #[test]
     fn every_technique_is_documented() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let overview = std::fs::read_to_string(root.join("docs/techniques/index.md"))
-            .expect("docs/techniques/index.md must exist");
-        let nav = std::fs::read_to_string(root.join("docs").join("nav.yml"))
-            .expect("docs/nav.yml must exist");
-
         for def in all() {
             let docs_page = format!("docs/techniques/ref/{}.md", def.name);
             assert!(
                 root.join(&docs_page).is_file(),
                 "{}: missing docs page '{docs_page}'",
-                def.name
-            );
-            assert!(
-                overview.contains(&format!("(ref/{}.md)", def.name)),
-                "{}: no link to the technique in docs/techniques/index.md",
-                def.name
-            );
-            assert!(
-                nav.contains(&format!("techniques/ref/{}.md", def.name)),
-                "{}: no nav entry in docs/nav.yml",
                 def.name
             );
         }
@@ -1103,7 +1207,7 @@ mod tests {
     fn readme_is_verbatim() {
         let raw = readme("process_hollowing").expect("known technique");
         assert!(raw.contains("# Process hollowing"));
-        assert!(raw.contains("## Metadata"));
+        assert!(raw.contains("## What it does"));
     }
 
     #[test]

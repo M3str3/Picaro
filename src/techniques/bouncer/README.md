@@ -3,16 +3,6 @@
 *Checks the host against declared requirements and aborts the pipeline before
 the payload runs when the target does not match.*
 
-## Metadata
-
-| | |
-|---|---|
-| **ATT&CK** | T1497.001 (Virtualization/Sandbox Evasion: System Checks), T1614.001 (System Location Discovery: System Language Discovery) |
-| **Stability** | Stable |
-| **Category** | Preparation |
-| **YAML key** | `bouncer` |
-| **Introduced in** | Phase 8 |
-
 ## What it does
 
 Checks the current host against a set of declared requirements and, when the
@@ -24,54 +14,6 @@ a research VM, or the wrong workstation.
 Every field is optional and activates one check; undeclared checks are skipped.
 With no field declared the technique is a no-op (it always lets the payload
 run), which `picaro build` reports as a warning.
-
-## YAML parameters
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `mode` | `all` \| `any` | no | `all` | How the declared checks combine. `all`: every check must pass. `any`: at least one must pass. |
-| `on_fail` | `silent` \| `exit` | no | `silent` | What the stub does when the gate rejects the host. `silent`: exit code `0`, no message. `exit`: exit code `1`. |
-| `hostname` | string (glob) | no | – | Required computer name. `*`/`?` make it a case-insensitive glob; otherwise an exact (case-insensitive) match. |
-| `username` | string (glob) | no | – | Required user name. Same matching rules as `hostname`. |
-| `domain` | string (glob) | no | – | Required DNS domain. A host outside a domain reports an empty domain, so the check then fails. |
-| `language` | list of strings | no | – | Accepted BCP-47 locales (e.g. `en-US`, `es-ES`). Passes if the host locale is one of them. |
-| `keyboard` | list of strings | no | – | Accepted 4-digit keyboard layout codes (e.g. `0409`, `0C0A`). Passes if any active layout matches. |
-| `not_in_vm` | bool | no | – | `true` requires that CPUID reports no known hypervisor vendor. `false`/absent skips the check. |
-| `not_in_sandbox` | bool | no | – | `true` requires that the aggregate sandbox heuristic stays below its threshold. `false`/absent skips the check. |
-| `min_uptime_min` | u32 | no | – | Minimum system uptime in minutes. |
-| `min_ram_mb` | u32 | no | – | Minimum physical memory in MiB. |
-
-## YAML example
-
-Minimal (a single check):
-
-```yaml
-runtime:
-  - technique: bouncer
-    params:
-      hostname: "WORKSTATION-*"
-  - technique: reflective_loading
-```
-
-Full:
-
-```yaml
-runtime:
-  - technique: bouncer
-    params:
-      mode: all
-      on_fail: silent
-      hostname: "WORKSTATION-*"
-      username: "admin"
-      domain: "CORP"
-      language: ["en-US", "es-ES"]
-      keyboard: ["0409", "0C0A"]
-      not_in_vm: true
-      not_in_sandbox: true
-      min_uptime_min: 10
-      min_ram_mb: 4096
-  - technique: reflective_loading
-```
 
 ## How it works
 
@@ -127,6 +69,12 @@ workstation with a Sysinternals tool open, a 4 GiB VM, or a freshly booted
 machine is very unlikely to be rejected by accident. The threshold is a
 constant in the fragment (`ENV_SCORE_THRESHOLD`) and is deliberately not a YAML
 option yet.
+
+## Integration
+
+A **Preparation** step: the stub runs it before the Execution and it never
+receives the payload. Place it earlier in `runtime:` than the Execution step. When a declared check fails it can abort the pipeline, so the payload
+never runs.
 
 ## What it evades
 

@@ -62,6 +62,8 @@ pub const DEF: TechniqueDef = TechniqueDef {
     doc_path: "src/techniques/living_off_the_land/README.md",
     readme: include_str!("README.md"),
     stub_fragment: include_str!("stub_fragment.rs"),
+    formats: &[],
+    requires_indirect_syscalls: false,
     params_example: "technique: living_off_the_land\nparams:\n  binary: certutil.exe\n  args: [\"-urlcache\", \"-f\"]\n",
     // The launcher is Win32 (`CreateProcessA`); routing it through the syscall
     // layer is out of scope (a new process is an entry point, not a kernel call

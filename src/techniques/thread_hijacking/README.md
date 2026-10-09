@@ -3,16 +3,6 @@
 *Redirects an already-running thread into the payload, so no thread is ever
 created and the heavily instrumented NtCreateThreadEx path is avoided.*
 
-## Metadata
-
-| | |
-|---|---|
-| **ATT&CK** | T1055.003 (Process Injection: Thread Execution Hijacking) |
-| **Stability** | Experimental |
-| **Category** | Execution |
-| **YAML key** | `thread_hijacking` |
-| **Introduced in** | unreleased (thread hijacking) |
-
 ## What it does
 
 Takes over a thread that already exists in a running process: suspends it,
@@ -25,47 +15,6 @@ the default `dedicated_stack: true` a `ret` reads a null return address and take
 the target down. The exception is deliberate — a cooperative payload that
 returns exactly once is supported with `dedicated_stack: false` (see *The stack
 question* below).
-
-## YAML parameters
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `payload` | string | no | the only declared payload | Name of the payload in `build.payloads` to run |
-| `target` | string | no | `svchost.exe` | Image name of a *running* process to hijack; matched case-insensitively against the base name (a full path works too) |
-| `pid` | integer | no | unset | Explicit process id to hijack; wins over `target` |
-| `dedicated_stack` | bool | no | `true` | Give the hijacked thread a private stack for the payload |
-| `wait_ms` | integer | no | `0` | Bounded wait, in milliseconds, for the *target* to exit; `0` does not wait |
-
-The payload must be `format: shellcode`; `plan::validate` rejects a `pe`, `dll`
-or `dotnet` payload for this technique at build time. The target must match the
-loader's architecture, and the packer checks that when `target` is an absolute
-path it can read (it resolves `System32` the way the stub's bitness would, so
-`C:\Windows\System32\ping.exe` is checked against `build.output.arch`). A bare
-image name is not a path, and a `pid` or a `$arg.N$` target has no path at all:
-none of those is checked, so pass a path when the plan should be refused before
-it is built. A bitness mismatch that reaches run time is untested; expect it to
-surface as a failing context round trip, not as a redirect into the payload.
-
-Two footnotes the defaults hide:
-
-- `svchost.exe` is a name every Windows install has running, but a plan that
-  hijacks it is hijacking a *service host*. Set `target` or `pid` explicitly for
-  anything but a lab run.
-- `wait_ms` values of `4294967295` or more clamp to that value, and the syscall
-  layer reads it as an **infinite** wait (`WaitForSingleObject(INFINITE)`,
-  a null `NtWaitForSingleObject` timeout). It is the "run until the target is
-  gone" setting; everything smaller is a real bound.
-
-## YAML example
-
-```yaml
-runtime:
-  - technique: thread_hijacking
-    params:
-      target: notepad.exe
-      dedicated_stack: true
-      wait_ms: 0
-```
 
 ## How it works
 
@@ -145,6 +94,12 @@ process while it collects the report (`WerFault.exe` started ~1.2 s after the
 fault; the process object signalled at ~3.3 s in the runs below). A `wait_ms`
 shorter than that reports `259` even though the payload certainly ran — treat
 `STILL_ACTIVE` as "not observed", never as "did not run".
+
+## Integration
+
+An **Execution** step: it runs a `shellcode` payload from the loader's own
+process. The payload runs by redirecting a thread that already
+exists in the target process.
 
 ## What it evades
 

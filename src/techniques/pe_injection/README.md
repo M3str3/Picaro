@@ -3,16 +3,6 @@
 *Maps a full PE into a suspended host process and runs it on a thread of its
 own, leaving the host's original signed image intact instead of hollowing it.*
 
-## Metadata
-
-| | |
-|---|---|
-| **ATT&CK** | T1055.002 (Process Injection: Portable Executable Injection) |
-| **Stability** | `experimental` — the technique runs and provisions the payload's TLS (index, template, per-thread slot and `DLL_PROCESS_ATTACH` callbacks), but the callbacks have not yet been runtime-verified on the measurement host (see "Implementation notes"). |
-| **Category** | Execution |
-| **YAML key** | `pe_injection` |
-| **Introduced in** | v0.1.0 (parallel technique batch, schema 6) |
-
 ## What it does
 
 Maps a full PE image into a freshly created, suspended process and starts it at
@@ -21,28 +11,6 @@ original image**. The payload is a second image in private memory; the target
 keeps its own module, its own thread (parked at the `CREATE_SUSPENDED` start),
 and its own loaded DLLs. The stub waits for the payload to finish and relays its
 exit code, so the step is chainable.
-
-## YAML parameters
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `payload` | string | no | the only declared payload | Name of the payload in `build.payloads` to run |
-| `target` | string | no | `C:\Windows\System32\svchost.exe` | Process to create, suspend and inject into |
-| `timeout_ms` | integer | no | `0` (wait forever) | How long to wait for the payload before failing |
-
-`format: pe` only: a DLL has no process entry point to start and shellcode has
-no image to map (`plan::validate` rejects the other formats; use
-`reflective_loading` for those).
-
-## YAML example
-
-```yaml
-runtime:
-  - technique: pe_injection
-    params:
-      target: "C:\\Windows\\System32\\notepad.exe"
-      timeout_ms: 30000
-```
 
 ## How it works
 
@@ -130,6 +98,11 @@ target's main module does not see the replacement hollowing causes. The price
 is that the payload does **not** become the target's main module: its
 `GetModuleHandleA(NULL)`/`GetModuleFileNameA(NULL)` calls still describe the
 target, and payloads that locate themselves through the PEB misbehave.
+
+## Integration
+
+An **Execution** step: it runs a `pe` payload from the loader's own
+process. It maps the image into a freshly created suspended process.
 
 ## What it evades
 

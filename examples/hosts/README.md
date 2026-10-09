@@ -58,8 +58,11 @@ Measured on this repo's Windows host (Windows 11, x64):
 | CPython | `python examples/hosts/ctypes_host.py` | `Run() -> 42` |
 | PowerShell 5.1 | `powershell -ExecutionPolicy Bypass -File examples/hosts/pinvoke_host.ps1` | `Run() -> 42` + the DLL in the host's module list |
 | .NET | `dotnet run --project examples/hosts/dotnet_host -- dist/dll-shellcode.dll Run` | `Run() -> 42` + the DLL in the host's module list |
-| `rundll32` (PowerShell) | `powershell -ExecutionPolicy Bypass -File examples/hosts/rundll32_host.ps1` | the stub's `STUB_MARKER_<hex>` on the captured stderr; `rundll32` exits 0 |
-| `rundll32` (cmd) | `examples\hosts\rundll32_host.cmd` | the stub's marker in cmd's console; `rundll32` exits 0 (the PowerShell-free path) |
+| `rundll32` (PowerShell) | `powershell -ExecutionPolicy Bypass -File examples/hosts/rundll32_host.ps1` | a debug build's `STUB_MARKER_<hex>` on the captured stderr; `rundll32` exits 0 |
+| `rundll32` (cmd) | `examples\hosts\rundll32_host.cmd` | a debug build's marker in cmd's console; `rundll32` exits 0 (the PowerShell-free path) |
+
+The `rundll32` rows read the stub's marker, which only a debug build
+(`build.stub.debug: true`) emits; a delivery build prints nothing.
 
 Scripts committed but **not** run here (the runtime was not installed on this
 host):

@@ -141,6 +141,8 @@ pub const DEF: TechniqueDef = TechniqueDef {
     category: Category::Preparation,
     doc_path: "src/techniques/self_deletion/README.md",
     stub_fragment: include_str!("stub_fragment.rs"),
+    formats: &[],
+    requires_indirect_syscalls: false,
     params_example: "technique: self_deletion\nparams:\n  mode: rename_ads\n",
     readme: include_str!("README.md"),
     syscalls: &["NtSetInformationFile", "NtClose"],

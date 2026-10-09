@@ -33,6 +33,12 @@ pub const DEF: TechniqueDef = TechniqueDef {
     category: Category::Execution,
     doc_path: "src/techniques/reflective_loading/README.md",
     stub_fragment: include_str!("stub_fragment.rs"),
+    formats: &[
+        super::PayloadFormat::Pe,
+        super::PayloadFormat::Dll,
+        super::PayloadFormat::Shellcode,
+    ],
+    requires_indirect_syscalls: false,
     params_example: "technique: reflective_loading\n",
     readme: include_str!("README.md"),
     // Allocation and page protection go through the syscall layer

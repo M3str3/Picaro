@@ -67,6 +67,8 @@ pub const DEF: TechniqueDef = TechniqueDef {
     category: Category::Control,
     doc_path: "src/techniques/ppid_spoofing/README.md",
     stub_fragment: include_str!("stub_fragment.rs"),
+    formats: &[],
+    requires_indirect_syscalls: false,
     params_example: "technique: ppid_spoofing\nparams:\n  binary: cmd.exe\n  args: [\"/c\", \"whoami\"]\n  parent: explorer.exe\n  wait: true\n",
     readme: include_str!("README.md"),
     // Pure Win32 (CreateProcessA + UpdateProcThreadAttribute): no kernel call

@@ -1,0 +1,1 @@
+--8<-- "src/engine/syscalls/resolvers/api_hash/README.md"

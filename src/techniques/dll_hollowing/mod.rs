@@ -64,6 +64,8 @@ pub const DEF: TechniqueDef = TechniqueDef {
     category: Category::Execution,
     doc_path: "src/techniques/dll_hollowing/README.md",
     stub_fragment: include_str!("stub_fragment.rs"),
+    formats: &[super::PayloadFormat::Shellcode],
+    requires_indirect_syscalls: false,
     params_example: "technique: dll_hollowing\nparams:\n  module: wininet.dll\n",
     readme: include_str!("README.md"),
     // `NtAllocateVirtualMemory` holds the saved original `.text` bytes (out of

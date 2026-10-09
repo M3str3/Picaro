@@ -158,7 +158,7 @@ diagnostics through `thiserror`.
 **Phase 6: indirect syscalls done.** New `build.stub.syscalls` block
 (`mode: none|indirect`, `resolver: hells_gate|tartarus_gate|api_hash`; defaults
 `none`/`hells_gate`). It is a *loader* configuration, not a pipeline technique. The
-stub template gains `$SYSCALLS_BLOCK$`, rendered by `src/engine/syscalls.rs`
+stub template gains `$SYSCALLS_BLOCK$`, rendered by `src/engine/syscalls/`
 from the union of `TechniqueDef::syscalls` requirements. Technique fragments
 always call the `nt_*` helpers (`crate::nt_alloc_vm`, ...) — `mode: none` maps
 them to the Win32 APIs, `mode: indirect` resolves SSNs at runtime and invokes
@@ -174,9 +174,11 @@ to the gadget). Three resolvers:
   disk (`std::fs::read` + a file-export walk + RVA→file-offset), so hooks in the
   live export stubs do not hide the SSN; the gadget still comes from live ntdll.
 - **API hashing (6c)** walks the same clean copy but matches each export by a
-  precomputed FNV-1a 64-bit hash of its name (`engine::syscalls::api_hash`,
-  mirrored in the stub), so neither `GetProcAddress` nor any Nt* name string is
-  needed; the PE-file helpers are shared with Tartarus via `$FILE_PE_HELPERS$`.
+  precomputed FNV-1a 64-bit hash of its name
+  (`engine::syscalls::resolvers::api_hash::api_hash_with`, mirrored in the stub),
+  so neither `GetProcAddress` nor any Nt* name string is needed; the basis is
+  seeded per build (`API_HASH_SEED`), and the PE-file helpers are shared with
+  Tartarus via `$FILE_PE_HELPERS$`.
 
 Verified on `x86_64-pc-windows-msvc` (rustc 1.90, `-C target-feature=+crt-static`
 works). All Nt*/DLL names and the Tartarus path go through `StringsConfig`.
@@ -461,7 +463,11 @@ replaces the older "placeholder fragment that fails at run time" idiom.
 (`RT_MANIFEST`, UAC/DPI) into the artifact. All generated in Rust — no
 `rc.exe`/`windres`, so the build stays cross-platform. `src/engine/resources/`
 (`tree.rs` directory builder, `icon.rs`, `version.rs`, `manifest.rs`, plus
-`inject.rs` which appends a `.rsrc` section to the compiled stub). Directory
+`inject.rs` which appends a `.rsrc` section to the compiled stub). `icon: random`
+(the schema's `IconPlan`) is rendered by `icon_gen.rs`: pure `std`,
+seed-deterministic, BMP `DIB` images at 16/32/48/64 (no PNG encoder, so no new
+dependency); the build picks the seed in `resolve_resources` and records it as
+`generated_icon` in the manifest. Directory
 offsets are section-relative, but `IMAGE_RESOURCE_DATA_ENTRY.OffsetToData` is an
 image RVA — that is why `embed()` resolves the RVA before building the blob.
 Verified against `FindResource`/`LoadResource` and `version.dll`

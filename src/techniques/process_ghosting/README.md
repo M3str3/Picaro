@@ -3,17 +3,6 @@
 *Runs the payload from a delete-on-close temporary file mapped as a section, so
 the mapped image outlives the file name and executes with no on-disk backing.*
 
-## Metadata
-
-| | |
-|---|---|
-| **ATT&CK** | T1055.012 |
-| **Stability** | experimental |
-| **Category** | Execution |
-| **YAML key** | `process_ghosting` |
-| **Payload format** | `pe` only |
-| **Verification** | compile-verified only (runtime verification pending) |
-
 ## What it does
 
 Runs the decrypted payload with no backing file on disk. The payload is
@@ -22,33 +11,6 @@ turned into a section, and mapped into the current process; the file handle is
 then closed so the file's name disappears while the section keeps the bytes
 alive. The mapped image is relocated, its imports are resolved, and its entry
 point runs in the loader's process.
-
-## YAML parameters
-
-| Parameter | Type   | Required | Default | Description                                             |
-|-----------|--------|----------|---------|---------------------------------------------------------|
-| `payload` | string | no       | (auto)  | Name of the payload in `build.payloads`. Optional when exactly one payload is declared. |
-
-## YAML example
-
-```yaml
-runtime:
-  - technique: process_ghosting
-```
-
-With an explicit payload (required when more than one payload is declared):
-
-```yaml
-build:
-  payloads:
-    implant:
-      source: implant.exe
-      format: pe
-runtime:
-  - technique: process_ghosting
-    params:
-      payload: implant
-```
 
 ## How it works
 
@@ -85,6 +47,12 @@ flowchart TD
 5. Applies base relocations for the view's actual base, resolves the payload's
    imports through the shared resolver (`crate::patch_imports`), and jumps to
    the entry point, relaying its exit code.
+
+## Integration
+
+An **Execution** step: it runs a `pe` payload from the loader's own
+process. It maps the image from a delete-on-close file, so there is no
+backing file on disk.
 
 ## What it evades
 

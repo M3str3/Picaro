@@ -43,6 +43,8 @@ pub const DEF: TechniqueDef = TechniqueDef {
     category: Category::Execution,
     doc_path: "src/techniques/process_ghosting/README.md",
     stub_fragment: include_str!("stub_fragment.rs"),
+    formats: &[super::PayloadFormat::Pe],
+    requires_indirect_syscalls: false,
     params_example: "technique: process_ghosting\n",
     readme: include_str!("README.md"),
     // The file -> section -> map flow is Win32 (`CreateFileW`,

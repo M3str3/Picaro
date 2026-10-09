@@ -53,6 +53,8 @@ pub const DEF: TechniqueDef = TechniqueDef {
     doc_path: "src/techniques/anti_debug/README.md",
     readme: include_str!("README.md"),
     stub_fragment: include_str!("stub_fragment.rs"),
+    formats: &[],
+    requires_indirect_syscalls: false,
     params_example: "technique: anti_debug\nparams:\n  action: abort\n",
     // The debug-port / debug-object checks use NtQueryInformationProcess and the
     // hardware-breakpoint check uses NtGetContextThread, so `mode: indirect`

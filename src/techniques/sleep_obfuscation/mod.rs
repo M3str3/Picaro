@@ -149,6 +149,8 @@ pub const DEF: TechniqueDef = TechniqueDef {
     doc_path: "src/techniques/sleep_obfuscation/README.md",
     readme: include_str!("README.md"),
     stub_fragment: include_str!("stub_fragment.rs"),
+    formats: &[],
+    requires_indirect_syscalls: false,
     params_example:
         "technique: sleep_obfuscation\nparams:\n  variant: ekko\n  sleep_ms: 5000\n  encrypt_regions: [payload]\n",
     // The timer-queue mechanism calls Win32 APIs resolved dynamically at
