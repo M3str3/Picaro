@@ -30,6 +30,7 @@ import {
 import { dirname, join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
+import { buildTechniqueCatalog } from './technique-catalog.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -80,6 +81,12 @@ function toSidebarItem(item) {
   }
   const [label, value] = entries[0];
   if (typeof value === 'string') {
+    // Absolute paths (e.g. `/plan-builder/`) are custom Astro routes, not
+    // Markdown pages under docs/.
+    if (value.startsWith('/')) {
+      const link = value.endsWith('/') ? value : `${value}/`;
+      return { label, link };
+    }
     return { label, link: toLink(value) };
   }
   if (Array.isArray(value)) {
@@ -294,12 +301,28 @@ function collectPages(nav) {
       const entries = Object.entries(item);
       if (entries.length !== 1) continue;
       const [label, value] = entries[0];
-      if (typeof value === 'string') pages.set(value, label);
-      else if (Array.isArray(value)) visit(value);
+      // Skip absolute routes (custom Astro pages such as `/plan-builder/`).
+      if (typeof value === 'string' && !value.startsWith('/')) {
+        pages.set(value, label);
+      } else if (Array.isArray(value)) {
+        visit(value);
+      }
     }
   };
   visit(nav);
   return pages;
+}
+
+/** Write `/plan-catalog.json` for the in-docs plan builder. */
+function writePlanCatalog(root, publicOut) {
+  const catalog = buildTechniqueCatalog(root);
+  mkdirSync(publicOut, { recursive: true });
+  const dest = join(publicOut, 'plan-catalog.json');
+  writeFileSync(dest, `${JSON.stringify(catalog, null, 2)}\n`);
+  // eslint-disable-next-line no-console
+  console.log(
+    `plan catalog: ${catalog.techniques.length} techniques → ${dest}`,
+  );
 }
 
 /** Copy exactly the pages the navigation references (orphans are not built). */
@@ -323,7 +346,7 @@ function copyDocs(root, outDir, pages) {
 /* Entry point                                                               */
 /* ------------------------------------------------------------------------- */
 
-function assemble(root, outDir, sidebarOut) {
+function assemble(root, outDir, sidebarOut, publicOut) {
   const nav = yaml.load(readFileSync(join(root, 'docs', 'nav.yml'), 'utf8'));
   const sidebar = buildSidebar(nav.nav);
 
@@ -338,6 +361,7 @@ function assemble(root, outDir, sidebarOut) {
   );
 
   copyDocs(root, outDir, collectPages(nav.nav));
+  writePlanCatalog(root, publicOut);
   // eslint-disable-next-line no-console
   console.log(
     `assembled ${sidebar.length} sidebar groups into ${outDir}`,
@@ -348,6 +372,7 @@ const args = parseArgs(process.argv.slice(2));
 const root = resolve(args.root ?? process.cwd());
 const outDir = resolve(args.out ?? join(root, 'docs/site/src/content/docs'));
 const sidebarOut = resolve(args['sidebar-out'] ?? join(root, 'docs/site/src/sidebar.mjs'));
+const publicOut = resolve(args['public-out'] ?? join(root, 'docs/site/public'));
 
 if (args.watch) {
   let timer = null;
@@ -355,7 +380,7 @@ if (args.watch) {
     clearTimeout(timer);
     timer = setTimeout(() => {
       try {
-        assemble(root, outDir, sidebarOut);
+        assemble(root, outDir, sidebarOut, publicOut);
       } catch (err) {
         // eslint-disable-next-line no-console
         console.error(`assemble failed: ${err.message}`);
@@ -377,5 +402,5 @@ if (args.watch) {
   console.log('watching for changes…');
   schedule();
 } else {
-  assemble(root, outDir, sidebarOut);
+  assemble(root, outDir, sidebarOut, publicOut);
 }

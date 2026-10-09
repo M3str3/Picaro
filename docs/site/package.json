@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "astro dev",
     "build": "astro build",
+    "build:docs": "node scripts/assemble-docs.mjs --root ../.. && astro build",
     "preview": "astro preview"
   },
   "dependencies": {
