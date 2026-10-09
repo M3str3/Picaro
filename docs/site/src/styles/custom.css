@@ -1,138 +1,494 @@
 /*
- * Picaro — Starlight theme overrides.
+ * Picaro docs — Linear-like theme on top of Starlight.
  *
- * Pins the site to the CLI's brand accent (the soft violet #A78BFA the terminal
- * uses) and adds a few "quiet premium" touches: a refined system font stack,
- * softer corners, and smooth hover transitions.
- *
- * `--sl-color-text-accent` does double duty in Starlight: it is both the link
- * color and the background of the sidebar's current-page pill. It therefore
- * has to be a mid-tone violet that reads as text AND holds a contrasting label
- * when used as a fill — the exact mistake the previous palette made.
+ * Dark is the default (`:root`). Light only overrides color tokens under
+ * `[data-theme='light']`, which is how Starlight switches themes.
+ * Depth comes from 1px borders and small steps in luminance. No shadows.
+ * Accent (#5e6ad2) is limited to links, focus, and the sidebar current marker.
  */
 
+@import url('https://rsms.me/inter/inter.css');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;1,400&display=swap');
+
 /* ------------------------------------------------------------------------- */
-/* Brand accent                                                              */
+/* Tokens                                                                    */
 /* ------------------------------------------------------------------------- */
 
-/* Light theme: a deepened violet; on-accent text is white for contrast. */
-:root {
-  --sl-color-accent-low: #ede9fe;
-  --sl-color-accent: #6d55e0;
-  --sl-color-accent-high: #553fc2;
-  --sl-color-text-accent: #6d55e0;
-  --sl-color-text-invert: #ffffff;
+:root,
+::backdrop {
+	color-scheme: dark;
+
+	--pico-base: #0f0f10;
+	--pico-surface: #23232a;
+	--pico-code: #141418;
+	--pico-chrome: #3c3d46;
+	--pico-elevated: #3c3d46;
+	--pico-hover: rgba(255, 255, 255, 0.06);
+	--pico-active: rgba(255, 255, 255, 0.1);
+	--pico-border: rgba(255, 255, 255, 0.14);
+	--pico-text: #e6e6e6;
+	--pico-text-secondary: #a4a9b2;
+	--pico-text-tertiary: #8b909a;
+	--pico-accent: #5e6ad2;
+
+	--sl-color-white: var(--pico-text);
+	--sl-color-gray-1: var(--pico-text);
+	--sl-color-gray-2: var(--pico-text-secondary);
+	--sl-color-gray-3: var(--pico-text-secondary);
+	--sl-color-gray-4: var(--pico-text-tertiary);
+	--sl-color-gray-5: var(--pico-border);
+	--sl-color-gray-6: var(--pico-surface);
+	--sl-color-black: var(--pico-base);
+
+	--sl-color-accent-low: #1c1f3d;
+	--sl-color-accent: var(--pico-accent);
+	--sl-color-accent-high: #8b93e0;
+	--sl-color-text: var(--pico-text);
+	--sl-color-text-accent: var(--pico-accent);
+	--sl-color-text-invert: var(--pico-text);
+	--sl-color-bg: var(--pico-base);
+	--sl-color-bg-nav: var(--pico-base);
+	--sl-color-bg-sidebar: var(--pico-base);
+	--sl-color-bg-inline-code: var(--pico-elevated);
+	--sl-color-bg-accent: var(--pico-accent);
+	--sl-color-hairline-light: var(--pico-border);
+	--sl-color-hairline: var(--pico-border);
+	--sl-color-hairline-shade: var(--pico-border);
+
+	--sl-shadow-sm: none;
+	--sl-shadow-md: none;
+	--sl-shadow-lg: none;
+
+	--sl-font: InterVariable, 'Inter Variable', Inter, sans-serif;
+	--sl-font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+	--sl-text-2xs: 0.75rem; /* 12px */
+	--sl-text-xs: 0.8125rem; /* 13px */
+	--sl-text-sm: 0.875rem; /* 14px */
+	--sl-text-base: 0.875rem; /* 14px UI */
+	--sl-text-body: 0.9375rem; /* 15px */
+	--sl-text-body-sm: 0.8125rem;
+	--sl-text-code: 0.8125rem; /* 13px */
+	--sl-text-code-sm: 0.8125rem;
+	--sl-text-h1: 1.75rem;
+	--sl-text-h2: 1.25rem;
+	--sl-text-h3: 1.0625rem;
+	--sl-text-h4: 0.9375rem;
+	--sl-text-h5: 0.875rem;
+	--sl-line-height: 1.6;
+	--sl-line-height-headings: 1.25;
+
+	--sl-nav-height: 3rem;
+	/* Keep a unit. A bare 0 makes SiteTitle's `calc(nav-height - 2 * pad)` invalid. */
+	--sl-nav-pad-y: 0.375rem;
+	--sl-content-width: 54rem;
 }
 
-/* Dark theme: the soft violet is the native accent on a dark surface; the
-   current-page pill is a light-violet fill with a near-black label. */
-:root[data-theme='dark'] {
-  --sl-color-accent-low: #2b2350;
-  --sl-color-accent: #a78bfa;
-  --sl-color-accent-high: #c4b5fd;
-  --sl-color-text-accent: #c4b5fd;
-  --sl-color-text-invert: #17121f;
+:root[data-theme='light'],
+[data-theme='light'] ::backdrop {
+	color-scheme: light;
+
+	--pico-base: #fcfcfc;
+	--pico-surface: #eef0f3;
+	--pico-code: #ffffff;
+	--pico-chrome: #d5d7de;
+	--pico-elevated: #d5d7de;
+	--pico-hover: rgba(0, 0, 0, 0.05);
+	--pico-active: rgba(0, 0, 0, 0.08);
+	--pico-border: rgba(0, 0, 0, 0.14);
+	--pico-text: #1c1c1f;
+	--pico-text-secondary: #4e525a;
+	--pico-text-tertiary: #6a6e76;
+
+	--sl-color-accent-low: #e8eaf8;
+	--sl-color-accent-high: #3f4cb0;
+	--sl-color-text-invert: #fcfcfc;
 }
 
 /* ------------------------------------------------------------------------- */
-/* Typography                                                                */
+/* Type                                                                      */
 /* ------------------------------------------------------------------------- */
 
-:root {
-  --sl-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
-    'Helvetica Neue', Arial, sans-serif;
-  --sl-font-mono: ui-monospace, 'SF Mono', 'Cascadia Code', 'JetBrains Mono',
-    Menlo, Consolas, monospace;
-  --sl-content-width: 54rem;
+:is(h1, h2, h3, h4, h5, h6) {
+	font-weight: 600;
+	letter-spacing: -0.02em;
 }
 
-/* Selection echoes the brand instead of the OS default. */
+.sl-markdown-content {
+	font-size: var(--sl-text-body);
+	line-height: var(--sl-line-height);
+}
+
+.sl-markdown-content a:hover:not(:where(.not-content *)) {
+	color: var(--sl-color-accent-high);
+}
+
 ::selection {
-  background: var(--sl-color-accent);
-  color: var(--sl-color-text-invert);
+	background: color-mix(in srgb, var(--pico-accent) 32%, transparent);
+	color: inherit;
+}
+
+:focus-visible {
+	outline-color: var(--pico-accent);
+}
+
+a,
+button,
+summary,
+[role='tab'] {
+	transition: background-color 120ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	a,
+	button,
+	summary,
+	[role='tab'] {
+		transition: none;
+	}
+}
+
+/* ------------------------------------------------------------------------- */
+/* Chrome: header, sidebar                                                   */
+/* ------------------------------------------------------------------------- */
+
+/* The outer bar only. An inner div also uses `.header`. */
+header.header {
+	background-color: var(--pico-base);
+	border-bottom: 1px solid var(--pico-border);
+	box-shadow: none;
+}
+
+header.header .site-title img {
+	height: 28px;
+	width: auto;
+}
+
+header.header button[data-open-modal] {
+	height: 2rem;
+}
+
+header.header select {
+	height: 2rem;
+	padding-block: 0;
+}
+
+.site-title {
+	color: var(--pico-text);
+	font-size: 14px;
+	letter-spacing: -0.02em;
+}
+
+.sidebar-pane {
+	background-color: var(--pico-base);
+	border-inline-end: 1px solid var(--pico-border);
+	box-shadow: none;
+}
+
+.sidebar-content {
+	padding: 12px 8px 0;
+	font-size: 13px;
+}
+
+.sidebar-content a {
+	display: flex;
+	align-items: center;
+	height: 28px;
+	min-height: 28px;
+	padding: 0 8px;
+	border-radius: 6px;
+	font-size: 13px;
+	font-weight: 400;
+	line-height: 1.2;
+	color: var(--pico-text-secondary);
+}
+
+.sidebar-content summary {
+	display: flex;
+	align-items: center;
+	min-height: 28px;
+	padding: 0 8px;
+	border-radius: 6px;
+}
+
+.sidebar-content a:hover,
+.sidebar-content a:focus-visible,
+.sidebar-content summary:hover {
+	background-color: var(--pico-hover);
+	color: var(--pico-text);
+}
+
+.sidebar-content a[aria-current='page'],
+.sidebar-content a[aria-current='page']:hover,
+.sidebar-content a[aria-current='page']:focus,
+.sidebar-content a[aria-current='page']:focus-visible {
+	position: relative;
+	background-color: var(--pico-active);
+	color: var(--pico-text);
+	font-weight: 500;
+}
+
+.sidebar-content a[aria-current='page']::before {
+	content: '';
+	position: absolute;
+	inset-inline-start: 0;
+	top: 6px;
+	bottom: 6px;
+	width: 2px;
+	border-radius: 2px;
+	background: var(--pico-accent);
+}
+
+/* Group labels only. Top-level links also carry `.large`. */
+.sidebar-content summary .large {
+	font-size: 12px;
+	font-weight: 500;
+	line-height: 1.3;
+	letter-spacing: 0;
+	text-transform: none;
+	color: var(--pico-text-tertiary);
+}
+
+.sidebar-content .top-level > li + li {
+	margin-top: 0.75rem;
+}
+
+/* Technique stability: a color dot. The word stays for screen readers. */
+.sidebar-content .sl-badge.stab {
+	width: 0.45rem;
+	height: 0.45rem;
+	padding: 0;
+	border: 0;
+	border-radius: 999px;
+	font-size: 0;
+	line-height: 0;
+	overflow: hidden;
+	color: transparent;
+	flex: none;
+}
+.sidebar-content .sl-badge.stab.success {
+	background-color: var(--sl-color-green);
+}
+.sidebar-content .sl-badge.stab.caution {
+	background-color: var(--sl-color-orange);
+}
+.sidebar-content .sl-badge.stab.danger {
+	background-color: var(--sl-color-red);
+}
+
+.right-sidebar a {
+	font-size: 13px;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Controls                                                                  */
+/* ------------------------------------------------------------------------- */
+
+button,
+[type='button'],
+[type='submit'],
+[type='search'],
+[type='text'],
+input,
+select,
+textarea,
+.sl-link-button {
+	border-radius: 6px;
+}
+
+.sl-link-button {
+	padding: 0.4rem 0.85rem;
+	font-size: 13px;
+}
+
+.sl-link-button.primary {
+	background: var(--pico-accent);
+	border-color: var(--pico-accent);
+	color: #fff;
+}
+
+.sl-link-button.primary:hover {
+	background: var(--sl-color-accent-high);
+	border-color: var(--sl-color-accent-high);
+	color: #fff;
+}
+
+.sl-link-button svg,
+header.header svg,
+.sidebar-content svg,
+.starlight-aside__icon {
+	width: 16px;
+	height: 16px;
+}
+
+starlight-tabs [role='tablist'] {
+	width: fit-content;
+	gap: 2px;
+	padding: 2px;
+	border: 1px solid var(--pico-border);
+	border-bottom: 1px solid var(--pico-border);
+	border-radius: 999px;
+	background: var(--pico-surface);
+}
+
+starlight-tabs .tab > [role='tab'] {
+	padding: 0.2rem 0.75rem;
+	border-radius: 999px;
+	box-shadow: none;
+	font-size: 13px;
+	font-weight: 400;
+	color: var(--pico-text-secondary);
+}
+
+starlight-tabs .tab [role='tab'][aria-selected='true'] {
+	background: var(--pico-active);
+	box-shadow: none;
+	color: var(--pico-text);
+	font-weight: 500;
+}
+
+.card,
+.pagination-links a {
+	border: 1px solid var(--pico-border);
+	border-radius: 8px;
+	background-color: var(--pico-surface);
+	box-shadow: none;
 }
 
 .hero {
-    padding-block: unset!important;
+	padding-block: unset !important;
 }
 
-/* Technique stability in the sidebar: a color dot, the word stays for
-   screen readers. */
-.sidebar-content .sl-badge.stab {
-  width: 0.45rem;
-  height: 0.45rem;
-  padding: 0;
-  border: 0;
-  border-radius: 999px;
-  font-size: 0;
-  line-height: 0;
-  overflow: hidden;
-  color: transparent;
-  flex: none;
+.hero h1 {
+	font-size: clamp(1.5rem, 0.5rem + 1.5vw, 2rem);
 }
-.sidebar-content .sl-badge.stab.success { background-color: var(--sl-color-green); }
-.sidebar-content .sl-badge.stab.caution { background-color: var(--sl-color-orange); }
-.sidebar-content .sl-badge.stab.danger { background-color: var(--sl-color-red); }
-.sidebar-content a[aria-current='page'] > .sl-badge.stab.success { background-color: var(--sl-color-green); }
-.sidebar-content a[aria-current='page'] > .sl-badge.stab.caution { background-color: var(--sl-color-orange); }
-.sidebar-content a[aria-current='page'] > .sl-badge.stab.danger { background-color: var(--sl-color-red); }
 
 /* ------------------------------------------------------------------------- */
-/* Quiet premium: corners + transitions                                      */
+/* Prose: code, callouts, tables                                             */
 /* ------------------------------------------------------------------------- */
 
-/* Links and nav entries ease their color instead of snapping. */
-a,
-.sidebar-content a,
-.sl-markdown-content a {
-  transition: color 0.15s ease, background-color 0.15s ease,
-    border-color 0.15s ease;
+.sl-markdown-content :not(pre) > code {
+	border: 1px solid var(--pico-border);
+	border-radius: 6px;
+	background: var(--pico-elevated);
+	font-size: 13px;
 }
 
-/* Links keep the brand violet and step to a distinct shade on hover (rather
-   than jumping to the plain body-text color). */
-.sl-markdown-content a:hover:not(:where(.not-content *)) {
-  color: var(--sl-color-accent-high);
-  text-decoration-color: currentColor;
+.expressive-code {
+	--ec-brdRad: 8px;
+	--ec-brdWd: 1px;
+	--ec-brdCol: var(--pico-border);
+	--ec-codeBg: var(--pico-code);
+	--ec-codeFontFml: var(--sl-font-mono);
+	--ec-codeFontSize: 13px;
+	--ec-frm-edBg: var(--pico-code);
+	--ec-frm-edTabBarBg: var(--pico-chrome);
+	--ec-frm-edActTabBg: var(--pico-code);
+	--ec-frm-edActTabFg: var(--pico-text);
+	--ec-frm-edTabBarBrdCol: var(--pico-border);
+	--ec-frm-edTabBarBrdBtmCol: var(--pico-border);
+	--ec-frm-trmBg: var(--pico-code);
+	--ec-frm-trmTtbBg: var(--pico-chrome);
+	--ec-frm-trmTtbFg: var(--pico-text-secondary);
+	--ec-frm-trmTtbBrdBtmCol: var(--pico-border);
+	--ec-frm-trmTtbDotsOpa: 0.55;
+	--ec-frm-frameBoxShdCssVal: none;
 }
 
-/* Dark mode links brighten by deepening the violet, so the step stays visible. */
-:root[data-theme='dark'] .sl-markdown-content a:hover:not(:where(.not-content *)) {
-  color: var(--sl-color-accent);
-}
-
-/* Code blocks (Expressive Code frames) and tables get softer corners. */
 .expressive-code,
 .expressive-code .frame,
-.sl-markdown-content pre,
+.sl-markdown-content pre {
+	border-radius: 8px;
+	box-shadow: none;
+}
+
+.expressive-code .frame,
+.sl-markdown-content pre:not(.mermaid) {
+	border: 1px solid var(--pico-border);
+	background: var(--pico-code);
+}
+
+.expressive-code .frame pre {
+	background: var(--pico-code);
+}
+
+/* The title bar has to read as its own strip, not as more of the code. */
+.expressive-code .frame.has-title:not(.is-terminal) .header,
+.expressive-code .frame.is-terminal .header {
+	background: var(--pico-chrome);
+	color: var(--pico-text-secondary);
+}
+
+.expressive-code .frame.has-title:not(.is-terminal) .title {
+	background: var(--pico-code);
+	color: var(--pico-text);
+}
+
+.starlight-aside {
+	border-inline-start-width: 2px;
+	border-radius: 8px;
+	background-color: var(--pico-surface);
+	color: var(--pico-text);
+	box-shadow: none;
+}
+
+.starlight-aside--note {
+	--sl-color-asides-border: color-mix(in srgb, var(--sl-color-blue) 72%, transparent);
+	--sl-color-asides-text-accent: color-mix(in srgb, var(--sl-color-blue) 65%, var(--pico-text));
+}
+
+.starlight-aside--tip {
+	--sl-color-asides-border: color-mix(in srgb, var(--sl-color-purple) 72%, transparent);
+	--sl-color-asides-text-accent: color-mix(in srgb, var(--sl-color-purple) 65%, var(--pico-text));
+}
+
+.starlight-aside--caution {
+	--sl-color-asides-border: color-mix(in srgb, var(--sl-color-orange) 72%, transparent);
+	--sl-color-asides-text-accent: color-mix(in srgb, var(--sl-color-orange) 65%, var(--pico-text));
+}
+
+.starlight-aside--danger {
+	--sl-color-asides-border: color-mix(in srgb, var(--sl-color-red) 72%, transparent);
+	--sl-color-asides-text-accent: color-mix(in srgb, var(--sl-color-red) 65%, var(--pico-text));
+}
+
 .sl-markdown-content table {
-  border-radius: 12px;
+	border-radius: 0;
+	background: transparent;
 }
 
-/* Inline code gets a slightly softer pill. */
-.sl-markdown-content :not(pre) > code {
-  border-radius: 6px;
+.sl-markdown-content tr,
+.sl-markdown-content :is(th, td) {
+	background: transparent;
 }
 
-/* Mermaid diagrams: strip the code-block chrome and centre the SVG. */
-.sl-markdown-content pre.mermaid {
-  background: transparent;
-  border: none;
-  padding: 0;
-  margin: 1.25rem 0;
-  display: flex;
-  justify-content: center;
-  overflow-x: auto;
-}
-.sl-markdown-content .mermaid svg {
-  max-width: 100%;
-  height: auto;
-  border-radius: 12px;
+.sl-markdown-content :is(th, td) {
+	border-bottom: 1px solid var(--pico-border);
+	border-inline: 0;
 }
 
-/* Table headers: a quieter, label-like treatment. */
 .sl-markdown-content th {
-  font-size: 0.78rem;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+	font-size: 12px;
+	font-weight: 500;
+	letter-spacing: 0;
+	text-transform: none;
+	color: var(--pico-text-secondary);
+}
+
+/* Mermaid: no code-block chrome; the SVG stays centered. */
+.sl-markdown-content pre.mermaid {
+	background: transparent;
+	border: none;
+	padding: 0;
+	margin: 1.25rem 0;
+	display: flex;
+	justify-content: center;
+	overflow-x: auto;
+	box-shadow: none;
+}
+
+.sl-markdown-content .mermaid svg {
+	max-width: 100%;
+	height: auto;
+	border-radius: 8px;
 }

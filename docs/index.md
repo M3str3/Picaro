@@ -18,7 +18,7 @@ hero:
       variant: minimal
     - text: Create plan
       link: /plan-builder/
-      icon: open-book
+      icon: pencil
       variant: minimal
 ---
 
