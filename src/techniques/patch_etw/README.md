@@ -20,7 +20,7 @@ sequenceDiagram
     L->>N: LoadLibraryA(ntdll.dll)
     L->>N: GetProcAddress(EtwEventWrite)
     L->>N: nt_protect_vm(RWX)
-    L->>N: write 33 C0 C3 (xor eax,eax; ret)
+    L->>N: write 33 C0 C3 (xor eax, eax then ret)
     L->>N: restore original protection
     opt full
         L->>N: same for EtwEventWriteFull
