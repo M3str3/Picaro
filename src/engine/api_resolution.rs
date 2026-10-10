@@ -19,6 +19,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::syscalls;
 use crate::engine::obfuscation::StringsConfig;
 use crate::error::{PackerError, Result};
 
@@ -187,8 +188,8 @@ pub const CATALOGUE: &[ApiEntry] = &[
 pub struct ApiResolutionConfig {
     /// Whether the loader proxies API resolution at all.
     pub mode: ApiResolutionMode,
-    /// Selected catalogue entries, in first-seen order and deduplicated.
-    pub apis: Vec<&'static ApiEntry>,
+    /// Selected entries, in first-seen order and deduplicated.
+    pub apis: Vec<ApiEntry>,
     /// What to do with imports not in the catalogue.
     pub unmatched: Unmatched,
 }
@@ -235,20 +236,39 @@ impl ApiResolutionConfig {
             }
         };
 
-        // `all` proxies every catalogue entry; otherwise each `dll!function`
-        // selector is looked up (an unknown name is a validation error).
-        let mut apis: Vec<&'static ApiEntry> = Vec::new();
+        // Every selectable entry: the catalogue plus a direct `ntdll!Nt*` route
+        // for each syscall-layer function whose helper can back a faithful proxy.
+        let direct = direct_entries();
+        let selectable: Vec<ApiEntry> = {
+            let mut all: Vec<ApiEntry> = CATALOGUE.to_vec();
+            for entry in &direct {
+                if !all.contains(entry) {
+                    all.push(*entry);
+                }
+            }
+            all
+        };
+
+        // `all` proxies every selectable entry; `ntdll:*` the direct routes;
+        // otherwise each `dll!function` selector is looked up (an unknown name is
+        // a validation error).
+        let mut apis: Vec<ApiEntry> = Vec::new();
         if yaml
             .apis
             .iter()
             .any(|selector| selector.eq_ignore_ascii_case("all"))
         {
-            apis.extend(CATALOGUE.iter());
+            apis = selectable;
         } else {
             for selector in &yaml.apis {
-                let entry = lookup(selector).ok_or_else(|| unknown_api(selector))?;
-                if !apis.iter().any(|e| std::ptr::eq(*e, entry)) {
-                    apis.push(entry);
+                if selector.eq_ignore_ascii_case("ntdll:*") {
+                    for entry in &direct {
+                        push_unique(&mut apis, *entry);
+                    }
+                } else {
+                    let entry =
+                        lookup(selector, &selectable).ok_or_else(|| unknown_api(selector))?;
+                    push_unique(&mut apis, entry);
                 }
             }
         }
@@ -268,13 +288,34 @@ impl ApiResolutionConfig {
     }
 }
 
-/// Looks up a `dll!func` selector (module side normalized) in the catalogue.
-fn lookup(selector: &str) -> Option<&'static ApiEntry> {
+/// The direct `ntdll!Nt*` routes a generated proxy can serve.
+fn direct_entries() -> Vec<ApiEntry> {
+    syscalls::nt_proxy_names()
+        .into_iter()
+        .map(|name| ApiEntry {
+            dll: "ntdll",
+            func: name,
+            strategy: Strategy::RouteToNt,
+            nt: Some(name),
+        })
+        .collect()
+}
+
+/// Pushes `entry` unless an equal one is already present.
+fn push_unique(apis: &mut Vec<ApiEntry>, entry: ApiEntry) {
+    if !apis.contains(&entry) {
+        apis.push(entry);
+    }
+}
+
+/// Looks up a `dll!func` selector (module side normalized) among `selectable`.
+fn lookup(selector: &str, selectable: &[ApiEntry]) -> Option<ApiEntry> {
     let (dll, func) = selector.split_once('!')?;
     let dll = normalize_module(dll);
-    CATALOGUE
+    selectable
         .iter()
         .find(|entry| entry.dll == dll.as_str() && entry.func == func)
+        .copied()
 }
 
 /// Normalizes a module name for comparison: file-name component only, a trailing
@@ -296,7 +337,8 @@ fn unknown_api(selector: &str) -> PackerError {
         .collect::<Vec<_>>()
         .join(", ");
     PackerError::Validation(format!(
-        "unknown build.stub.api_resolution.apis entry '{selector}': not in the catalogue ({known})"
+        "unknown build.stub.api_resolution.apis entry '{selector}': not in the catalogue ({known}); \
+         use 'ntdll:*' for every direct Nt* route or 'all' for everything"
     ))
 }
 
@@ -373,16 +415,17 @@ fn proxy_id(index: usize) -> String {
 
 /// The body of the proxy for one selected entry.
 fn proxy_body(index: usize, entry: &ApiEntry, strings: &StringsConfig) -> String {
+    // A direct `ntdll!Nt*` route is generated from the syscall layer's metadata.
+    if entry.strategy == Strategy::RouteToNt {
+        if let Some(info) = syscalls::nt_proxy_info(entry.func) {
+            return direct_nt_proxy(index, entry, info);
+        }
+    }
+
     let id = proxy_id(index);
     let comment = format!("proxy for {}!{}", entry.dll, entry.func);
     match entry.func {
-        "NtReadVirtualMemory" => DIRECT_NT_READ_VM
-            .replace("$ID$", &id)
-            .replace("$COMMENT$", &comment),
         "ReadProcessMemory" => WRAPPER_READ_PROCESS_MEMORY
-            .replace("$ID$", &id)
-            .replace("$COMMENT$", &comment),
-        "NtOpenProcess" => DIRECT_NT_OPEN_PROCESS
             .replace("$ID$", &id)
             .replace("$COMMENT$", &comment),
         "OpenProcess" => REBUILD_OPEN_PROCESS
@@ -394,6 +437,27 @@ fn proxy_body(index: usize, entry: &ApiEntry, strings: &StringsConfig) -> String
         // function.
         _ => format!("    // {comment}: no proxy body is implemented yet\n"),
     }
+}
+
+/// A generated direct `ntdll!Nt*` proxy: an `extern "system"` wrapper with the
+/// export's native signature that forwards to the syscall-layer helper.
+fn direct_nt_proxy(index: usize, entry: &ApiEntry, info: syscalls::NtProxyInfo) -> String {
+    let id = proxy_id(index);
+    let comment = format!("proxy for {}!{}", entry.dll, entry.func);
+    let params = info
+        .params
+        .iter()
+        .map(|(name, ty)| format!("{name}: {ty}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "    /// {comment}: routed through the syscall layer.\n    \
+         extern \"system\" fn {id}({params}) -> i32 {{\n        \
+         crate::tech_dbg!(\"api_resolution\", \"an intercepted call was routed to the \
+         syscall layer\");\n        crate::{helper}({forward})\n    }}\n",
+        helper = info.helper_name,
+        forward = info.forward,
+    )
 }
 
 /// A `GetProcAddress` handler: catalogue hits get their proxy, everything else
@@ -486,19 +550,6 @@ $PROXIES$
 use api_resolution::resolution_policy;
 "#;
 
-const DIRECT_NT_READ_VM: &str = r#"    /// $COMMENT$: routed through the syscall layer.
-    extern "system" fn $ID$(
-        process: windows::Win32::Foundation::HANDLE,
-        base: *const core::ffi::c_void,
-        buffer: *mut core::ffi::c_void,
-        size: usize,
-        read: *mut usize,
-    ) -> i32 {
-        crate::tech_dbg!("api_resolution", "an intercepted call was routed to the syscall layer");
-        crate::nt_read_vm(process, base, buffer, size, read)
-    }
-"#;
-
 const WRAPPER_READ_PROCESS_MEMORY: &str = r#"    /// $COMMENT$: the Win32 wrapper re-implemented on NtReadVirtualMemory
     /// (NTSTATUS -> BOOL, `GetLastError` preserved, partial count kept).
     extern "system" fn $ID$(
@@ -521,18 +572,6 @@ const WRAPPER_READ_PROCESS_MEMORY: &str = r#"    /// $COMMENT$: the Win32 wrappe
             ));
         }
         0
-    }
-"#;
-
-const DIRECT_NT_OPEN_PROCESS: &str = r#"    /// $COMMENT$: routed through the syscall layer.
-    extern "system" fn $ID$(
-        handle: *mut core::ffi::c_void,
-        access: u32,
-        attributes: *const core::ffi::c_void,
-        client_id: *const core::ffi::c_void,
-    ) -> i32 {
-        crate::tech_dbg!("api_resolution", "an intercepted call was routed to the syscall layer");
-        crate::nt_open_process(handle, access, attributes, client_id)
     }
 "#;
 
@@ -732,18 +771,78 @@ mod tests {
     }
 
     #[test]
-    fn apis_all_selects_the_whole_catalogue() {
+    fn apis_all_selects_the_catalogue_and_every_direct_nt_route() {
         // Bare scalar form.
         let config =
             ApiResolutionConfig::from_yaml(Some(&yaml("mode: proxy\napis: all\n"))).expect("valid");
-        assert_eq!(config.apis.len(), CATALOGUE.len());
-        assert!(config.apis.iter().any(|e| e.func == "GetProcAddress"));
+        for entry in CATALOGUE {
+            assert!(
+                config.apis.iter().any(|e| e == entry),
+                "missing {}",
+                entry.selector()
+            );
+        }
+        for name in crate::engine::syscalls::nt_proxy_names() {
+            assert!(
+                config
+                    .apis
+                    .iter()
+                    .any(|e| e.dll == "ntdll" && e.func == name),
+                "missing ntdll!{name}"
+            );
+        }
+        // Deduplicated: the two Nt* the catalogue already lists appear once.
+        let mut expected: Vec<String> = CATALOGUE.iter().map(ApiEntry::selector).collect();
+        for name in crate::engine::syscalls::nt_proxy_names() {
+            let selector = format!("ntdll!{name}");
+            if !expected.contains(&selector) {
+                expected.push(selector);
+            }
+        }
+        assert_eq!(config.apis.len(), expected.len());
         assert!(!config.is_noop());
 
         // List form is equivalent.
         let config = ApiResolutionConfig::from_yaml(Some(&yaml("mode: proxy\napis:\n  - all\n")))
             .expect("valid");
-        assert_eq!(config.apis.len(), CATALOGUE.len());
+        assert_eq!(config.apis.len(), expected.len());
+    }
+
+    /// `ntdll:*` selects every direct `Nt*` route the syscall layer can serve,
+    /// and only those (the helper-backed ones).
+    #[test]
+    fn ntdll_wildcard_selects_every_direct_route() {
+        let direct = crate::engine::syscalls::nt_proxy_names();
+        let config =
+            ApiResolutionConfig::from_yaml(Some(&yaml("mode: proxy\napis: \"ntdll:*\"\n")))
+                .expect("valid");
+        assert_eq!(config.apis.len(), direct.len());
+        assert!(config
+            .apis
+            .iter()
+            .all(|e| e.dll == "ntdll" && e.strategy == Strategy::RouteToNt));
+        assert!(config.apis.iter().any(|e| e.func == "NtClose"));
+        // Every syscall-layer function is offered now, the convenience-backed
+        // ones included.
+        assert!(config.apis.iter().any(|e| e.func == "NtCreateThreadEx"));
+        assert!(config
+            .apis
+            .iter()
+            .any(|e| e.func == "NtWaitForSingleObject"));
+        // Every selected route pulls its syscall helper.
+        assert_eq!(config.required_syscalls().len(), direct.len());
+    }
+
+    /// A direct `ntdll!Nt*` route renders a generated `extern "system"` proxy
+    /// that forwards to the syscall-layer helper.
+    #[test]
+    fn a_direct_nt_route_renders_a_generated_proxy() {
+        let config = proxy_config(&["ntdll!NtClose"]);
+        let block = render_block(&config, &xor_strings());
+        assert!(block.contains("extern \"system\" fn proxy_0"), "{block}");
+        assert!(block.contains("crate::nt_close(handle)"), "{block}");
+        assert!(block.contains("routed to the syscall layer"), "{block}");
+        assert!(!block.contains('$'), "leftover placeholder: {block}");
     }
 
     #[test]

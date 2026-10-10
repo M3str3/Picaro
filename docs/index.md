@@ -1,11 +1,11 @@
 ---
 title: Picaro
-description: Declarative PE packer for authorized red team research
+description: Declarative evasion for Windows payloads
 template: splash
 hero:
-  tagline: A declarative PE packer for authorized red team research — a PE, a DLL or raw shellcode plus a YAML plan becomes a packed binary with the evasion techniques you select.
+  tagline: Declarative evasion for Windows payloads — a PE, a DLL or raw shellcode plus a YAML plan becomes a packed binary with the evasion techniques you select.
   image:
-    file: ../../assets/picaro_logo.png
+    file: ../../assets/full-logo-512.webp
     alt: Picaro logo
   actions:
     - text: Get started

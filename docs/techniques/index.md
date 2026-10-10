@@ -1,5 +1,9 @@
 # Techniques overview
 
+<p align="center">
+  <img src="/jester-emblem-512.webp" alt="Picaro emblem: two stacked joker cards" height="130" />
+</p>
+
 A runtime is a list of technique steps applied in order. Techniques are split
 into three categories (`TechniqueDef.category`):
 

@@ -62,6 +62,17 @@ loader image, which is not mapped in the target.
 - `Strategy::Forward` (call the original, resolved dynamically) exists in the
   catalogue vocabulary but no shipped entry uses it today; it is reserved for
   "thick" APIs that cannot be re-implemented on a syscall.
+- The catalogue has two layers: hand-written Win32 entries (the wrappers, the
+  rebuild and the `GetProcAddress` handler) and **generated direct `ntdll!Nt*`
+  routes**. Every syscall-layer function gets a proxy for free; `apis: ntdll:*`
+  selects all of them, and `apis: all` selects the catalogue plus every direct
+  route. Where the technique helper is a lossy convenience wrapper
+  (`NtCreateThreadEx`, `NtWaitForSingleObject`), the proxy uses a
+  native-signature variant of the helper.
+- Reentrancy, a multi-page IAT and `OpenProcess` equality with the real export
+  are covered by runtime tests under
+  `src/techniques/reflective_loading/tests.rs` (see the design doc's
+  limitations for what is still open, e.g. CFG enforcement).
 
 ## References
 

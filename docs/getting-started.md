@@ -1,5 +1,9 @@
 # Getting started
 
+<p align="center">
+  <img src="/card-back-512.webp" alt="Picaro joker card back" style="width:100px" />
+</p>
+
 This is the whole loop: generate a payload, write the YAML, pack it, run it and
 measure the result.
 

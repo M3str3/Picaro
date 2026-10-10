@@ -2,7 +2,7 @@
 name = "picaro"
 version = "0.1.0"
 edition = "2021"
-description = "Declarative PE packer for authorized red team research"
+description = "Declarative evasion for Windows payloads"
 license = "MIT"
 
 [dependencies]

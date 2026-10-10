@@ -126,6 +126,18 @@ path to LSASS. `NtQuerySystemInformation` is deliberately **not** included yet:
 its semantics vary per information class, each with its own struct — a rabbit hole
 until needed.
 
+The catalogue has two layers. The **hand-written** entries below carry per-API
+semantics (a wrapper, a rebuild, a handler) and are added by hand. The
+**direct `ntdll!Nt*` routes** are *generated*: every syscall-layer function gets
+a proxy for free, emitted from signature metadata (`NtProxyInfo` in
+`src/engine/syscalls/mod.rs`) as an `extern "system"` wrapper that forwards to
+the `nt_*` helper. `apis: ntdll:*` selects all of them. Where the technique
+helper is a lossy convenience wrapper — `NtCreateThreadEx` (a 5-argument helper
+over the 11-argument export) and `NtWaitForSingleObject` (milliseconds vs a
+`LARGE_INTEGER`) — the proxy calls a native-signature variant
+(`nt_create_thread_ex_native` / `nt_wait_for_single_object_native`), rendered and
+re-exported only in `mode: indirect`.
+
 Every entry names its **strategy** (phase 2, section 5). A catalogue entry is always
 *proxied*; the strategy says what the proxy does. `unmatched` (section 3) governs
 imports that are *not* in the catalogue.
@@ -320,6 +332,12 @@ both execution techniques resolve imports, so the resolver is always emitted.
   asm. Until then `mode: proxy` with `process_hollowing` is a validation error
   (D-23), so it fails loudly instead of silently not proxying.
 - [ ] **Phase F (parked) — `LdrGetProcedureAddress` handler; remote channel.**
+- [x] **Phase G — generated direct `ntdll!Nt*` proxies.** *Implemented
+  2026-10-10:* `NtProxyInfo` signature metadata in the syscall layer, a generated
+  `extern "system"` wrapper per function, and the `ntdll:*` selector
+  (`apis: all` now includes them). `NtCreateThreadEx` and
+  `NtWaitForSingleObject` are backed by native-signature helper variants, so all
+  17 functions are proxeable.
 
 ---
 
@@ -340,9 +358,11 @@ Declared, not hidden:
 - **A payload that writes its own IAT at runtime** (lazy binding / hot-patching)
   would need the IAT page left writable; we restore the original (read-only)
   protection. Such a payload can break. None of the repo payloads do this.
-- **A genuinely multi-page IAT was not covered.** No repo payload has one (the
-  largest is 78 imports / 688 B / one page); the case was covered synthetically.
-  The implementation must protect/restore the **whole** slot range, not one page.
+- **A genuinely multi-page IAT is covered.**
+  `api_resolution_handles_a_multi_page_iat` generates a probe that imports more
+  than 512 `kernel32` exports, so its IAT spans more than one page; the artifact
+  loads and runs. The implementation protects and restores the **whole** slot
+  range, page by page.
 - **`process_hollowing` is out of the first cut** (Phase E).
 - **Out-of-scope payloads** (section 2): own syscalls, manual `PEB`→`Ldr` walk with
   a direct call, raw syscalls, patched `.text`.
@@ -351,8 +371,13 @@ Declared, not hidden:
   in-memory IAT; you introduce a non-module pointer there.
 - **Win32↔Nt\* fidelity** (section 5) — `ReadProcessMemory`'s error/partial-copy
   semantics; `OpenProcess` is a rebuild, not a wrapper.
-- **Concurrency / reentrancy** of the proxies is untested; the payload may call
-  from many threads.
+- **Concurrency / reentrancy is covered.**
+  `api_resolution_proxies_are_reentrant` runs eight raw OS threads that route
+  `ReadProcessMemory`, rebuild `OpenProcess` and resolve through the
+  `GetProcAddress` handler at once; all see the right bytes. (`std::thread` is
+  deliberately avoided: the mapped image shares a TLS index with a loaded
+  module — a `reflective_loading` limitation — and `std`'s thread machinery
+  trips over it, so the probe uses `CreateThread`.)
 - **`process_hollowing` is not supported (Phase E).** The proxies live in the
   loader image, which is not mapped in the target; the payload's IAT there can only
   point at the real exports. `mode: proxy` with `process_hollowing` is a validation
@@ -366,8 +391,14 @@ Declared, not hidden:
   access masks, so the mask passes through unchanged, and `bInheritHandle` maps to
   `OBJ_INHERIT`; the returned handle is verified usable with `ReadProcessMemory`.
   `PROCESS_ALL_ACCESS` keeps its Win32 value (`0x1F0FFF`, a subset of the NT
-  mask), so the granted rights match what `OpenProcess` would request. No diverging
-  case has been observed; this entry remains the highest-risk one.
+  mask), so the granted rights match what `OpenProcess` would request. A
+  differential test
+  (`api_resolution_openprocess_matches_error_semantics`) compares the rebuild
+  against the real export (resolved from `kernelbase.dll`, outside the catalogue)
+  for a zero access mask, a bogus pid, a valid pid and the `inherit` flag — they
+  agree. On current Windows a zero access mask yields `ERROR_ACCESS_DENIED` (5),
+  not the `ERROR_INVALID_PARAMETER` (87) the docs suggest; the export and the
+  rebuild match.
 - **`audit` is static** and cannot see the payload's in-memory IAT (the payload is
   encrypted on disk); the check targets the **stub** and exempts the
   `GetProcAddress` handler (D-22).

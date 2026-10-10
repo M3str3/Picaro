@@ -171,6 +171,43 @@ struct NtFunction {
     helper_none: &'static str,
     /// Helper body for `mode: indirect` (syscall through the gadget).
     helper_indirect: &'static str,
+    /// Native signature for a generated direct `ntdll!Nt*` proxy, when the
+    /// helper can back one (see [`NtProxyInfo`]).
+    proxy: Option<NtProxyInfo>,
+}
+
+/// Native signature for a generated direct `ntdll!Nt*` proxy.
+///
+/// Present only when the helper's parameters are a faithful match for the
+/// export (or reachable with a small forwarding expression). A helper that is a
+/// lossy convenience wrapper over the native call — one that takes milliseconds
+/// where the export takes a `LARGE_INTEGER`, or drops part of the native
+/// argument list — cannot back a direct proxy and carries `proxy: None`.
+#[derive(Clone, Copy)]
+pub(crate) struct NtProxyInfo {
+    /// The generated helper the proxy calls.
+    pub(crate) helper_name: &'static str,
+    /// Native `(name, type)` parameters for the `extern "system"` wrapper.
+    pub(crate) params: &'static [(&'static str, &'static str)],
+    /// Argument expressions forwarded to the helper.
+    pub(crate) forward: &'static str,
+}
+
+/// The direct-proxy signature for `name`, if the helper can back one.
+pub(crate) fn nt_proxy_info(name: &str) -> Option<NtProxyInfo> {
+    NT_FUNCTIONS
+        .iter()
+        .find(|f| f.name == name)
+        .and_then(|f| f.proxy)
+}
+
+/// The `Nt*` names a generated direct proxy can be emitted for.
+pub(crate) fn nt_proxy_names() -> Vec<&'static str> {
+    NT_FUNCTIONS
+        .iter()
+        .filter(|f| f.proxy.is_some())
+        .map(|f| f.name)
+        .collect()
 }
 
 // --- Generated helper bodies -------------------------------------------------
@@ -1188,6 +1225,121 @@ const SET_INFO_FILE_INDIRECT: &str = r#"    /// NtSetInformationFile(FileHandle,
     }
 "#;
 
+/// `HANDLE` (full path) as spelled in a generated proxy parameter.
+const P_HANDLE: &str = "windows::Win32::Foundation::HANDLE";
+/// `void*` as spelled in a generated proxy parameter.
+const P_PVOID: &str = "*mut core::ffi::c_void";
+/// `const void*` as spelled in a generated proxy parameter.
+const P_CVOID: &str = "*const core::ffi::c_void";
+
+/// `NtCreateThreadEx` with its native eleven-argument list, rendered only for a
+/// generated direct proxy. The technique helper (`nt_create_thread_ex`) is a
+/// five-argument convenience, so it cannot back the proxy itself.
+const CREATE_THREAD_EX_NATIVE_INDIRECT: &str = r#"    /// NtCreateThreadEx(&ThreadHandle, DesiredAccess, &ObjectAttributes,
+    /// ProcessHandle, StartRoutine, Argument, CreateFlags, ZeroBits, StackSize,
+    /// MaximumStackSize, &AttributeList). The native argument list, for the
+    /// generated direct proxy.
+    #[allow(clippy::too_many_arguments)]
+    pub fn nt_create_thread_ex_native(
+        thread: *mut HANDLE,
+        desired_access: u32,
+        object_attributes: *const core::ffi::c_void,
+        process: HANDLE,
+        start: *mut core::ffi::c_void,
+        argument: *mut core::ffi::c_void,
+        create_flags: u32,
+        zero_bits: usize,
+        stack_size: usize,
+        maximum_stack_size: usize,
+        attribute_list: *const core::ffi::c_void,
+    ) -> i32 {
+        let Some(ssns) = SSNS.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        let Some(gadget) = GADGET.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        unsafe {
+            nt_invoke(
+                thread as usize,
+                desired_access as usize,
+                object_attributes as usize,
+                process.0 as usize,
+                start as usize,
+                argument as usize,
+                create_flags as usize,
+                zero_bits,
+                stack_size,
+                maximum_stack_size,
+                attribute_list as usize,
+                ssns.create_thread_ex,
+                *gadget,
+            )
+        }
+    }
+"#;
+
+/// `NtWaitForSingleObject` with its native argument list, rendered only for a
+/// generated direct proxy. The technique helper takes milliseconds, so it
+/// cannot back the proxy itself.
+const WAIT_FOR_SINGLE_OBJECT_NATIVE_INDIRECT: &str = r#"    /// NtWaitForSingleObject(Handle, Alertable, &Timeout). The native argument
+    /// list, for the generated direct proxy.
+    pub fn nt_wait_for_single_object_native(
+        handle: HANDLE,
+        alertable: u8,
+        timeout: *const i64,
+    ) -> i32 {
+        let Some(ssns) = SSNS.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        let Some(gadget) = GADGET.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        unsafe {
+            nt_invoke(
+                handle.0 as usize,
+                alertable as usize,
+                timeout as usize,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                ssns.wait_for_single_object,
+                *gadget,
+            )
+        }
+    }
+"#;
+
+/// Native-signature helpers that back a direct proxy for the few functions
+/// whose technique helper is a lossy convenience wrapper: `(Nt* name, helper
+/// name, indirect body)`. Rendered and re-exported only in `mode: indirect`,
+/// where proxies exist.
+const NATIVE_PROXY_HELPERS: &[(&str, &str, &str)] = &[
+    (
+        "NtCreateThreadEx",
+        "nt_create_thread_ex_native",
+        CREATE_THREAD_EX_NATIVE_INDIRECT,
+    ),
+    (
+        "NtWaitForSingleObject",
+        "nt_wait_for_single_object_native",
+        WAIT_FOR_SINGLE_OBJECT_NATIVE_INDIRECT,
+    ),
+];
+
+/// The native proxy helper `(helper_name, body)` for a function, if any.
+fn native_proxy_helper(function: &str) -> Option<(&'static str, &'static str)> {
+    NATIVE_PROXY_HELPERS
+        .iter()
+        .find(|(name, _, _)| *name == function)
+        .map(|(_, helper, body)| (*helper, *body))
+}
+
 const NT_FUNCTIONS: &[NtFunction] = &[
     NtFunction {
         name: "NtAllocateVirtualMemory",
@@ -1195,6 +1347,18 @@ const NT_FUNCTIONS: &[NtFunction] = &[
         helper_name: "nt_alloc_vm",
         helper_none: ALLOC_VM_NONE,
         helper_indirect: ALLOC_VM_INDIRECT,
+        proxy: Some(NtProxyInfo {
+            helper_name: "nt_alloc_vm",
+            params: &[
+                ("process", P_HANDLE),
+                ("base", "*mut *mut core::ffi::c_void"),
+                ("zero_bits", "usize"),
+                ("size", "*mut usize"),
+                ("alloc_type", "u32"),
+                ("protect", "u32"),
+            ],
+            forward: "process, base, zero_bits, size, alloc_type, protect",
+        }),
     },
     NtFunction {
         name: "NtWriteVirtualMemory",
@@ -1202,6 +1366,17 @@ const NT_FUNCTIONS: &[NtFunction] = &[
         helper_name: "nt_write_vm",
         helper_none: WRITE_VM_NONE,
         helper_indirect: WRITE_VM_INDIRECT,
+        proxy: Some(NtProxyInfo {
+            helper_name: "nt_write_vm",
+            params: &[
+                ("process", P_HANDLE),
+                ("base", P_CVOID),
+                ("buffer", P_CVOID),
+                ("size", "usize"),
+                ("written", "*mut usize"),
+            ],
+            forward: "process, base, buffer, size, written",
+        }),
     },
     NtFunction {
         name: "NtReadVirtualMemory",
@@ -1209,6 +1384,17 @@ const NT_FUNCTIONS: &[NtFunction] = &[
         helper_name: "nt_read_vm",
         helper_none: READ_VM_NONE,
         helper_indirect: READ_VM_INDIRECT,
+        proxy: Some(NtProxyInfo {
+            helper_name: "nt_read_vm",
+            params: &[
+                ("process", P_HANDLE),
+                ("base", P_CVOID),
+                ("buffer", P_PVOID),
+                ("size", "usize"),
+                ("read", "*mut usize"),
+            ],
+            forward: "process, base, buffer, size, read",
+        }),
     },
     NtFunction {
         name: "NtResumeThread",
@@ -1216,6 +1402,11 @@ const NT_FUNCTIONS: &[NtFunction] = &[
         helper_name: "nt_resume_thread",
         helper_none: RESUME_THREAD_NONE,
         helper_indirect: RESUME_THREAD_INDIRECT,
+        proxy: Some(NtProxyInfo {
+            helper_name: "nt_resume_thread",
+            params: &[("thread", P_HANDLE), ("previous", "*mut u32")],
+            forward: "thread, previous",
+        }),
     },
     NtFunction {
         name: "NtUnmapViewOfSection",
@@ -1223,6 +1414,11 @@ const NT_FUNCTIONS: &[NtFunction] = &[
         helper_name: "nt_unmap_view",
         helper_none: UNMAP_VIEW_NONE,
         helper_indirect: UNMAP_VIEW_INDIRECT,
+        proxy: Some(NtProxyInfo {
+            helper_name: "nt_unmap_view",
+            params: &[("process", P_HANDLE), ("base", P_PVOID)],
+            forward: "process, base",
+        }),
     },
     NtFunction {
         name: "NtProtectVirtualMemory",
@@ -1230,6 +1426,17 @@ const NT_FUNCTIONS: &[NtFunction] = &[
         helper_name: "nt_protect_vm",
         helper_none: PROTECT_VM_NONE,
         helper_indirect: PROTECT_VM_INDIRECT,
+        proxy: Some(NtProxyInfo {
+            helper_name: "nt_protect_vm",
+            params: &[
+                ("process", P_HANDLE),
+                ("base", "*mut *mut core::ffi::c_void"),
+                ("size", "*mut usize"),
+                ("new_protect", "u32"),
+                ("old_protect", "*mut u32"),
+            ],
+            forward: "process, unsafe { *base }, unsafe { *size }, new_protect, old_protect",
+        }),
     },
     NtFunction {
         name: "NtSuspendThread",
@@ -1237,6 +1444,11 @@ const NT_FUNCTIONS: &[NtFunction] = &[
         helper_name: "nt_suspend_thread",
         helper_none: SUSPEND_THREAD_NONE,
         helper_indirect: SUSPEND_THREAD_INDIRECT,
+        proxy: Some(NtProxyInfo {
+            helper_name: "nt_suspend_thread",
+            params: &[("thread", P_HANDLE), ("previous", "*mut u32")],
+            forward: "thread, previous",
+        }),
     },
     NtFunction {
         name: "NtQueryInformationProcess",
@@ -1244,6 +1456,17 @@ const NT_FUNCTIONS: &[NtFunction] = &[
         helper_name: "nt_query_info_process",
         helper_none: QUERY_INFO_PROCESS_NONE,
         helper_indirect: QUERY_INFO_PROCESS_INDIRECT,
+        proxy: Some(NtProxyInfo {
+            helper_name: "nt_query_info_process",
+            params: &[
+                ("process", P_HANDLE),
+                ("info_class", "i32"),
+                ("info", P_PVOID),
+                ("info_len", "u32"),
+                ("return_len", "*mut u32"),
+            ],
+            forward: "process, info_class, info, info_len, return_len",
+        }),
     },
     NtFunction {
         name: "NtGetContextThread",
@@ -1251,6 +1474,11 @@ const NT_FUNCTIONS: &[NtFunction] = &[
         helper_name: "nt_get_context_thread",
         helper_none: GET_CONTEXT_THREAD_NONE,
         helper_indirect: GET_CONTEXT_THREAD_INDIRECT,
+        proxy: Some(NtProxyInfo {
+            helper_name: "nt_get_context_thread",
+            params: &[("thread", P_HANDLE), ("context", P_PVOID)],
+            forward: "thread, context",
+        }),
     },
     NtFunction {
         name: "NtSetContextThread",
@@ -1258,6 +1486,11 @@ const NT_FUNCTIONS: &[NtFunction] = &[
         helper_name: "nt_set_context_thread",
         helper_none: SET_CONTEXT_THREAD_NONE,
         helper_indirect: SET_CONTEXT_THREAD_INDIRECT,
+        proxy: Some(NtProxyInfo {
+            helper_name: "nt_set_context_thread",
+            params: &[("thread", P_HANDLE), ("context", P_PVOID)],
+            forward: "thread, context",
+        }),
     },
     NtFunction {
         name: "NtCreateThreadEx",
@@ -1265,6 +1498,23 @@ const NT_FUNCTIONS: &[NtFunction] = &[
         helper_name: "nt_create_thread_ex",
         helper_none: CREATE_THREAD_EX_NONE,
         helper_indirect: CREATE_THREAD_EX_INDIRECT,
+        proxy: Some(NtProxyInfo {
+            helper_name: "nt_create_thread_ex_native",
+            params: &[
+                ("thread", "*mut windows::Win32::Foundation::HANDLE"),
+                ("desired_access", "u32"),
+                ("object_attributes", P_CVOID),
+                ("process", P_HANDLE),
+                ("start", P_PVOID),
+                ("argument", P_PVOID),
+                ("create_flags", "u32"),
+                ("zero_bits", "usize"),
+                ("stack_size", "usize"),
+                ("maximum_stack_size", "usize"),
+                ("attribute_list", P_CVOID),
+            ],
+            forward: "thread, desired_access, object_attributes, process, start, argument, create_flags, zero_bits, stack_size, maximum_stack_size, attribute_list",
+        }),
     },
     NtFunction {
         name: "NtWaitForSingleObject",
@@ -1272,6 +1522,15 @@ const NT_FUNCTIONS: &[NtFunction] = &[
         helper_name: "nt_wait_for_single_object",
         helper_none: WAIT_FOR_SINGLE_OBJECT_NONE,
         helper_indirect: WAIT_FOR_SINGLE_OBJECT_INDIRECT,
+        proxy: Some(NtProxyInfo {
+            helper_name: "nt_wait_for_single_object_native",
+            params: &[
+                ("handle", P_HANDLE),
+                ("alertable", "u8"),
+                ("timeout", "*const i64"),
+            ],
+            forward: "handle, alertable, timeout",
+        }),
     },
     NtFunction {
         name: "NtQueryInformationThread",
@@ -1279,6 +1538,17 @@ const NT_FUNCTIONS: &[NtFunction] = &[
         helper_name: "nt_query_info_thread",
         helper_none: QUERY_INFO_THREAD_NONE,
         helper_indirect: QUERY_INFO_THREAD_INDIRECT,
+        proxy: Some(NtProxyInfo {
+            helper_name: "nt_query_info_thread",
+            params: &[
+                ("thread", P_HANDLE),
+                ("info_class", "i32"),
+                ("info", P_PVOID),
+                ("info_len", "u32"),
+                ("return_len", "*mut u32"),
+            ],
+            forward: "thread, info_class, info, info_len, return_len",
+        }),
     },
     NtFunction {
         name: "NtClose",
@@ -1286,6 +1556,11 @@ const NT_FUNCTIONS: &[NtFunction] = &[
         helper_name: "nt_close",
         helper_none: CLOSE_NONE,
         helper_indirect: CLOSE_INDIRECT,
+        proxy: Some(NtProxyInfo {
+            helper_name: "nt_close",
+            params: &[("handle", P_HANDLE)],
+            forward: "handle",
+        }),
     },
     NtFunction {
         name: "NtOpenProcess",
@@ -1293,6 +1568,16 @@ const NT_FUNCTIONS: &[NtFunction] = &[
         helper_name: "nt_open_process",
         helper_none: OPEN_PROCESS_NONE,
         helper_indirect: OPEN_PROCESS_INDIRECT,
+        proxy: Some(NtProxyInfo {
+            helper_name: "nt_open_process",
+            params: &[
+                ("handle", P_PVOID),
+                ("access", "u32"),
+                ("attributes", P_CVOID),
+                ("client_id", P_CVOID),
+            ],
+            forward: "handle, access, attributes, client_id",
+        }),
     },
     NtFunction {
         name: "NtQueueApcThread",
@@ -1300,6 +1585,17 @@ const NT_FUNCTIONS: &[NtFunction] = &[
         helper_name: "nt_queue_apc",
         helper_none: QUEUE_APC_NONE,
         helper_indirect: QUEUE_APC_INDIRECT,
+        proxy: Some(NtProxyInfo {
+            helper_name: "nt_queue_apc",
+            params: &[
+                ("thread", P_HANDLE),
+                ("routine", P_CVOID),
+                ("argument1", P_PVOID),
+                ("argument2", P_PVOID),
+                ("argument3", P_PVOID),
+            ],
+            forward: "thread, routine, argument1, argument2, argument3",
+        }),
     },
     NtFunction {
         name: "NtSetInformationFile",
@@ -1307,6 +1603,17 @@ const NT_FUNCTIONS: &[NtFunction] = &[
         helper_name: "nt_set_info_file",
         helper_none: SET_INFO_FILE_NONE,
         helper_indirect: SET_INFO_FILE_INDIRECT,
+        proxy: Some(NtProxyInfo {
+            helper_name: "nt_set_info_file",
+            params: &[
+                ("file", P_HANDLE),
+                ("io_status", P_PVOID),
+                ("info", P_CVOID),
+                ("length", "u32"),
+                ("class", "i32"),
+            ],
+            forward: "file, io_status, info, length, class",
+        }),
     },
 ];
 
@@ -1396,9 +1703,18 @@ pub fn render_block_with(
         }
     };
 
-    let reexports: Vec<&str> = std::iter::once("init_syscalls")
+    let mut reexports: Vec<&str> = std::iter::once("init_syscalls")
         .chain(required.iter().map(|f| f.helper_name))
         .collect();
+    // The native-signature helpers (indirect only) are re-exported so the
+    // generated direct proxies can call them.
+    if matches!(plan.mode, SyscallsMode::Indirect) {
+        for f in &required {
+            if let Some((helper, _)) = native_proxy_helper(f.name) {
+                reexports.push(helper);
+            }
+        }
+    }
     assemble(&header, &body, &reexports)
 }
 
@@ -1499,6 +1815,10 @@ fn render_indirect(
 
         helpers.push_str(f.helper_indirect);
         helpers.push('\n');
+        if let Some((_, body)) = native_proxy_helper(f.name) {
+            helpers.push_str(body);
+            helpers.push('\n');
+        }
     }
 
     // `stack_spoofing` replaces the raw trampoline with its own `nt_invoke`,
@@ -2189,6 +2509,56 @@ mod tests {
         assert!(
             block.contains("std::hint::black_box"),
             "stack stores missing"
+        );
+    }
+
+    /// The direct-proxy metadata: a faithful helper is offered, and the two
+    /// convenience helpers are backed by native-signature variants.
+    #[test]
+    fn direct_proxy_metadata_covers_every_function() {
+        let info = nt_proxy_info("NtReadVirtualMemory").expect("NtReadVirtualMemory is direct");
+        assert_eq!(info.helper_name, "nt_read_vm");
+        assert_eq!(info.forward, "process, base, buffer, size, read");
+        // The in-out deviation of NtProtectVirtualMemory is handled by the
+        // forwarding expression.
+        let protect = nt_proxy_info("NtProtectVirtualMemory").expect("NtProtectVirtualMemory");
+        assert!(protect.forward.contains("*base"));
+
+        // The two convenience helpers are backed by native-signature variants.
+        let create = nt_proxy_info("NtCreateThreadEx").expect("NtCreateThreadEx");
+        assert_eq!(create.helper_name, "nt_create_thread_ex_native");
+        assert_eq!(create.params.len(), 11);
+        let wait = nt_proxy_info("NtWaitForSingleObject").expect("NtWaitForSingleObject");
+        assert_eq!(wait.helper_name, "nt_wait_for_single_object_native");
+
+        // Every function is proxeable now.
+        assert_eq!(nt_proxy_names().len(), NT_FUNCTIONS.len());
+    }
+
+    /// A native-signature proxy helper is rendered (and re-exported) in indirect
+    /// mode, next to the convenience helper the techniques still use.
+    #[test]
+    fn a_native_proxy_helper_is_rendered_and_reexported() {
+        let block = render_block_with(
+            &indirect(),
+            &[],
+            &xor_config(),
+            &["NtCreateThreadEx"],
+            TEST_SEED,
+        );
+        assert!(
+            block.contains("pub fn nt_create_thread_ex_native"),
+            "{block}"
+        );
+        assert!(
+            block.contains("pub fn nt_create_thread_ex("),
+            "the convenience helper must stay"
+        );
+        // Re-exported so the generated proxy can call it through `crate::`.
+        assert!(
+            block.contains("nt_create_thread_ex_native,")
+                || block.contains("nt_create_thread_ex_native}"),
+            "native helper not re-exported: {block}"
         );
     }
 }

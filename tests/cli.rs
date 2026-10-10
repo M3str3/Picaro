@@ -115,7 +115,7 @@ fn banner_is_printed_by_default() {
     assert!(output.status.success(), "list must exit 0");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("The plan is the program"),
+        stdout.contains("Declarative evasion for Windows payloads"),
         "banner missing: {stdout}"
     );
 }
@@ -131,7 +131,7 @@ fn quiet_flag_hides_the_banner() {
     assert!(output.status.success(), "list must exit 0");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        !stdout.contains("mimicry-based packer"),
+        !stdout.contains("Declarative evasion for Windows payloads"),
         "banner not suppressed: {stdout}"
     );
     assert!(

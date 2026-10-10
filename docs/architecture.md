@@ -1,5 +1,9 @@
 # Architecture
 
+<p align="center">
+  <img src="/card-tilted-256.webp" alt="Picaro joker card, tilted" height="130" />
+</p>
+
 ## What this project is
 
 A malware loader packer for authorized red team engagements and security
@@ -86,11 +90,23 @@ the payload's imports*. With `mode: proxy`, `patch_imports` rewrites the
 payload's IAT so the selected calls land on proxies generated in the loader, and
 the intercepted names never enter the loader's own import table
 (`verify_no_intercepted_imports` fails the build if one does). The catalogue
-(`src/engine/api_resolution.rs`) is deliberately small:
-`ntdll!NtReadVirtualMemory`, `ntdll!NtOpenProcess`, `kernel32!ReadProcessMemory`
-and `kernel32!OpenProcess` are re-implemented on the `Nt*` calls through the
-syscall layer, and `kernel32!GetProcAddress` is a handler that answers catalogue
-hits with the matching proxy (ordinals and misses fall through to the original).
+(`src/engine/api_resolution.rs`) has two layers:
+
+- **Direct `ntdll!Nt*` routes** — a proxy is generated for every syscall-layer
+  function, and `apis: ntdll:*` selects them all (all 17). The proxy is an
+  `extern "system"` wrapper with the export's native signature that forwards to
+  the `nt_*` helper, so it needs no per-API code. Where the technique helper is a
+  lossy convenience wrapper (`NtCreateThreadEx`, `NtWaitForSingleObject`), the
+  proxy calls a native-signature variant of the helper instead.
+- **Hand-written Win32 entries** — `kernel32!ReadProcessMemory` and
+  `kernel32!OpenProcess` are rebuilt on the `Nt*` calls through the syscall layer
+  (a wrapper and a rebuild, with `NTSTATUS`→`BOOL`/`GetLastError` and
+  `OBJECT_ATTRIBUTES` translation), and `kernel32!GetProcAddress` is a handler
+  that answers catalogue hits with the matching proxy (ordinals and misses fall
+  through to the original). These carry per-API semantics and are added by hand.
+
+`apis: all` selects the whole catalogue plus every direct route; individual
+`dll!function` selectors still work.
 
 Two couplings, both hard validation errors: `mode: proxy` needs
 `syscalls.mode: indirect` (otherwise the re-routed calls fall back to the Win32

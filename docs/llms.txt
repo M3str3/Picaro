@@ -1,8 +1,8 @@
 # Picaro
 
-> Picaro is a declarative PE packer for authorized red team research. It takes
-> a PE (or DLL / shellcode) and a YAML plan and emits a packed PE with the
-> selected evasion techniques baked into a generated Rust stub.
+> Picaro brings declarative evasion to Windows payloads. It takes a PE (or DLL /
+> shellcode) and a YAML plan and emits a packed PE with the selected evasion
+> techniques baked into a generated Rust stub.
 
 ## Getting started
 

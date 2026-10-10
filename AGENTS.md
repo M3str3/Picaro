@@ -240,7 +240,8 @@ terminal, plus `NO_COLOR`/`--no-color`). Legibility rules: primary values use
 the terminal's default foreground (a fixed light gray vanishes on a light
 `theme), and the secondary slate tone is bright enough to read on dark. The
 banner (the `BANNER` literal in `src/ui.rs`) is printed before every subcommand,
-followed by the dim tagline (`mimicry-based packer · vX.Y.Z`); `-q`/`--quiet`
+followed by the dim tagline (`Declarative evasion for Windows payloads ·
+vX.Y.Z`); `-q`/`--quiet`
 skips it. `build` and `audit` open with a
 `▸ picaro <cmd> · <target>` echo; `build` logs `✓` steps with compact
 path/size detail and a green result line, while `-v`/`--verbose` adds a
@@ -272,7 +273,20 @@ rejected with `process_hollowing` (the proxies live in the loader image, which i
 not mapped in the target — Phase E, D-23). The generated `resolution_policy`
 returns `crate::ImportPolicy` (`Proxy(u64) | Forward | Abort`); `unmatched: abort`
 makes `resolve_imports` fail the load on the first non-catalogue import (with an
-advisory printed at build time). Design, phases and decision log:
+advisory printed at build time). The catalogue has two layers: hand-written
+Win32 entries (the wrappers, the rebuild, the handler) and generated direct
+`ntdll!Nt*` routes — a proxy is emitted for every syscall-layer function (all 17;
+`NtCreateThreadEx`/`NtWaitForSingleObject` use native-signature helper variants),
+selected with `apis: ntdll:*`, and `apis: all` now selects the catalogue plus
+every direct route. Coverage grew to three runtime
+properties: reentrancy (`api_resolution_proxies_are_reentrant`, eight raw
+`CreateThread` threads), a genuinely multi-page IAT
+(`api_resolution_handles_a_multi_page_iat`, a generated probe with >512
+`kernel32` imports), and `OpenProcess` equality with the real export
+(`api_resolution_openprocess_matches_error_semantics`, compared against
+`kernelbase.dll`'s export). Still `Experimental`: CFG enforcement is not
+reproduced in-host and Phase F (`LdrGetProcedureAddress`) is parked. Design,
+phases and decision log:
 `docs/design/api-resolution.md` (in the docs nav under Architecture).
 
 **`build.stub.debug` (done).** `true` compiles the stub without the hardening

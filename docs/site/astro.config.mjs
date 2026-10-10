@@ -15,10 +15,10 @@ export default defineConfig({
     starlight({
       title: 'Picaro',
       logo: {
-        src: './src/assets/picaro_logo.png',
+        src: './src/assets/full-logo-512.webp',
         replacesTitle: false,
       },
-      favicon: '/picaro_logo.png',
+      favicon: '/card-back.ico',
       social: [
         { icon: 'github', label: 'GitHub', href: 'https://github.com/M3str3/Picaro' },
       ],

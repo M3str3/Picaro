@@ -242,6 +242,21 @@ fn run_proxy_case(
     apis_yaml: &str,
     unmatched: &str,
 ) -> (std::process::ExitStatus, String, String) {
+    let probe_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("api_probe.rs");
+    run_proxy_case_with(name, &probe_src, apis_yaml, unmatched, &[])
+}
+
+/// The same, with a custom probe source and extra runtime arguments.
+fn run_proxy_case_with(
+    name: &str,
+    probe_src: &std::path::Path,
+    apis_yaml: &str,
+    unmatched: &str,
+    args: &[&str],
+) -> (std::process::ExitStatus, String, String) {
     use std::path::Path;
 
     let build_dir =
@@ -254,7 +269,7 @@ fn run_proxy_case(
     let rustc = crate::engine::compiler::find_rustc().unwrap();
     let probe_exe = build_dir.join("probe.exe");
     let status = Command::new(&rustc)
-        .arg(root.join("tests").join("fixtures").join("api_probe.rs"))
+        .arg(probe_src)
         .args(["-O", "-C", "strip=symbols", "-o"])
         .arg(&probe_exe)
         .status()
@@ -319,7 +334,7 @@ fn run_proxy_case(
     .unwrap();
 
     // 5. Run the artifact and capture both streams.
-    let output = Command::new(&out).output().unwrap();
+    let output = Command::new(&out).args(args).output().unwrap();
     let status = output.status;
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -453,4 +468,318 @@ fn api_resolution_aborts_on_unmatched() {
         !stdout.contains("API_PROBE"),
         "the payload ran despite unmatched: abort:\n{stdout}"
     );
+}
+
+/// `OpenProcess` rebuild fidelity: the rebuilt call must reproduce the real
+/// export's error semantics (a zero access mask and a bogus pid are refused
+/// with `ERROR_INVALID_PARAMETER`) and still honour the `inherit` flag.
+#[test]
+#[ignore = "requires rustc and the compiled dependencies"]
+fn api_resolution_openprocess_matches_error_semantics() {
+    let (_, stdout, stderr) =
+        run_proxy_case("openfidelity", "  - \"kernel32!OpenProcess\"\n", "forward");
+    assert!(
+        stderr.contains("routed to the syscall layer"),
+        "no route trace:\n{stderr}"
+    );
+    // The proxy's `OpenProcess` must match the real export case for case
+    // (null-or-not and the error code): a zero access mask, a bogus pid, a
+    // valid pid, and the `inherit` flag.
+    assert!(
+        stdout.contains("API_PROBE open_fidelity agree=4/4"),
+        "the proxy diverged from the real OpenProcess:\n{stdout}"
+    );
+    // `inherit != 0` maps to `OBJ_INHERIT`; the handle is still usable.
+    assert!(
+        !stdout.contains("inherit=0x0 rc="),
+        "the inherit flag broke OpenProcess:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("inherit=0x") && stdout.contains(" rc=1 read=8"),
+        "the inherited handle was not usable:\n{stdout}"
+    );
+}
+
+/// Reentrancy: the proxies must answer many concurrent callers correctly.
+///
+/// The probe spawns eight threads that each route `ReadProcessMemory`, rebuild
+/// `OpenProcess`, and resolve `ReadProcessMemory` dynamically through the
+/// `GetProcAddress` handler. All eight must see the right bytes on every path.
+#[test]
+#[ignore = "requires rustc and the compiled dependencies"]
+fn api_resolution_proxies_are_reentrant() {
+    let (status, stdout, stderr) = run_proxy_case_with(
+        "reentrant",
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("api_probe.rs"),
+        "  - \"kernel32!GetProcAddress\"\n  - \"kernel32!OpenProcess\"\n  - \"kernel32!ReadProcessMemory\"\n",
+        "forward",
+        &["--threads"],
+    );
+    assert!(status.success(), "the threaded probe failed:\n{stderr}");
+    assert!(
+        stdout.contains("API_PROBE threads=8 rpm=8 open=8 gpa=8"),
+        "a concurrent path misbehaved:\n{stdout}\n{stderr}"
+    );
+}
+
+/// A payload whose import address table spans more than one page still loads:
+/// `patch_imports` protects and restores every touched page, not just one.
+#[test]
+#[ignore = "requires rustc and the compiled dependencies"]
+fn api_resolution_handles_a_multi_page_iat() {
+    let dir = std::env::temp_dir().join(format!("picaro_api_res_mp_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let probe = generate_multi_page_probe(&dir);
+
+    let (status, stdout, stderr) = run_proxy_case_with(
+        "multipage",
+        &probe,
+        "  - \"kernel32!ReadProcessMemory\"\n",
+        "forward",
+        &[],
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(
+        status.success(),
+        "the multi-page-IAT payload failed:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains("API_MULTIPAGE imports="),
+        "the payload did not run:\n{stdout}\n{stderr}"
+    );
+}
+
+/// A wildcard selection proxies every direct `Nt*` route: the payload's
+/// `ntdll!NtClose` (and its siblings) land on the generated proxies.
+#[test]
+#[ignore = "requires rustc and the compiled dependencies"]
+fn api_resolution_proxies_every_direct_nt_route() {
+    let (status, stdout, stderr) = run_proxy_case_with(
+        "ntwildcard",
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("api_probe.rs"),
+        "  - \"ntdll:*\"\n",
+        "forward",
+        &[],
+    );
+    assert!(status.success(), "the payload failed:\n{stderr}");
+    assert!(
+        stdout.contains("API_PROBE ntclose=0x00000000"),
+        "NtClose was not served correctly:\n{stdout}"
+    );
+    // The native-signature proxy helper: NtWaitForSingleObject with a zero
+    // relative timeout returns STATUS_TIMEOUT (0x102).
+    assert!(
+        stdout.contains("API_PROBE ntwait=0x00000102"),
+        "the native-signature proxy helper misbehaved:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("routed to the syscall layer"),
+        "no route trace:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("forwarded to the original"),
+        "a direct route was forwarded instead of proxied:\n{stderr}"
+    );
+}
+
+/// The named exports of an on-disk DLL, read from its export directory.
+fn module_export_names(dll: &str) -> Vec<String> {
+    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+    let path = std::path::Path::new(&system_root)
+        .join("System32")
+        .join(dll);
+    let file =
+        std::fs::read(&path).unwrap_or_else(|e| panic!("could not read {}: {e}", path.display()));
+
+    let u16_at = |o: usize| u16::from_le_bytes([file[o], file[o + 1]]);
+    let u32_at = |o: usize| u32::from_le_bytes([file[o], file[o + 1], file[o + 2], file[o + 3]]);
+
+    let e_lfanew = u32_at(0x3C) as usize;
+    assert_eq!(
+        u32_at(e_lfanew),
+        0x0000_4550,
+        "not a PE: {}",
+        path.display()
+    );
+    let num_sections = u16_at(e_lfanew + 4 + 2) as usize;
+    let opt_size = u16_at(e_lfanew + 4 + 16) as usize;
+    let opt = e_lfanew + 4 + 20;
+    let is_pe32plus = u16_at(opt) == 0x20b;
+    let dir_off = if is_pe32plus { opt + 112 } else { opt + 96 };
+    let export_rva = u32_at(dir_off);
+    assert!(export_rva != 0, "no exports in {dll}");
+
+    let section_table = opt + opt_size;
+    let sections: Vec<(u32, u32, u32, u32)> = (0..num_sections)
+        .map(|i| {
+            let s = section_table + i * 40;
+            (
+                u32_at(s + 12),
+                u32_at(s + 8),
+                u32_at(s + 16),
+                u32_at(s + 20),
+            )
+        })
+        .collect();
+    let rva_to_off = |rva: u32| -> Option<usize> {
+        for &(va, vsize, raw_size, ptr) in &sections {
+            let size = vsize.max(raw_size);
+            if rva >= va && rva < va + size {
+                return Some((ptr + (rva - va)) as usize);
+            }
+        }
+        None
+    };
+
+    let ed = rva_to_off(export_rva).expect("export directory");
+    let num_names = u32_at(ed + 24) as usize;
+    let names_off = rva_to_off(u32_at(ed + 32)).expect("name pointer table");
+
+    let mut names = Vec::with_capacity(num_names);
+    for i in 0..num_names {
+        let Some(off) = rva_to_off(u32_at(names_off + i * 4)) else {
+            continue;
+        };
+        let len = file[off..].iter().position(|&b| b == 0).unwrap_or(0);
+        if len == 0 {
+            continue;
+        }
+        if let Ok(name) = std::str::from_utf8(&file[off..off + len]) {
+            names.push(name.to_string());
+        }
+    }
+    names
+}
+
+/// Whether an export name is a valid, non-keyword Rust identifier.
+fn is_usable_ident(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return false;
+    }
+    !matches!(
+        name,
+        "main"
+            | "fn"
+            | "type"
+            | "loop"
+            | "match"
+            | "move"
+            | "ref"
+            | "box"
+            | "in"
+            | "as"
+            | "use"
+            | "mod"
+            | "let"
+            | "impl"
+            | "trait"
+            | "self"
+            | "Self"
+    )
+}
+
+/// Writes a probe that references real `kernel32` exports, so the payload's IAT
+/// is forced past a single page (a page holds 512 x64 slots).
+///
+/// The export list read from disk includes entries the import library does not
+/// carry, so the source is compiled once here and the unresolved `__imp_*`
+/// symbols are pruned until it links; the final set is a subset, hence linkable.
+fn generate_multi_page_probe(dir: &std::path::Path) -> std::path::PathBuf {
+    let mut names: Vec<String> = module_export_names("kernel32.dll")
+        .into_iter()
+        .filter(|name| is_usable_ident(name))
+        .collect();
+
+    let rustc = crate::engine::compiler::find_rustc().unwrap();
+    let path = dir.join("multipage_probe.rs");
+    let exe = dir.join("mp_probe.exe");
+    for _ in 0..16 {
+        std::fs::write(&path, render_multi_page_probe(&names)).expect("write generated probe");
+        let output = Command::new(&rustc)
+            .arg(&path)
+            .args(["-O", "-C", "strip=symbols", "-o"])
+            .arg(&exe)
+            .output()
+            .unwrap();
+        if output.status.success() {
+            break;
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let missing = unresolved_imports(&stderr);
+        assert!(
+            !missing.is_empty(),
+            "the generated multi-page probe failed to compile:\n{stderr}"
+        );
+        let before = names.len();
+        names.retain(|name| !missing.contains(name));
+        assert!(
+            names.len() < before,
+            "no progress pruning unresolved imports"
+        );
+    }
+
+    // A subset of a linkable set is linkable; keep the count modest but past a
+    // page.
+    names.truncate(600);
+    assert!(
+        names.len() > 512,
+        "need more than 512 linkable imports to cross a page, got {}",
+        names.len()
+    );
+    std::fs::write(&path, render_multi_page_probe(&names)).expect("write generated probe");
+    path
+}
+
+/// Renders a probe that imports `names` and takes each address, forcing an IAT
+/// entry for every one of them.
+fn render_multi_page_probe(names: &[String]) -> String {
+    let mut src = String::new();
+    src.push_str("//! Generated probe: >512 imports, so the IAT spans two pages.\n\n");
+    src.push_str("#[link(name = \"kernel32\")]\nextern \"system\" {\n");
+    for name in names {
+        src.push_str(&format!("    fn {name}();\n"));
+    }
+    src.push_str("}\n\nfn main() {\n");
+    for name in names {
+        src.push_str(&format!("    std::hint::black_box({name} as usize);\n"));
+    }
+    src.push_str(&format!(
+        "    println!(\"API_MULTIPAGE imports={}\");\n",
+        names.len()
+    ));
+    src.push_str("}\n");
+    src
+}
+
+/// The `__imp_<Name>` symbols the linker reported as unresolved.
+fn unresolved_imports(stderr: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for line in stderr.lines() {
+        let Some(idx) = line.find("__imp_") else {
+            continue;
+        };
+        let name: String = line[idx + "__imp_".len()..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if !name.is_empty() {
+            names.push(name);
+        }
+    }
+    names
 }
