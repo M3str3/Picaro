@@ -1333,7 +1333,9 @@ fn without_timestamps(stdout: &[u8]) -> String {
 ///
 /// The module is mapped with `LoadLibraryW` and the entry point found with
 /// `GetProcAddress` (windows-rs); the raw call is the only `unsafe` and it stays
-/// in this one place.
+/// in this one place. Windows-only: the `windows` crate is `#![cfg(windows)]`,
+/// so the lint job on Linux cannot compile this.
+#[cfg(windows)]
 fn load_dll_and_call(dll: &Path, export: &str) -> i32 {
     use windows::core::{PCSTR, PCWSTR};
     use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
@@ -1375,13 +1377,10 @@ fn load_dll_and_call(dll: &Path, export: &str) -> i32 {
 ///
 /// `#[ignore]`: compiles a stub and needs a Windows host, since the artifact is
 /// loaded by the image loader of the process that loads it.
+#[cfg(windows)]
 #[test]
 #[ignore = "requires rustc, the compiled dependencies and a Windows host"]
 fn a_dll_artifact_runs_the_chain_when_a_host_loads_it() {
-    if !cfg!(windows) {
-        return;
-    }
-
     let build = picaro(&["build".as_ref(), "tests/plans/dll.yaml".as_ref()]);
     assert!(
         build.status.success(),

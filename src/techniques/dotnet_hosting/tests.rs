@@ -106,6 +106,10 @@ runtime:
 /// be asserted from here — the fragment is a template compiled only inside a
 /// stub, where its own `const` assertion catches a mismatch — so this pins the
 /// numbers a future `windows` update would change.
+///
+/// Windows-only: the `windows` crate is `#![cfg(windows)]`, so `windows::core`
+/// and `windows::Win32` do not exist when the lint job runs on Linux.
+#[cfg(windows)]
 #[test]
 fn the_variant_layout_is_what_the_fragment_assumes() {
     use windows::core::VARIANT;

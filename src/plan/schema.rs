@@ -693,21 +693,16 @@ impl Default for ManifestPlan {
 }
 
 /// UAC execution level for the embedded application manifest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionLevel {
     /// Run with the caller's privileges (default).
+    #[default]
     AsInvoker,
     /// Elevate when the user is an administrator, without prompting.
     HighestAvailable,
     /// Always prompt for elevation.
     RequireAdministrator,
-}
-
-impl Default for ExecutionLevel {
-    fn default() -> Self {
-        Self::AsInvoker
-    }
 }
 
 impl ExecutionLevel {

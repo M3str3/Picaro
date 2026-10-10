@@ -107,16 +107,12 @@ fn substitute_string(s: &mut String, args: &BTreeMap<String, String>) -> Result<
     let mut out = String::with_capacity(s.len());
     let mut rest: &str = s;
 
-    loop {
-        // Replace the leftmost of the two prefixes first.
-        let Some((start, prefix)) = [PREFIX, STEM_PREFIX]
-            .into_iter()
-            .filter_map(|prefix| rest.find(prefix).map(|at| (at, prefix)))
-            .min_by_key(|(at, _)| *at)
-        else {
-            break;
-        };
-
+    // Replace the leftmost of the two prefixes first.
+    while let Some((start, prefix)) = [PREFIX, STEM_PREFIX]
+        .into_iter()
+        .filter_map(|prefix| rest.find(prefix).map(|at| (at, prefix)))
+        .min_by_key(|(at, _)| *at)
+    {
         out.push_str(&rest[..start]);
 
         let after = &rest[start + prefix.len()..];
