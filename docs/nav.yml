@@ -39,6 +39,7 @@ nav:
     - Syscall layer design: design/syscalls.md
     - API resolution design: design/api-resolution.md
     - DLL output design: design/dll-output.md
+    - Polymorphism: design/polymorphism.md
     - Network stager design: design/network-stager.md
     - x86 support: x86.md
   - Reference:

@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::engine::api_resolution::YamlApiResolutionPlan;
 use crate::engine::args::ArgsMode;
 use crate::engine::obfuscation::YamlStringsPlan;
+use crate::engine::polymorphism::YamlPolymorphismPlan;
 use crate::engine::syscalls::YamlSyscallsPlan;
 use crate::techniques::RuntimeStep;
 
@@ -89,6 +90,13 @@ pub struct BuildPlan {
     /// string obfuscation applied to the stub's literals.
     #[serde(default)]
     pub stub: StubPlan,
+
+    /// Build-time polymorphism: a seeded codegen profile (and, in later phases,
+    /// source diversity and PE cosmetics) so two builds of one plan do not
+    /// share a `.text`. Defaults to `full`; a debug build forces it off. See
+    /// `docs/design/polymorphism.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polymorphism: Option<YamlPolymorphismPlan>,
 
     /// Output block: how to produce the packed PE.
     pub output: OutputPlan,

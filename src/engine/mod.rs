@@ -6,6 +6,8 @@
 //! - `stub`: stub rendering from the template.
 //! - `debug`: the `tech_dbg!` trace macro appended to a debug stub.
 //! - `obfuscation`: string obfuscation for stub literals.
+//! - `polymorphism`: per-build diversity (the seeded codegen profile) so two
+//!   builds of one plan do not share a `.text`.
 //! - `compiler`: stub compilation with `rustc`.
 //! - `entry`: the stub's entry point (`fn main` or the DLL's exports,
 //!   selected by `build.output.kind`).
@@ -42,6 +44,7 @@ pub mod managed;
 pub mod manifest;
 pub mod obfuscation;
 pub mod pe;
+pub mod polymorphism;
 pub mod resources;
 pub mod scrub;
 pub mod signing;
@@ -103,6 +106,10 @@ pub enum BuildError {
     /// The build manifest could not be serialized.
     #[error("could not serialize the build manifest: {0}")]
     Manifest(String),
+
+    /// `build.polymorphism` is invalid (e.g. a non-positive `codegen-units`).
+    #[error("invalid build.polymorphism: {0}")]
+    InvalidPolymorphism(String),
 
     /// PE resource embedding failed (icon, version info or manifest).
     #[error("could not embed PE resources: {0}")]

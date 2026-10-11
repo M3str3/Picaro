@@ -7,11 +7,13 @@
 //! provides the `windows-rs` proc-macros, and the GNU import library is passed
 //! via `-L native`.
 //!
-//! Note: we do not use `-C lto=fat` because the `.rlib` files produced by
-//! cargo do not carry bitcode (`.llvmbc`), so `lto=fat` with `--extern` fails.
-//! Size therefore comes from `opt-level="z"` (optimize for size, not speed),
-//! `codegen-units=1`, and `strip=symbols`: the stub is a small shim, so speed
-//! is irrelevant next to a smaller artifact.
+//! Note: `-C lto=fat` (and, with the precompiled `.rlib`s cargo produces,
+//! likely `thin` too) fails because those `.rlib` files do not carry bitcode
+//! (`.llvmbc`), so `lto` with `--extern` cannot be used. The `lto` pool is
+//! therefore `[off]` by default. Size comes from `opt-level="z"`,
+//! `codegen-units=1` and `strip=symbols`: the stub is a small shim, so speed is
+//! irrelevant next to a smaller artifact. `build.polymorphism` may vary
+//! `opt-level`/`codegen-units` per build (see `super::polymorphism`).
 //!
 //! `build.output` reaches this module as [`CompileOptions`]: `strip` maps to
 //! `-C strip=...` and `trim_paths` to `--remap-path-prefix`, so both actually
@@ -21,6 +23,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use super::polymorphism::CodegenProfile;
 use super::{BuildError, Result};
 use crate::plan::schema::{Arch, OutputKind};
 
@@ -454,6 +457,11 @@ pub struct CompileOptions {
     /// What the artifact is: a binary or a host-loaded DLL
     /// (`build.output.kind`).
     pub kind: OutputKind,
+    /// Seeded codegen profile (`build.polymorphism`): `-C codegen-units`,
+    /// `-C opt-level`, `-C lto`, `-C llvm-args=--inline-threshold` and
+    /// `-Z randomize-layout`/`-Z layout-seed`. [`CodegenProfile::default`] is
+    /// exactly the previous hardcoded release flags.
+    pub codegen: CodegenProfile,
 }
 
 impl Default for CompileOptions {
@@ -465,6 +473,7 @@ impl Default for CompileOptions {
             debug: false,
             arch: Arch::X64,
             kind: OutputKind::Exe,
+            codegen: CodegenProfile::default(),
         }
     }
 }
@@ -574,9 +583,34 @@ fn hardening_flags(
         return flags;
     }
 
-    flags.extend(["-C".to_string(), "opt-level=z".to_string()]);
+    flags.extend([
+        "-C".to_string(),
+        format!("opt-level={}", options.codegen.opt_level.flag()),
+    ]);
     flags.extend(["-C".to_string(), "debug-assertions=off".to_string()]);
     flags.extend(["-C".to_string(), "overflow-checks=off".to_string()]);
+    if let Some(lto) = options.codegen.lto.flag() {
+        flags.extend(["-C".to_string(), format!("lto={lto}")]);
+    }
+    if let Some(threshold) = options.codegen.inline_threshold {
+        flags.extend([
+            "-C".to_string(),
+            format!("llvm-args=--inline-threshold={threshold}"),
+        ]);
+    }
+    if let Some(level) = options.codegen.mir_opt_level {
+        // MIR optimization level; unstable, hence `RUSTC_BOOTSTRAP=1`.
+        flags.extend(["-Z".to_string(), format!("mir-opt-level={level}")]);
+    }
+    if options.codegen.randomize_layout {
+        // Per-build `repr(Rust)` field order. Unstable, hence `RUSTC_BOOTSTRAP=1`
+        // (set in `compile_stub`); the toolchain is frozen in the container.
+        flags.extend(["-Z".to_string(), "randomize-layout".to_string()]);
+        flags.extend([
+            "-Z".to_string(),
+            format!("layout-seed={}", options.codegen.layout_seed),
+        ]);
+    }
     flags.extend(["-C".to_string(), strip_flag(options.strip).to_string()]);
     match options.trim_paths {
         PathTrim::None => {}
@@ -626,6 +660,12 @@ pub fn compile_stub(
     hardening.extend(hardening_flags(options, manifest_dir, home.as_deref()));
 
     let mut cmd = Command::new(rustc);
+    if options.codegen.uses_unstable() {
+        // `-Z randomize-layout` is unstable: the pinned stable toolchain accepts it
+        // under the bootstrap escape hatch, which is acceptable because the
+        // toolchain is frozen inside the container.
+        cmd.env("RUSTC_BOOTSTRAP", "1");
+    }
     if !is_native_target(options.arch) {
         cmd.arg("--target").arg(stub_target(options.arch));
     }
@@ -644,7 +684,7 @@ pub fn compile_stub(
         .arg("-C")
         .arg(panic_flag(options.kind))
         .arg("-C")
-        .arg("codegen-units=1")
+        .arg(format!("codegen-units={}", options.codegen.codegen_units))
         .arg("-C")
         .arg("target-feature=+crt-static")
         .arg("-L")
@@ -858,8 +898,7 @@ dependencies = [
             strip: true,
             trim_paths,
             debug: false,
-            arch: Arch::X64,
-            kind: OutputKind::Exe,
+            ..CompileOptions::default()
         }
     }
 
@@ -893,8 +932,7 @@ dependencies = [
                 strip: true,
                 trim_paths: PathTrim::None,
                 debug: false,
-                arch: Arch::X64,
-                kind: OutputKind::Exe,
+                ..CompileOptions::default()
             },
             manifest,
             None,
@@ -906,8 +944,7 @@ dependencies = [
                 strip: false,
                 trim_paths: PathTrim::None,
                 debug: false,
-                arch: Arch::X64,
-                kind: OutputKind::Exe,
+                ..CompileOptions::default()
             },
             manifest,
             None,
@@ -923,8 +960,7 @@ dependencies = [
                 strip: true,
                 trim_paths: PathTrim::None,
                 debug: false,
-                arch: Arch::X64,
-                kind: OutputKind::Exe,
+                ..CompileOptions::default()
             },
             Path::new("/proj"),
             Some(Path::new("/home/dev")),
@@ -939,8 +975,7 @@ dependencies = [
                 strip: true,
                 trim_paths: PathTrim::Relative,
                 debug: false,
-                arch: Arch::X64,
-                kind: OutputKind::Exe,
+                ..CompileOptions::default()
             },
             Path::new("/proj"),
             Some(Path::new("/home/dev")),
@@ -955,8 +990,7 @@ dependencies = [
                 strip: true,
                 trim_paths: PathTrim::All,
                 debug: false,
-                arch: Arch::X64,
-                kind: OutputKind::Exe,
+                ..CompileOptions::default()
             },
             Path::new("/proj"),
             Some(Path::new("/home/dev/.cargo")),
@@ -971,8 +1005,7 @@ dependencies = [
                 strip: true,
                 trim_paths: PathTrim::All,
                 debug: false,
-                arch: Arch::X64,
-                kind: OutputKind::Exe,
+                ..CompileOptions::default()
             },
             Path::new("/proj"),
             None,
@@ -989,8 +1022,7 @@ dependencies = [
                 strip: true,
                 trim_paths: PathTrim::All,
                 debug: true,
-                arch: Arch::X64,
-                kind: OutputKind::Exe,
+                ..CompileOptions::default()
             },
             Path::new("/proj"),
             Some(Path::new("/home/dev/.cargo")),
@@ -1016,8 +1048,7 @@ dependencies = [
                 strip: true,
                 trim_paths: PathTrim::None,
                 debug: false,
-                arch: Arch::X64,
-                kind: OutputKind::Exe,
+                ..CompileOptions::default()
             },
             Path::new("/proj"),
             None,
@@ -1031,6 +1062,67 @@ dependencies = [
         assert!(flags.contains(&"strip=symbols".to_string()));
         assert!(!flags.contains(&"-O".to_string()));
         assert!(!flags.contains(&"opt-level=0".to_string()));
+    }
+
+    /// `build.polymorphism` reaches the flags through `CompileOptions`:
+    /// `opt-level` and `lto` here, `codegen-units` in `compile_stub`. It is a
+    /// parameter, not a global, so the same source compiles with different
+    /// profiles.
+    #[test]
+    fn the_codegen_profile_shapes_the_flags() {
+        use crate::engine::polymorphism::{CodegenProfile, LtoMode, OptLevel};
+
+        let flags = hardening_flags(
+            CompileOptions {
+                codegen: CodegenProfile {
+                    codegen_units: 4,
+                    opt_level: OptLevel::S,
+                    lto: LtoMode::Thin,
+                    inline_threshold: Some(25),
+                    mir_opt_level: Some(3),
+                    randomize_layout: true,
+                    layout_seed: 42,
+                },
+                ..CompileOptions::default()
+            },
+            Path::new("/proj"),
+            None,
+        );
+        assert!(
+            flags.contains(&"opt-level=s".to_string()),
+            "flags: {flags:?}"
+        );
+        assert!(flags.contains(&"lto=thin".to_string()), "flags: {flags:?}");
+        assert!(
+            flags.contains(&"llvm-args=--inline-threshold=25".to_string()),
+            "flags: {flags:?}"
+        );
+        assert!(
+            flags.contains(&"mir-opt-level=3".to_string()),
+            "flags: {flags:?}"
+        );
+        assert!(
+            flags.contains(&"randomize-layout".to_string()),
+            "flags: {flags:?}"
+        );
+        assert!(
+            flags.contains(&"layout-seed=42".to_string()),
+            "flags: {flags:?}"
+        );
+        assert!(!flags.contains(&"opt-level=z".to_string()));
+    }
+
+    /// The baseline profile emits no `lto` flag and keeps `opt-level=z`, so the
+    /// release flags are byte-for-byte the previous ones when polymorphism is
+    /// off or its seed lands on the baseline.
+    #[test]
+    fn the_default_profile_emits_the_previous_release_flags() {
+        let flags = hardening_flags(CompileOptions::default(), Path::new("/proj"), None);
+        assert!(flags.contains(&"opt-level=z".to_string()));
+        assert!(!flags.iter().any(|flag| flag.starts_with("lto=")));
+        assert!(!flags.iter().any(|flag| flag.starts_with("llvm-args=")));
+        assert!(!flags.contains(&"randomize-layout".to_string()));
+        assert!(!flags.iter().any(|flag| flag.starts_with("mir-opt-level=")));
     }
 
     /// Full packing flow with a 1 KB payload.

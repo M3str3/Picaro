@@ -117,6 +117,25 @@ mapped in the target. `unmatched` decides what a non-catalogue import does:
 `forward` (default) resolves it normally, `abort` fails the load. Design, phases
 and limitations: [API resolution design](design/api-resolution.md).
 
+## Polymorphism (`build.polymorphism`)
+
+A loader configuration, not a pipeline technique: it makes the generated stub's
+**code** a function of a per-build seed, so two builds of one plan do not share a
+byte-identical `.text` (previously only `.rdata`, the encrypted payload and
+re-rolled strings, differed). It is **on by default** (`mode: full`, a random
+seed — no flag needed) and is forced off for a debug build (`build.stub.debug`
+or `--debug`).
+
+Two behavior-preserving layers: a **seeded codegen profile** (`codegen-units`,
+`opt-level`, `llvm-args=--inline-threshold` and `mir-opt-level` drawn from small
+pools, plus an opt-in `randomize-layout`) and a **per-build source entropy**
+function whose immediates land inside instructions. The knobs change the emitted
+instructions (inlining, MIR lowering) but not the control flow, so this is build
+code diversity, not control-flow obfuscation. The resolved profile is recorded in
+the manifest, so a build is reproduced by reusing its `seed`. Measurements,
+limitations and the planned premium layers (PE cosmetics, a self-encrypting
+loader, LLVM obfuscation): [Polymorphism](design/polymorphism.md).
+
 ## Payload formats (`build.payloads.<name>.format`)
 
 `format` describes the input: `pe` (default), `shellcode`, `dll` or `dotnet`.
@@ -262,9 +281,10 @@ second, compilation fails with `can't find crate for windows_implement`.
 ```text
 src/
   plan/     YAML parsing and validation
-  engine/     crypto, pe parsing, stub generation, compilation, syscall layer,
-              imports, api_resolution, args, resources (icon/VERSIONINFO/
-              manifest), identity, signing, manifest, hash, builtin stub template
+  engine/     crypto, pe parsing, stub generation, compilation, polymorphism,
+              syscall layer, imports, api_resolution, args, resources (icon/
+              VERSIONINFO/manifest), identity, signing, manifest, hash, builtin
+              stub template
   audit/      static measurement (pe_info, strings, yara, defender, report)
   techniques/ one directory per technique + the registry (mod.rs)
   error.rs    top-level error types

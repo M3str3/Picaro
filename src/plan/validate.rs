@@ -9,6 +9,7 @@
 
 use crate::engine::api_resolution::{ApiResolutionConfig, ApiResolutionMode, Unmatched};
 use crate::engine::obfuscation::StringsConfig;
+use crate::engine::polymorphism::PolymorphismMode;
 use crate::engine::syscalls::{SyscallsConfig, SyscallsMode};
 use crate::error::{PackerError, Result};
 use crate::techniques::{Capability, Stability, TechniqueKind};
@@ -35,6 +36,7 @@ pub fn validate(plan: &Plan) -> Result<()> {
 
     validate_sign(plan)?;
     validate_stub(&plan.build.stub)?;
+    validate_polymorphism(plan)?;
     validate_syscalls_arch(plan)?;
 
     let steps = steps::resolve(plan)?;
@@ -60,6 +62,18 @@ pub fn validate(plan: &Plan) -> Result<()> {
 
     validate_api_resolution(plan, &steps)?;
 
+    Ok(())
+}
+
+/// Checks `build.polymorphism`: the codegen pools must be non-degenerate.
+///
+/// The mode and seed are validated by `serde` on parse; this catches pool
+/// values that would produce an invalid `rustc` invocation (`codegen-units: 0`,
+/// an empty `opt-level`/`lto` pool).
+fn validate_polymorphism(plan: &Plan) -> Result<()> {
+    if let Some(polymorphism) = &plan.build.polymorphism {
+        polymorphism.validate().map_err(PackerError::Validation)?;
+    }
     Ok(())
 }
 
@@ -440,6 +454,20 @@ pub fn advisories(plan: &Plan) -> Vec<String> {
     let indirect_active = SyscallsConfig::from_yaml(plan.build.stub.syscalls.as_ref())
         .map(|config| config.mode == SyscallsMode::Indirect)
         .unwrap_or(false);
+
+    // A debug build forces `mode: none` (`src/main.rs`), so a plan that asks for
+    // polymorphism and is built with `build.stub.debug: true` gets none.
+    if plan.build.stub.debug {
+        if let Some(polymorphism) = &plan.build.polymorphism {
+            if polymorphism.mode != PolymorphismMode::None {
+                warnings.push(
+                    "build.stub.debug is true: polymorphism is disabled for debug builds (their \
+                     output must stay reproducible), so build.polymorphism is ignored"
+                        .to_string(),
+                );
+            }
+        }
+    }
 
     for step in &steps {
         match &step.technique {

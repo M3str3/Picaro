@@ -1333,6 +1333,9 @@ fn assemble(payload: &Path, answers: &Answers) -> Plan {
                 // Debug builds are a lab setting; edit it in the YAML.
                 debug: false,
             },
+            // Polymorphism is on by default (`mode: full`); omitted here so the
+            // generated YAML stays minimal.
+            polymorphism: None,
             output: OutputPlan {
                 path: PathBuf::from(&answers.output_path),
                 kind: answers.output_kind,

@@ -19,6 +19,7 @@ use crate::plan::Plan;
 
 use super::compiler;
 use super::hash::sha256_hex;
+use super::polymorphism::PolymorphismRecord;
 use super::signing::Signature;
 use super::{BuildError, Result};
 
@@ -51,6 +52,10 @@ pub struct BuildManifest {
     /// Generated-icon provenance, when `output.resources.icon: random`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub generated_icon: Option<GeneratedIcon>,
+    /// Resolved build-time polymorphism (mode, seed and codegen profile), when
+    /// the plan declares `build.polymorphism`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub polymorphism: Option<PolymorphismRecord>,
     /// Compiler that produced the stub.
     pub toolchain: Toolchain,
     /// The plan after build-arg substitution and defaults.
@@ -120,6 +125,7 @@ impl BuildManifest {
             signature: None,
             version_info: None,
             generated_icon: None,
+            polymorphism: None,
             toolchain: Toolchain {
                 rustc: compiler::rustc_version()?,
                 target: compiler::stub_target(plan.build.output.arch).to_string(),

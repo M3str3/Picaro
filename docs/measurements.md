@@ -393,6 +393,62 @@ wait for the worker.
   embeds malware-API and technique keywords for its string scan, so the
   measurement tool trips the heuristics it is meant to measure.
 
+## Polymorphism — repeated-build `.text` diversity (2026-10-11)
+
+Goal: two builds of the same plan must not share a byte-identical `.text`.
+Measured on `examples/plans/shellcode.yaml`, `x86_64-pc-windows-msvc`, SHA-256 of
+the `.text` raw section truncated to 16 hex chars:
+
+| Scenario | Builds | Distinct `.text` |
+|---|---|---|
+| `mode: none` (baseline) | 2 | 1 (byte-identical) |
+| `mode: codegen` (seeded codegen profile only) | 4 | 3 (one collision) |
+| `mode: full` (default: profile + per-build immediates) | 6 | 6 |
+| `mode: full`, `seed: literal:0xdeadbeef` | 2 | 1 (reproducible) |
+
+The default is `full`, so two ordinary builds differ in `.text`; the codegen
+profile alone is not enough (its ~12 combinations collide ~8% of the time), and
+the per-build source immediates remove that residual.
+
+**But a different `.text` hash is not different code.** The same pair of builds,
+disassembled with Capstone (x86-64, `.text` ≈ 300 KB, ≈ 74 000 instructions):
+
+| Pair | Instructions | Differing | Mnemonic multiset overlap |
+|---|---|---|---|
+| same codegen profile (`dist/mimikatz.picaro2.exe` vs `...picaro3.exe`) | 74,639 each | 8 (0.01%) | 1.0000 |
+| different codegen profile (`...picaro4.exe` vs `...picaro5.exe`) | 67,747 vs 68,654 | layout shifted | 0.9995 |
+
+So the feature is **build-time code diversity**: hashes and layout-sensitive byte
+fuzzy hashes move outright, and the codegen knobs (next section) change the
+instruction stream too — but the control-flow structure is unchanged, so a
+CFG-aware similarity or a human disassembly still matches the loader. The
+regression guard is the `#[ignore]` test
+`two_polymorphism_seeds_differ_in_the_text_section`. Design and limitations:
+[Polymorphism](design/polymorphism.md).
+
+### Codegen knobs — the instruction stream moves (2026-10-11)
+
+The codegen profile now also varies `-C llvm-args=--inline-threshold` and
+`-Z mir-opt-level` (and offers `-Z randomize-layout`). Unlike the earlier
+measures, these change the *instructions*. Measured with Capstone (x86-64) on
+`examples/plans/shellcode.yaml`, with the seed and every pool pinned so exactly
+one knob differs between the two builds:
+
+| Knob varied | `.text` A → B (bytes) | Instructions A → B | Identical (addr, mnem, ops) tuples |
+|---|---|---|---|
+| `inline_threshold` (`25` vs `300`) | 309,248 → 310,272 | 73,896 → 74,037 | **0.64%** |
+| `mir_opt_level` (`0` vs `3`) | 309,760 → 307,712 | 67,951 → 67,432 | **1.08%** |
+| `randomize_layout` (on vs off) | 309,760 → 309,760 | 74,020 → 74,020 | **100% (no-op)** |
+
+Ten builds of `examples/plans/shellcode.yaml` with distinct seeds produced **10
+distinct `.text`** sections (sizes 272,896–310,784 bytes), up from 6/6 before the
+knobs. `randomize_layout` is a no-op for this stub: it reorders `repr(Rust)`
+fields, and the stub keeps almost none in memory at `opt-level >= s` (most data
+is `std`/`windows` types, which are not randomized). It stays opt-in.
+
+Harness: `pefile` for the section, Capstone for the disassembly
+(`pefile.PE(data=…)` on bytes, as in the polymorphism notes above).
+
 ## Adding a report
 
 Add a section here rather than a new file. For an EDR test, record:

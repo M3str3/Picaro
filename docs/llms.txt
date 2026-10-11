@@ -59,6 +59,7 @@
 - [Custom stubs](/custom-stubs/): replacing the builtin loader template.
 - [Syscall layer design](/design/syscalls/): phases 6a/6b/6c, the resolvers and the trampoline.
 - [API resolution design](/design/api-resolution/): the payload import proxy (catalogue, phases, limitations).
+- [Polymorphism](/design/polymorphism/): on-by-default per-build code diversity (seeded codegen profile + per-build immediates), plus the planned premium layers (PE cosmetics, self-encrypting loader, LLVM obfuscation).
 - [x86 support](/x86/): `build.output.arch`, what is ported and what is still x64-only.
 
 ## Reference

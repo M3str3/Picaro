@@ -24,7 +24,8 @@ use std::time::Instant;
 use clap::{CommandFactory, Parser, Subcommand};
 
 use engine::{
-    api_resolution, build_lock, compiler, crypto, obfuscation, pe, steps, stub, syscalls,
+    api_resolution, build_lock, compiler, crypto, obfuscation, pe, polymorphism, steps, stub,
+    syscalls,
 };
 use error::Result;
 use plan::schema::{
@@ -393,6 +394,24 @@ fn build(
         );
     }
 
+    // Polymorphism is on by default (`mode: full`); a debug build forces it off
+    // so the artifact stays reproducible and debuggable.
+    let polymorphism =
+        polymorphism::PolymorphismConfig::from_yaml(plan.build.polymorphism.as_ref(), debug)?;
+    if debug
+        && plan
+            .build
+            .polymorphism
+            .as_ref()
+            .is_some_and(|block| block.mode != polymorphism::PolymorphismMode::None)
+    {
+        anstream::eprintln!(
+            "  {} {}",
+            ui.bang(),
+            ui.warn("debug build: polymorphism is disabled (mode forced to none)")
+        );
+    }
+
     if verbose {
         print_plan(plan, plan_path, ui);
     }
@@ -640,6 +659,7 @@ fn build(
         windows_subsystem: plan.build.output.subsystem == Subsystem::Windows,
         kind: plan.build.output.kind,
         entry: plan.build.output.entry.clone(),
+        poly_seed: polymorphism.uses_source().then_some(polymorphism.seed),
     };
     let stub_src = if is_custom {
         stub::validate_custom_stub_template(&template)?;
@@ -668,6 +688,9 @@ fn build(
         format!("{} {}", ui.dim("strings"), strings.strategy.label()),
         format!("{} {}", ui.dim("syscalls"), syscalls.mode.label()),
     ];
+    if polymorphism.mode != polymorphism::PolymorphismMode::None {
+        stub_parts.push(format!("{} {}", ui.dim("poly"), polymorphism.mode.label()));
+    }
     if plan.build.output.kind == OutputKind::Dll {
         stub_parts.push(ui.brand(format!(
             "{} {}",
@@ -684,6 +707,35 @@ fn build(
         anstream::println!(
             "{}",
             ui.detail("resolver", ui.dim(syscalls.resolver.label()))
+        );
+        anstream::println!(
+            "{}",
+            ui.detail(
+                "poly",
+                ui.dim(format!(
+                    "mode {} seed {:#018x} units {} opt {} lto {} inline {} mir {} layout {}",
+                    polymorphism.mode.label(),
+                    polymorphism.seed,
+                    polymorphism.codegen.codegen_units,
+                    polymorphism.codegen.opt_level.flag(),
+                    polymorphism.codegen.lto.flag().unwrap_or("off"),
+                    polymorphism
+                        .codegen
+                        .inline_threshold
+                        .map(|t| t.to_string())
+                        .unwrap_or_else(|| "off".to_string()),
+                    polymorphism
+                        .codegen
+                        .mir_opt_level
+                        .map(|l| l.to_string())
+                        .unwrap_or_else(|| "off".to_string()),
+                    if polymorphism.codegen.randomize_layout {
+                        format!("{:#x}", polymorphism.codegen.layout_seed)
+                    } else {
+                        "off".to_string()
+                    },
+                ))
+            )
         );
         anstream::println!(
             "{}",
@@ -715,6 +767,7 @@ fn build(
         debug,
         arch,
         kind: plan.build.output.kind,
+        codegen: polymorphism.codegen,
     };
     compiler::compile_stub(&stub_path, &out, &deps, options)?;
     // D-21: a proxy must never import the API it intercepts, or the signature
@@ -830,6 +883,7 @@ fn build(
         manifest.signature = signature;
         manifest.version_info = resources.as_ref().and_then(|r| r.version_info.clone());
         manifest.generated_icon = generated_icon(resources.as_ref());
+        manifest.polymorphism = Some(polymorphism.record());
         manifest.steps = step_records;
         manifest.write(&manifest_path)?;
         if verbose {
