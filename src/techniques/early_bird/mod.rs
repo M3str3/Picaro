@@ -67,7 +67,11 @@ pub const DEF: TechniqueDef = TechniqueDef {
     stub_fragment: include_str!("stub_fragment.rs"),
     formats: &[super::PayloadFormat::Shellcode],
     requires_indirect_syscalls: false,
-    params_example: "technique: early_bird\n",
+    params_example: r#"technique: early_bird
+params:
+  target: "C:\\Windows\\System32\\svchost.exe"
+  wait_ms: 0
+"#,
     readme: include_str!("README.md"),
     syscalls: &[
         "NtAllocateVirtualMemory",
