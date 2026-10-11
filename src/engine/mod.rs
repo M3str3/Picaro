@@ -23,6 +23,9 @@
 //!   built in Rust and written into a `.rsrc` section.
 //! - `signing`: optional Authenticode signing of the artifact (`signtool` on
 //!   Windows, `osslsigncode` elsewhere, including the Docker image).
+//! - `scrub`: overwrites build-path literals the compiler remap cannot reach
+//!   (the scratch dir outside the manifest dir, and paths baked into precompiled
+//!   dependency rlibs), in place and with a per-build filler.
 
 pub mod api_resolution;
 pub mod args;
@@ -40,6 +43,7 @@ pub mod manifest;
 pub mod obfuscation;
 pub mod pe;
 pub mod resources;
+pub mod scrub;
 pub mod signing;
 pub mod stager;
 pub mod steps;

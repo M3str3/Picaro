@@ -319,7 +319,7 @@ fn registry_src_dirs() -> Result<Vec<PathBuf>> {
 }
 
 /// Determines the `CARGO_HOME` directory (defaults to `~/.cargo`).
-fn cargo_home() -> Result<PathBuf> {
+pub(crate) fn cargo_home() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("CARGO_HOME") {
         return Ok(PathBuf::from(dir));
     }
@@ -591,6 +591,24 @@ fn hardening_flags(
     flags
 }
 
+/// The `--remap-path-prefix` for the stub's own source directory.
+///
+/// [`hardening_flags`] remaps the manifest dir and the cargo home, but the stub
+/// is compiled from a scratch directory that can sit outside the manifest dir
+/// (`PICARO_BUILD_DIR`), in which case the absolute path of its `main.rs` would
+/// leak into the artifact. Returns an empty list for a debug build or
+/// `trim_paths: none` (both keep paths on purpose).
+fn stub_dir_remap(options: CompileOptions, stub_dir: Option<&Path>) -> Vec<String> {
+    let mut flags = Vec::new();
+    if options.debug || options.trim_paths == PathTrim::None {
+        return flags;
+    }
+    if let Some(dir) = stub_dir {
+        push_remap(dir, REMAP_TO, &mut flags);
+    }
+    flags
+}
+
 /// Compiles the generated stub into a final binary.
 pub fn compile_stub(
     stub_rs: &Path,
@@ -601,6 +619,11 @@ pub fn compile_stub(
     let rustc = find_rustc()?;
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let home = cargo_home().ok();
+
+    // The stub dir remap goes first so it wins over the manifest-dir remap when
+    // the scratch directory is a subdirectory of the manifest dir.
+    let mut hardening = stub_dir_remap(options, stub_rs.parent());
+    hardening.extend(hardening_flags(options, manifest_dir, home.as_deref()));
 
     let mut cmd = Command::new(rustc);
     if !is_native_target(options.arch) {
@@ -617,7 +640,7 @@ pub fn compile_stub(
     cmd.arg(stub_rs)
         .arg("--edition")
         .arg("2021")
-        .args(hardening_flags(options, manifest_dir, home.as_deref()))
+        .args(hardening)
         .arg("-C")
         .arg(panic_flag(options.kind))
         .arg("-C")
@@ -828,6 +851,38 @@ dependencies = [
             .filter(|(_, f)| f.as_str() == "--remap-path-prefix")
             .filter_map(|(i, _)| flags.get(i + 1).map(String::as_str))
             .collect()
+    }
+
+    fn release_options(trim_paths: PathTrim) -> CompileOptions {
+        CompileOptions {
+            strip: true,
+            trim_paths,
+            debug: false,
+            arch: Arch::X64,
+            kind: OutputKind::Exe,
+        }
+    }
+
+    #[test]
+    fn stub_dir_is_remapped_when_outside_the_manifest_dir() {
+        let flags = stub_dir_remap(
+            release_options(PathTrim::All),
+            Some(Path::new("/tmp/picaro-build")),
+        );
+        assert_eq!(remaps(&flags), vec!["/tmp/picaro-build=."]);
+    }
+
+    #[test]
+    fn stub_dir_remap_is_skipped_in_debug_and_for_trim_none() {
+        let mut debug = release_options(PathTrim::All);
+        debug.debug = true;
+        assert!(stub_dir_remap(debug, Some(Path::new("/tmp/x"))).is_empty());
+
+        let none = stub_dir_remap(
+            release_options(PathTrim::None),
+            Some(Path::new("/tmp/x")),
+        );
+        assert!(none.is_empty());
     }
 
     #[test]

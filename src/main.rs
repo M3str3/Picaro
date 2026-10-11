@@ -720,6 +720,28 @@ fn build(
     // D-21: a proxy must never import the API it intercepts, or the signature
     // would simply move from the payload's IAT into the stub's.
     verify_no_intercepted_imports(&out, &api_resolution)?;
+
+    // 5a. Scrub build-path literals the compiler remap cannot reach: the scratch
+    //     dir when it sits outside the manifest dir, and the paths baked into
+    //     precompiled dependencies (a constant fingerprint across artifacts).
+    //     Overwritten in place with a per-build filler, so the region also
+    //     differs build to build. Before resources and signing.
+    if !debug && !matches!(plan.build.output.trim_paths, TrimPaths::None) {
+        let patterns = engine::scrub::default_patterns(&build_dir);
+        let mut bytes = std::fs::read(&out)?;
+        let replaced =
+            engine::scrub::scrub_with(&mut bytes, &patterns, engine::scrub::random_fill());
+        if replaced > 0 {
+            std::fs::write(&out, &bytes)?;
+        }
+        if verbose {
+            anstream::println!(
+                "{}",
+                ui.detail("scrub", ui.dim(format!("{replaced} path literals")))
+            );
+        }
+    }
+
     let compile_time = timer.elapsed();
 
     anstream::println!(
