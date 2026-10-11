@@ -1166,6 +1166,47 @@ fn build_rejects_a_dotnet_format_without_the_hosting_technique() {
     assert!(stderr.contains("dotnet_hosting"), "unclear error: {stderr}");
 }
 
+/// `format: powershell` and `technique: powershell_hosting` imply each other.
+#[test]
+fn build_rejects_a_powershell_format_without_the_hosting_technique() {
+    let plan = write_temp_plan(
+        "picaro_ps_tech.yaml",
+        &managed_plan(
+            "ps_tech",
+            "./examples/payloads/demo_script.ps1",
+            "powershell",
+            "x64",
+            "reflective_loading",
+        ),
+    );
+    let output = picaro(&["--quiet".as_ref(), "build".as_ref(), plan.as_os_str()]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("powershell_hosting"),
+        "unclear error: {stderr}"
+    );
+}
+
+/// `powershell_hosting` runs only a `.ps1`: a native payload is rejected.
+#[test]
+fn build_rejects_a_pe_payload_with_powershell_hosting() {
+    let plan = write_temp_plan(
+        "picaro_ps_pe.yaml",
+        &managed_plan(
+            "ps_pe",
+            "./tests/fixtures/minimal_x64.exe",
+            "pe",
+            "x64",
+            "powershell_hosting",
+        ),
+    );
+    let output = picaro(&["--quiet".as_ref(), "build".as_ref(), plan.as_os_str()]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("powershell"), "unclear error: {stderr}");
+}
+
 /// End-to-end: a 32-bit managed assembly is loaded from memory by the CLR the
 /// stub hosts, its `Main` runs (with the payload args) and its exit code comes
 /// back through the stub.
@@ -1260,6 +1301,170 @@ fn packs_and_runs_a_managed_payload_on_x64() {
         "the AnyCPU assembly did not run on the 64-bit CLR: {stdout}"
     );
     assert_eq!(run.status.code(), Some(42));
+}
+
+/// End-to-end: a `.ps1` is embedded, compiled to a managed launcher at build
+/// time and run in-process by the CLR the stub hosts — no `powershell.exe`.
+///
+/// `#[ignore]`: compiles a stub and a managed launcher (needs `rustc`, `csc.exe`
+/// and a Windows host with Windows PowerShell 5.1).
+#[test]
+#[ignore = "requires rustc, csc.exe and a Windows host with Windows PowerShell"]
+fn packs_and_runs_a_powershell_payload() {
+    if !cfg!(windows) {
+        return;
+    }
+    let plan = write_temp_plan(
+        "picaro_powershell.yaml",
+        r#"schema: 6
+name: ps_marker
+build:
+  payloads:
+    script:
+      source: ./examples/payloads/demo_script.ps1
+      format: powershell
+  output:
+    path: ./dist/ps_marker.exe
+runtime:
+  - technique: patch_amsi
+  - technique: powershell_hosting
+    params:
+      payload: script
+      command: Get-PicaroMarker | Out-File -Encoding ascii ./dist/ps_marker.out
+"#,
+    );
+
+    let build = picaro(&["build".as_ref(), plan.as_os_str()]);
+    assert!(
+        build.status.success(),
+        "powershell build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    // The script's effect is asserted through a file it writes (not stdout). On a
+    // host with Defender's real-time protection enabled, the AMSI patch is
+    // intermittently interfered with, so the hosted engine may not run on every
+    // launch; retry a few times. A Defender-off lab host is stable (see
+    // `docs/measurements.md`).
+    let marker_path = "dist/ps_marker.out";
+    let mut ran = false;
+    for _ in 0..6 {
+        let _ = std::fs::remove_file(marker_path);
+        let _ = Command::new("dist/ps_marker.exe").output();
+        let wrote = std::fs::read_to_string(marker_path)
+            .map(|marker| marker.contains("picaro-ok"))
+            .unwrap_or(false);
+        if wrote {
+            ran = true;
+            break;
+        }
+    }
+    assert!(ran, "the hosted script did not run in 6 attempts");
+    let _ = std::fs::remove_file(marker_path);
+}
+
+/// `import_powermodule` builds a managed module: it needs `kind: psmodule`.
+#[test]
+fn build_rejects_import_powermodule_without_the_psmodule_kind() {
+    let plan = write_temp_plan(
+        "picaro_psmodule_kind.yaml",
+        &managed_plan(
+            "psmod_kind",
+            "./examples/payloads/demo_script.ps1",
+            "powershell",
+            "x64",
+            "import_powermodule",
+        ),
+    );
+    let output = picaro(&["--quiet".as_ref(), "build".as_ref(), plan.as_os_str()]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("psmodule"), "unclear error: {stderr}");
+}
+
+/// A `kind: psmodule` build needs at least one `import_powermodule` step.
+#[test]
+fn build_rejects_a_psmodule_without_an_import_step() {
+    let plan = write_temp_plan(
+        "picaro_psmodule_empty.yaml",
+        r#"schema: 6
+name: empty_module
+build:
+  payloads:
+    script:
+      source: ./examples/payloads/demo_script.ps1
+      format: powershell
+  output:
+    kind: psmodule
+    path: ./dist/empty_module.dll
+runtime:
+  - technique: patch_amsi
+"#,
+    );
+    let output = picaro(&["--quiet".as_ref(), "build".as_ref(), plan.as_os_str()]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("import_powermodule"),
+        "unclear error: {stderr}"
+    );
+}
+
+/// End-to-end: a `kind: psmodule` artifact is imported by PowerShell and its
+/// function lands in the importing session, with no `.ps1` on disk.
+///
+/// `#[ignore]`: compiles a managed module (needs `rustc`, `csc.exe` and a Windows
+/// host with Windows PowerShell 5.1).
+#[test]
+#[ignore = "requires rustc, csc.exe and a Windows host with Windows PowerShell"]
+fn packs_and_imports_a_powershell_module() {
+    if !cfg!(windows) {
+        return;
+    }
+    let plan = write_temp_plan(
+        "picaro_psmodule.yaml",
+        r#"schema: 6
+name: psmod
+build:
+  payloads:
+    script:
+      source: ./examples/payloads/demo_script.ps1
+      format: powershell
+  output:
+    kind: psmodule
+    path: ./dist/psmod.dll
+runtime:
+  - technique: patch_amsi
+  - technique: import_powermodule
+    params:
+      payload: script
+"#,
+    );
+
+    let build = picaro(&["build".as_ref(), plan.as_os_str()]);
+    assert!(
+        build.status.success(),
+        "psmodule build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let run = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            "Import-Module ./dist/psmod.dll; Get-PicaroMarker",
+        ])
+        .output()
+        .expect("run powershell");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("picaro-ok"),
+        "the module did not inject the function: status={:?} stdout={stdout} stderr={}",
+        run.status,
+        String::from_utf8_lossy(&run.stderr)
+    );
 }
 
 /// Acceptance case: the real-world managed assembly dropped in

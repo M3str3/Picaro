@@ -1226,6 +1226,9 @@ fn execution_defs() -> Vec<&'static TechniqueDef> {
     techniques::all()
         .iter()
         .filter(|def| def.category == Category::Execution)
+        // The wizard builds an executable or a native DLL; `import_powermodule`
+        // only exists inside a `kind: psmodule` build (assembled in the YAML).
+        .filter(|def| def.name != "import_powermodule")
         .collect()
 }
 
@@ -1362,6 +1365,9 @@ fn assemble(payload: &Path, answers: &Answers) -> Plan {
 fn default_format(technique: &TechniqueKind) -> PayloadFormat {
     match technique {
         TechniqueKind::DotnetHosting { .. } => PayloadFormat::Dotnet,
+        TechniqueKind::PowershellHosting { .. } | TechniqueKind::ImportPowermodule { .. } => {
+            PayloadFormat::Powershell
+        }
         TechniqueKind::ExecutionCallbacks { .. }
         | TechniqueKind::ModuleStomping { .. }
         | TechniqueKind::EarlyBird { .. }

@@ -504,7 +504,8 @@ fn strip_flag(strip: bool) -> &'static str {
 /// need.
 fn panic_flag(kind: OutputKind) -> &'static str {
     match kind {
-        OutputKind::Dll => "panic=unwind",
+        // A psmodule build compiles C#, not a Rust stub; the value is unused.
+        OutputKind::Dll | OutputKind::PsModule => "panic=unwind",
         OutputKind::Exe => "panic=abort",
     }
 }

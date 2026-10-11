@@ -14,12 +14,14 @@ pub mod early_bird;
 pub mod execution_callbacks;
 pub mod fibers;
 pub mod guardrail;
+pub mod import_powermodule;
 pub mod living_off_the_land;
 pub mod module_stomping;
 pub mod network_stager;
 pub mod patch_amsi;
 pub mod patch_etw;
 pub mod pe_injection;
+pub mod powershell_hosting;
 pub mod ppid_spoofing;
 pub mod process_ghosting;
 pub mod process_hollowing;
@@ -145,6 +147,20 @@ pub enum TechniqueKind {
         /// Technique parameters (`payload`).
         #[serde(default)]
         params: dotnet_hosting::Params,
+    },
+    /// PowerShell hosting: run a `.ps1` payload in-process by hosting the
+    /// PowerShell engine on the CLR.
+    PowershellHosting {
+        /// Technique parameters (`payload`, `mode`, `command`, `command_mode`).
+        #[serde(default)]
+        params: powershell_hosting::Params,
+    },
+    /// Import a PowerShell module into the caller's session (a `kind: psmodule`
+    /// build).
+    ImportPowermodule {
+        /// Technique parameters (`payload`).
+        #[serde(default)]
+        params: import_powermodule::Params,
     },
     /// Reflective loading: map the payload into the current process and run
     /// its entry point.
@@ -286,6 +302,8 @@ impl TechniqueKind {
             TechniqueKind::PatchAmsi { params } => params.render_fragment(strings),
             TechniqueKind::PatchEtw { params } => params.render_fragment(strings),
             TechniqueKind::DotnetHosting { params } => params.render_fragment(strings),
+            TechniqueKind::PowershellHosting { params } => params.render_fragment(strings),
+            TechniqueKind::ImportPowermodule { params } => params.render_fragment(strings),
             TechniqueKind::ProcessHollowing { params } => {
                 params.render_fragment_for(strings, format)
             }
@@ -335,6 +353,8 @@ impl TechniqueKind {
             TechniqueKind::PatchAmsi { .. } => patch_amsi::DEF.name,
             TechniqueKind::PatchEtw { .. } => patch_etw::DEF.name,
             TechniqueKind::DotnetHosting { .. } => dotnet_hosting::DEF.name,
+            TechniqueKind::PowershellHosting { .. } => powershell_hosting::DEF.name,
+            TechniqueKind::ImportPowermodule { .. } => import_powermodule::DEF.name,
             TechniqueKind::ProcessHollowing { .. } => process_hollowing::DEF.name,
             TechniqueKind::ReflectiveLoading { .. } => reflective_loading::DEF.name,
             TechniqueKind::ExecutionCallbacks { .. } => execution_callbacks::DEF.name,
@@ -366,6 +386,8 @@ impl TechniqueKind {
         match self {
             TechniqueKind::ProcessHollowing { params } => params.payload.as_deref(),
             TechniqueKind::DotnetHosting { params } => params.payload.as_deref(),
+            TechniqueKind::PowershellHosting { params } => params.payload.as_deref(),
+            TechniqueKind::ImportPowermodule { params } => params.payload.as_deref(),
             TechniqueKind::ReflectiveLoading { params } => params.payload.as_deref(),
             TechniqueKind::ExecutionCallbacks { params } => params.payload.as_deref(),
             TechniqueKind::Fibers { params } => params.payload.as_deref(),
@@ -375,6 +397,17 @@ impl TechniqueKind {
             TechniqueKind::ThreadHijacking { params } => params.payload.as_deref(),
             TechniqueKind::DllHollowing { params } => params.payload.as_deref(),
             TechniqueKind::ProcessGhosting { params } => params.payload.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// The PowerShell-hosting parameters, when this step is one.
+    ///
+    /// The build reads them to compile the `.ps1` payload into a managed
+    /// launcher before it is embedded.
+    pub fn powershell_params(&self) -> Option<&powershell_hosting::Params> {
+        match self {
+            TechniqueKind::PowershellHosting { params } => Some(params),
             _ => None,
         }
     }
@@ -390,6 +423,8 @@ impl TechniqueKind {
             TechniqueKind::PatchAmsi { .. } => patch_amsi::DEF.category,
             TechniqueKind::PatchEtw { .. } => patch_etw::DEF.category,
             TechniqueKind::DotnetHosting { .. } => dotnet_hosting::DEF.category,
+            TechniqueKind::PowershellHosting { .. } => powershell_hosting::DEF.category,
+            TechniqueKind::ImportPowermodule { .. } => import_powermodule::DEF.category,
             TechniqueKind::ProcessHollowing { .. } => process_hollowing::DEF.category,
             TechniqueKind::ReflectiveLoading { .. } => reflective_loading::DEF.category,
             TechniqueKind::ExecutionCallbacks { .. } => execution_callbacks::DEF.category,
@@ -592,6 +627,8 @@ pub struct TechniqueDef {
 pub fn all() -> &'static [TechniqueDef] {
     &[
         dotnet_hosting::DEF,
+        powershell_hosting::DEF,
+        import_powermodule::DEF,
         process_hollowing::DEF,
         reflective_loading::DEF,
         execution_callbacks::DEF,

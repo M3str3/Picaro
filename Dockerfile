@@ -94,6 +94,45 @@ RUN touch src/main.rs && cargo build --release
 RUN cargo build --target x86_64-pc-windows-gnu --release
 RUN cargo build --target i686-pc-windows-gnu --release
 
+# `powershell_hosting` compiles a small C# launcher at build time against the
+# Windows PowerShell 5.1 engine, which needs two inputs a Linux toolchain does
+# not have:
+#
+#   * a C# compiler able to emit a .NET Framework 4.x assembly — Mono's `mcs`
+#     (`mono-devel` carries the net40 reference assemblies under
+#     `/usr/lib/mono/4.0-api` too).
+#   * PowerShell 5.1's `System.Management.Automation.dll` — the SDK *reference*
+#     assembly from the official NuGet package (targets net40). A reference
+#     assembly is all the compiler needs; at run time the CLR host resolves the
+#     real assembly from the target's GAC.
+#
+# Both are build-time only and never reach the artifact, exactly like rustc and
+# MinGW above. The two overrides (`PICARO_CSC` / `PICARO_PSASSEMBLY`) are the
+# same knobs a host install uses. This block sits *after* the cargo layers on
+# purpose: it only runs once and never invalidates the (expensive) dependency
+# compile above.
+ARG PICARO_PSREF_VERSION=1.1.0
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        mono-devel \
+        mono-mcs \
+        curl \
+        unzip \
+    && rm -rf /var/lib/apt/lists/* \
+    && test -x /usr/bin/mcs \
+    && curl -fsSL -o /tmp/psref.nupkg \
+        "https://www.nuget.org/api/v2/package/Microsoft.PowerShell.5.ReferenceAssemblies/${PICARO_PSREF_VERSION}" \
+    && mkdir -p /usr/local/lib/powershell-ref \
+    && unzip -o -j /tmp/psref.nupkg 'lib/*' -d /usr/local/lib/powershell-ref \
+    && test -f /usr/local/lib/powershell-ref/System.Management.Automation.dll \
+    && rm -f /tmp/psref.nupkg
+
+# Point the packer at the container's C# compiler and PowerShell reference
+# assembly. `mcs` is Mono's compiler; it emits the .NET Framework assembly the
+# stub's CLR host loads at run time.
+ENV PICARO_CSC=/usr/bin/mcs \
+    PICARO_PSASSEMBLY=/usr/local/lib/powershell-ref/System.Management.Automation.dll
+
 # Copied after the compile: read at runtime, so editing an example must not
 # invalidate the build layers above. `examples/` feeds the smoke tests below;
 # the stub template and the YARA rules live under `src/` now, so they are copied

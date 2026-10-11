@@ -431,6 +431,12 @@ fn build(
         anstream::eprintln!("  {} {}", ui.bang(), ui.warn(format!("warning: {warning}")));
     }
 
+    // A `kind: psmodule` build is a managed PowerShell module, not a Rust stub:
+    // it compiles generated C# instead of the stub template.
+    if plan.build.output.kind == OutputKind::PsModule {
+        return build_psmodule(plan, &steps, plan_path, ui, verbose);
+    }
+
     // 3. Encrypt every Execution step's payload and collect the renderer input.
     let build_dir = scratch_dir();
     prepare_build_dir(&build_dir)?;
@@ -498,26 +504,49 @@ fn build(
                     inspect_payload(payload.plan.format, &plaintext, plan.build.output.arch)?;
                 let read_time = timer.elapsed();
 
+                // A `format: powershell` payload is text, not a managed image:
+                // compile it into a small managed launcher the stub hosts (see
+                // `engine::managed`). Every other format is embedded as read.
+                let payload_bytes = match step.technique.powershell_params() {
+                    Some(params) => {
+                        let script = std::str::from_utf8(&plaintext).map_err(|_| {
+                            error::PackerError::Validation(
+                                "the PowerShell payload is not valid UTF-8 text".to_string(),
+                            )
+                        })?;
+                        engine::managed::build_launcher(
+                            script,
+                            params.command.as_deref().unwrap_or(""),
+                            params.command_mode
+                                == crate::techniques::powershell_hosting::CommandMode::Join,
+                            params.mode == crate::techniques::powershell_hosting::Mode::Interactive,
+                            &build_dir,
+                            &format!("launcher_{}", step.index),
+                        )?
+                    }
+                    None => plaintext.clone(),
+                };
+
                 // Derive the key and encrypt with XChaCha20-Poly1305.
                 let timer = Instant::now();
                 let key = match payload.crypto.key {
                     KeySource::Random => crypto::generate_key(),
                 };
-                let encrypted = crypto::encrypt_payload(&plaintext, &key)?;
+                let encrypted = crypto::encrypt_payload(&payload_bytes, &key)?;
                 let encrypt_time = timer.elapsed();
 
                 let path = format!("payload_{}.bin", step.index);
                 std::fs::write(build_dir.join(&path), &encrypted.ciphertext)?;
-                total_plaintext += plaintext.len();
+                total_plaintext += payload_bytes.len();
                 record.payload_sha256 = Some(engine::hash::sha256_hex(&plaintext));
-                record.payload_size = Some(plaintext.len() as u64);
+                record.payload_size = Some(payload_bytes.len() as u64);
                 record.nonce = Some(hex::encode(encrypted.nonce));
                 nonces.push((step.index, encrypted.nonce, encrypted.key));
 
                 let mut parts = vec![
                     ui.target(describe_source(&payload.plan.source)),
                     ui.dim(summary.label),
-                    human_size(plaintext.len()),
+                    human_size(payload_bytes.len()),
                 ];
                 if let Some(export) = &payload.plan.export {
                     parts.push(ui.dim(format!("export {export}")));
@@ -548,14 +577,17 @@ fn build(
                             ui.dim(format!("read {}", format_elapsed(read_time)))
                         )
                     );
-                    let tag = encrypted.ciphertext.len().saturating_sub(plaintext.len());
+                    let tag = encrypted
+                        .ciphertext
+                        .len()
+                        .saturating_sub(payload_bytes.len());
                     anstream::println!(
                         "{}",
                         ui.detail(
                             "encrypt",
                             ui.dim(format!(
                                 "{} -> {} (+{tag} tag) {}",
-                                human_size(plaintext.len()),
+                                human_size(payload_bytes.len()),
                                 human_size(encrypted.ciphertext.len()),
                                 format_elapsed(encrypt_time)
                             ))
@@ -836,6 +868,173 @@ fn build(
     Ok(())
 }
 
+/// Builds a `kind: psmodule` artifact: a managed PowerShell binary module.
+///
+/// A module is not the Rust stub. The packer encrypts each `import_powermodule`
+/// script, renders a C# `IModuleAssemblyInitializer` around them and compiles it
+/// with `csc`; `Import-Module` then injects the scripts into the operator's
+/// session. The output is signed and a manifest written like any other artifact.
+fn build_psmodule(
+    plan: &plan::Plan,
+    steps: &[ResolvedStep],
+    plan_path: &Path,
+    ui: &Palette,
+    _verbose: bool,
+) -> Result<()> {
+    let started = Instant::now();
+    let build_dir = scratch_dir();
+    prepare_build_dir(&build_dir)?;
+
+    let patch_amsi = steps
+        .iter()
+        .any(|step| matches!(step.technique, TechniqueKind::PatchAmsi { .. }));
+
+    // Encrypt each `import_powermodule` script and collect the provenance.
+    let mut scripts = Vec::new();
+    let mut step_records = Vec::new();
+    let mut nonces: Vec<(usize, [u8; 24], [u8; 32])> = Vec::new();
+    for step in steps {
+        let mut record = engine::manifest::StepRecord {
+            index: step.index,
+            label: step.label.clone(),
+            technique: step.technique.name().to_string(),
+            payload: step.payload.as_ref().map(|payload| payload.name.clone()),
+            payload_sha256: None,
+            payload_size: None,
+            nonce: None,
+        };
+
+        let Some(payload) = &step.payload else {
+            // A preparation step (patch_amsi, sleep): nothing to embed.
+            anstream::println!(
+                "{}",
+                ui.done(
+                    &format!("step {} {}", step.index, ui.brand(step.technique.name())),
+                    ui.dim(step.technique.category().label())
+                )
+            );
+            step_records.push(record);
+            continue;
+        };
+
+        let plaintext = load_source(&payload.plan.source)?;
+        verify_payload_hash(&plaintext, payload.plan.sha256.as_deref())?;
+        let summary = inspect_payload(payload.plan.format, &plaintext, plan.build.output.arch)?;
+
+        let key = match payload.crypto.key {
+            KeySource::Random => crypto::generate_key(),
+        };
+        let encrypted = crypto::encrypt_payload(&plaintext, &key)?;
+        scripts.push(engine::managed::EncryptedScript {
+            key_hex: hex::encode(encrypted.key),
+            nonce_hex: hex::encode(encrypted.nonce),
+            cipher_hex: hex::encode(&encrypted.ciphertext),
+        });
+
+        record.payload_sha256 = Some(engine::hash::sha256_hex(&plaintext));
+        record.payload_size = Some(plaintext.len() as u64);
+        record.nonce = Some(hex::encode(encrypted.nonce));
+        nonces.push((step.index, encrypted.nonce, encrypted.key));
+        step_records.push(record);
+
+        anstream::println!(
+            "{}",
+            ui.done(
+                &format!("step {} {}", step.index, ui.brand(step.technique.name())),
+                dotted(
+                    ui,
+                    &[
+                        ui.target(describe_source(&payload.plan.source)),
+                        ui.dim(summary.label),
+                        human_size(plaintext.len()),
+                    ]
+                )
+            )
+        );
+    }
+
+    // Render and compile the managed module.
+    let timer = Instant::now();
+    let module_bytes =
+        engine::managed::build_module(&scripts, patch_amsi, &build_dir, "picaro_module")?;
+    let compile_time = timer.elapsed();
+    let module_path = build_dir.join("picaro_module.dll");
+    std::fs::write(&module_path, &module_bytes)?;
+    anstream::println!(
+        "{}",
+        ui.done(
+            "module",
+            dotted(
+                ui,
+                &[
+                    ui.dim("csc"),
+                    human_size(module_bytes.len()),
+                    ui.dim(format_elapsed(compile_time)),
+                ]
+            )
+        )
+    );
+
+    // Copy to the output path under the build lock, sign, write the manifest —
+    // the same tail as the Rust-stub build.
+    let _output_lock = build_lock::OutputLock::acquire(&plan.build.output.path)?;
+    std::fs::copy(&module_path, &plan.build.output.path)?;
+    let out_size = std::fs::metadata(&plan.build.output.path)?.len() as usize;
+
+    let sign_plan = resolve_sign(plan, None);
+    let signature = engine::signing::sign(&plan.build.output.path, sign_plan.as_ref())?;
+    if let Some(sig) = &signature {
+        let mut parts = vec![ui.brand(sig.mode.clone())];
+        if let Some(thumbprint) = &sig.thumbprint {
+            parts.push(ui.dim(short_thumbprint(thumbprint)));
+        }
+        if sig.timestamp_url.is_some() {
+            parts.push(ui.dim("timestamped"));
+        }
+        anstream::println!("{}", ui.done("sign", dotted(ui, &parts)));
+    }
+
+    if plan.build.output.manifest {
+        let manifest_path = engine::manifest::manifest_path(&plan.build.output.path);
+        let mut manifest =
+            engine::manifest::BuildManifest::new(plan, plan_path, &plan.build.output.path)?;
+        manifest.signature = signature;
+        manifest.steps = step_records;
+        manifest.write(&manifest_path)?;
+    }
+
+    anstream::println!();
+    anstream::println!(
+        "{}",
+        ui.result(
+            "packed",
+            dotted(
+                ui,
+                &[
+                    ui.target(plan.build.output.path.display().to_string()),
+                    human_size(out_size),
+                    ui.dim(format_elapsed(started.elapsed())),
+                ]
+            )
+        )
+    );
+
+    anstream::println!();
+    for (index, nonce, key) in &nonces {
+        anstream::println!(
+            "{}",
+            ui.field(&format!("nonce {index}"), hex::encode(nonce))
+        );
+        #[cfg(debug_assertions)]
+        {
+            let _ = key;
+            anstream::println!("{}", ui.field(&format!("key {index}"), hex::encode(key)));
+        }
+    }
+
+    Ok(())
+}
+
 /// Loads the stub template: the builtin one, or a custom loader stub.
 fn load_stub_template(plan: &plan::Plan) -> Result<(String, String, bool)> {
     match &plan.build.stub.path {
@@ -1014,6 +1213,24 @@ fn inspect_payload(format: PayloadFormat, data: &[u8], arch: Arch) -> Result<Pay
             }
             Ok(PayloadSummary {
                 label: "shellcode",
+                pe: None,
+            })
+        }
+        PayloadFormat::Powershell => {
+            if data.is_empty() {
+                return Err(error::PackerError::Validation(
+                    "the PowerShell payload is empty".to_string(),
+                ));
+            }
+            if std::str::from_utf8(data).is_err() {
+                return Err(error::PackerError::Validation(
+                    "the PowerShell payload is not valid UTF-8 text (a .ps1/.psm1 is text; \
+                     check the payload source)"
+                        .to_string(),
+                ));
+            }
+            Ok(PayloadSummary {
+                label: "PowerShell script",
                 pe: None,
             })
         }
@@ -1328,7 +1545,9 @@ fn apply_subsystem(source: String, subsystem: Subsystem) -> String {
 fn intermediate_path(build_dir: &Path, output: &plan::schema::OutputPlan) -> PathBuf {
     match output.kind {
         OutputKind::Exe => build_dir.join("out.exe"),
-        OutputKind::Dll => {
+        // A psmodule build has its own flow (see `build_psmodule`); this keeps
+        // the match total and names the scratch module after the artifact.
+        OutputKind::Dll | OutputKind::PsModule => {
             let stem = output
                 .path
                 .file_stem()

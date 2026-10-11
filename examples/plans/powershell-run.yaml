@@ -1,0 +1,44 @@
+# PowerShell in memory: run a `.ps1` tool's command without writing it to disk.
+#
+# The `.ps1` is embedded and encrypted like any payload; `powershell_hosting`
+# compiles it into a managed launcher at build time and hosts the PowerShell
+# engine in the loader's own process (no `powershell.exe`, no `-EncodedCommand`,
+# no temp file). `patch_amsi` is required in practice: the engine AMSI-scans the
+# script it compiles.
+#
+#   picaro build examples/plans/powershell-run.yaml
+#   .\dist\picaro-ps.picaro.exe            -> runs the baked command
+#   .\dist\picaro-ps.picaro.exe "Get-PicaroMarker"   -> overrides it (command_mode: override)
+#
+# Point `source` at a real tool (`PowerUp.ps1`, `powerview.ps1`, ...) and set
+# `command` to the function you want (`Invoke-AllChecks`, `Get-DomainUser`, ...).
+
+schema: 6
+name: picaro-ps
+
+build:
+  payloads:
+    script:
+      source: ./examples/payloads/demo_script.ps1
+      format: powershell
+
+  stub:
+    strings:
+      strategy: xor
+
+  output:
+    path: ./dist/picaro-ps.picaro.exe
+    resources:
+      icon: random
+      version_info:
+        randomize: true
+
+runtime:
+  - technique: patch_amsi
+  - technique: patch_etw
+  - technique: powershell_hosting
+    params:
+      payload: script
+      mode: run
+      command: Get-PicaroMarker
+      command_mode: override

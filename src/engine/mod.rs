@@ -35,6 +35,7 @@ pub mod fetch;
 pub mod hash;
 pub mod identity;
 pub mod imports;
+pub mod managed;
 pub mod manifest;
 pub mod obfuscation;
 pub mod pe;
@@ -48,6 +49,18 @@ pub mod syscalls;
 /// Build engine error (stub rendering and compilation).
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
+    /// The .NET Framework C# compiler (`csc.exe`) is not available.
+    #[error("the .NET Framework compiler (csc.exe) is not available: {0}")]
+    DotnetCompilerNotFound(String),
+
+    /// Windows PowerShell's engine assembly could not be located.
+    #[error("Windows PowerShell is not available: {0}")]
+    PowershellAssemblyNotFound(String),
+
+    /// The generated managed launcher failed to compile.
+    #[error("managed launcher compilation failed:\n{0}")]
+    ManagedCompilationFailed(String),
+
     /// The stub template is invalid (missing or unsubstituted placeholder).
     #[error("invalid stub template: {0}")]
     InvalidTemplate(String),

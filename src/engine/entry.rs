@@ -139,6 +139,9 @@ pub fn render(kind: OutputKind, entry: &DllEntry) -> String {
     match kind {
         OutputKind::Exe => EXE_ENTRY.to_string(),
         OutputKind::Dll => render_dll(entry),
+        // A psmodule build never renders the Rust entry block (it is compiled
+        // from generated C#); the placeholder keeps the match total.
+        OutputKind::PsModule => String::new(),
     }
 }
 

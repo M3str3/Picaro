@@ -216,6 +216,36 @@ fn validate_stager(plan: &Plan, steps: &[ResolvedStep]) -> Result<()> {
 fn validate_output(plan: &Plan, steps: &[ResolvedStep]) -> Result<()> {
     let output = &plan.build.output;
 
+    // A technique tied to one output kind must not appear under another.
+    for step in steps {
+        match &step.technique {
+            TechniqueKind::PowershellHosting { .. } if output.kind != OutputKind::Exe => {
+                return Err(PackerError::Validation(format!(
+                    "step {} ('{}') is 'powershell_hosting' but build.output.kind is '{}': it runs a \
+                     script in the loader's own process, which needs 'kind: exe'. For a module the \
+                     operator imports, use 'import_powermodule' with 'kind: psmodule'",
+                    step.index,
+                    step.label,
+                    output.kind.label()
+                )));
+            }
+            TechniqueKind::ImportPowermodule { .. } if output.kind != OutputKind::PsModule => {
+                return Err(PackerError::Validation(format!(
+                    "step {} ('{}') is 'import_powermodule' but build.output.kind is '{}': it builds \
+                     a managed PowerShell module, which needs 'kind: psmodule'",
+                    step.index,
+                    step.label,
+                    output.kind.label()
+                )));
+            }
+            _ => {}
+        }
+    }
+
+    if output.kind == OutputKind::PsModule {
+        return validate_psmodule(plan, steps);
+    }
+
     if output.kind == OutputKind::Exe {
         if output.entry != DllEntry::Auto {
             return Err(PackerError::Validation(format!(
@@ -296,6 +326,65 @@ fn validate_output(plan: &Plan, steps: &[ResolvedStep]) -> Result<()> {
     Ok(())
 }
 
+/// Validates a `build.output.kind: psmodule` build.
+///
+/// A PowerShell module is compiled from generated C# (not the Rust stub), runs
+/// inside the operator's own `powershell.exe`, and only supports the techniques
+/// that make sense there: `patch_amsi` (the host's AMSI) and `import_powermodule`
+/// (one per script), plus `sleep`.
+fn validate_psmodule(plan: &Plan, steps: &[ResolvedStep]) -> Result<()> {
+    let output = &plan.build.output;
+
+    if output.subsystem == Subsystem::Windows {
+        return Err(PackerError::Validation(
+            "build.output.subsystem is 'windows' but build.output.kind is 'psmodule': the module \
+             runs inside the operator's powershell.exe"
+                .to_string(),
+        ));
+    }
+    if output.resources.is_some() {
+        return Err(PackerError::Validation(
+            "build.output.resources is not embedded into a managed module yet; remove it for a \
+             'kind: psmodule' build"
+                .to_string(),
+        ));
+    }
+    if plan.build.stub.path.is_some() {
+        return Err(PackerError::Validation(
+            "build.stub.path is set but build.output.kind is 'psmodule': the module is compiled \
+             from generated C#, not the Rust stub"
+                .to_string(),
+        ));
+    }
+
+    let mut imports = 0usize;
+    for step in steps {
+        match &step.technique {
+            TechniqueKind::ImportPowermodule { .. } => imports += 1,
+            TechniqueKind::PatchAmsi { .. } | TechniqueKind::Sleep { .. } => {}
+            other => {
+                return Err(PackerError::Validation(format!(
+                    "step {} ('{}') is '{}' and build.output.kind is 'psmodule': a module runs \
+                     inside the operator's powershell.exe, where only 'patch_amsi', \
+                     'import_powermodule' and 'sleep' are available",
+                    step.index,
+                    step.label,
+                    other.name()
+                )));
+            }
+        }
+    }
+
+    if imports == 0 {
+        return Err(PackerError::Validation(
+            "build.output.kind is 'psmodule' but no 'import_powermodule' step is declared"
+                .to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 /// The plain export a `kind: dll` build declares must be a C identifier and must
 /// not collide with the entry points the build itself emits.
 fn validate_export_name(name: &str) -> Result<()> {
@@ -342,6 +431,10 @@ pub fn advisories(plan: &Plan) -> Vec<String> {
     // step before it (which patches `EtwEventWrite`, also in ntdll's `.text`) is
     // silently undone. The order is the fix, so the warning names it.
     let mut patched_ntdll_text = false;
+    // `powershell_hosting` drives the PowerShell engine, which scans every script
+    // it compiles through AMSI: without a `patch_amsi` step before it the script
+    // is detected. The order is the fix, so the warning names it.
+    let mut patched_amsi = false;
     // A technique that requires the indirect syscall layer (registry:
     // `requires_indirect_syscalls`) does nothing under `mode: none`.
     let indirect_active = SyscallsConfig::from_yaml(plan.build.stub.syscalls.as_ref())
@@ -358,6 +451,15 @@ pub fn advisories(plan: &Plan) -> Vec<String> {
                 );
             }
             TechniqueKind::PatchEtw { .. } => patched_ntdll_text = true,
+            TechniqueKind::PatchAmsi { .. } => patched_amsi = true,
+            TechniqueKind::PowershellHosting { .. } if !patched_amsi => {
+                warnings.push(format!(
+                    "step {}: 'powershell_hosting' runs the script through the PowerShell engine, \
+                     which AMSI-scans it; add a 'patch_amsi' step before it or the script will be \
+                     detected",
+                    step.index
+                ));
+            }
             TechniqueKind::UnhookNtdll { .. } if patched_ntdll_text => {
                 warnings.push(format!(
                     "step {}: 'unhook_ntdll' restores ntdll's .text from disk, which undoes the \
@@ -635,6 +737,30 @@ fn validate_payload_format(step: &ResolvedStep, payload: &ResolvedPayload) -> Re
     if format != PayloadFormat::Dotnet && hosts_the_clr {
         return Err(PackerError::Validation(format!(
             "'technique: dotnet_hosting' (step {}) needs 'format: dotnet'; payload '{}' is '{}'",
+            step.index,
+            payload.name,
+            format.label()
+        )));
+    }
+
+    // The same mutual implication for PowerShell: a `.ps1` is run by
+    // `powershell_hosting`, and that technique runs nothing else.
+    let hosts_powershell = matches!(
+        step.technique,
+        TechniqueKind::PowershellHosting { .. } | TechniqueKind::ImportPowermodule { .. }
+    );
+    if format == PayloadFormat::Powershell && !hosts_powershell {
+        return Err(PackerError::Validation(format!(
+            "payload '{}' has 'format: powershell', which needs 'technique: powershell_hosting' \
+             (this step runs '{}', which does not host PowerShell)",
+            payload.name,
+            step.technique.name()
+        )));
+    }
+    if format != PayloadFormat::Powershell && hosts_powershell {
+        return Err(PackerError::Validation(format!(
+            "'technique: powershell_hosting' (step {}) needs 'format: powershell'; payload '{}' is \
+             '{}'",
             step.index,
             payload.name,
             format.label()

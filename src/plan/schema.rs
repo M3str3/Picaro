@@ -204,6 +204,11 @@ pub enum PayloadFormat {
     /// stub hosts the CLR and loads the assembly from memory
     /// (`technique: dotnet_hosting`).
     Dotnet,
+    /// A PowerShell script (`.ps1`/`.psm1`): **text**, embedded and encrypted
+    /// like any payload. The packer compiles it into a managed launcher at build
+    /// time and the stub hosts that (`technique: powershell_hosting`), so the
+    /// script never touches disk.
+    Powershell,
 }
 
 impl PayloadFormat {
@@ -214,6 +219,7 @@ impl PayloadFormat {
             PayloadFormat::Shellcode => "shellcode",
             PayloadFormat::Dll => "dll",
             PayloadFormat::Dotnet => "dotnet",
+            PayloadFormat::Powershell => "powershell",
         }
     }
 
@@ -370,6 +376,9 @@ pub enum OutputKind {
     Exe,
     /// A Windows DLL, loaded by a host process.
     Dll,
+    /// A managed (.NET) PowerShell binary module: `Import-Module` loads it and
+    /// its `OnImport` injects the embedded scripts into the caller's session.
+    PsModule,
 }
 
 impl OutputKind {
@@ -383,6 +392,7 @@ impl OutputKind {
         match self {
             OutputKind::Exe => "exe",
             OutputKind::Dll => "dll",
+            OutputKind::PsModule => "psmodule",
         }
     }
 }
@@ -1218,6 +1228,19 @@ runtime:
         let plan: Plan = serde_yml::from_str(&yaml).expect("shellcode format should parse");
         let payload = plan.build.payloads.get("mimikatz").expect("payload");
         assert_eq!(payload.format, PayloadFormat::Shellcode);
+        assert!(!payload.format.is_pe_image());
+    }
+
+    #[test]
+    fn parses_powershell_format() {
+        let yaml = VALID_YAML.replace(
+            "      source: ./mimikatz.exe\n",
+            "      source: ./PowerUp.ps1\n      format: powershell\n",
+        );
+        let plan: Plan = serde_yml::from_str(&yaml).expect("powershell format should parse");
+        let payload = plan.build.payloads.get("mimikatz").expect("payload");
+        assert_eq!(payload.format, PayloadFormat::Powershell);
+        assert_eq!(payload.format.label(), "powershell");
         assert!(!payload.format.is_pe_image());
     }
 
