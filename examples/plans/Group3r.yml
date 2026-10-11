@@ -1,0 +1,46 @@
+# Group3r.exe (.NET) packed with Picaro.
+#
+# Group3r is a managed assembly, so it is not mapped like native code:
+# `dotnet_hosting` hosts the CLR in the stub's own process and loads the
+# assembly from memory. It is a terminal step (the managed `Main` owns the
+# process), so it goes last.
+#
+# `patch_amsi` is not optional here: Windows Defender scans
+# `Assembly.Load(byte[])` through AMSI and blocks a flagged assembly, which the
+# CLR reports as a misleading "bad image format" error.
+#
+#   picaro build Group3r.yml
+#   .\dist\hidden.exe
+
+schema: 6
+name: group3r
+
+build:
+  payloads:
+    group3r:
+      source: "https://github.com/Group3r/Group3r/releases/download/1.0.69/Group3r.exe"
+      format: dotnet
+
+  stub:
+    strings:
+      strategy: xor
+    # Resolve the Nt* SSNs at runtime and enter the kernel through ntdll's own
+    # `syscall; ret` gadget, so no Nt*/Virtual* import is left in the IAT.
+    syscalls:
+      mode: indirect
+      resolver: api_hash
+
+  output:
+    path: ./dist/group3r.picaro.exe
+    resources:
+      icon: random
+      version_info:
+        randomize: true
+    sign:
+      mode: lab
+
+runtime:
+  - technique: patch_amsi
+  - technique: patch_etw
+  - technique: dotnet_hosting
+    params: { payload: group3r }

