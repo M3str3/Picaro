@@ -211,6 +211,56 @@ test('a step that does not accept the payload format is flagged on its card', ()
 });
 
 /* ------------------------------------------------------------------ */
+/* PowerShell module (kind: psmodule)                                 */
+/* ------------------------------------------------------------------ */
+
+test('a PowerShell payload loaded by import_powermodule is not warned', () => {
+  const state = stateWith(
+    [payload('pv', { format: 'powershell' })],
+    [makeStep('patch_amsi', TECH), makeStep('import_powermodule', TECH, { payload: 'pv' })],
+  );
+  state.kind = 'psmodule';
+  const notes = advisories(state, TECH);
+  // No false "run it with PowerShell hosting" warning: import_powermodule hosts it.
+  assert.ok(!notes.some((n) => /load it with/.test(n.text)), 'no false PowerShell-hosting warning');
+  assert.ok(!hasErr(notes, /psmodule/));
+});
+
+test('a psmodule build emits kind: psmodule', () => {
+  const state = stateWith(
+    [payload('pv', { format: 'powershell' })],
+    [makeStep('import_powermodule', TECH, { payload: 'pv' })],
+  );
+  state.kind = 'psmodule';
+  const doc = parse(state);
+  assert.equal(doc.build.output.kind, 'psmodule');
+});
+
+test('import_powermodule without the psmodule kind is an error', () => {
+  const state = stateWith(
+    [payload('pv', { format: 'powershell' })],
+    [makeStep('import_powermodule', TECH, { payload: 'pv' })],
+  );
+  // The base state is an executable.
+  assert.ok(hasErr(advisories(state, TECH), /needs 'kind: psmodule'/));
+});
+
+test('a psmodule build rejects a technique outside its restricted runtime', () => {
+  const state = stateWith(
+    [payload('pv', { format: 'powershell' })],
+    [makeStep('import_powermodule', TECH, { payload: 'pv' }), makeStep('process_hollowing', TECH)],
+  );
+  state.kind = 'psmodule';
+  assert.ok(hasErr(advisories(state, TECH), /not available in a 'kind: psmodule'/));
+});
+
+test('a psmodule build needs an import_powermodule step', () => {
+  const state = stateWith([payload('pv', { format: 'powershell' })], [makeStep('patch_amsi', TECH)]);
+  state.kind = 'psmodule';
+  assert.ok(hasErr(advisories(state, TECH), /needs at least one 'import_powermodule'/));
+});
+
+/* ------------------------------------------------------------------ */
 /* catalogue integration                                              */
 /* ------------------------------------------------------------------ */
 

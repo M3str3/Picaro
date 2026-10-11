@@ -23,7 +23,7 @@ const SELECT_OPTIONS = {
 };
 
 /** Payload formats a technique accepts, read from `TechniqueDef::formats`. */
-const FORMAT_LABEL = { Pe: 'pe', Shellcode: 'shellcode', Dll: 'dll', Dotnet: 'dotnet' };
+const FORMAT_LABEL = { Pe: 'pe', Shellcode: 'shellcode', Dll: 'dll', Dotnet: 'dotnet', Powershell: 'powershell' };
 
 const CAPABILITY_LABEL = {
   WindowsX64: 'windows-x64',

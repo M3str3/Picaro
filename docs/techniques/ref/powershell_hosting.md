@@ -1,0 +1,1 @@
+--8<-- "src/techniques/powershell_hosting/README.md"

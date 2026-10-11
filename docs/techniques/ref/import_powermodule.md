@@ -1,0 +1,1 @@
+--8<-- "src/techniques/import_powermodule/README.md"

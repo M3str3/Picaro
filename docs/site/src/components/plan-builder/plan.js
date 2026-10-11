@@ -18,7 +18,7 @@ export const SECTIONS = [
 ];
 
 /** Formats `build.payloads.<name>.format` accepts. */
-export const PAYLOAD_FORMATS = ['pe', 'dll', 'shellcode', 'dotnet'];
+export const PAYLOAD_FORMATS = ['pe', 'dll', 'shellcode', 'dotnet', 'powershell'];
 
 /** A fresh payload block — one entry of `build.payloads`. */
 export function newPayload(overrides = {}) {
@@ -232,6 +232,7 @@ export function emitYaml(state, TECH) {
 
   lines.push(indent(1, 'output:'), indent(2, `path: ${yamlEscape(state.out || './dist/packed.exe')}`));
   if (state.kind === 'dll') lines.push(indent(2, 'kind: dll'), indent(2, 'entry: auto'));
+  else if (state.kind === 'psmodule') lines.push(indent(2, 'kind: psmodule'));
   if (state.arch && state.arch !== 'x64') lines.push(indent(2, `arch: ${state.arch}`));
   if (state.identity) {
     lines.push(indent(2, 'resources:'), indent(3, 'version_info:'), indent(4, 'randomize: true'));
@@ -307,6 +308,23 @@ export function advisories(state, TECH) {
     if (!hosted) add('warn', `Payload '${p.name}' is managed (.NET); load it with .NET hosting.`);
   }
 
+  // PowerShell hosting and a `.ps1` payload imply each other. A script is
+  // hosted by `powershell_hosting` (an executable) or `import_powermodule` (a
+  // module), so "is it hosted" is read from each technique's accepted formats.
+  for (const step of execs) {
+    if (step.id === 'powershell_hosting' && stepPayloadFormat(step, state) !== 'powershell') {
+      add('err', `${TECH.powershell_hosting.label} requires a payload with format 'powershell'.`);
+    }
+  }
+  const hostsPowershell = (s) => (TECH[s.id]?.formats ?? []).includes('powershell');
+  for (const p of state.payloads) {
+    if (p.format !== 'powershell') continue;
+    const hosted = execs.some((s) => hostsPowershell(s) && stepPayloadName(s, state) === p.name);
+    if (!hosted) {
+      add('warn', `Payload '${p.name}' is a PowerShell script; load it with 'powershell_hosting' or 'import_powermodule'.`);
+    }
+  }
+
   // A terminal technique hands the process to the payload, so it must be last.
   state.steps.forEach((step, i) => {
     if (i === state.steps.length - 1) return;
@@ -350,6 +368,30 @@ export function advisories(state, TECH) {
   const unhook = state.steps.findIndex((s) => s.id === 'unhook_ntdll');
   if (unhook >= 0 && etw >= 0 && unhook > etw) {
     add('warn', 'Unhook ntdll after the ETW patch restores the bytes the patch changed.');
+  }
+
+  // A technique tied to one output kind must not appear under another.
+  for (const step of state.steps) {
+    if (step.id === 'powershell_hosting' && state.kind !== 'exe') {
+      add('err', "'powershell_hosting' runs a script in the loader's own process; it needs 'kind: exe'.");
+    }
+    if (step.id === 'import_powermodule' && state.kind !== 'psmodule') {
+      add('err', "'import_powermodule' builds a managed PowerShell module; it needs 'kind: psmodule'.");
+    }
+  }
+
+  // A PowerShell module runs inside the operator's `powershell.exe`, so only the
+  // techniques that make sense there are available.
+  if (state.kind === 'psmodule') {
+    const allowed = new Set(['patch_amsi', 'import_powermodule', 'sleep']);
+    for (const step of state.steps) {
+      if (!allowed.has(step.id)) {
+        add('err', `'${step.id}' is not available in a 'kind: psmodule' build (only patch_amsi, import_powermodule and sleep).`);
+      }
+    }
+    if (!state.steps.some((s) => s.id === 'import_powermodule')) {
+      add('err', "A 'kind: psmodule' build needs at least one 'import_powermodule' step.");
+    }
   }
 
   if (state.kind === 'dll'

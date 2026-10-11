@@ -119,6 +119,18 @@ export async function mount(root) {
       && ((s.params.payload || '') === name || !s.params.payload)));
   }
 
+  function ensurePowershellHosting(name) {
+    const hosted = state.steps.some((s) => s.id === 'powershell_hosting' && stepPayloadName(s, state) === name);
+    if (hosted) return;
+    const step = addStep('powershell_hosting');
+    if (step) step.params.payload = name;
+  }
+
+  function removePowershellHosting(name) {
+    state.steps = state.steps.filter((s) => !(s.id === 'powershell_hosting'
+      && ((s.params.payload || '') === name || !s.params.payload)));
+  }
+
   /* ---- YAML + status ---------------------------------------------------- */
 
   function refreshYaml() {
@@ -199,6 +211,8 @@ export async function mount(root) {
           p.format = node.value;
           if (p.format === 'dotnet') ensureDotnetHosting(p.name);
           else if (previous === 'dotnet') removeDotnetHosting(p.name);
+          if (p.format === 'powershell' && state.kind !== 'psmodule') ensurePowershellHosting(p.name);
+          else if (previous === 'powershell' && state.kind !== 'psmodule') removePowershellHosting(p.name);
           paint();
           return;
         }
@@ -413,7 +427,7 @@ export async function mount(root) {
         <label class="pb-field pb-span-3"><span>Path</span>
           <input type="text" data-k="out" value="${escAttr(state.out)}" />
         </label>
-        <label class="pb-field"><span>Kind</span><select data-k="kind">${opts(['exe', 'dll'], state.kind)}</select></label>
+        <label class="pb-field"><span>Kind</span><select data-k="kind">${opts(['exe', 'dll', 'psmodule'], state.kind)}</select></label>
         <label class="pb-field"><span>Arch</span><select data-k="arch">${opts(['x64', 'x86'], state.arch)}</select></label>
         <div class="pb-toggles pb-span-3">
           <label class="pb-toggle"><input type="checkbox" data-k="signLab" ${state.signLab ? 'checked' : ''} /> Lab sign</label>
@@ -429,7 +443,8 @@ export async function mount(root) {
     else if (key === 'strings') state.strings = node.value === 'xor';
     else state[key] = node.value;
 
-    if (key === 'kind' && node.value === 'dll' && !/\.dll$/i.test(state.out)) {
+    if (key === 'kind' && (node.value === 'dll' || node.value === 'psmodule')
+        && !/\.dll$/i.test(state.out)) {
       state.out = state.out.replace(/\.exe$/i, '') + '.dll';
     }
     if (key === 'stubPath') ui.stub.textContent = stubLabel(state);

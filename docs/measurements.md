@@ -426,3 +426,57 @@ placeholder until rules exist.
 - Covered by the e2e `indirect_syscall_resolvers_run_the_payload` (`tests/cli.rs`).
 - The three resolvers were reorganized under `src/engine/syscalls/resolvers/<name>/`
   (each self-contained; the registry drives `techniques list`/`show`/`validate`).
+
+## PowerShell hosting — runtime verification (2026-10-11)
+
+- Host: Windows x64 (`10.0.26200`), rustc 1.90, `x86_64-pc-windows-msvc`,
+  .NET Framework 4.0 `csc.exe` + Windows PowerShell 5.1
+  (`System.Management.Automation`, GAC `v4.0_3.0.0.0`).
+- Artifact: `examples/plans/powershell-run.yaml` (`format: powershell`,
+  `patch_amsi` + `patch_etw` + `powershell_hosting`), ~492 KB.
+- Result: the `.ps1` is compiled to a managed launcher at build time (csc) and
+  the stub hosts the PowerShell engine in its own process; the demo script's
+  `Get-PicaroMarker` returns `picaro-ok`, exit `0`. **No `powershell.exe` child
+  and no script on disk.** All three invocation paths verified:
+  - baked default (`command: Get-PicaroMarker`) → `picaro-ok`;
+  - run-time override (`picaro-ps.picaro.exe '6*7'`) → `42`
+    (`command_mode: override`);
+  - `mode: interactive` (a line on stdin) → `picaro-ok`.
+- Covered by the e2e `packs_and_runs_a_powershell_payload` (`tests/cli.rs`,
+  `#[ignore]`).
+- Note: the launcher flushes `Console.Out`/`Console.Error` before returning,
+  because the stub's `main` ends with `std::process::exit`, which skips the CLR's
+  normal shutdown and would otherwise drop a piped run's output.
+
+## PowerShell module — runtime verification (2026-10-11)
+
+- Host: Windows x64, rustc 1.90, .NET Framework 4.0 `csc.exe`, Windows
+  PowerShell 5.1.
+- Artifact: `examples/plans/powershell-module.yaml` (`kind: psmodule`,
+  `patch_amsi` + `import_powermodule`), 11 KB, output `dist/picaro-psmodule.dll`.
+- Result: `Import-Module .\dist\picaro-psmodule.dll` in a fresh
+  `powershell.exe -NoProfile` prints `picaro-ok` from `Get-PicaroMarker` — the
+  script's functions land in the importing session.
+- **The `.ps1` never reaches disk in cleartext**: the module embeds the script as
+  XChaCha20-Poly1305 ciphertext (hex), decrypted in `OnImport`. Verified by
+  scanning the `.dll` byte-wise (UTF-16 and ASCII): neither `Get-PicaroMarker`
+  (the script) nor `amsi.dll` / `AmsiScanBuffer` (XOR-scrambled) appear.
+- The packer's XChaCha20 was ported to C# for the module (`System.Numerics`
+  `BigInteger` for Poly1305) and validated against the draft-irtf-cfrg-xchacha-03
+  A.3 vector.
+- Covered by the e2e `packs_and_imports_a_powershell_module` (`tests/cli.rs`,
+  `#[ignore]`).
+
+### PowerShell hosting — host sensitivity (2026-10-11)
+
+- With Defender's real-time protection **enabled** on the measurement host, a
+  `patch_amsi` + `powershell_hosting` artifact runs the script ~2 times in 3
+  (the AMSI patch is intermittently interfered with); **without** the AMSI patch
+  it is 12/12, and a plain `powershell_hosting` is stable. The e2e
+  `packs_and_runs_a_powershell_payload` therefore retries; a **Defender-off lab
+  host** is the intended environment for runtime verification.
+- The `patch_amsi` patch was corrected while investigating: it now returns
+  `S_OK` **and** writes `AMSI_RESULT_CLEAN` (0) to the caller's out-parameter
+  (the old `sub eax, eax; ret` left it uninitialized, which a caller that reads
+  the result — `System.Management.Automation` does on every script — saw as
+  non-deterministic).
