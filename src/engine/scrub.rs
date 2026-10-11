@@ -27,8 +27,7 @@ use rand::Rng;
 /// shifts the local entropy; printable path characters keep the region in the
 /// same "text" entropy band as the strings around it.
 pub fn random_fill() -> impl FnMut() -> u8 {
-    const ALPHABET: &[u8] =
-        b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/\\";
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/\\";
     let mut rng = rand::thread_rng();
     move || ALPHABET[rng.gen_range(0..ALPHABET.len())]
 }
@@ -75,7 +74,11 @@ fn extend_through_rs(bytes: &[u8], start: usize, max: usize) -> usize {
     let mut scan = start;
     while scan < bytes.len() && scan - start < max && is_path_byte(bytes[scan]) {
         scan += 1;
-        if scan >= 3 && bytes[scan - 3] == b'.' && bytes[scan - 2] == b'r' && bytes[scan - 1] == b's' {
+        if scan >= 3
+            && bytes[scan - 3] == b'.'
+            && bytes[scan - 2] == b'r'
+            && bytes[scan - 1] == b's'
+        {
             return scan;
         }
     }
@@ -265,7 +268,10 @@ mod tests {
         );
 
         assert_eq!(replaced, 1);
-        assert!(bytes.ends_with(b"ntdll.dll"), "adjacent literal was damaged");
+        assert!(
+            bytes.ends_with(b"ntdll.dll"),
+            "adjacent literal was damaged"
+        );
         assert!(bytes.starts_with(b"...."), "match was not filled");
         // The tail up to `.rs` is gone too.
         assert!(!bytes.windows(5).any(|w| w == b"src/l"));
@@ -279,7 +285,10 @@ mod tests {
 
         assert_eq!(replaced, 1);
         assert!(bytes.ends_with(b"NEXT"), "adjacent data was eaten");
-        assert!(!bytes.windows(5).any(|w| w == b"rustc"), "tail not scrubbed");
+        assert!(
+            !bytes.windows(5).any(|w| w == b"rustc"),
+            "tail not scrubbed"
+        );
     }
 
     #[test]

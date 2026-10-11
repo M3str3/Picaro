@@ -917,10 +917,7 @@ dependencies = [
         debug.debug = true;
         assert!(stub_dir_remap(debug, Some(Path::new("/tmp/x"))).is_empty());
 
-        let none = stub_dir_remap(
-            release_options(PathTrim::None),
-            Some(Path::new("/tmp/x")),
-        );
+        let none = stub_dir_remap(release_options(PathTrim::None), Some(Path::new("/tmp/x")));
         assert!(none.is_empty());
     }
 
