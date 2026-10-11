@@ -34,7 +34,7 @@ build:
       unmatched: forward # ( forward | abort ) Strategy when the API is not resolved by syscalls module
 
   output:
-    path: ./dist/mimikatz_packed.exe
+    path: ./dist/mimikatz.picaro.exe
     resources:
       version_info:
         # Fill company/product/description/versions with a generated identity.
