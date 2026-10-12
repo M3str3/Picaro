@@ -76,6 +76,38 @@ pub const SENSITIVE_LITERALS: &[&str] = &[
     // telltale signature, so it must reach the stub through `StringsConfig`.
     "sekurlsa::logonpasswords",
     "privilege::debug",
+    // Technique / feature keywords. A generated stub names its technique only
+    // inside inert `tech_dbg!` macros (stripped before this list is applied to
+    // rendered source), so a *string literal* that names one is a real leak.
+    "loader",
+    "anti_debug",
+    "bouncer",
+    "patch_amsi",
+    "patch_etw",
+    "unhook_ntdll",
+    "process_hollowing",
+    "dotnet_hosting",
+    "powershell_hosting",
+    "import_powermodule",
+    "reflective_loading",
+    "execution_callbacks",
+    "fibers",
+    "module_stomping",
+    "early_bird",
+    "pe_injection",
+    "thread_hijacking",
+    "self_deletion",
+    "stack_spoofing",
+    "sleep_obfuscation",
+    "living_off_the_land",
+    "ppid_spoofing",
+    "network_stager",
+    "guardrail",
+    "timestomping",
+    "dll_hollowing",
+    "process_ghosting",
+    "payload_args",
+    "api_resolution",
 ];
 
 /// Findings of the string scan.
@@ -120,6 +152,21 @@ pub fn find_sensitive_literals(data: &[u8]) -> Vec<String> {
     found.into_iter().collect()
 }
 
+/// Like [`find_sensitive_literals`], but drops any literal present in
+/// `excluded` (case-insensitively).
+///
+/// The binary audit passes the names of the statically imported DLLs here: the
+/// `windows` crate graph embeds `ntdll.dll` (`windows-result`) and the linker
+/// keeps that copy depending on the build, so it is toolchain noise, not a stub
+/// leak. The *source* guardrail ([`find_sensitive_literals_in_source`]) still
+/// checks those names, so a fragment that emits one in cleartext is caught.
+pub fn find_sensitive_literals_excluding(data: &[u8], excluded: &BTreeSet<String>) -> Vec<String> {
+    find_sensitive_literals(data)
+        .into_iter()
+        .filter(|literal| !excluded.contains(&literal.to_ascii_lowercase()))
+        .collect()
+}
+
 /// Returns the sensitive literals that appear in a generated stub's *source*,
 /// ignoring comments.
 ///
@@ -132,18 +179,141 @@ pub fn find_sensitive_literals(data: &[u8]) -> Vec<String> {
 /// the binary comes from the toolchain, while one that is also written in the
 /// generated source is a genuine fragment leak.
 ///
+/// Only the *contents of string literals* are inspected: an identifier that
+/// happens to contain a keyword (`fn patch_amsi`, a `FnNtContinue` type alias,
+/// a `loader_state` variable) is not data and cannot reach the binary. The
+/// arguments of the inert `tech_dbg!(...)` macro are dropped as well (the macro
+/// expands to nothing unless `build.stub.debug` is set), so a technique name
+/// there is not a leak either.
+///
 /// Both the plain form and the Rust-escaped form (backslashes doubled) are
 /// matched, so a Windows path leaked as `"C:\\Windows"` is still recognized.
 #[cfg(test)]
 pub fn find_sensitive_literals_in_source(source: &str) -> Vec<String> {
     let stripped = strip_comments(source);
+    let literals = strip_to_string_literals(&stripped);
     let mut found = BTreeSet::new();
     for lit in SENSITIVE_LITERALS {
-        if stripped.contains(lit) || stripped.contains(&lit.replace('\\', "\\\\")) {
+        if literals.contains(lit) || literals.contains(&lit.replace('\\', "\\\\")) {
             found.insert(lit.to_string());
         }
     }
     found.into_iter().collect()
+}
+
+/// Blanks everything in `code` except the contents of string literals, keeping
+/// separators, so a keyword is reported only when it appears inside a literal.
+///
+/// `tech_dbg!(...)` invocations are blanked whole: their arguments are inert
+/// (the macro is a no-op unless `build.stub.debug` is set), so a technique name
+/// there is not a leak.
+#[cfg(test)]
+fn strip_to_string_literals(code: &str) -> String {
+    let bytes = code.as_bytes();
+    let mut out = vec![b' '; bytes.len()];
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => i = copy_literal(bytes, i, &mut out),
+            b'\'' => i = skip_char_or_lifetime(bytes, i),
+            b'b' | b'c' => match bytes.get(i + 1) {
+                Some(&b'"') => i = copy_literal(bytes, i + 1, &mut out),
+                Some(&b'r') => match skip_raw_string(bytes, i + 1) {
+                    Some(end) => {
+                        out[i..end].copy_from_slice(&bytes[i..end]);
+                        i = end;
+                    }
+                    None => i += 1,
+                },
+                _ => i += 1,
+            },
+            b'r' => match skip_raw_string(bytes, i) {
+                Some(end) => {
+                    out[i..end].copy_from_slice(&bytes[i..end]);
+                    i = end;
+                }
+                None => i += 1,
+            },
+            c if c.is_ascii_alphabetic() || c == b'_' => {
+                let mut j = i;
+                while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+                    j += 1;
+                }
+                if &code[i..j] == "tech_dbg" {
+                    if let Some(end) = tech_dbg_span(bytes, j) {
+                        i = end;
+                        continue;
+                    }
+                }
+                i = j;
+            }
+            _ => i += 1,
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Copies the string literal that opens at `i` (a `"`) into `out` and returns
+/// the index just past its closing quote.
+#[cfg(test)]
+fn copy_literal(bytes: &[u8], i: usize, out: &mut [u8]) -> usize {
+    let end = skip_string(bytes, i);
+    out[i..end].copy_from_slice(&bytes[i..end]);
+    end
+}
+
+/// If a `tech_dbg!` invocation follows the identifier ending at `j`
+/// (whitespace, `!`, whitespace, `(`), returns the index just past its matching
+/// `)`.
+#[cfg(test)]
+fn tech_dbg_span(bytes: &[u8], mut j: usize) -> Option<usize> {
+    while bytes.get(j).is_some_and(|b| b.is_ascii_whitespace()) {
+        j += 1;
+    }
+    if bytes.get(j) != Some(&b'!') {
+        return None;
+    }
+    j += 1;
+    while bytes.get(j).is_some_and(|b| b.is_ascii_whitespace()) {
+        j += 1;
+    }
+    if bytes.get(j) != Some(&b'(') {
+        return None;
+    }
+    Some(match_paren(bytes, j))
+}
+
+/// Returns the index just past the `)` that closes the `(` at `open`, skipping
+/// nested parentheses and string / char / raw-string literals.
+#[cfg(test)]
+fn match_paren(bytes: &[u8], open: usize) -> usize {
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' => {
+                depth -= 1;
+                i += 1;
+                if depth == 0 {
+                    return i;
+                }
+            }
+            b'"' => i = skip_string(bytes, i),
+            b'\'' => i = skip_char_or_lifetime(bytes, i),
+            b'b' | b'c' => match bytes.get(i + 1) {
+                Some(&b'"') => i = skip_string(bytes, i + 1),
+                Some(&b'r') => i = skip_raw_string(bytes, i + 1).unwrap_or(i + 1),
+                _ => i += 1,
+            },
+            b'r' => i = skip_raw_string(bytes, i).unwrap_or(i + 1),
+            _ => i += 1,
+        }
+    }
+    bytes.len()
 }
 
 /// Removes Rust comments from `source`, preserving string/char/raw-string
@@ -445,6 +615,16 @@ mod tests {
     }
 
     #[test]
+    fn excluding_drops_toolchain_dll_names_only() {
+        let data = b"ntdll.dll AmsiScanBuffer";
+        let mut excluded = BTreeSet::new();
+        excluded.insert("ntdll.dll".to_string());
+        let found = find_sensitive_literals_excluding(data, &excluded);
+        assert!(!found.contains(&"ntdll.dll".to_string()));
+        assert!(found.contains(&"AmsiScanBuffer".to_string()));
+    }
+
+    #[test]
     fn source_scan_ignores_comments() {
         // Doc comments and line comments must not count as leaks.
         let src = "/// Patches `AmsiScanBuffer` (see ntdll.dll).\n// amsi.dll\nlet x = 1;";
@@ -482,5 +662,42 @@ mod tests {
         assert!(!stripped.contains("nested"));
         assert!(stripped.contains("has \" quote"));
         assert!(stripped.contains("let r"));
+    }
+
+    #[test]
+    fn source_scan_ignores_identifiers() {
+        // A keyword inside an identifier is not data: functions, type aliases
+        // and variables named after a technique must not trip the scan.
+        let src = "fn patch_amsi() {} type FnNtContinue = (); let loader_state = 0;";
+        assert!(find_sensitive_literals_in_source(src).is_empty());
+    }
+
+    #[test]
+    fn source_scan_ignores_tech_dbg_arguments() {
+        // `tech_dbg!` expands to nothing unless `build.stub.debug` is set, so
+        // its literal arguments are inert and must not count as leaks.
+        let src = r#"crate::tech_dbg!("patch_amsi", "the loader is {loader_state}", x);"#;
+        assert!(find_sensitive_literals_in_source(src).is_empty());
+    }
+
+    #[test]
+    fn source_scan_still_finds_a_real_literal() {
+        let src = r#"let name = "patch_amsi";"#;
+        assert!(find_sensitive_literals_in_source(src).contains(&"patch_amsi".to_string()));
+    }
+
+    #[test]
+    fn source_scan_ignores_a_tech_dbg_span_with_nested_parens_and_strings() {
+        let src = r#"crate::tech_dbg!("imports", "loading '{}': )", f(dll, "loader"));"#;
+        assert!(!find_sensitive_literals_in_source(src).contains(&"loader".to_string()));
+    }
+
+    #[test]
+    fn strip_to_string_literals_keeps_only_literal_contents() {
+        let src = r#"let loader = "setup"; let s = "keep me"; //"#;
+        let only = strip_to_string_literals(src);
+        assert!(only.contains("setup"));
+        assert!(only.contains("keep me"));
+        assert!(!only.contains("loader"));
     }
 }

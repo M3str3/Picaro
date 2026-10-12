@@ -10,7 +10,6 @@
 //! without leaking escape codes into the latter. Everything that carries
 //! meaning is also encoded in structure and glyphs, never in color alone.
 
-use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::ui::{glyph, Meta, Palette, Tone};
@@ -97,7 +96,7 @@ pub fn render(
         out.push_str(&render_exports(pe, ui));
     }
     if focus.enabled("strings") {
-        out.push_str(&render_strings(pe, strings, ui));
+        out.push_str(&render_strings(strings, ui));
     }
     if focus.enabled("yara") {
         out.push_str(&render_yara(yara, ui));
@@ -256,7 +255,7 @@ fn render_exports(pe: &PeAudit, ui: &Palette) -> String {
     out
 }
 
-fn render_strings(pe: &PeAudit, strings: &StringFindings, ui: &Palette) -> String {
+fn render_strings(strings: &StringFindings, ui: &Palette) -> String {
     let mut out = section(ui, "STRINGS", None);
 
     out.push_str(&string_row(ui, "paths (system32)", strings.paths.len()));
@@ -274,16 +273,7 @@ fn render_strings(pe: &PeAudit, strings: &StringFindings, ui: &Palette) -> Strin
     out.push_str(&list_items(ui, &strings.urls_ips));
 
     out.push_str(&string_row(ui, "sensitive", strings.sensitive.len()));
-    let imported = imported_dll_names(pe);
-    for s in &strings.sensitive {
-        // A literal that is also a statically imported DLL name (e.g.
-        // `ntdll.dll`, shipped by the `windows` crate graph) is toolchain
-        // noise, not a stub leak; label it so the reader can tell.
-        let note = imported
-            .contains(&s.to_ascii_lowercase())
-            .then(|| "imported".to_string());
-        out.push_str(&preview_line(ui, s, note));
-    }
+    out.push_str(&list_items(ui, &strings.sensitive));
 
     let flagged = strings.total_flagged();
     let value = if flagged == 0 {
@@ -589,14 +579,6 @@ fn technique_note(s: &str) -> Option<String> {
     (!keywords.is_empty()).then(|| keywords.join(", "))
 }
 
-/// Lowercased names of the statically imported DLLs.
-fn imported_dll_names(pe: &PeAudit) -> BTreeSet<String> {
-    pe.imports
-        .iter()
-        .map(|d| d.name.to_ascii_lowercase())
-        .collect()
-}
-
 /// The entropy gauge: a fixed-width bar whose fill tracks `entropy` (0–8) and
 /// whose color encodes how packed the section looks.
 fn entropy_bar(ui: &Palette, entropy: f64) -> String {
@@ -757,21 +739,22 @@ mod tests {
     }
 
     /// The summary must name the flagged strings, not just count them, and the
-    /// list must explain *why* each matched.
+    /// list must explain *why* each matched. (A statically imported DLL name is
+    /// filtered out before the report; the sample uses `amsi.dll`, which is a
+    /// real leak candidate.)
     #[test]
     fn summary_names_the_flagged_strings() {
         let findings = StringFindings {
             apis: vec!["NtUnmapViewOfSection".to_string()],
             techniques: vec!["the target loader to initialize".to_string()],
-            sensitive: vec!["kernel32.dll".to_string()],
+            sensitive: vec!["amsi.dll".to_string()],
             ..StringFindings::default()
         };
 
         let out = render_with_strings(&findings);
         assert!(out.contains("[loader]"), "missing keyword note: {out}");
-        assert!(out.contains("[imported]"), "missing import note: {out}");
         assert!(
-            out.contains("NtUnmapViewOfSection, loader, kernel32.dll"),
+            out.contains("NtUnmapViewOfSection, loader, amsi.dll"),
             "summary should list labels: {out}"
         );
     }

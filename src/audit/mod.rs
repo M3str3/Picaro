@@ -155,10 +155,18 @@ pub fn run(binary: &Path, options: &AuditOptions, ui: &Palette) -> Result<Outcom
     // Sensitive literals are checked over the code/data sections only, with the
     // import table's own strings blanked out, so its DLL/function names (e.g.
     // `kernel32.dll`) are not false positives regardless of where the linker
-    // placed them.
+    // placed them. A statically imported DLL name is still excluded outright:
+    // the `windows` crate graph embeds `ntdll.dll` (`windows-result`) and the
+    // linker keeps it depending on the build, which is toolchain noise. The
+    // source guardrail still checks those names.
     let code_data = pe_info::code_data(&data, &pe.sections, &pe.import_text_ranges);
+    let imported_dlls: BTreeSet<String> = pe
+        .imports
+        .iter()
+        .map(|d| d.name.to_ascii_lowercase())
+        .collect();
     let mut strings = strings_scan;
-    strings.sensitive = strings::find_sensitive_literals(&code_data);
+    strings.sensitive = strings::find_sensitive_literals_excluding(&code_data, &imported_dlls);
     let yara = yara::scan(&data);
     let defender = defender::scan(binary);
 
