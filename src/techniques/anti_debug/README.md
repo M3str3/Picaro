@@ -88,9 +88,10 @@ receives the payload. Place it earlier in `runtime:` than the Execution step.
 - The `windows` `CONTEXT` binding only guarantees 8-byte alignment, so the
   fragment wraps it in a `#[repr(align(16))]` struct, as x64 `GetThreadContext`
   requires. This mirrors the process-hollowing fragment.
-- No string literals: every check is a direct `nt_*` call, so nothing needs to
-  go through `StringsConfig`. The `ProcessDebugPort` / `ProcessDebugObjectHandle`
-  information-class values are compile-time constants, not runtime strings.
+- The detection message is rebuilt at runtime through `StringsConfig` (the
+  `MESSAGES` pattern in `mod.rs`), so no diagnostic text reaches `.rdata`. The
+  `ProcessDebugPort` / `ProcessDebugObjectHandle` information-class values are
+  compile-time constants, not runtime strings.
 - The checks resolve through the syscall layer (`NtQueryInformationProcess` for
   the debug-port / debug-object checks, `NtGetContextThread` for the hardware
   breakpoints), mirroring the `patch_amsi`/`patch_etw` migration.

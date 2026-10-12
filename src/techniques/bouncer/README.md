@@ -119,8 +119,9 @@ away are not in the file:
 - `on_fail: exit` is handled inside the fragment (`std::process::exit(1)`), so
   the exit code is preserved even though the dispatcher's `false` means "exit
   silently" in the builtin template.
-- A failing *API read* (not a failed check) propagates as a `BouncerError` and
-  the stub reports it and exits `1`; only a policy rejection obeys `on_fail`.
+- A failing *API read* (not a failed check) propagates as an obfuscated message
+  string and the stub reports it and exits `1`; only a policy rejection obeys
+  `on_fail`.
 - The glob matcher in the fragment mirrors `bouncer::glob_match` in the packer
   (kept for unit tests). A fragment cannot call back into the packer, so the
   two copies are intentional and small.

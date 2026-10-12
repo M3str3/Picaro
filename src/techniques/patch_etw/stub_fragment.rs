@@ -18,19 +18,6 @@ const PATCH_EX: bool = $PATCH_EX$;
 /// Whether to also patch `NtTraceEvent`, the native entry (best effort).
 const PATCH_NT_TRACE: bool = $PATCH_NT_TRACE$;
 
-/// Errors produced while patching an event-writing function.
-#[derive(Debug, thiserror::Error)]
-pub enum PatchEtwError {
-    #[error("failed to load the library to patch")]
-    LoadFailed,
-    #[error("failed to resolve the function to patch")]
-    ResolveFailed,
-    #[error("failed to make the target function writable")]
-    MakeWritableFailed,
-    #[error("failed to restore the target function protection")]
-    RestoreProtectionFailed,
-}
-
 /// Patches the event-writing exports in the current process so no events reach
 /// their consumers.
 ///
@@ -44,7 +31,7 @@ pub enum PatchEtwError {
 /// do not appear in `strings`. The page protection changes go through the
 /// syscall layer's `nt_protect_vm`, so `mode: indirect` removes the
 /// `VirtualProtect` import.
-pub fn patch_etw() -> Result<bool, PatchEtwError> {
+pub fn patch_etw() -> Result<bool, String> {
     patch_export(&$ETW_DLL_DEF$, &$ETW_FUNC_DEF$)?;
     if PATCH_FULL {
         patch_optional(&$ETW_DLL_DEF$, &$ETW_FULL_FUNC_DEF$);
@@ -70,15 +57,15 @@ fn patch_optional(dll: &str, func: &str) {
 }
 
 /// Resolves `func` in `dll` and overwrites its prologue with [`ETW_PATCH`].
-fn patch_export(dll: &str, func: &str) -> Result<(), PatchEtwError> {
-    let dll = std::ffi::CString::new(dll).map_err(|_| PatchEtwError::LoadFailed)?;
-    let func = std::ffi::CString::new(func).map_err(|_| PatchEtwError::LoadFailed)?;
+fn patch_export(dll: &str, func: &str) -> Result<(), String> {
+    let dll = std::ffi::CString::new(dll).map_err(|_| $MSG_LOAD_FAILED$)?;
+    let func = std::ffi::CString::new(func).map_err(|_| $MSG_LOAD_FAILED$)?;
 
     // The library is already loaded, so this only fetches its handle.
     let module = unsafe { LoadLibraryA(PCSTR(dll.as_ptr() as *const u8)) }
-        .map_err(|_| PatchEtwError::LoadFailed)?;
+        .map_err(|_| $MSG_LOAD_FAILED$)?;
     let address = unsafe { GetProcAddress(module, PCSTR(func.as_ptr() as *const u8)) }
-        .ok_or(PatchEtwError::ResolveFailed)?;
+        .ok_or($MSG_RESOLVE_FAILED$)?;
     let target = address as usize as *mut u8;
 
     // Make the first bytes writable.
@@ -91,7 +78,7 @@ fn patch_export(dll: &str, func: &str) -> Result<(), PatchEtwError> {
         &mut old_protect,
     );
     if status < 0 {
-        return Err(PatchEtwError::MakeWritableFailed);
+        return Err($MSG_MAKE_WRITABLE_FAILED$);
     }
 
     // Write the patch.
@@ -110,7 +97,7 @@ fn patch_export(dll: &str, func: &str) -> Result<(), PatchEtwError> {
         &mut old_protect,
     );
     if status < 0 {
-        return Err(PatchEtwError::RestoreProtectionFailed);
+        return Err($MSG_RESTORE_PROTECTION_FAILED$);
     }
     crate::tech_dbg!(
         "patch_etw",

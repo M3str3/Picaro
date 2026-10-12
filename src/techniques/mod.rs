@@ -1268,4 +1268,33 @@ mod tests {
             );
         }
     }
+
+    /// A technique fragment must not declare a `thiserror` diagnostic: its
+    /// `#[error("...")]` literals reach the generated stub in cleartext.
+    ///
+    /// Every diagnostic must be rebuilt at runtime through `StringsConfig` (the
+    /// `MESSAGES` pattern in `process_hollowing`/`fibers`/...). This is the
+    /// source-level counterpart of the compiled-stub guardrail
+    /// (`no_sensitive_literals_in_generated_stubs`), and it runs without rustc.
+    #[test]
+    fn no_fragment_declares_a_cleartext_diagnostic() {
+        let fragments =
+            all()
+                .iter()
+                .map(|def| (def.name, def.stub_fragment))
+                .chain(std::iter::once((
+                    "reflective_loading (shellcode)",
+                    reflective_loading::SHELLCODE_FRAGMENT,
+                )));
+        for (name, fragment) in fragments {
+            assert!(
+                !fragment.contains("thiserror::Error"),
+                "technique '{name}' derives a thiserror diagnostic"
+            );
+            assert!(
+                !fragment.contains("#[error("),
+                "technique '{name}' declares a cleartext `#[error(...)]` diagnostic"
+            );
+        }
+    }
 }

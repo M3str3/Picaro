@@ -151,9 +151,9 @@ payload completes (exit `0`). A relocation bug (DIR64/HIGHLOW swapped in the
 fragment) was the real blocker. Measured evidence:
 `docs/techniques/process_hollowing.md`. Every diagnostic the fragment emits is
 obfuscated (`MESSAGES` + `render_fragment`), so no error text — and no technique
-keyword such as `loader` — reaches `.rdata`. `reflective_loading`'s shellcode
-fragment and the other five techniques still carry cleartext (keyword-free)
-diagnostics through `thiserror`.
+keyword such as `loader` — reaches `.rdata`. Every technique's diagnostics now
+go through `StringsConfig` the same way; none derives a `thiserror` error (see
+the source-level guard `no_fragment_declares_a_cleartext_diagnostic`).
 
 **Phase 6: indirect syscalls done.** New `build.stub.syscalls` block
 (`mode: none|indirect`, `resolver: hells_gate|tartarus_gate|api_hash`; defaults
@@ -224,13 +224,18 @@ above.
 
 **String-leak consolidation (done).** Every runtime literal in every stub
 fragment goes through `StringsConfig` (`patch_amsi`, `process_hollowing`
-included). `audit` reports a `Sensitive:` line (`SENSITIVE_LITERALS`) and blanks
-the import table's own DLL/function-name strings (`import_text_ranges`) so those
-are not false positives. The `#[ignore]` test
+included); no technique fragment declares a `thiserror` diagnostic any more, and
+the source-level guard `no_fragment_declares_a_cleartext_diagnostic`
+(`src/techniques/mod.rs`) enforces it. `audit` reports a `Sensitive:` line
+(`SENSITIVE_LITERALS`, which now also lists the technique/feature keywords) and
+blanks the import table's own DLL/function-name strings (`import_text_ranges`)
+so those are not false positives. The `#[ignore]` test
 `no_sensitive_literals_in_generated_stubs` is the CI safety net: it flags a
 literal only when it is in the compiled stub **and** in the generated stub
-source (comments stripped) — a binary hit alone can come from the toolchain
-(e.g. `windows-result` ships `ntdll.dll`).
+source — a binary hit alone can come from the toolchain (e.g. `windows-result`
+ships `ntdll.dll`). The source scan is literal-scoped and skips inert
+`tech_dbg!(...)` arguments, so an identifier named after a technique
+(`fn patch_amsi`) is not a false positive.
 
 **CLI UX, app named `picaro` (done).** The crate, binary and CLI are `picaro`.
 UX lives in `src/ui.rs`:

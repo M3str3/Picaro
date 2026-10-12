@@ -180,6 +180,37 @@ params:
     resolves_imports: false,
 };
 
+/// Runtime diagnostics the fragment can emit, as `(placeholder, plaintext)`
+/// pairs.
+///
+/// `render_fragment` replaces each placeholder with code that rebuilds the
+/// message at runtime, so no diagnostic text lands in the generated stub's
+/// `.rdata`. Each message is passed through the fragment's `win32_error` helper,
+/// which appends the failing Win32 error code at the call site; the helper keeps
+/// a keyword-free `format!` literal (`format!` cannot take a runtime format
+/// string).
+const MESSAGES: &[(&str, &str)] = &[
+    (
+        "$MSG_COMPUTER_NAME_FAILED$",
+        "could not read the computer name",
+    ),
+    ("$MSG_USER_NAME_FAILED$", "could not read the user name"),
+    ("$MSG_DOMAIN_FAILED$", "could not read the DNS domain"),
+    ("$MSG_LOCALE_FAILED$", "could not read the user locale"),
+    (
+        "$MSG_KEYBOARD_FAILED$",
+        "could not read the active keyboard layouts",
+    ),
+    (
+        "$MSG_PROCESS_ENUM_FAILED$",
+        "could not enumerate the running processes",
+    ),
+    (
+        "$MSG_MEMORY_QUERY_FAILED$",
+        "could not query the physical memory",
+    ),
+];
+
 impl Params {
     /// Whether the gate declares no checks at all, so it can never reject a
     /// host. Surfaced as a build advisory by `plan::validate::advisories`.
@@ -262,6 +293,14 @@ impl Params {
 
         for (placeholder, value) in substitutions {
             fragment = fragment.replace(placeholder, &value);
+        }
+        for (index, (placeholder, text)) in MESSAGES.iter().enumerate() {
+            fragment = fragment.replace(
+                placeholder,
+                &strings
+                    .obfuscate(text)
+                    .render_stub_expr(&format!("bouncer_msg_{index}")),
+            );
         }
         fragment
     }

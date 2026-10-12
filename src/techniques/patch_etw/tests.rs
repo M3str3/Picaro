@@ -39,10 +39,9 @@ fn parses_explicit_full_false() {
 
 #[test]
 fn parses_explicit_ex_and_nt_trace_false() {
-    let step: TechniqueKind = serde_yml::from_str(
-        "technique: patch_etw\nparams:\n  ex: false\n  nt_trace: false\n",
-    )
-    .expect("patch_etw should parse");
+    let step: TechniqueKind =
+        serde_yml::from_str("technique: patch_etw\nparams:\n  ex: false\n  nt_trace: false\n")
+            .expect("patch_etw should parse");
     assert_eq!(
         step,
         TechniqueKind::PatchEtw {
@@ -103,6 +102,10 @@ fn render_fragment_obfuscates_literals_and_enables_every_variant() {
         "$PATCH_FULL$",
         "$PATCH_EX$",
         "$PATCH_NT_TRACE$",
+        "$MSG_LOAD_FAILED$",
+        "$MSG_RESOLVE_FAILED$",
+        "$MSG_MAKE_WRITABLE_FAILED$",
+        "$MSG_RESTORE_PROTECTION_FAILED$",
     ] {
         assert!(
             !fragment.contains(placeholder),

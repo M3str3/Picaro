@@ -88,6 +88,13 @@ fn render_fragment_bakes_in_abort() {
     assert!(fragment.contains("fn anti_debug"));
     assert!(fragment.contains("const ABORT_ON_DETECT: bool = true;"));
     assert!(!fragment.contains("$ABORT_ON_DETECT$"));
+    // The detection error must be rebuilt at runtime, not inlined: a leftover
+    // `$...$` token is not valid Rust and the plaintext message must not survive.
+    assert!(
+        !fragment.contains('$'),
+        "an unsubstituted placeholder would break the stub"
+    );
+    assert!(!fragment.contains("a debugger was detected"));
     assert!(find_sensitive_literals_in_source(&fragment).is_empty());
 }
 

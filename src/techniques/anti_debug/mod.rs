@@ -64,15 +64,35 @@ pub const DEF: TechniqueDef = TechniqueDef {
     resolves_imports: false,
 };
 
+/// Runtime diagnostics the fragment can emit, as `(placeholder, plaintext)`
+/// pairs.
+///
+/// `render_fragment` replaces each placeholder with code that rebuilds the
+/// message at runtime, so no diagnostic text — least of all a technique keyword
+/// like `loader` — lands in the generated stub's `.rdata`.
+const MESSAGES: &[(&str, &str)] = &[("$MSG_DEBUGGER_DETECTED$", "a debugger was detected")];
+
 impl Params {
     /// Renders the anti-debug stub fragment, baking in whether a detection
     /// aborts the preparation.
-    pub fn render_fragment(&self, _strings: &StringsConfig) -> String {
+    ///
+    /// The detection error is rebuilt from `strings`'s obfuscated bytes, so no
+    /// diagnostic text reaches the generated stub's `.rdata`.
+    pub fn render_fragment(&self, strings: &StringsConfig) -> String {
         let abort = match self.action {
             Action::Abort => "true",
             Action::Continue => "false",
         };
-        DEF.stub_fragment.replace("$ABORT_ON_DETECT$", abort)
+        let mut rendered = DEF.stub_fragment.replace("$ABORT_ON_DETECT$", abort);
+        for (index, (placeholder, text)) in MESSAGES.iter().enumerate() {
+            rendered = rendered.replace(
+                placeholder,
+                &strings
+                    .obfuscate(text)
+                    .render_stub_expr(&format!("anti_debug_msg_{index}")),
+            );
+        }
+        rendered
     }
 }
 

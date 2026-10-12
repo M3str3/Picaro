@@ -80,6 +80,10 @@ fn render_fragment_obfuscates_literals() {
         "$AMSI_OPEN_SESSION_FUNC_DEF$",
         "$PATCH_SCAN_STRING$",
         "$PATCH_OPEN_SESSION$",
+        "$MSG_LOAD_FAILED$",
+        "$MSG_RESOLVE_FAILED$",
+        "$MSG_MAKE_WRITABLE_FAILED$",
+        "$MSG_RESTORE_PROTECTION_FAILED$",
     ] {
         assert!(
             !fragment.contains(placeholder),

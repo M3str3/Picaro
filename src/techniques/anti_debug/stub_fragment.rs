@@ -15,13 +15,6 @@ const PROCESS_DEBUG_OBJECT_HANDLE: i32 = 30;
 /// Whether a positive detection aborts the preparation.
 const ABORT_ON_DETECT: bool = $ABORT_ON_DETECT$;
 
-/// Errors produced by the anti-debug preparation.
-#[derive(Debug, thiserror::Error)]
-pub enum AntiDebugError {
-    #[error("a debugger was detected")]
-    DebuggerDetected,
-}
-
 /// `CONTEXT_DEBUG_REGISTERS` for the stub's architecture: DR0-DR3 are what the
 /// hardware-breakpoint check reads, and the flag value differs between x64 and
 /// x86 (`0x10010` there).
@@ -45,14 +38,14 @@ struct AlignedContext(CONTEXT);
 /// layer's `nt_query_info_process` / `nt_get_context_thread`, so `mode: indirect`
 /// removes the `IsDebuggerPresent`/`CheckRemoteDebuggerPresent`/`GetThreadContext`
 /// imports.
-pub fn anti_debug() -> Result<bool, AntiDebugError> {
+pub fn anti_debug() -> Result<bool, String> {
     let detected = debugger_present();
     crate::tech_dbg!(
         "anti_debug",
         "debugger detected: {detected} (abort on detect: {ABORT_ON_DETECT})"
     );
     if detected && ABORT_ON_DETECT {
-        return Err(AntiDebugError::DebuggerDetected);
+        return Err($MSG_DEBUGGER_DETECTED$);
     }
     // A Preparation always continues the pipeline when it does not error; only
     // the `bouncer` gate decides to abort (see `techniques/README.md`).

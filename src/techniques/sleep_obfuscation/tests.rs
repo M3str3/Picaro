@@ -1,6 +1,7 @@
 //! Tests for the sleep-obfuscation technique.
 
-use super::{EncryptRegion, Params, Variant, DEF};
+use super::{EncryptRegion, Params, Variant, DEF, MESSAGES};
+use crate::audit::strings::find_sensitive_literals_in_source;
 use crate::engine::obfuscation::StringsConfig;
 use crate::techniques::TechniqueKind;
 
@@ -142,6 +143,14 @@ fn render_fragment_obfuscates_api_names() {
         "$SYSTEM_FUNCTION_032_DEF$",
         "$SLEEP_MS$",
         "$SLEEP_KEY_DEF$",
+        "$MSG_CAPTURE_CONTEXT_FAILED$",
+        "$MSG_CREATE_TIMER_QUEUE_FAILED$",
+        "$MSG_CREATE_TIMER_QUEUE_TIMER_FAILED$",
+        "$MSG_VIRTUAL_QUERY_FAILED$",
+        "$MSG_VIRTUAL_PROTECT_FAILED$",
+        "$MSG_CRYPT_FUNCTION_NOT_FOUND$",
+        "$MSG_CRYPT_FUNCTION_FAILED$",
+        "$MSG_NO_TARGET_REGIONS$",
     ] {
         assert!(
             !fragment.contains(placeholder),
@@ -149,9 +158,26 @@ fn render_fragment_obfuscates_api_names() {
         );
     }
 
+    // No `$` token survives at all, and no sensitive literal (nor an
+    // obfuscated diagnostic's plaintext) leaks in cleartext into the source.
+    assert!(
+        !fragment.contains('$'),
+        "an unsubstituted placeholder survived"
+    );
+    let leaked = find_sensitive_literals_in_source(&fragment);
+    assert!(
+        leaked.is_empty(),
+        "the rendered fragment leaks sensitive literals: {leaked:?}"
+    );
+    for (_, text) in MESSAGES {
+        assert!(
+            !fragment.contains(text),
+            "a diagnostic message leaked in cleartext: {text}"
+        );
+    }
+
     // No resolved API/DLL name may appear as a string literal in the
-    // generated source (checking the quoted form keeps the check honest: the
-    // error-variant identifiers legitimately contain e.g. "VirtualProtect").
+    // generated source: the quoted form is what would leak into `.rdata`.
     for name in [
         "kernel32.dll",
         "ntdll.dll",

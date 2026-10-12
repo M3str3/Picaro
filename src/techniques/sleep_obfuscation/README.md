@@ -140,8 +140,8 @@ restores it afterwards.
   with staggered due times. Function pointers are transmuted to the callback
   ABI.
 - **`SystemFunction032` is dynamic**: it resolves from `advapi32` at runtime;
-  if resolution fails, the stub errors with `CryptFunctionNotFound` (a pure
-  ChaCha20 fallback in the stub is possible but not needed — the crate is
+  if resolution fails, the stub reports a clear error and aborts the sleep (a
+  pure ChaCha20 fallback in the stub is possible but not needed — the crate is
   already linked).
 - **`SystemFunction032` takes a `struct ustring`, not a `UNICODE_STRING`**: its
   `Length`/`MaximumLength` fields are `DWORD`s (u32). Modeling them as the

@@ -89,6 +89,43 @@ fn rendered_fragments_substitute_placeholders_and_obfuscate_the_export() {
     );
 }
 
+/// The exact guardrail the build flow relies on: a rendered fragment -- the PE
+/// mapper and the shellcode runner alike -- leaves no `$PLACEHOLDER$` token and
+/// no sensitive literal in the generated source, under either obfuscation
+/// strategy.
+#[test]
+fn rendered_fragments_have_no_placeholders_or_sensitive_literals() {
+    use crate::audit::strings::find_sensitive_literals_in_source;
+    use crate::engine::obfuscation::StringStrategy;
+
+    let strategies = [
+        StringsConfig::from_yaml(None).expect("default strings"),
+        StringsConfig {
+            strategy: StringStrategy::Stack,
+            key: None,
+        },
+    ];
+
+    for strings in strategies {
+        for format in [
+            PayloadFormat::Pe,
+            PayloadFormat::Dll,
+            PayloadFormat::Shellcode,
+        ] {
+            let fragment = Params::default().render_fragment_for(&strings, format, None);
+            assert!(
+                !fragment.contains('$'),
+                "an unsubstituted placeholder would break the stub ({format:?})"
+            );
+            let leaked = find_sensitive_literals_in_source(&fragment);
+            assert!(
+                leaked.is_empty(),
+                "the rendered fragment leaks sensitive literals ({format:?}): {leaked:?}"
+            );
+        }
+    }
+}
+
 /// Full e2e: render + compile a reflective-loading stub for each payload
 /// format, producing a PE each time.
 ///

