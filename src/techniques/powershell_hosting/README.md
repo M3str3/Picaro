@@ -73,10 +73,11 @@ powerup.picaro.exe                                    # no args -> the baked def
 
 An Execution step, so it belongs after the Preparations that shape the process.
 `patch_amsi` is required in practice: the engine scans `AddScript` content
-through `AmsiScanBuffer`, so the script would be detected without it. `patch_etw`
-is recommended (script block logging travels over ETW). The step returns control
-to the loader (it is **not** terminal), so a step such as `self_deletion` may
-follow it. It accepts only `format: powershell` payloads.
+through `AmsiScanBuffer`, so the script would be detected without it (the step
+patches the native exports *and* bakes the managed `AmsiUtils` bypass into the
+launcher). `patch_etw` is recommended (script block logging travels over ETW).
+The step returns control to the loader (it is **not** terminal), so a step such
+as `self_deletion` may follow it. It accepts only `format: powershell` payloads.
 
 ## What it evades
 
@@ -121,8 +122,12 @@ follow it. It accepts only `format: powershell` payloads.
   so a container build works out of the box.
 - Interactive output uses each result's `ToString()`; rich objects are not
   formatted with `Out-String` yet.
-- The launcher patches nothing itself: AMSI is patched by the `patch_amsi` step,
-  in the loader's process, before the CLR starts.
+- The launcher patches nothing native itself: the native AMSI patch is the
+  `patch_amsi` step's job, in the loader's process, before the CLR starts. When
+  that step is present the launcher *does* carry the managed bypass — it sets
+  `System.Management.Automation.AmsiUtils.amsiInitFailed` (the name is
+  XOR-scrambled in the assembly) so PowerShell's own scan entry returns before it
+  calls into `amsi.dll`.
 - **Host sensitivity.** With Defender's real-time protection enabled, the AMSI
   patch is intermittently interfered with, so the hosted engine may not run on
   every launch; a Defender-off lab host is stable (see `docs/measurements.md`).

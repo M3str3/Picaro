@@ -21,7 +21,7 @@ flowchart TD
     C --> D["csc -> managed module (x.dll)"]
     D --> E["operator: Import-Module .\\x.dll"]
     E --> F["OnImport runs in powershell.exe"]
-    G{"patch_amsi step?"} --> H["patch AmsiScanBuffer in the host"]
+    G{"patch_amsi step?"} --> H["patch AMSI in the host (native + managed)"]
     F --> G
     H --> I["decrypt each script in memory"]
     I --> J["PowerShell.Create(CurrentRunspace)"]
@@ -35,7 +35,8 @@ flowchart TD
    XChaCha20-Poly1305 and its ciphertext/key/nonce baked into a generated C#
    module as hex constants.
 2. The module implements `IModuleAssemblyInitializer`; if the runtime declares
-   `patch_amsi`, its `OnImport` first patches the host's `AmsiScanBuffer` (the two
+   `patch_amsi`, its `OnImport` first patches the host's AMSI: the native
+   `AmsiScanBuffer` plus the managed `AmsiUtils.amsiInitFailed` flag (all the
    names are XOR-scrambled in the assembly).
 3. `csc` compiles the module to a managed `.dll`, which is signed and shipped.
 
@@ -72,8 +73,9 @@ injection order (Plan C: several tools in one import).
 - **`Import-Module` of an unsigned/unknown module**: `output.sign` (an unsigned
   module beside a signed host is loud) is the mitigation.
 - **AMSI / script block logging** in the host: the `patch_amsi` step is what
-  keeps the injected script from being flagged; with invocation logging on, ETW
-  still sees the blocks.
+  keeps the injected script from being flagged. It patches the native scan
+  exports and sets the managed `AmsiUtils.amsiInitFailed` flag; with invocation
+  logging on, ETW still sees the blocks.
 
 ## Measurements
 
@@ -87,6 +89,10 @@ injection order (Plan C: several tools in one import).
 - The Rust `stub_fragment.rs` is a placeholder: this technique is rendered in C#,
   and the fragment exists only so the registry entry and the compile guardrail are
   well-formed. `plan::validate` rejects the technique outside a psmodule build.
+- A `patch_amsi` step emits two AMSI bypasses into the module: the native
+  `AmsiScanBuffer` patch and the managed `AmsiUtils.amsiInitFailed` flag (both
+  reflection/lookup names are scrambled, and `amsi.dll`/`AmsiScanBuffer` with
+  them).
 - `resources` (icon/VERSIONINFO/manifest) are not embedded into a managed module
   yet.
 

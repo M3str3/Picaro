@@ -536,3 +536,35 @@ placeholder until rules exist.
   (the old `sub eax, eax; ret` left it uninitialized, which a caller that reads
   the result — `System.Management.Automation` does on every script — saw as
   non-deterministic).
+
+## ETW/AMSI patch — expanded coverage (2026-10-12)
+
+- `patch_etw` now covers four exports — `EtwEventWrite` (always),
+  `EtwEventWriteFull`, `EtwEventWriteEx` and `NtTraceEvent` (best effort) — and
+  `patch_amsi` three — `AmsiScanBuffer` (always), `AmsiScanString` and
+  `AmsiOpenSession` (best effort). The extra variants are opt-out through
+  `params` and default on. `AmsiScanString` and `AmsiOpenSession` write the
+  caller's out-parameter from the correct argument slot (5th and 2nd
+  respectively); `NtTraceEvent` is patched exactly like the `Etw*` writers.
+- Static surface is unchanged: every export name is a `StringsConfig` runtime
+  literal resolved through `GetProcAddress`, so none reaches `.rdata` or the
+  import table. `NtTraceEvent` was added to `SENSITIVE_LITERALS`;
+  `EtwEventWriteEx` is covered by the `EtwEventWrite` substring. The guardrail
+  `no_sensitive_literals_in_generated_stubs` (one stub per technique, x64) stays
+  clean, and both fragments compile for x86 and x64
+  (`compiles_the_x86_preparations_for_i686`).
+- The native patches are exercised end to end by
+  `x86_preparations_run_before_the_payload` (32-bit stub, `patch_amsi` +
+  `patch_etw`, payload runs) and `build_with_amsi_patch_produces_pe`.
+- **Managed path (`AmsiUtils`).** A `patch_amsi` step now also emits a C#
+  `PatchManagedScan` into the generated launcher (`powershell_hosting`) and the
+  generated module (`import_powermodule`): it sets
+  `System.Management.Automation.AmsiUtils.amsiInitFailed` to `true` by reflection,
+  so PowerShell's own scan entry returns before it calls into `amsi.dll`. Both
+  reflection names are XOR-scrambled with fresh per-string keys. Verified by the
+  e2e `packs_and_runs_a_powershell_payload` and
+  `packs_and_imports_a_powershell_module` (each compiles the generated C# and
+  runs it).
+- Not measured: a scan that *should* be caught with and without the extended
+  variants needs an AMSI-invoking payload and a Defender-on host; the AMSI rows
+  stay a lab claim, not a measured number.

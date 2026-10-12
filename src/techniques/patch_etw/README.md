@@ -11,6 +11,28 @@ payload; it only modifies process state, which is why it is a Preparation
 technique. Blinding ETW complements `patch_amsi`: AMSI gates script and .NET
 content before it runs, ETW is the telemetry channel that reports what ran.
 
+Four exports are covered — one always, three best effort (see Parameters):
+
+- `EtwEventWrite` — the base writer (always patched).
+- `EtwEventWriteFull` — the variant most script and .NET telemetry calls.
+- `EtwEventWriteEx` — the extended writer.
+- `NtTraceEvent` — the native export the user-mode writers funnel through on the
+  way into the kernel. The widest single cut: it also catches providers that
+  bypass the `Etw*` wrappers.
+
+## Parameters
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `full` | `true` | Also patch `EtwEventWriteFull` (best effort). |
+| `ex` | `true` | Also patch `EtwEventWriteEx` (best effort). |
+| `nt_trace` | `true` | Also patch `NtTraceEvent` (best effort). |
+
+Only `EtwEventWrite` is load-bearing: if it cannot be resolved or made writable
+the preparation fails. Each optional variant is best effort, because not every
+Windows build exports every variant and a missing secondary export must not
+discard a working main patch.
+
 ## How it works
 
 ```mermaid
@@ -22,15 +44,15 @@ sequenceDiagram
     L->>N: nt_protect_vm(RWX)
     L->>N: write 33 C0 C3 (xor eax, eax then ret)
     L->>N: restore original protection
-    opt full
-        L->>N: same for EtwEventWriteFull
+    opt full / ex / nt_trace
+        L->>N: repeat for each selected variant
     end
 ```
 
 ### 1. Resolve the export
 
 1. Load `ntdll.dll` (`LoadLibraryA`, a no-op if already loaded).
-2. Resolve `EtwEventWrite` with `GetProcAddress`.
+2. Resolve the export with `GetProcAddress`.
 
 ### 2. Overwrite the prologue
 
@@ -40,11 +62,10 @@ sequenceDiagram
    writing an event.
 5. Restore the original page protection.
 
-### 3. Optionally patch the Full variant
+### 3. Optionally patch the other variants
 
-6. If `full` is `true`, repeat steps 2–5 for `EtwEventWriteFull`. This second
-   patch is best effort: some builds do not export the Full variant, and a
-   missing secondary export must not discard a working main patch.
+6. `full`, `ex` and `nt_trace` each repeat steps 1–2 for their export. These are
+   best effort: a missing variant is logged and ignored.
 
 If the main export cannot be resolved (or the page cannot be made writable), the
 preparation returns a clear error and the pipeline fails with a useful message.
@@ -83,16 +104,21 @@ receives the payload. Place it earlier in `runtime:` than the Execution step.
   export returns a `ULONG` NTSTATUS, and a bare `ret` would leak whatever was in
   EAX. On x64, writing EAX zero-extends to RAX, so `33 C0` clears the full
   64-bit return register.
+- `NtTraceEvent` is patched exactly like the `Etw*` writers: returning
+  `STATUS_SUCCESS` without writing the event record is what stops it reaching a
+  consumer. It is resolved through `GetProcAddress` on the same `ntdll.dll`
+  handle, so it needs no syscall-layer entry.
 - Only affects the current process. If the payload runs in another process
   (e.g. process hollowing), that process's ETW exports are not patched here.
 - The patch is deliberately unsynchronised. In practice `run_preparations`
   executes before the payload and before any thread the stub creates, so there
   is no concurrent reader of the bytes being rewritten.
-- The DLL and function names go through `StringsConfig`
-  (`Params::render_fragment`), so `ntdll.dll`, `EtwEventWrite` and
-  `EtwEventWriteFull` never appear in cleartext in `.rdata`. The page
-  protection change goes through the syscall layer's `nt_protect_vm`, so
-  `mode: indirect` removes the `VirtualProtect` import.
+- The DLL and every function name go through `StringsConfig`
+  (`Params::render_fragment`), so `ntdll.dll`, `EtwEventWrite`,
+  `EtwEventWriteFull`, `EtwEventWriteEx` and `NtTraceEvent` never appear in
+  cleartext in `.rdata`. The page protection change goes through the syscall
+  layer's `nt_protect_vm`, so `mode: indirect` removes the `VirtualProtect`
+  import.
 - The function names are resolved dynamically through `GetProcAddress`, so
   they never reach the import table. `ntdll.dll` may still appear in the binary
   through the `windows` crate graph; the audit blanks import-table name strings,
