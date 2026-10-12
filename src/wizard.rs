@@ -907,10 +907,12 @@ impl Wizard<'_> {
                     _ => None,
                 });
                 let (prev_string, prev_session) = previous.unwrap_or((true, true));
-                let scan_string =
-                    self.prompts.confirm("also patch AmsiScanString", prev_string)?;
-                let open_session =
-                    self.prompts.confirm("also patch AmsiOpenSession", prev_session)?;
+                let scan_string = self
+                    .prompts
+                    .confirm("also patch AmsiScanString", prev_string)?;
+                let open_session = self
+                    .prompts
+                    .confirm("also patch AmsiOpenSession", prev_session)?;
                 Ok(TechniqueKind::PatchAmsi {
                     params: patch_amsi::Params {
                         scan_string,
@@ -929,16 +931,14 @@ impl Wizard<'_> {
                 let full = self
                     .prompts
                     .confirm("also patch EtwEventWriteFull", prev_full)?;
-                let ex = self.prompts.confirm("also patch EtwEventWriteEx", prev_ex)?;
+                let ex = self
+                    .prompts
+                    .confirm("also patch EtwEventWriteEx", prev_ex)?;
                 let nt_trace = self
                     .prompts
                     .confirm("also patch NtTraceEvent", prev_nt_trace)?;
                 Ok(TechniqueKind::PatchEtw {
-                    params: patch_etw::Params {
-                        full,
-                        ex,
-                        nt_trace,
-                    },
+                    params: patch_etw::Params { full, ex, nt_trace },
                 })
             }
             "sleep_obfuscation" => {

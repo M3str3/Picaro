@@ -246,10 +246,7 @@ pub fn render_launcher(
     patch_amsi: bool,
 ) -> String {
     let (helper, patch) = if patch_amsi {
-        (
-            render_amsi_utils_helper(),
-            "        PatchManagedScan();",
-        )
+        (render_amsi_utils_helper(), "        PatchManagedScan();")
     } else {
         (
             String::new(),
