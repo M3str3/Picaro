@@ -12,6 +12,12 @@ const ETW_PATCH: [u8; 3] = [0x33, 0xC0, 0xC3];
 /// Whether to also patch the Full variant (best effort).
 const PATCH_FULL: bool = $PATCH_FULL$;
 
+/// Whether to also patch the Ex variant (best effort).
+const PATCH_EX: bool = $PATCH_EX$;
+
+/// Whether to also patch `NtTraceEvent`, the native entry (best effort).
+const PATCH_NT_TRACE: bool = $PATCH_NT_TRACE$;
+
 /// Errors produced while patching an event-writing function.
 #[derive(Debug, thiserror::Error)]
 pub enum PatchEtwError {
@@ -28,9 +34,10 @@ pub enum PatchEtwError {
 /// Patches the event-writing exports in the current process so no events reach
 /// their consumers.
 ///
-/// The main export failing aborts the preparation; the Full variant is best
-/// effort, because some Windows builds do not export it and a missing secondary
-/// export must not discard a working main patch.
+/// The main export failing aborts the preparation; the Full, Ex and
+/// `NtTraceEvent` variants are best effort, because some Windows builds do not
+/// export every variant and a missing secondary export must not discard a
+/// working main patch.
 ///
 /// The DLL and function names are substituted at build time by
 /// `Params::render_fragment` with code that rebuilds them at runtime, so they
@@ -40,13 +47,26 @@ pub enum PatchEtwError {
 pub fn patch_etw() -> Result<bool, PatchEtwError> {
     patch_export(&$ETW_DLL_DEF$, &$ETW_FUNC_DEF$)?;
     if PATCH_FULL {
-        if let Err(error) = patch_export(&$ETW_DLL_DEF$, &$ETW_FULL_FUNC_DEF$) {
-            crate::tech_dbg!("patch_etw", "optional full variant skipped: {error}");
-        }
+        patch_optional(&$ETW_DLL_DEF$, &$ETW_FULL_FUNC_DEF$);
+    }
+    if PATCH_EX {
+        patch_optional(&$ETW_DLL_DEF$, &$ETW_EX_FUNC_DEF$);
+    }
+    if PATCH_NT_TRACE {
+        patch_optional(&$ETW_DLL_DEF$, &$ETW_NT_TRACE_FUNC_DEF$);
     }
     // A Preparation always continues the pipeline; only the `bouncer` gate
     // decides to abort (see `techniques/README.md`).
     Ok(true)
+}
+
+/// Patches an optional export, logging and ignoring a failure: not every
+/// Windows build exports every variant, and a missing secondary export must not
+/// discard a working main patch.
+fn patch_optional(dll: &str, func: &str) {
+    if let Err(error) = patch_export(dll, func) {
+        crate::tech_dbg!("patch_etw", "optional export {func} skipped: {error}");
+    }
 }
 
 /// Resolves `func` in `dll` and overwrites its prologue with [`ETW_PATCH`].

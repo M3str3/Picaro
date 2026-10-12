@@ -6,13 +6,17 @@ use crate::engine::obfuscation::StringsConfig;
 use crate::techniques::{Category, TechniqueKind};
 
 #[test]
-fn parses_params_from_empty_yaml_and_defaults_full_to_true() {
+fn parses_params_from_empty_yaml_and_enables_every_variant() {
     let step: TechniqueKind =
         serde_yml::from_str("technique: patch_etw\n").expect("patch_etw should parse");
     assert_eq!(
         step,
         TechniqueKind::PatchEtw {
-            params: Params { full: true }
+            params: Params {
+                full: true,
+                ex: true,
+                nt_trace: true,
+            }
         }
     );
 }
@@ -24,7 +28,29 @@ fn parses_explicit_full_false() {
     assert_eq!(
         step,
         TechniqueKind::PatchEtw {
-            params: Params { full: false }
+            params: Params {
+                full: false,
+                ex: true,
+                nt_trace: true,
+            }
+        }
+    );
+}
+
+#[test]
+fn parses_explicit_ex_and_nt_trace_false() {
+    let step: TechniqueKind = serde_yml::from_str(
+        "technique: patch_etw\nparams:\n  ex: false\n  nt_trace: false\n",
+    )
+    .expect("patch_etw should parse");
+    assert_eq!(
+        step,
+        TechniqueKind::PatchEtw {
+            params: Params {
+                full: true,
+                ex: false,
+                nt_trace: false,
+            }
         }
     );
 }
@@ -59,18 +85,24 @@ fn fragment_has_no_forbidden_patterns() {
 }
 
 #[test]
-fn render_fragment_obfuscates_literals_and_enables_full() {
+fn render_fragment_obfuscates_literals_and_enables_every_variant() {
     let strings = StringsConfig::from_yaml(None).expect("default strings");
-    let fragment = Params { full: true }.render_fragment(&strings);
+    let fragment = Params::default().render_fragment(&strings);
 
     // The entry point is present and every placeholder is substituted.
     assert!(fragment.contains("fn patch_etw"));
     assert!(fragment.contains("const PATCH_FULL: bool = true;"));
+    assert!(fragment.contains("const PATCH_EX: bool = true;"));
+    assert!(fragment.contains("const PATCH_NT_TRACE: bool = true;"));
     for placeholder in [
         "$ETW_DLL_DEF$",
         "$ETW_FUNC_DEF$",
         "$ETW_FULL_FUNC_DEF$",
+        "$ETW_EX_FUNC_DEF$",
+        "$ETW_NT_TRACE_FUNC_DEF$",
         "$PATCH_FULL$",
+        "$PATCH_EX$",
+        "$PATCH_NT_TRACE$",
     ] {
         assert!(
             !fragment.contains(placeholder),
@@ -88,8 +120,15 @@ fn render_fragment_obfuscates_literals_and_enables_full() {
 }
 
 #[test]
-fn render_fragment_disables_full_when_requested() {
+fn render_fragment_disables_optional_variants_when_requested() {
     let strings = StringsConfig::from_yaml(None).expect("default strings");
-    let fragment = Params { full: false }.render_fragment(&strings);
+    let fragment = Params {
+        full: false,
+        ex: false,
+        nt_trace: false,
+    }
+    .render_fragment(&strings);
     assert!(fragment.contains("const PATCH_FULL: bool = false;"));
+    assert!(fragment.contains("const PATCH_EX: bool = false;"));
+    assert!(fragment.contains("const PATCH_NT_TRACE: bool = false;"));
 }

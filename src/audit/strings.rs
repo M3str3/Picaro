@@ -21,9 +21,14 @@ pub const SENSITIVE_LITERALS: &[&str] = &[
     "AmsiScanBuffer",
     "AmsiOpenSession",
     "AmsiScanString",
+    "AmsiUtils",
+    "amsiInitFailed",
     "amsi.dll",
     "EtwEventWrite",
     "EtwEventWriteFull",
+    // The native entry the ETW writers funnel into, resolved dynamically by
+    // `patch_etw`; `EtwEventWriteEx` is already covered by `EtwEventWrite`.
+    "NtTraceEvent",
     "ntdll.dll",
     "kernel32.dll",
     "powershell",

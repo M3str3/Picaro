@@ -114,16 +114,16 @@ pub enum TechniqueKind {
         #[serde(default)]
         params: bouncer::Params,
     },
-    /// Patch AmsiScanBuffer in the current process (preparation).
+    /// Patch the AMSI scan exports in the current process (preparation).
     PatchAmsi {
-        /// Technique parameters (none).
+        /// Technique parameters (the optional scan variants).
         #[serde(default)]
         params: patch_amsi::Params,
     },
     /// Patch the ETW event-writing exports in the current process
     /// (preparation).
     PatchEtw {
-        /// Technique parameters (`full`).
+        /// Technique parameters (`full`, `ex`, `nt_trace`).
         #[serde(default)]
         params: patch_etw::Params,
     },
