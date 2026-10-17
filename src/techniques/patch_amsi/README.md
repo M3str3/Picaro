@@ -112,7 +112,18 @@ receives the payload. Place it earlier in `runtime:` than the Execution step.
 
 ## Measurements
 
-- Pending — needs a .NET or script payload that actually invokes AMSI.
+- Measured on the measurement host (2026-10-11, `docs/measurements.md`): a
+  `patch_amsi` + `powershell_hosting` artifact runs a script that invokes AMSI.
+  The patch was corrected while investigating — it now returns `S_OK` **and**
+  writes `AMSI_RESULT_CLEAN` (`0`) to the caller's out-parameter, which is what
+  `System.Management.Automation` reads on every script (the old `sub eax, eax;
+  ret` left it uninitialized). With real-time protection **on** the patched
+  artifact ran the script ~2 times in 3; a **Defender-off** host (the intended
+  environment) is stable.
+- Still unmeasured: a *detection-bypass* number (a script AMSI flags, blocked
+  with the patch off and allowed with it on). The lab host's AMSI provider is
+  inert with real-time protection off, so that comparison needs an
+  AMSI-active host; the same gap is recorded for `hardware_breakpoints`.
 
 ## Implementation notes
 

@@ -8,9 +8,9 @@
 // this thread. See `README.md` for the full write-up.
 //
 // The file -> section -> map flow is Win32 (`CreateFileW`,
-// `SetFileInformationByHandle`, `CreateFileMappingW`, `MapViewOfFile`,
-// `CloseHandle`), so this fragment is the same for `build.stub.syscalls.mode:
-// none` and `mode: indirect` and adds no Nt* helper to the syscall layer.
+// `SetFileInformationByHandle`, `CreateFileMappingW`, `MapViewOfFile`), so
+// this fragment is the same for `build.stub.syscalls.mode: none` and `mode:
+// indirect` and adds no Nt* helper to the syscall layer.
 //
 // Per-build values (the temp-file stem, every diagnostic) are substituted by
 // `Params::render_fragment_for` with code that rebuilds the string at runtime,

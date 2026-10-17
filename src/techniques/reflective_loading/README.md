@@ -146,11 +146,25 @@ index.
 
 ## Measurements
 
-- A dedicated static/dynamic baseline for this technique has not been recorded
-  yet; see `docs/measurements.md` for the measurements that do exist.
+- No dedicated baseline section, but the technique is the substrate of most of
+  the measurement record: `packs_and_runs_a_reflective_payload` (marker + exit
+  code, x64 and x86), the payload-TLS provisioning measurements
+  (`docs/measurements.md`, "x86 — TLS provisioning for a manually mapped image")
+  and every probe-based round test (the preparation techniques run on top of it).
+- **Unmeasured caveat:** a payload that raises a *native exception* on x64 cannot
+  unwind through its own frames — the mapped image's unwind tables are never
+  registered with `RtlAddFunctionTable` and the image is not in the loader list
+  (see `docs/x86.md` for the x86/x64 difference). A payload that only returns or
+  calls `ExitProcess` is unaffected. See `docs/measurements.md`.
 
 ## Implementation notes
 
+- **A payload that raises a native exception cannot unwind on x64.** The mapped
+  image's unwind tables (`IMAGE_DIRECTORY_ENTRY_EXCEPTION`) are not registered
+  with `RtlAddFunctionTable` and the image is absent from the loader list, so a
+  raise/catch inside the payload has no frame data to walk; a payload that only
+  returns (or calls `ExitProcess`) is unaffected. `docs/x86.md` has the x86/x64
+  difference; registering the tables is a separate feature.
 - The mapped PE's entry point runs on the calling thread and its return value
   is captured directly; the `shellcode` runner is the one that needs a thread.
   If the payload calls `ExitProcess`, it terminates the whole stub process (and

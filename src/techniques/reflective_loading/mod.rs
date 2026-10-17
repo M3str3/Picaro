@@ -27,6 +27,10 @@ pub struct Params {
 pub const DEF: TechniqueDef = TechniqueDef {
     name: "reflective_loading",
     attck: &["T1620"],
+    // Measured widely (e2e marker + exit code on x64/x86, the payload-TLS
+    // provisioning record, every probe-based test). Not `Stable` because a
+    // payload that raises a native exception cannot unwind on x64 — the mapped
+    // image's unwind tables are not registered (README).
     stability: Stability::Experimental,
     requires: &[Capability::WindowsX64, Capability::WindowsX86],
     conflicts: &["process_hollowing"],

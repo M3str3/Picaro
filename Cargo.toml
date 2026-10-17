@@ -5,6 +5,13 @@ edition = "2021"
 description = "Declarative evasion for Windows payloads"
 license = "MIT"
 
+[features]
+# The tests that compile a stub or run an artifact. OFF by default so `cargo
+# test` never builds or runs a loader (CI stays inert). Enable it explicitly to
+# run them by hand, on an isolated VM with Defender disabled:
+#   cargo test --features live-tests -- --ignored
+live-tests = []
+
 [dependencies]
 # Serialization/deserialization with `derive` and YAML support.
 serde = { version = "1.0", features = ["derive"] }

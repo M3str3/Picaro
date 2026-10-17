@@ -1,0 +1,54 @@
+# Host-loaded variant of `full-evasion.yaml`: the same chain (indirect syscalls +
+# api_hash SSN resolution + the API resolution proxy + reflective loading), built
+# as a DLL a host process loads instead of a standalone `.exe`.
+#
+#   cargo run -- build examples/plans/full-evasion-dll.yaml   # dist/full-evasion.dll
+#
+#   java -cp <dir> LoadDll C:\ruta\full-evasion.dll
+#
+# `entry: auto` exports `DllMain`, `JNI_OnLoad` and `Run`, so one artifact loads
+# from any host:
+#   - `System.load` / `System.loadLibrary` calls `JNI_OnLoad`;
+#   - an FFI host (FFM `SymbolLookup`, JNA, ctypes, `rundll32`) calls `Run`.
+# If your `LoadDll.java` only uses one path, set `entry` to match (`jni_on_load`
+# for `System.load`, `export:Run` for an FFI host) so the export table stops
+# advertising a `Run` that an ordinary DLL would not have.
+#
+# The DLL runs in-process, so it must match the host's bitness and it is scanned
+# by the image loader on load — `output.sign` is the mitigation that matters most
+# here. `subsystem`, `resources.manifest`, `self_deletion`, `sleep_obfuscation`
+# and `bouncer` with `on_fail: exit` are rejected for a DLL build (the host owns
+# the process). See docs/design/dll-output.md.
+
+schema: 6
+name: full-evasion-dll
+
+build:
+  payloads:
+    payload:
+      source: ./examples/payloads/test_payload.exe
+
+  stub:
+    syscalls:
+      mode: indirect
+      resolver: api_hash
+    strings:
+      strategy: xor
+    api_resolution:
+      mode: proxy
+      apis:
+        - all
+      unmatched: forward
+
+  output:
+    path: ./dist/full-evasion.dll
+    kind: dll
+    entry: auto
+    resources:
+      version_info:
+        randomize: true
+    sign:
+      mode: lab
+
+runtime:
+  - technique: reflective_loading

@@ -1,0 +1,25 @@
+# Image-path masquerading. The loader repoints the PEB `ImagePathName` at a
+# signed system binary, so `GetModuleFileNameW(NULL)` reports the decoy. Kernel
+# queries (`QueryFullProcessImageNameW`) still see the real path.
+#
+# Run it *after* any step that needs the real path (`self_deletion`, a
+# `timestomping` with no explicit `target`); `plan::validate` warns otherwise.
+#
+#   cargo run -- build examples/plans/image-path-spoofing.yaml
+
+schema: 6
+name: image-path-spoofing
+
+build:
+  payloads:
+    shellcode:
+      source: ./examples/payloads/demo_shellcode.bin
+      format: shellcode
+  output:
+    path: ./dist/test_image_path_spoofing.exe
+
+runtime:
+  - technique: image_path_spoofing
+    params:
+      path: "C:\\Windows\\System32\\svchost.exe"
+  - technique: reflective_loading

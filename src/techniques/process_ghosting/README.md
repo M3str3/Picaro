@@ -75,8 +75,16 @@ backing file on disk.
 
 ## Measurements
 
-- See `docs/measurements.md` (no entry yet — this technique is compile-verified
-  only, pending a runtime pass on a Defender-off Windows host).
+- Measured on Windows 11 26200 (2026-10-14): **the technique does not run.** The
+  first host run failed at `CreateFileMappingW(PAGE_EXECUTE_READWRITE)` with
+  `ERROR_ACCESS_DENIED` — a delete-pending file refuses a writable mapping. The
+  alternatives were measured too: mapping it read-only fails later because a data
+  mapping keeps *file* offsets, so the image's RVAs do not line up; creating the
+  writable section first makes the delete-on-close mark fail with the same error.
+  A working implementation needs an image section (`NtCreateSection(SEC_IMAGE)`
+  + `NtMapViewOfSection`), which the syscall layer does not have yet — so the
+  registry marks the technique `Unimplemented` and a build that selects it warns.
+  Full diagnosis: `docs/measurements.md`.
 
 ## Implementation notes
 

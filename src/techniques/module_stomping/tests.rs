@@ -268,8 +268,9 @@ fn fragment_has_no_forbidden_patterns() {
 /// syscall modes, producing a PE each time.
 ///
 /// Marked `#[ignore]` because it requires `rustc` and the compiled
-/// dependencies. Run it with `cargo test -- --ignored module_stomping`.
+/// dependencies. Run it with `cargo test --features live-tests -- --ignored module_stomping`.
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn compiles_module_stomping_stub_for_both_syscall_modes() {
     use std::path::Path;

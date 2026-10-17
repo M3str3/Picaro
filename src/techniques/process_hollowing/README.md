@@ -88,8 +88,8 @@ family-based fallback for the CRT contracts).
 > template copy and the main thread's slot **are** provisioned (step 10), and
 > the `DLL_PROCESS_ATTACH` callbacks are invoked on the main thread via a
 > `jmp $` parking stub before the entry-point hand-off, so a payload whose CRT
-> relies on its TLS init completes. Runtime verification of the callbacks on a
-> Defender-off host is still pending; evidence in
+> relies on its TLS init completes. Verified on x64 with a payload carrying a
+> real `.CRT$XLB` callback (measured 2026-10-14); evidence in
 > `docs/techniques/process_hollowing.md`.
 
 ### Payload arguments
@@ -167,9 +167,23 @@ What differs from the x64 path:
 ## Measurements
 
 - See `docs/measurements.md`.
+- **TLS callbacks are green** (measured 2026-10-14, Windows 11 26200, Defender
+  real-time off). The fix: the emulated call into each callback was issued from
+  the stack pointer the thread parked with, so the callback entered with
+  `rsp % 16 == 0` instead of the ABI's `8`. The chain stayed off by eight until
+  a `movaps` of a frame local faulted — the target's `0xC0000005` at address
+  `-1`, which the earlier baseline read as “the target dies while the callback
+  runs”. With `(parked_rsp & !0xF) - 8` as the emulated call site and the parked
+  pointer restored before the entry-point hand-off
+  (`packs_and_runs_a_hollowed_payload_with_tls_callbacks`), the callback's marker
+  lands before the entry point's. Numbers: `docs/measurements.md`.
 
 ## Implementation notes
 
+- **A payload that raises a native exception cannot unwind on x64.** The mapped
+  image's unwind tables are not registered and it is not in the loader list, so
+  a raise/catch inside the payload has no frame data to walk (shared with
+  `reflective_loading`/`pe_injection`; `docs/x86.md`).
 - The loader-init step (3) makes the entry page writable for the `jmp $` patch
   and leaves it `PAGE_EXECUTE_READWRITE`; the page is unmapped moments later, so
   the RWX window is tiny. The payload allocation itself is still
@@ -201,8 +215,10 @@ What differs from the x64 path:
   `TlsAlloc` — see `docs/measurements.md` for what ntdll does at thread exit to
   an unreserved entry. The TLS *callbacks* (`DLL_PROCESS_ATTACH`) run on the
   main thread via a `jmp $` parking stub before the entry-point hand-off (see
-  the blockquote above); runtime verification of the callbacks on a Defender-off
-  host is still pending.
+  the blockquote above). Each emulated call is based on the *parked* stack
+  pointer and the pointer is restored afterwards, so the callback enters with
+  the ABI's `rsp % 16 == 8` and the entry point still sees the state the
+  target's loader left (measured; see `docs/measurements.md`).
 
 ## References
 

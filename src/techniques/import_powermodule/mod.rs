@@ -25,6 +25,11 @@ pub struct Params {
 pub const DEF: TechniqueDef = TechniqueDef {
     name: "import_powermodule",
     attck: &["T1059.001", "T1620"],
+    // Measured on the lab host (2026-10-11): the module imports into a fresh
+    // `powershell.exe -NoProfile` and the script's functions land in the
+    // session. Not `Stable` because the `.dll` itself is on disk (README) and
+    // the module is a `kind: psmodule` output, which no host matrix has covered
+    // beyond PowerShell 5.1.
     stability: Stability::Experimental,
     requires: &[Capability::WindowsX64, Capability::WindowsX86],
     conflicts: &[],

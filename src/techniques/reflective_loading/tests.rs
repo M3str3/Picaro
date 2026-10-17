@@ -3,7 +3,10 @@
 use super::{Params, DEF, SHELLCODE_FRAGMENT};
 use crate::engine::obfuscation::StringsConfig;
 use crate::plan::schema::PayloadFormat;
-use crate::techniques::{RuntimeStep, TechniqueKind};
+#[cfg(feature = "live-tests")]
+use crate::techniques::RuntimeStep;
+use crate::techniques::TechniqueKind;
+#[cfg(feature = "live-tests")]
 use std::process::Command;
 
 #[test]
@@ -130,8 +133,9 @@ fn rendered_fragments_have_no_placeholders_or_sensitive_literals() {
 /// format, producing a PE each time.
 ///
 /// Marked `#[ignore]` because it requires `rustc` and the compiled
-/// dependencies. Run it with `cargo test -- --ignored`.
+/// dependencies. Run it with `cargo test --features live-tests -- --ignored`.
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn compiles_reflective_loading_stub_for_every_format() {
     use std::path::Path;
@@ -211,8 +215,9 @@ fn compiles_reflective_loading_stub_for_every_format() {
 /// Full e2e: render + compile a reflective-loading stub, producing a PE.
 ///
 /// Marked `#[ignore]` because it requires `rustc` and the compiled
-/// dependencies. Run it with `cargo test -- --ignored`.
+/// dependencies. Run it with `cargo test --features live-tests -- --ignored`.
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn compiles_reflective_loading_stub_to_pe() {
     use std::path::Path;
@@ -274,6 +279,7 @@ fn compiles_reflective_loading_stub_to_pe() {
 /// `reflective_loading` stub and the given `apis:` selection and `unmatched`
 /// policy (debug build, so the proxies emit `tech_dbg!` traces), runs it and
 /// returns `(exit status, stdout, stderr)`.
+#[cfg(feature = "live-tests")]
 fn run_proxy_case(
     name: &str,
     apis_yaml: &str,
@@ -287,6 +293,7 @@ fn run_proxy_case(
 }
 
 /// The same, with a custom probe source and extra runtime arguments.
+#[cfg(feature = "live-tests")]
 fn run_proxy_case_with(
     name: &str,
     probe_src: &std::path::Path,
@@ -382,6 +389,7 @@ fn run_proxy_case_with(
 /// Strategy `route_to_nt` (rebuild): `kernel32!OpenProcess` is rebuilt on
 /// `NtOpenProcess` and the returned handle must be valid and usable.
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn api_resolution_rebuilds_openprocess() {
     let (_, stdout, stderr) =
@@ -403,6 +411,7 @@ fn api_resolution_rebuilds_openprocess() {
 /// Strategy `route_to_nt` (direct): the `ntdll!NtOpenProcess` entry routes
 /// through the syscall layer.
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn api_resolution_routes_ntopenprocess() {
     let (_, stdout, stderr) = run_proxy_case("ntopen", "  - \"ntdll!NtOpenProcess\"\n", "forward");
@@ -424,6 +433,7 @@ fn api_resolution_routes_ntopenprocess() {
 /// The `GetProcAddress` handler: a catalogue name gets its proxy, an ordinal is
 /// forwarded to the original resolver.
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn api_resolution_handler_returns_proxies() {
     let (_, stdout, stderr) = run_proxy_case(
@@ -448,6 +458,7 @@ fn api_resolution_handler_returns_proxies() {
 /// Strategy `route_to_nt` (direct): the `ntdll!Nt*` entry routes through the
 /// syscall layer.
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn api_resolution_routes_ntreadvirtualmemory() {
     let (_, stdout, stderr) =
@@ -469,6 +480,7 @@ fn api_resolution_routes_ntreadvirtualmemory() {
 /// Strategy `route_to_nt` (wrapper): `kernel32!ReadProcessMemory` is
 /// re-implemented on `NtReadVirtualMemory` (NTSTATUS -> BOOL).
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn api_resolution_wraps_readprocessmemory() {
     let (_, stdout, stderr) =
@@ -491,6 +503,7 @@ fn api_resolution_wraps_readprocessmemory() {
 /// catalogue, so the probe never runs (finding 1: the option used to be parsed
 /// but ignored).
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn api_resolution_aborts_on_unmatched() {
     // Only `NtReadVirtualMemory` is proxied, but the probe imports and uses many
@@ -511,6 +524,7 @@ fn api_resolution_aborts_on_unmatched() {
 /// export's error semantics (a zero access mask and a bogus pid are refused
 /// with `ERROR_INVALID_PARAMETER`) and still honour the `inherit` flag.
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn api_resolution_openprocess_matches_error_semantics() {
     let (_, stdout, stderr) =
@@ -543,6 +557,7 @@ fn api_resolution_openprocess_matches_error_semantics() {
 /// `OpenProcess`, and resolve `ReadProcessMemory` dynamically through the
 /// `GetProcAddress` handler. All eight must see the right bytes on every path.
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn api_resolution_proxies_are_reentrant() {
     let (status, stdout, stderr) = run_proxy_case_with(
@@ -565,6 +580,7 @@ fn api_resolution_proxies_are_reentrant() {
 /// A payload whose import address table spans more than one page still loads:
 /// `patch_imports` protects and restores every touched page, not just one.
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn api_resolution_handles_a_multi_page_iat() {
     let dir = std::env::temp_dir().join(format!("picaro_api_res_mp_{}", std::process::id()));
@@ -594,6 +610,7 @@ fn api_resolution_handles_a_multi_page_iat() {
 /// A wildcard selection proxies every direct `Nt*` route: the payload's
 /// `ntdll!NtClose` (and its siblings) land on the generated proxies.
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn api_resolution_proxies_every_direct_nt_route() {
     let (status, stdout, stderr) = run_proxy_case_with(
@@ -628,6 +645,7 @@ fn api_resolution_proxies_every_direct_nt_route() {
 }
 
 /// The named exports of an on-disk DLL, read from its export directory.
+#[cfg(feature = "live-tests")]
 fn module_export_names(dll: &str) -> Vec<String> {
     let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
     let path = std::path::Path::new(&system_root)
@@ -697,6 +715,7 @@ fn module_export_names(dll: &str) -> Vec<String> {
 }
 
 /// Whether an export name is a valid, non-keyword Rust identifier.
+#[cfg(feature = "live-tests")]
 fn is_usable_ident(name: &str) -> bool {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
@@ -736,6 +755,7 @@ fn is_usable_ident(name: &str) -> bool {
 /// The export list read from disk includes entries the import library does not
 /// carry, so the source is compiled once here and the unresolved `__imp_*`
 /// symbols are pruned until it links; the final set is a subset, hence linkable.
+#[cfg(feature = "live-tests")]
 fn generate_multi_page_probe(dir: &std::path::Path) -> std::path::PathBuf {
     let mut names: Vec<String> = module_export_names("kernel32.dll")
         .into_iter()
@@ -784,6 +804,7 @@ fn generate_multi_page_probe(dir: &std::path::Path) -> std::path::PathBuf {
 
 /// Renders a probe that imports `names` and takes each address, forcing an IAT
 /// entry for every one of them.
+#[cfg(feature = "live-tests")]
 fn render_multi_page_probe(names: &[String]) -> String {
     let mut src = String::new();
     src.push_str("//! Generated probe: >512 imports, so the IAT spans two pages.\n\n");
@@ -804,6 +825,7 @@ fn render_multi_page_probe(names: &[String]) -> String {
 }
 
 /// The `__imp_<Name>` symbols the linker reported as unresolved.
+#[cfg(feature = "live-tests")]
 fn unresolved_imports(stderr: &str) -> Vec<String> {
     let mut names = Vec::new();
     for line in stderr.lines() {

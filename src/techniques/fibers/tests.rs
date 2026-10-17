@@ -231,8 +231,9 @@ fn fragment_has_no_forbidden_patterns() {
 /// generated source (before the `$`-bearing debug prelude).
 ///
 /// Shared by the ignored compile tests, which need `rustc` and the compiled
-/// dependencies and therefore only run under `cargo test -- --ignored`.
+/// dependencies and therefore only run under `cargo test --features live-tests -- --ignored`.
 #[cfg(test)]
+#[cfg(feature = "live-tests")]
 fn render_stub_for(format: PayloadFormat, name: &str) -> String {
     use std::path::Path;
 
@@ -310,8 +311,9 @@ fn render_stub_for(format: PayloadFormat, name: &str) -> String {
 /// supported format), producing a PE.
 ///
 /// Marked `#[ignore]` because it requires `rustc` and the compiled
-/// dependencies. Run it with `cargo test -- --ignored`.
+/// dependencies. Run it with `cargo test --features live-tests -- --ignored`.
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn compiles_a_fibers_stub_for_shellcode() {
     render_stub_for(PayloadFormat::Shellcode, "shellcode");
@@ -324,6 +326,7 @@ fn compiles_a_fibers_stub_for_shellcode() {
 /// Marked `#[ignore]` because it requires `rustc` and the compiled
 /// dependencies.
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn compiles_the_format_guard_for_a_pe_payload() {
     let body = render_stub_for(PayloadFormat::Pe, "pe_guard");
@@ -339,6 +342,7 @@ fn compiles_the_format_guard_for_a_pe_payload() {
 /// Marked `#[ignore]` because it needs `rustc` and the workspace built for the
 /// i686 target: `cargo build --target i686-pc-windows-msvc`.
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc and the workspace built for the i686 target"]
 fn compiles_a_fibers_stub_for_i686() {
     use std::path::Path;

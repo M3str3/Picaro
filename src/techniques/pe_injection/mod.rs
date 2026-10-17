@@ -59,10 +59,10 @@ pub const DEF: TechniqueDef = TechniqueDef {
     attck: &["T1055.002"],
     // The payload's TLS (index, template, per-thread slot and
     // DLL_PROCESS_ATTACH callbacks) is provisioned through a target-resident
-    // prologue, matching process hollowing. Runtime verification of the
-    // callbacks is still pending on the measurement host, which is why the
-    // state is `Experimental` and not `Stable`.
-    stability: Stability::Experimental,
+    // prologue, matching process hollowing. Both the plain and the
+    // TLS-callback e2e are green on x64 (the callback path needed a
+    // 16-byte-aligned stack for the emulated call; see `build_prologue`).
+    stability: Stability::Stable,
     requires: &[Capability::WindowsX64, Capability::WindowsX86],
     conflicts: &[],
     category: Category::Execution,
@@ -252,9 +252,6 @@ impl Params {
         let tls_alloc_def = strings
             .obfuscate("TlsAlloc")
             .render_stub_expr("tls_alloc_name");
-        let tls_set_value_def = strings
-            .obfuscate("TlsSetValue")
-            .render_stub_expr("tls_set_value_name");
 
         // The error paths get the same treatment as the target path and the
         // resolved names: a `format!` literal is keyword-free, and the message
@@ -265,7 +262,6 @@ impl Params {
             .replace("$KERNEL32_DEF$", &kernel32_def)
             .replace("$LOAD_LIBRARY_DEF$", &load_library_def)
             .replace("$TLS_ALLOC_DEF$", &tls_alloc_def)
-            .replace("$TLS_SET_VALUE_DEF$", &tls_set_value_def)
             .replace("$TIMEOUT_MS$", &format!("{}u32", self.timeout_ms));
         for (index, (placeholder, text)) in MESSAGES.iter().enumerate() {
             rendered = rendered.replace(

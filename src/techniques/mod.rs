@@ -11,9 +11,14 @@ pub mod bouncer;
 pub mod dll_hollowing;
 pub mod dotnet_hosting;
 pub mod early_bird;
+pub mod erase_pe_header;
 pub mod execution_callbacks;
 pub mod fibers;
 pub mod guardrail;
+pub mod hardware_breakpoints;
+pub mod hide_module;
+pub mod hide_thread_from_debugger;
+pub mod image_path_spoofing;
 pub mod import_powermodule;
 pub mod living_off_the_land;
 pub mod module_stomping;
@@ -25,6 +30,7 @@ pub mod powershell_hosting;
 pub mod ppid_spoofing;
 pub mod process_ghosting;
 pub mod process_hollowing;
+pub mod process_mitigations;
 pub mod reflective_loading;
 pub mod self_deletion;
 pub mod sleep;
@@ -108,6 +114,13 @@ pub enum TechniqueKind {
         #[serde(default)]
         params: anti_debug::Params,
     },
+    /// Hide the loader's main thread from any debugger (`ThreadHideFromDebugger`)
+    /// (preparation).
+    HideThreadFromDebugger {
+        /// Technique parameters (none).
+        #[serde(default)]
+        params: hide_thread_from_debugger::Params,
+    },
     /// Gate the pipeline on the host environment (preparation).
     Bouncer {
         /// Technique parameters (the declared checks).
@@ -126,6 +139,42 @@ pub enum TechniqueKind {
         /// Technique parameters (`full`, `ex`, `nt_trace`).
         #[serde(default)]
         params: patch_etw::Params,
+    },
+    /// Hardware-breakpoint AMSI/ETW bypass: emulate the watched exports through
+    /// the CPU debug registers instead of patching them (preparation).
+    HardwareBreakpoints {
+        /// Technique parameters (`amsi`, `scan_string`, `open_session`, `etw`).
+        #[serde(default)]
+        params: hardware_breakpoints::Params,
+    },
+    /// Process mitigation policies: BlockDLLs, extension-point disable and an
+    /// optional Win32k system-call block (preparation).
+    ProcessMitigations {
+        /// Technique parameters (`block_dlls`, `extension_points`,
+        /// `win32k_filter`).
+        #[serde(default)]
+        params: process_mitigations::Params,
+    },
+    /// Image path spoofing: repoint the PEB's `ImagePathName` at a decoy path so
+    /// the PEB readers report a legitimate image (preparation).
+    ImagePathSpoofing {
+        /// Technique parameters (`path`).
+        #[serde(default)]
+        params: image_path_spoofing::Params,
+    },
+    /// Erase PE header: zero the loader image's in-memory PE header so memory
+    /// scanners cannot parse it (preparation).
+    ErasePeHeader {
+        /// Technique parameters (none).
+        #[serde(default)]
+        params: erase_pe_header::Params,
+    },
+    /// Hide module: unlink a module from the PEB's loader lists so userland PEB
+    /// walkers cannot see it (preparation).
+    HideModule {
+        /// Technique parameters (`modules`, `hide_self`).
+        #[serde(default)]
+        params: hide_module::Params,
     },
     /// ntdll unhooking: restore the loaded ntdll's code section from a clean
     /// copy read from disk (preparation).
@@ -298,9 +347,15 @@ impl TechniqueKind {
     ) -> String {
         match self {
             TechniqueKind::AntiDebug { params } => params.render_fragment(strings),
+            TechniqueKind::HideThreadFromDebugger { params } => params.render_fragment(strings),
             TechniqueKind::Bouncer { params } => params.render_fragment(strings),
             TechniqueKind::PatchAmsi { params } => params.render_fragment(strings),
             TechniqueKind::PatchEtw { params } => params.render_fragment(strings),
+            TechniqueKind::HardwareBreakpoints { params } => params.render_fragment(strings),
+            TechniqueKind::ProcessMitigations { params } => params.render_fragment(strings),
+            TechniqueKind::ImagePathSpoofing { params } => params.render_fragment(strings),
+            TechniqueKind::ErasePeHeader { params } => params.render_fragment(strings),
+            TechniqueKind::HideModule { params } => params.render_fragment(strings),
             TechniqueKind::DotnetHosting { params } => params.render_fragment(strings),
             TechniqueKind::PowershellHosting { params } => params.render_fragment(strings),
             TechniqueKind::ImportPowermodule { params } => params.render_fragment(strings),
@@ -349,9 +404,15 @@ impl TechniqueKind {
     pub fn name(&self) -> &'static str {
         match self {
             TechniqueKind::AntiDebug { .. } => anti_debug::DEF.name,
+            TechniqueKind::HideThreadFromDebugger { .. } => hide_thread_from_debugger::DEF.name,
             TechniqueKind::Bouncer { .. } => bouncer::DEF.name,
             TechniqueKind::PatchAmsi { .. } => patch_amsi::DEF.name,
             TechniqueKind::PatchEtw { .. } => patch_etw::DEF.name,
+            TechniqueKind::HardwareBreakpoints { .. } => hardware_breakpoints::DEF.name,
+            TechniqueKind::ProcessMitigations { .. } => process_mitigations::DEF.name,
+            TechniqueKind::ImagePathSpoofing { .. } => image_path_spoofing::DEF.name,
+            TechniqueKind::ErasePeHeader { .. } => erase_pe_header::DEF.name,
+            TechniqueKind::HideModule { .. } => hide_module::DEF.name,
             TechniqueKind::DotnetHosting { .. } => dotnet_hosting::DEF.name,
             TechniqueKind::PowershellHosting { .. } => powershell_hosting::DEF.name,
             TechniqueKind::ImportPowermodule { .. } => import_powermodule::DEF.name,
@@ -419,9 +480,15 @@ impl TechniqueKind {
     pub fn category(&self) -> Category {
         match self {
             TechniqueKind::AntiDebug { .. } => anti_debug::DEF.category,
+            TechniqueKind::HideThreadFromDebugger { .. } => hide_thread_from_debugger::DEF.category,
             TechniqueKind::Bouncer { .. } => bouncer::DEF.category,
             TechniqueKind::PatchAmsi { .. } => patch_amsi::DEF.category,
             TechniqueKind::PatchEtw { .. } => patch_etw::DEF.category,
+            TechniqueKind::HardwareBreakpoints { .. } => hardware_breakpoints::DEF.category,
+            TechniqueKind::ProcessMitigations { .. } => process_mitigations::DEF.category,
+            TechniqueKind::ImagePathSpoofing { .. } => image_path_spoofing::DEF.category,
+            TechniqueKind::ErasePeHeader { .. } => erase_pe_header::DEF.category,
+            TechniqueKind::HideModule { .. } => hide_module::DEF.category,
             TechniqueKind::DotnetHosting { .. } => dotnet_hosting::DEF.category,
             TechniqueKind::PowershellHosting { .. } => powershell_hosting::DEF.category,
             TechniqueKind::ImportPowermodule { .. } => import_powermodule::DEF.category,
@@ -643,7 +710,10 @@ pub fn all() -> &'static [TechniqueDef] {
         unhook_ntdll::DEF,
         patch_amsi::DEF,
         anti_debug::DEF,
+        hide_thread_from_debugger::DEF,
         patch_etw::DEF,
+        hardware_breakpoints::DEF,
+        process_mitigations::DEF,
         sleep_obfuscation::DEF,
         bouncer::DEF,
         living_off_the_land::DEF,
@@ -651,6 +721,9 @@ pub fn all() -> &'static [TechniqueDef] {
         network_stager::DEF,
         guardrail::DEF,
         timestomping::DEF,
+        image_path_spoofing::DEF,
+        erase_pe_header::DEF,
+        hide_module::DEF,
         dll_hollowing::DEF,
         process_ghosting::DEF,
     ]

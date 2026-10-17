@@ -34,10 +34,14 @@ impl Default for Params {
 pub const DEF: TechniqueDef = TechniqueDef {
     name: "process_ghosting",
     attck: &["T1055.012"],
-    // Compile-verified only: the delete-on-close -> section -> execute flow has
-    // not been exercised on a Windows host yet, so the state stays
-    // `Experimental`.
-    stability: Stability::Experimental,
+    // Measured on the Windows 11 lab host (2026-10-14): the technique does not
+    // run. Two Windows rules block the design: a delete-pending file cannot be
+    // mapped writable (`ERROR_ACCESS_DENIED`), and a data mapping of the file
+    // keeps file offsets rather than virtual addresses, so the mapped image's
+    // RVAs do not line up. A working implementation needs an image section
+    // (`NtCreateSection(SEC_IMAGE)` + `NtMapViewOfSection`), which the syscall
+    // layer does not have yet; see `docs/measurements.md`.
+    stability: Stability::Unimplemented,
     requires: &[Capability::WindowsX64, Capability::WindowsX86],
     conflicts: &[],
     category: Category::Execution,

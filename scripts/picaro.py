@@ -95,6 +95,7 @@ def rootless_docker() -> bool:
             ["docker", "info", "--format", "{{.SecurityOptions}}"],
             capture_output=True,
             text=True,
+            check=False
         )
     except OSError:
         return False

@@ -64,6 +64,10 @@ pub const DEF: TechniqueDef = TechniqueDef {
     name: "powershell_hosting",
     // T1059.001: PowerShell. T1620: the script is loaded and run from memory.
     attck: &["T1059.001", "T1620"],
+    // Measured on the lab host (2026-10-11): the artifact runs the script
+    // in-process. With real-time protection on, the `patch_amsi` dependency is
+    // intermittently interfered with (~2/3 runs), so the recorded stable case is
+    // the Defender-off lab host (README, `docs/measurements.md`).
     stability: Stability::Experimental,
     requires: &[Capability::WindowsX64, Capability::WindowsX86],
     conflicts: &[],

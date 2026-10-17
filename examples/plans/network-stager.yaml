@@ -5,6 +5,10 @@
 # (the URL in the stager's `params` is what is fetched). The packed artifact
 # contains no embedded payload, only the stager and the runner.
 #
+# `downloader: auto` (the default) fetches in-process over WinHTTP for an
+# `http(s)` URL: no child process and no temp file. `fallback: embedded` is the
+# staged/stageless switch — see examples/plans/network-stager-fallback.yaml.
+#
 #   cargo run -- build examples/plans/network-stager.yaml
 #
 # (The stub fetches at run time, so nothing is downloaded by the build itself.)

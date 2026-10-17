@@ -58,6 +58,10 @@ pub const DEF: TechniqueDef = TechniqueDef {
     // T1574.002 (DLL Side-Loading): ATT&CK's "Hijack Execution Flow" family,
     // where execution is redirected through a legitimate binary's module.
     attck: &["T1574.002"],
+    // Measured on Windows 11 26200 (2026-10-14): the demo shellcode runs from the
+    // hollowed `.text` and the artifact exits `42`. The state stays
+    // `Experimental`: the byte-for-byte restore after the payload returns and the
+    // PE/dll mapper follow-up are still unmeasured (README).
     stability: Stability::Experimental,
     requires: &[Capability::WindowsX64, Capability::WindowsX86],
     conflicts: &[],

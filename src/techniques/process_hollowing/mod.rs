@@ -43,7 +43,10 @@ impl Default for Params {
 pub const DEF: TechniqueDef = TechniqueDef {
     name: "process_hollowing",
     attck: &["T1055.012"],
-    stability: Stability::Experimental,
+    // The full-PE path, TLS callbacks included, is verified on x64 (the
+    // callback path needed a 16-byte-aligned stack for the emulated call; see
+    // `run_one_callback`) and the plain path on x86.
+    stability: Stability::Stable,
     requires: &[Capability::WindowsX64, Capability::WindowsX86],
     conflicts: &[],
     category: Category::Execution,

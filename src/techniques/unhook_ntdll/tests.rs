@@ -3,6 +3,7 @@
 use super::{Params, DEF, MESSAGES};
 use crate::audit::strings::find_sensitive_literals_in_source;
 use crate::engine::obfuscation::{StringsConfig, YamlStringsPlan};
+#[cfg(feature = "live-tests")]
 use crate::plan::schema::PayloadFormat;
 use crate::techniques::{Capability, Category, RuntimeStep, Stability, TechniqueKind};
 
@@ -239,8 +240,9 @@ fn the_fragment_restores_through_the_syscall_layer() {
 /// syscall modes, producing a PE each time.
 ///
 /// Marked `#[ignore]` because it requires `rustc` and the compiled
-/// dependencies. Run it with `cargo test -- --ignored unhook_ntdll`.
+/// dependencies. Run it with `cargo test --features live-tests -- --ignored unhook_ntdll`.
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn compiles_unhook_ntdll_stub_for_both_syscall_modes() {
     use std::path::Path;

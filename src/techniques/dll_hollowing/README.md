@@ -156,11 +156,11 @@ original bytes are restored afterwards.
 
 ## Measurements
 
-Not yet measured. Once the technique is verified end to end, this section records
-the static baseline (section entropy, imports, sensitive strings) from
-`picaro audit` and the runtime result (the packed artifact relaying the payload's
-exit code, and the module's exports still resolving afterwards), mirroring the
-`module_stomping` section in `docs/measurements.md`.
+- Measured end to end on Windows 11 26200 (2026-10-14): packing the demo shellcode
+  (`mov eax, 42; ret`) and running the artifact returns `42`, so the hollowed
+  `.text` runs and the payload's return value is relayed through the step. Still
+  unmeasured: the byte-for-byte restore after the payload returns, and the PE/dll
+  mapper follow-up below. Numbers: `docs/measurements.md`.
 
 ## Implementation notes
 

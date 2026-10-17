@@ -1,0 +1,29 @@
+# Hardware-breakpoint AMSI/ETW bypass. The loader emulates `AmsiScanBuffer`
+# and `EtwEventWrite` through the CPU debug registers, so an AMSI- or
+# ETW-invoking payload runs without either export's code ever being patched.
+#
+# The bypass matters for a payload that calls AMSI or ETW (a hosted script or
+# .NET assembly); `demo_shellcode.bin` here is just the stand-in that keeps the
+# example runnable end to end.
+#
+#   cargo run -- build examples/plans/hardware-breakpoints.yaml
+#
+# x64 only, and mutually exclusive with `patch_amsi`/`patch_etw` (pick one).
+
+schema: 6
+name: hardware-breakpoints
+
+build:
+  payloads:
+    shellcode:
+      source: ./examples/payloads/demo_shellcode.bin
+      format: shellcode
+  output:
+    path: ./dist/test_hardware_breakpoints.exe
+
+runtime:
+  - technique: hardware_breakpoints
+    params:
+      amsi: true       # watch AmsiScanBuffer (the buffer scan)
+      etw: true        # watch EtwEventWrite (the user-mode event writer)
+  - technique: reflective_loading

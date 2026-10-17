@@ -60,11 +60,13 @@ fn def_is_well_formed() {
     assert_eq!(DEF.name, "process_ghosting");
     assert_eq!(DEF.attck, &["T1055.012"]);
     assert_eq!(DEF.category, Category::Execution);
-    assert_eq!(DEF.stability, Stability::Experimental);
+    assert_eq!(DEF.stability, Stability::Unimplemented);
     assert!(!DEF.requires.is_empty());
     assert!(!DEF.stub_fragment.is_empty());
     assert!(!DEF.readme.is_empty());
-    // Ghosting is Win32-only: the section/map/delete flow needs no Nt* helper.
+    // The section/map/delete flow is Win32: the technique as written adds no
+    // Nt* helper to the syscall layer. The measured redesign (an image section
+    // via `NtCreateSection`) needs new helpers — see `docs/measurements.md`.
     assert!(
         DEF.syscalls.is_empty(),
         "unexpected syscalls: {:?}",

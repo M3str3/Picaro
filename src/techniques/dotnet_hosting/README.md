@@ -98,8 +98,14 @@ An **Execution** step: it runs a `dotnet` assembly on the CLR it hosts. It is
   packed artifact that hosts the CLR is visible in the import table.
 - **CLR telemetry.** Starting the runtime and loading an assembly in an unusual
   process (a stub with no managed identity) is a well-known in-memory assembly
-  load pattern; ETW providers (`Microsoft-Windows-DotNETRuntime`) and AMSI
-  (for script-like assemblies) can observe it.
+  load pattern; ETW providers (`Microsoft-Windows-DotNETRuntime`) observe it
+  and **AMSI scans the assembly itself**: measured 2026-10-15, with Defender's
+  real-time protection on, `_AppDomain.Load_3` of a Defender-flagged assembly
+  is refused and the stub reports `0x8007000b` (`ERROR_BAD_FORMAT`) — the
+  Defender events name the *host process* with an `amsi:` path and
+  `Trojan:MSIL/SharpHound.VD!MTB` as the threat. With real-time protection off
+  (the lab condition) AMSI is inert and the same load succeeds. See
+  `docs/measurements.md`.
 - **Behavioral analysis** of what the assembly does once it runs, which is the
   same surface as running it directly.
 

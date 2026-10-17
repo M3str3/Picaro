@@ -47,6 +47,9 @@ pub const SENSITIVE_LITERALS: &[&str] = &[
     "NtClose",
     // Self-deletion: the file-information call that unlinks the running image.
     "NtSetInformationFile",
+    // Token manipulation: resolved dynamically, must stay obfuscated.
+    "NtOpenProcessToken",
+    "NtDuplicateToken",
     // Sleep obfuscation (ekko): resolved dynamically, must stay obfuscated.
     "SystemFunction032",
     "RtlCaptureContext",
@@ -84,6 +87,12 @@ pub const SENSITIVE_LITERALS: &[&str] = &[
     "bouncer",
     "patch_amsi",
     "patch_etw",
+    "hardware_breakpoints",
+    "process_mitigations",
+    "hide_module",
+    "erase_pe_header",
+    "hide_thread_from_debugger",
+    "image_path_spoofing",
     "unhook_ntdll",
     "process_hollowing",
     "dotnet_hosting",
@@ -449,9 +458,14 @@ fn path_re() -> &'static Regex {
 
 /// NT API names (`NtXxx`/`ZwXxx`, camelCase). These indicate dynamic resolution
 /// via `GetProcAddress`, since such names are not normally statically imported.
+///
+/// The minimum length is seven characters — the shortest real NT/Zw export
+/// (`NtClose`/`ZwClose`) — so the four-character printable fragments that random
+/// data (XOR keys, encrypted payloads) happens to produce are not reported as
+/// API names.
 fn api_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\b(Nt|Zw)[A-Z][a-zA-Z]{1,}\b").expect("static regex"))
+    RE.get_or_init(|| Regex::new(r"\b(Nt|Zw)[A-Z][a-zA-Z]{4,}\b").expect("static regex"))
 }
 
 fn url_re() -> &'static Regex {
@@ -575,6 +589,18 @@ mod tests {
         let f = scan(data, &imported);
         assert!(f.apis.contains(&"NtUnmapViewOfSection".to_string()));
         assert!(!f.apis.contains(&"NtWriteFile".to_string()));
+    }
+
+    #[test]
+    fn api_scan_ignores_short_fragments_but_keeps_real_names() {
+        // Four-character `Nt`/`Zw` runs are random-data false positives, not
+        // API names; a real export (`NtClose`) and a longer one must still be
+        // reported.
+        let data = b"NtEc\0ZwIj\0ZwLg\0ZwMZ\0ZwTa\0NtClose\0NtAllocateVirtualMemory";
+        let f = scan(data, &BTreeSet::new());
+        assert_eq!(f.apis.len(), 2);
+        assert!(f.apis.contains(&"NtClose".to_string()));
+        assert!(f.apis.contains(&"NtAllocateVirtualMemory".to_string()));
     }
 
     #[test]

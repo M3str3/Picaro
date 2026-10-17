@@ -142,6 +142,11 @@ impl Default for Params {
 pub const DEF: TechniqueDef = TechniqueDef {
     name: "sleep_obfuscation",
     attck: &["T1027"],
+    // Measured 2026-10-14: the whole image is RC4 ciphertext under
+    // `PAGE_READWRITE` for `sleep_ms` and restored byte-for-byte afterwards
+    // (README). Not `Stable`: the operational form (encrypting during the
+    // *payload's* own sleeps) and the payload-region enumeration are open —
+    // this phase is the one-shot demo sleep over the whole image.
     stability: Stability::Experimental,
     requires: &[Capability::WindowsX64],
     conflicts: &[],

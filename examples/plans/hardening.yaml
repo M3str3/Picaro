@@ -1,0 +1,33 @@
+# Process hardening before the payload runs. Two low-cost Preparations that blunt
+# userland instrumentation:
+#
+#   process_mitigations       — BlockDLLs (refuse non-Microsoft DLLs) + no
+#                               extension points (AppInit_DLLs / global hooks).
+#   hide_thread_from_debugger — the loader's main thread stops raising debug
+#                               events (an attached debugger detaches).
+#
+# `process_mitigations` runs first: the DLL block only affects *future* loads.
+# Both are Preparations, so they need no payload of their own; the shellcode step
+# is only here so the example builds and runs end to end.
+#
+#   cargo run -- build examples/plans/hardening.yaml
+
+schema: 6
+name: hardening
+
+build:
+  payloads:
+    shellcode:
+      source: ./examples/payloads/demo_shellcode.bin
+      format: shellcode
+  output:
+    path: ./dist/test_hardening.exe
+
+runtime:
+  - technique: process_mitigations
+    params:
+      block_dlls: true
+      extension_points: true
+      win32k_filter: false
+  - technique: hide_thread_from_debugger
+  - technique: reflective_loading

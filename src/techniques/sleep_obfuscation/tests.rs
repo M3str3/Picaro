@@ -208,8 +208,9 @@ fn render_fragment_obfuscates_api_names() {
 /// stub, not just in isolation.
 ///
 /// Marked `#[ignore]` because it requires `rustc` and the compiled
-/// dependencies. Run it with `cargo test -- --ignored`.
+/// dependencies. Run it with `cargo test --features live-tests -- --ignored`.
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn compiles_sleep_obfuscation_stub_to_pe() {
     use std::path::Path;

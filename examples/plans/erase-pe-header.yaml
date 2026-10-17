@@ -1,0 +1,29 @@
+# Erase PE header: zero the loader's in-memory DOS/NT headers so a memory
+# scanner that parses PE headers at the module base finds nothing there.
+#
+# A Preparation, so it runs before the Execution step and takes no payload of
+# its own. It belongs *last* among the preparations: it removes the loader's own
+# header, which the loader needs for SEH / stack unwinding and for
+# `RtlImageDirectoryEntryToData`-style lookups, and it conflicts with
+# `sleep_obfuscation` (which reads `SizeOfImage` from that header).
+#
+# `demo_shellcode.bin` is 6 hand-written x64 bytes (`mov eax, 42; ret`), so the
+# packed binary exits with 42.
+#
+#   cargo run -- build examples/plans/erase-pe-header.yaml
+#   .\dist\test_erase_pe_header.exe ; echo $LASTEXITCODE
+
+schema: 6
+name: erase_pe_header
+
+build:
+  payloads:
+    shellcode:
+      source: ./examples/payloads/demo_shellcode.bin
+      format: shellcode
+  output:
+    path: ./dist/test_erase_pe_header.exe
+
+runtime:
+  - technique: erase_pe_header
+  - technique: reflective_loading

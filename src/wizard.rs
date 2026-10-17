@@ -1279,9 +1279,12 @@ fn prep_rank(name: &str) -> usize {
     match name {
         "bouncer" => 0,
         "anti_debug" => 1,
-        "patch_amsi" => 2,
-        "patch_etw" => 3,
-        "sleep_obfuscation" => 4,
+        "hide_thread_from_debugger" => 2,
+        "process_mitigations" => 3,
+        "patch_amsi" => 4,
+        "patch_etw" => 5,
+        "hardware_breakpoints" => 6,
+        "sleep_obfuscation" => 7,
         _ => usize::MAX,
     }
 }

@@ -247,16 +247,23 @@ const ARGS_BLOCK: &str = r##"mod payload_args {
             return Err("the process parameters are not initialized".to_string());
         }
         // RTL_USER_PROCESS_PARAMETERS->CommandLine is a UNICODE_STRING at +0x70
-        // on x64, +0x40 on x86: Length (u16), MaximumLength (u16), padding
-        // (u32), Buffer (*mut u16). Length excludes the terminating NUL.
+        // on x64, +0x40 on x86: Length (u16), MaximumLength (u16), then the
+        // Buffer (`*mut u16`) at `UNICODE_STRING_BUFFER_OFFSET` — +8 on x64 (four
+        // bytes of padding align the 8-byte pointer), +4 on x86. Length excludes
+        // the terminating NUL.
         let command_line = unsafe { params.add(COMMAND_LINE_OFFSET) };
-        let previous = unsafe { command_line.add(8).cast::<*mut u16>().read() };
+        let previous = unsafe {
+            command_line
+                .add(UNICODE_STRING_BUFFER_OFFSET)
+                .cast::<*mut u16>()
+                .read()
+        };
         let previous_length = unsafe { command_line.cast::<u16>().read() };
         unsafe {
             command_line.cast::<u16>().write(chars * 2);
             command_line.add(2).cast::<u16>().write(chars * 2 + 2);
             command_line
-                .add(8)
+                .add(UNICODE_STRING_BUFFER_OFFSET)
                 .cast::<*mut u16>()
                 .write(buffer.as_mut_ptr());
         }
@@ -296,11 +303,14 @@ const ARGS_BLOCK: &str = r##"mod payload_args {
             // If the cache is `UNICODE_STRING`-shaped, keep its lengths in sync
             // (only when they match the previous command line, so an unrelated
             // pointer that happens to hit is left alone).
-            if offset >= 8 {
-                let length_slot = ((base + offset - 8) as *mut u16).read_unaligned();
+            if offset >= UNICODE_STRING_BUFFER_OFFSET {
+                let length_slot =
+                    ((base + offset - UNICODE_STRING_BUFFER_OFFSET) as *mut u16).read_unaligned();
                 if length_slot == previous_length {
-                    ((base + offset - 8) as *mut u16).write_unaligned(length);
-                    ((base + offset - 6) as *mut u16).write_unaligned(length + 2);
+                    ((base + offset - UNICODE_STRING_BUFFER_OFFSET) as *mut u16)
+                        .write_unaligned(length);
+                    ((base + offset - UNICODE_STRING_BUFFER_OFFSET + 2) as *mut u16)
+                        .write_unaligned(length + 2);
                 }
             }
             slot.write_unaligned(new as usize);
@@ -313,6 +323,12 @@ const ARGS_BLOCK: &str = r##"mod payload_args {
     /// `RTL_USER_PROCESS_PARAMETERS->CommandLine` offset: `0x40` on x86, `0x70`
     /// on x64 (the 32-bit structure is 12 bytes narrower up to that field).
     const COMMAND_LINE_OFFSET: usize = if cfg!(target_arch = "x86") { 0x40 } else { 0x70 };
+
+    /// `UNICODE_STRING->Buffer` offset inside the struct: `0x04` on x86 (the
+    /// 4-byte pointer follows the two `u16` lengths directly), `0x08` on x64
+    /// (four bytes of padding align the 8-byte pointer). Using `0x08` on x86
+    /// would write the pointer over the following field.
+    const UNICODE_STRING_BUFFER_OFFSET: usize = if cfg!(target_arch = "x86") { 0x04 } else { 0x08 };
 
     /// Reads the current thread's PEB (x64: `gs:[0x60]`).
     #[cfg(target_arch = "x86_64")]

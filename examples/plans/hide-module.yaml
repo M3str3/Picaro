@@ -1,0 +1,32 @@
+# Hide module: unlink the running loader image from the PEB's three module lists
+# (`InLoadOrderModuleList` / `InMemoryOrderModuleList` / `InInitOrderModuleList`),
+# so userland `PEB->Ldr` walkers (`EnumProcessModules`, `GetModuleHandleA` by
+# name, a hand-rolled walk) no longer see it. Kernel-backed enumerations
+# (`CreateToolhelp32Snapshot` / `Module32*`) still report it.
+#
+#   cargo run -- build examples/plans/hide-module.yaml
+#   .\dist\test_hide_module.exe ; echo $LASTEXITCODE
+#
+# Do NOT name a system module (`ntdll`, `kernel32`), and do not name a module a
+# later step or the payload resolves by name: after this step it is invisible to
+# a name lookup even though its code still runs.
+
+schema: 6
+name: hide-module
+
+build:
+  payloads:
+    shellcode:
+      source: ./examples/payloads/demo_shellcode.bin
+      format: shellcode
+  output:
+    path: ./dist/test_hide_module.exe
+
+runtime:
+  # Preparation: unlink the running image (hide_self). List extra modules by
+  # their base name in `modules`, e.g. ["payload.dll"].
+  - technique: hide_module
+    params:
+      modules: []
+      hide_self: true
+  - technique: reflective_loading

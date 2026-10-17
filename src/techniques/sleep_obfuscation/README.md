@@ -102,18 +102,48 @@ restores it afterwards.
 - **RW during the crypto steps**: the image pages flip `RX → RW` (visible to
   `VirtualQuery`/`NtQueryVirtualMemory` watchers) for the duration of the
   encryption and decryption passes.
-- **RC4 key reuse across chunks**: every ≤ 64 KB chunk restarts the RC4
-  keystream with the same key, so equal-size chunks share keystream bytes (a
-  cryptanalytic weakness; the threat model here is signature scans, not
-  offline cryptanalysis).
+- **RC4 key reuse across chunks**: **measured false** (2026-10-14). The chunks
+  do *not* share keystream bytes: the first chunk of a run is plain `RC4(key)`
+  (verified byte-for-byte against the build key, see Measurements), and every
+  later chunk uses a *different* key state — consistent with
+  `SystemFunction032` destroying the key buffer between calls (the API's
+  documented behaviour; the mutation itself is not reproduced from the build
+  key by the obvious S-box/keystream candidates, nor is the stream simply
+  continued). What remains true: one 16-byte key seeds every call, so the
+  *image* is protected by RC4 only.
 - **The RC4 key sits in the heap** in cleartext during the whole sleep.
 
 ## Measurements
 
-- See `docs/measurements.md`. Static metrics barely
-  move (the payload is already encrypted at rest in `.rdata`); the value is
-  runtime: during the sleep the image region is ciphertext — verifiable with a
-  debugger (`VirtualQuery` + memory dump inside the sleep window).
+- **Measured 2026-10-14 (Windows 11 26200, Defender real-time off)** with a
+  passive sampler outside the process (`code_examples/`, scratch): it spawns the
+  artifact, walks the loader image (`base + SizeOfImage`) with `VirtualQueryEx`
+  every 250 ms and reports, per sample, how many 4 KiB pages differ from the
+  first sample and how many are `PAGE_READWRITE`. `sleep_ms: 6000`, image
+  872 KiB / 218 pages / 5 committed runs / 17 chunks:
+
+| t | changed pages | protect histogram | state |
+|---|---|---|---|
+| 0.02 s | 0 | `0x02=82 0x04=2 0x20=134` | baseline (before the step) |
+| 0.28 s | 17 | `0x04=21 0x08=197` | encryption start: the flip is `WRITECOPY`, each chunk's write makes its pages `RW` |
+| 1.04 s – 7.07 s | **218 / 218** | `0x04=218` | the whole image is RC4 ciphertext and writable — the 6.04 s plateau matches `sleep_ms` |
+| 7.32 s–7.83 s | 154 → 83 → 13 | `0x04=218` | decryption pass (chunk by chunk) |
+| 8.08 s | **0 / 218** | `0x02=71 0x04=13 0x20=134` | byte-exact restore (this sample catches the tail of the protection restore) |
+| 8.55 s+ | 1 (loader state) | `0x02=82 0x04=2 0x20=134` | protections exactly at baseline again; the one page is the loader's own subsequent work |
+
+The `MZ` page itself is ciphertext in the window (`4d 5a 90 00 …` → `7f e0 a4
+c5 …`). The **control** (the plain `sleep` technique, same 6 s) kept 0/218 pages
+changed with the baseline histogram for the whole window, so the signal is the
+technique and not the sampler.
+
+- **The cipher is RC4 with the per-build key**: the 16-byte key is recovered
+  from the generated stub (the `$SLEEP_KEY_DEF$` literal, xor-obfuscated) and
+  `RC4(key)` over the first chunk (65 520 bytes) reproduces the observed
+  `plain ^ cipher` keystream byte-for-byte. Later chunks use a different key
+  state (see the detection note above).
+- The e2e `sleep_obfuscation_sleeps_and_still_runs_the_payload` asserts what
+  needs no observer: the wait really takes `sleep_ms` and the chain reaches the
+  payload afterwards.
 
 ## Implementation notes
 

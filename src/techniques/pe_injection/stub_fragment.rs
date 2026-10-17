@@ -254,9 +254,11 @@ fn map_payload(
 // reserves a real index, publishes `_tls_index` and materializes the `.tls`
 // template. The slot itself cannot be written cross-process without reading the
 // thread's TEB, so the work is handed to a tiny target-resident prologue the
-// payload thread runs before its entry point: `TlsSetValue` sets the slot, the
-// prologue then runs the payload's `DLL_PROCESS_ATTACH` callbacks (each on a
-// started thread with a real TLS array), and finally jumps to the entry point.
+// payload thread runs before its entry point: the prologue writes the thread's
+// `ThreadLocalStoragePointer` slot for the payload's index, then runs the
+// payload's `DLL_PROCESS_ATTACH` callbacks, and finally jumps to the entry
+// point. The slot must be that array — `TlsSetValue` writes a different one a
+// CRT does not read (measured; see `build_prologue`).
 
 /// `TlsAlloc`'s failure value.
 const TLS_OUT_OF_INDEXES: u32 = u32::MAX;
@@ -404,13 +406,8 @@ fn remote_tls_alloc(process: HANDLE) -> Result<u32, String> {
     Ok(info.exit_status as u32)
 }
 
-/// Resolves `TlsSetValue`'s session-wide address in the current process; the
-/// prologue calls it in the target, where kernel32 shares the same base.
-fn resolve_tls_set_value() -> Result<usize, String> {
-    let name: String = $TLS_SET_VALUE_DEF$;
-    resolve_kernel32_export(name)
-}
-
+/// Writes the TLS prologue and its callback array into the target and starts
+/// the payload thread on the prologue.
 /// Walks the payload's null-terminated TLS callback array and returns the
 /// relocated callback addresses, in order.
 fn read_callback_array(
@@ -485,108 +482,126 @@ fn render_callback_array(callbacks: &[u64]) -> Vec<u8> {
 }
 
 /// Builds the x64 prologue the payload thread runs before its entry point:
-/// set the TLS slot via `TlsSetValue`, run each callback with
-/// `DLL_PROCESS_ATTACH`, then jump to the entry point.
+/// write the thread's TLS-array slot for the payload's index, run each callback
+/// with `DLL_PROCESS_ATTACH`, then jump to the entry point.
+///
+/// The slot is written into `TEB->ThreadLocalStoragePointer` (`gs:[0x58]`), the
+/// array a CRT reads through `_tls_index`. `TlsSetValue` writes
+/// `TEB->TlsSlots`, a *different* array: a payload whose slot was set that way
+/// finds a null block and its Rust TLS guard faults reading `[block+0x10]`
+/// (measured on Windows 11 26200 — `0xC0000005` at address `0x10`;
+/// `docs/measurements.md`).
+///
+/// `sub rsp, 8` around the callback loop exists for the x64 call ABI: a thread
+/// start routine is entered with `rsp % 16 == 8` (as if called), so a `call`
+/// issued from that state hands the callee `rsp % 16 == 0` and every frame the
+/// callback builds is off by eight, until a `movaps` of a local faults
+/// (`0xC0000005` at address `-1`, measured). The `add rsp, 8` restores the entry
+/// state before the jump, since the payload's entry point must be entered with
+/// `rsp % 16 == 8` too.
 #[cfg(target_arch = "x86_64")]
 fn build_prologue(
     index: u32,
     block: u64,
-    tls_set_value: u64,
     callbacks_ptr: u64,
     image_base: u64,
     entry: u64,
 ) -> Vec<u8> {
-    let mut code = Vec::with_capacity(83);
-    // mov ecx, index                          ; 0
-    code.extend_from_slice(&[0xB9]);
-    code.extend_from_slice(&index.to_le_bytes());
-    // mov rdx, block                          ; 5
+    let mut code = Vec::with_capacity(88);
+    // mov rcx, gs:[0x58]                      ; 0
+    code.extend_from_slice(&[0x65, 0x48, 0x8B, 0x0C, 0x25, 0x58, 0x00, 0x00, 0x00]);
+    // mov rdx, block                          ; 9
     code.extend_from_slice(&[0x48, 0xBA]);
     code.extend_from_slice(&block.to_le_bytes());
-    // mov rax, tls_set_value                  ; 15
-    code.extend_from_slice(&[0x48, 0xB8]);
-    code.extend_from_slice(&tls_set_value.to_le_bytes());
-    // call rax                                ; 25
-    code.extend_from_slice(&[0xFF, 0xD0]);
-    // mov rbx, callbacks_ptr                  ; 27
+    // mov eax, index                          ; 19
+    code.extend_from_slice(&[0xB8]);
+    code.extend_from_slice(&index.to_le_bytes());
+    // mov [rcx + rax*8], rdx                  ; 24
+    code.extend_from_slice(&[0x48, 0x89, 0x14, 0xC1]);
+    // mov rbx, callbacks_ptr                  ; 28
     code.extend_from_slice(&[0x48, 0xBB]);
     code.extend_from_slice(&callbacks_ptr.to_le_bytes());
-    // loop: mov rax, [rbx]                    ; 37
+    // sub rsp, 8                              ; 38
+    code.extend_from_slice(&[0x48, 0x83, 0xEC, 0x08]);
+    // loop: mov rax, [rbx]                    ; 42
     code.extend_from_slice(&[0x48, 0x8B, 0x03]);
-    // test rax, rax                           ; 40
+    // test rax, rax                           ; 45
     code.extend_from_slice(&[0x48, 0x85, 0xC0]);
-    // je done (+26 -> 71)                     ; 43
+    // je done (+26 -> 76)                     ; 48
     code.extend_from_slice(&[0x74, 26]);
-    // mov rcx, image_base                     ; 45
+    // mov rcx, image_base                     ; 50
     code.extend_from_slice(&[0x48, 0xB9]);
     code.extend_from_slice(&image_base.to_le_bytes());
-    // mov edx, 1                              ; 55
+    // mov edx, 1                              ; 60
     code.extend_from_slice(&[0xBA, 0x01, 0x00, 0x00, 0x00]);
-    // xor r8, r8                              ; 60
+    // xor r8, r8                              ; 65
     code.extend_from_slice(&[0x4D, 0x31, 0xC0]);
-    // call rax                                ; 63
+    // call rax                                ; 68
     code.extend_from_slice(&[0xFF, 0xD0]);
-    // add rbx, 8                              ; 65
+    // add rbx, 8                              ; 70
     code.extend_from_slice(&[0x48, 0x83, 0xC3, 0x08]);
-    // jmp loop (-34 -> 37)                    ; 69
+    // jmp loop (-34 -> 42)                    ; 74
     code.extend_from_slice(&[0xEB, 0xDE]);
-    // done: mov rax, entry                    ; 71
+    // done: add rsp, 8                        ; 76
+    code.extend_from_slice(&[0x48, 0x83, 0xC4, 0x08]);
+    // mov rax, entry                          ; 80
     code.extend_from_slice(&[0x48, 0xB8]);
     code.extend_from_slice(&entry.to_le_bytes());
-    // jmp rax                                 ; 81
+    // jmp rax                                 ; 90
     code.extend_from_slice(&[0xFF, 0xE0]);
     code
 }
 
-/// Builds the x86 prologue (stdcall): set the TLS slot, run each callback,
-/// then jump to the entry point.
+/// Builds the x86 prologue (stdcall): write the thread's TLS-array slot for the
+/// payload's index, run each callback, then jump to the entry point.
+///
+/// The slot goes into `TEB->ThreadLocalStoragePointer` (`fs:[0x2C]`); see the
+/// x64 variant for why `TlsSetValue` is not used.
 #[cfg(target_arch = "x86")]
 fn build_prologue(
     index: u32,
     block: u64,
-    tls_set_value: u64,
     callbacks_ptr: u64,
     image_base: u64,
     entry: u64,
 ) -> Vec<u8> {
-    let mut code = Vec::with_capacity(51);
-    // push block                              ; 0
-    code.extend_from_slice(&[0x68]);
+    let mut code = Vec::with_capacity(55);
+    // mov ecx, fs:[0x2C]                      ; 0
+    code.extend_from_slice(&[0x64, 0x8B, 0x0C, 0x25, 0x2C, 0x00, 0x00, 0x00]);
+    // mov edx, block                          ; 8
+    code.extend_from_slice(&[0xBA]);
     code.extend_from_slice(&(block as u32).to_le_bytes());
-    // push index                              ; 5
-    code.extend_from_slice(&[0x68]);
-    code.extend_from_slice(&index.to_le_bytes());
-    // mov eax, tls_set_value                  ; 10
+    // mov eax, index                          ; 13
     code.extend_from_slice(&[0xB8]);
-    code.extend_from_slice(&(tls_set_value as u32).to_le_bytes());
-    // call eax                                ; 15
-    code.extend_from_slice(&[0xFF, 0xD0]);
-    // mov ebx, callbacks_ptr                  ; 17
+    code.extend_from_slice(&index.to_le_bytes());
+    // mov [ecx + eax*4], edx                  ; 18
+    code.extend_from_slice(&[0x89, 0x14, 0x81]);
+    // mov ebx, callbacks_ptr                  ; 21
     code.extend_from_slice(&[0xBB]);
     code.extend_from_slice(&(callbacks_ptr as u32).to_le_bytes());
-    // loop: mov eax, [ebx]                    ; 22
+    // loop: mov eax, [ebx]                    ; 26
     code.extend_from_slice(&[0x8B, 0x03]);
-    // test eax, eax                           ; 24
+    // test eax, eax                           ; 28
     code.extend_from_slice(&[0x85, 0xC0]);
-    // je done (+16 -> 44)                     ; 26
+    // je done (+16 -> 48)                     ; 30
     code.extend_from_slice(&[0x74, 16]);
-    // push 0 (reserved)                       ; 28
+    // push 0 (reserved)                       ; 32
     code.extend_from_slice(&[0x6A, 0x00]);
-    // push 1 (reason)                         ; 30
+    // push 1 (reason)                         ; 34
     code.extend_from_slice(&[0x6A, 0x01]);
-    // push image_base                         ; 32
+    // push image_base                         ; 36
     code.extend_from_slice(&[0x68]);
     code.extend_from_slice(&(image_base as u32).to_le_bytes());
-    // call eax                                ; 37
+    // call eax                                ; 41
     code.extend_from_slice(&[0xFF, 0xD0]);
-    // add ebx, 4                              ; 39
+    // add ebx, 4                              ; 43
     code.extend_from_slice(&[0x83, 0xC3, 0x04]);
-    // jmp loop (-22 -> 22)                    ; 42
+    // jmp loop (-22 -> 26)                    ; 46
     code.extend_from_slice(&[0xEB, 0xEA]);
-    // done: mov eax, entry                    ; 44
+    // done: mov eax, entry                    ; 48
     code.extend_from_slice(&[0xB8]);
     code.extend_from_slice(&(entry as u32).to_le_bytes());
-    // jmp eax                                 ; 49
+    // jmp eax                                 ; 53
     code.extend_from_slice(&[0xFF, 0xE0]);
     code
 }
@@ -599,7 +614,6 @@ fn start_with_tls(
     entry: u64,
     provision: &TlsProvision,
 ) -> Result<HANDLE, String> {
-    let tls_set_value = resolve_tls_set_value()? as u64;
     let callback_bytes = render_callback_array(&provision.callbacks);
 
     // One executable page holds the prologue and the null-terminated callback
@@ -624,7 +638,6 @@ fn start_with_tls(
     let prologue = build_prologue(
         provision.index,
         provision.block,
-        tls_set_value,
         callbacks_ptr,
         base,
         entry,

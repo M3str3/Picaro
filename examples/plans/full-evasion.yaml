@@ -1,0 +1,60 @@
+# Full reflective-loading evasion: indirect syscalls (api_hash SSN resolution)
+# plus the API resolution proxy enabled for every catalogue entry.
+#
+#   cargo run -- build examples/plans/full-evasion.yaml
+#
+# The three pieces fit together and each assumes the next:
+#
+#   - `syscalls.mode: indirect` resolves the `Nt*` SSNs at runtime and issues
+#     every syscall through a `syscall; ret` gadget, so the loader never calls a
+#     `ntdll` stub an EDR may have hooked. `resolver: api_hash` matches each
+#     export by a precomputed FNV-1a hash against a clean on-disk copy of ntdll,
+#     so no `Nt*` name string and no `GetProcAddress` is involved at all — and,
+#     unlike `hells_gate`, it does not break when the EDR has hooked the live
+#     `Nt*` stubs.
+#   - `api_resolution.mode: proxy` makes the *loader* own the payload's import
+#     resolution: a catalogue hit (kernel32!ReadProcessMemory/OpenProcess,
+#     kernel32!GetProcAddress, the ntdll!Nt* routes) is served by a proxy
+#     generated in the stub and routed through that same syscall layer, instead
+#     of the real export. `apis: [all]` selects the catalogue plus every direct
+#     `ntdll!Nt*` route; `unmatched: forward` leaves any other import resolved
+#     normally (never fails the load).
+#   - `reflective_loading` is the only execution technique that accepts a full
+#     PE and runs it in-process, and `mode: proxy` is reflective_loading-only.
+#
+# The payload here is the repo's test payload; point `source` at the real one.
+# For a host-loaded build (a DLL a process such as java.exe loads) see
+# `examples/plans/full-evasion-dll.yaml`.
+
+schema: 6
+name: full-evasion
+
+build:
+  payloads:
+    payload:
+      source: ./examples/payloads/test_payload.exe
+
+  stub:
+    syscalls:
+      mode: indirect
+      resolver: api_hash
+    strings:
+      strategy: xor
+    api_resolution:
+      mode: proxy
+      apis:
+        # Every selectable entry: the hand-written catalogue entries plus a
+        # direct `ntdll!Nt*` proxy for each syscall-layer function.
+        - all
+      unmatched: forward
+
+  output:
+    path: ./dist/full-evasion.exe
+    resources:
+      version_info:
+        randomize: true
+    sign:
+      mode: lab
+
+runtime:
+  - technique: reflective_loading

