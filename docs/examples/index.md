@@ -24,6 +24,7 @@ cargo run -- build examples/plans/<name>.yaml               # local build
 | `lab-signed.yaml` | A self-signed (`mode: lab`) Authenticode signature and an embedded VERSIONINFO. |
 | `dll.yaml` | `output.kind: dll`: the chain ships as a DLL a host process loads (JVM `System.load`, CPython `ctypes`, `rundll32`) instead of a standalone executable. Its payload opens a modal dialog (the visible check). |
 | `dll-shellcode.yaml` | The same `kind: dll` build with a shellcode payload: the chain returns 42, so every host example in `examples/hosts/` reports a value. |
+| `shellcode-output.yaml` | `output.kind: shellcode`: the packed DLL wrapped in a reflective loader (sRDI) and emitted as raw `.bin` — no PE on disk. Verified on the lab host (see `docs/design/shellcode-output.md`). |
 | `mimikatz.yaml` | A full-featured plan: remote payload URL, indirect syscalls, API resolution (import proxying), `patch_etw`, randomized VERSIONINFO and a lab signature. |
 
 ## Recipe: pack an msfvenom payload

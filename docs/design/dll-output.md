@@ -77,6 +77,7 @@ build:
     path: ./dist/loader.dll
     kind: dll
     entry: auto            # auto | jni_on_load | export:Run
+    console: parent        # parent | none (skipped when parent)
     arch: x64
     strip: true
     sign: { mode: lab }
@@ -90,6 +91,9 @@ build:
   + `Display` with serde's `try_from`/`into`, in the style of the existing
   enums. The *syntax* of the export name is checked in `plan::validate` (§5) so
   the operator gets a normal validation error instead of a serde one.
+- `ConsoleMode { Parent, None }`, serialized lowercase, `Default = Parent`,
+  skipped when it is the default — the same shape as `Subsystem` and
+  `TrimPaths`. It is only meaningful with `kind: dll`/`shellcode` (§4.4).
 - `output` is `deny_unknown_fields`, so both fields must be declared on
   `OutputPlan`.
 - `entry` is only meaningful with `kind: dll`; declaring it with `kind: exe` is
@@ -230,7 +234,18 @@ waits for it is a parked extension (Phase E).
 
 ### 4.4 Console
 
-A DLL has no console of its own. The entry:
+A DLL has no console of its own. `build.output.console` picks what the entry
+does before the chain runs:
+
+| `console` | Behavior |
+|---|---|
+| `parent` (default) | `AttachConsole(ATTACH_PARENT_PROCESS)` — the OS installs the parent's console standard handles, so the chain's output reaches the host's terminal. |
+| `none` | no attach — the chain writes to stdout and the host decides where that goes. |
+
+`parent` is the default; omitting the field is identical to `console: parent`,
+so existing plans generate the exact entry they already did.
+
+With `parent` the entry:
 
 1. calls `AttachConsole(ATTACH_PARENT_PROCESS)` — on attach, the OS installs
    the console's standard handles for the process;
@@ -245,6 +260,15 @@ alone does not replace them. The reference's `CONOUT$` + `SetStdHandle` +
 raw-`WriteFile` recipe covers that case, and whether it is needed here is a
 Phase D measurement (which handles a `java.exe`/`python.exe` host actually
 has), not an assumption.
+
+`none` is for hosts that already redirect stdout themselves — for example, a
+host that calls `SetStdHandle(STD_OUTPUT_HANDLE, pipe)` to capture the output
+in a named pipe. With `parent`, the attach would send the chain's output to
+the parent's console instead of that pipe, breaking the capture; `none` skips
+the attach so the chain writes to the (redirected) stdout and the host keeps
+deciding where it goes. The entry still emits `dll_attach_console()` as a
+no-op so the blocking export and the detached worker stay identical in both
+modes.
 
 The `build.stub.debug` prelude is rendered with `windows_subsystem = false` for
 DLL builds, so it takes the plain-stderr variant: `AllocConsole` would open a
@@ -297,15 +321,17 @@ Advisories (build succeeds, the line is printed):
 
 ## 6. Code touchpoints
 
-- `src/plan/schema.rs` — `OutputPlan.kind`, `OutputPlan.entry`, `OutputKind`,
-  `DllEntry`.
+- `src/plan/schema.rs` — `OutputPlan.kind`, `OutputPlan.entry`,
+  `OutputPlan.console`, `OutputKind`, `DllEntry`, `ConsoleMode`.
 - `src/plan/validate.rs` — `validate_dll` (§5) and the advisories.
 - `src/engine/templates/main.rs.tpl` — `$ENTRY_BLOCK$` replaces the inline `fn main`.
 - `src/engine/entry.rs` (new) — renders the entry block; unit tests assert the
   exe variant is byte-identical to today's literal, that the DLL variants carry
-  the expected exports, and that no `process::exit` appears in a DLL block.
-- `src/engine/steps.rs` — `StepsParams` gains `kind`/`entry`; `render_common`
-  substitutes `$ENTRY_BLOCK$`.
+  the expected exports, that no `process::exit` appears in a DLL block, and
+  that `dll_attach_console` emits `AttachConsole` for `console: parent` (and
+  not for `console: none`).
+- `src/engine/steps.rs` — `StepsParams` gains `kind`/`entry`/`console`;
+  `render_common` substitutes `$ENTRY_BLOCK$`.
 - `src/engine/debug.rs` — the DLL path passes `windows_subsystem = false`
   (§4.4); no new prelude variant.
 - `src/engine/compiler.rs` — `--crate-type=cdylib`, `--crate-name` from the

@@ -347,7 +347,12 @@ export function advisories(state, TECH) {
       } else if (state.steps.indexOf(consumers[0]) < state.steps.indexOf(stager)) {
         add('err', `The execution step that runs network_stager's payload must come after the stager.`);
       }
-      add('info', `network_stager fetches '${name}' at run time; its 'source' is ignored.`);
+      const fallback = stager.params?.fallback ?? 'none';
+      if (fallback === 'embedded') {
+        add('info', `network_stager fetches '${name}' at run time and keeps the embedded copy as a fallback.`);
+      } else {
+        add('info', `network_stager fetches '${name}' at run time; its 'source' is ignored.`);
+      }
     }
   }
 

@@ -639,6 +639,13 @@ fn build(
                         dotted(ui, &parts)
                     )
                 );
+                for warning in payload_advisories(step, &summary) {
+                    anstream::eprintln!(
+                        "  {} {}",
+                        ui.bang(),
+                        ui.warn(format!("warning: {warning}"))
+                    );
+                }
                 if verbose {
                     if let Some(info) = &summary.pe {
                         anstream::println!(
@@ -1275,6 +1282,9 @@ fn dry_run(plan: &plan::Plan, plan_path: &Path, ui: &Palette) -> Result<()> {
         let bytes = load_source(&payload.plan.source)?;
         verify_payload_hash(&bytes, payload.plan.sha256.as_deref())?;
         let summary = inspect_payload(payload.plan.format, &bytes, plan.build.output.arch)?;
+        for warning in payload_advisories(step, &summary) {
+            anstream::eprintln!("  {} {}", ui.bang(), ui.warn(format!("warning: {warning}")));
+        }
         let mut parts = vec![
             ui.target(describe_source(&payload.plan.source)),
             ui.dim(summary.label),
@@ -1496,6 +1506,42 @@ fn inspect_payload(format: PayloadFormat, data: &[u8], arch: Arch) -> Result<Pay
             })
         }
     }
+}
+
+/// Build-time advisories about an execution step's payload, from facts the
+/// parser already extracted.
+///
+/// `reflective_loading` maps the payload into the *stub's* process and can only
+/// move an image that carries base relocations: a `/FIXED` payload runs only if
+/// its preferred base happens to be free, and the load fails there instead of
+/// running with stale absolute addresses. That is a legitimate build (the base
+/// may well be free), so this is a warning, not an error.
+fn payload_advisories(step: &ResolvedStep, summary: &PayloadSummary) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if matches!(step.technique, TechniqueKind::ReflectiveLoading { .. }) {
+        if let Some(pe) = &summary.pe {
+            if !pe.has_relocations {
+                warnings.push(format!(
+                    "step {} ('{}'): the {} payload has no base relocations (data directory 5 is \
+                     empty), so it can only be mapped at its preferred base 0x{:x}; the load fails \
+                     if that base is taken. Rebuild the payload without /FIXED",
+                    step.index, step.label, summary.label, pe.image_base,
+                ));
+            }
+            if let Some(template) = pe.tls_template_size {
+                if template > 0 {
+                    warnings.push(format!(
+                        "step {} ('{}'): the {} payload carries {} bytes of static TLS data (its PE \
+                         has a TLS template), which reflective_loading does not provision: any \
+                         thread-local read or write stays on _tls_index 0 and aliases the host's \
+                         TLS block instead of the payload's own",
+                        step.index, step.label, summary.label, template,
+                    ));
+                }
+            }
+        }
+    }
+    warnings
 }
 
 /// Fails when the payload does not match its `sha256`.

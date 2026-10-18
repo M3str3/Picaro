@@ -133,6 +133,29 @@ RUN apt-get update \
 ENV PICARO_CSC=/usr/bin/mcs \
     PICARO_PSASSEMBLY=/usr/local/lib/powershell-ref/System.Management.Automation.dll
 
+# `kind: shellcode` wraps the packed DLL in a reflective loader with sRDI. The
+# loader blob is built here from the vendored C source with the image's own
+# MinGW-w64 (the same toolchain that links the stub), so the image is
+# self-contained: no upstream download, and the blob is reproducible from
+# `vendor/srdi/ShellcodeRDI.c`. The converter it emits is pure Python and runs
+# on this Linux image; the shellcode it produces runs on the Windows target,
+# never here. `python3` is the interpreter the packer finds via `find_python`.
+COPY vendor/srdi /usr/local/lib/srdi-src
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /usr/local/lib/srdi \
+    && python3 /usr/local/lib/srdi-src/build_blob.py \
+        /usr/local/lib/srdi-src/ShellcodeRDI.c \
+        -o /usr/local/lib/srdi/ShellcodeRDI.py \
+    && cp /usr/local/lib/srdi-src/ConvertToShellcode.py \
+        /usr/local/lib/srdi/ConvertToShellcode.py \
+    && rm -rf /usr/local/lib/srdi-src \
+    && test -s /usr/local/lib/srdi/ShellcodeRDI.py \
+    && test -s /usr/local/lib/srdi/ConvertToShellcode.py
+
+ENV PICARO_SRDI=/usr/local/lib/srdi/ConvertToShellcode.py
+
 # Copied after the compile: read at runtime, so editing an example must not
 # invalidate the build layers above. `examples/` feeds the smoke tests below;
 # the stub template and the YARA rules live under `src/` now, so they are copied

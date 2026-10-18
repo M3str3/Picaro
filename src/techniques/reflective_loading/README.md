@@ -19,45 +19,56 @@ are copied into an executable allocation and run on a thread instead (see
 
 ```mermaid
 flowchart TD
-    A[Validate MZ and PE signatures] --> B[Allocate at the preferred base]
+    A[Validate headers, sizes and entry point] --> B[Allocate at the preferred base]
     B --> C[Copy headers and sections]
     C --> D[Resolve imports, patch the IAT]
     D --> E{Landed at preferred base?}
-    E -- no --> F[Apply base relocations]
+    E -- no --> F[Apply base relocations, or fail without any]
     E -- yes --> G[Set section protections]
     F --> G
-    G --> H[Run TLS callbacks]
-    H --> I{erase_header?}
-    I -- yes --> J[Zero the mapped PE header]
-    I -- no --> K[Run the entry point on the calling thread]
-    J --> K
+    G --> H[Set section protections]
+    H --> I[Run TLS callbacks]
+    I --> J{erase_header?}
+    J -- yes --> K[Zero the mapped PE header]
+    J -- no --> L[Run the entry point on the calling thread]
+    K --> L
 ```
 
 ### 1. Map the image
 
-1. Validate the image (MZ and PE signatures, x64 magic).
+1. Validate the image: the MZ and PE signatures, the x64 magic, that the
+   headers, the section table and a non-zero entry point are inside the buffer,
+   and that `SizeOfHeaders` fits in both the buffer and `SizeOfImage`.
 2. Allocate memory at the preferred image base (fall back to any address if it
    is taken) through `nt_alloc_vm`.
-3. Copy the PE headers and each section's raw data into the allocation.
+3. Copy the PE headers and each section's raw data into the allocation, checking
+   both ends of every copy: the source against the buffer, the destination
+   against `SizeOfImage`.
 
 ### 2. Fix it up
 
 4. Resolve imports (`LoadLibraryA` + `GetProcAddress`), patching the import
    address table.
-5. Apply base relocations if the image did not land at its preferred base.
+5. Apply base relocations if the image did not land at its preferred base. An
+   image with no relocation directory (`/FIXED`) *must* land there: when it does
+   not, the load fails with a diagnostic instead of running with stale absolute
+   addresses.
 6. Set each section's final memory protection (`nt_protect_vm`).
 
 ### 3. Run it
 
-7. Run TLS callbacks, if present.
-8. Run the entry point (`DllMain` for a DLL, `mainCRTStartup`-style for an EXE)
+7. Run TLS callbacks, if present. The mapper does not provision per-thread TLS
+   (see “TLS and per-thread state”).
+9. Run the entry point (`DllMain` for a DLL, `mainCRTStartup`-style for an EXE)
    on the calling thread and return its exit code.
 
-With `build.payloads.<name>.export` (DLLs only), step 8 changes: the entry point is
+With `build.payloads.<name>.export` (DLLs only), step 9 changes: the entry point is
 called once with `DLL_PROCESS_ATTACH` — the loader step a mapped DLL needs so
 its CRT and global constructors initialize — and then the named export is called
 with no arguments instead of running the entry point. The process
-exits 0 once the export returns.
+exits 0 once the export returns. Only *named* exports are reachable, and a
+forwarded export (`DLL.Function`) is refused: its entry is a string inside the
+export directory, not code.
 
 A `format: dll` payload **must** set `export`: `plan::validate` rejects a mapped
 DLL without one, because its `DllMain` only initializes the library (a
@@ -157,26 +168,59 @@ IAT slots come from the shared import resolver (`src/engine/imports.rs`). On x86
 the entry point is called through the x86 ABI (arguments on the stack); the
 mapper never uses a register hand-off.
 
-## TLS callbacks
+## TLS and per-thread state
 
-A manually mapped image has no TLS index, so the mapper only runs the payload's
-`DLL_PROCESS_ATTACH` TLS callbacks — the loader step that initializes global
-state — and then jumps to the entry point. It does **not** provision a per-thread
-TLS block.
+A manually mapped image gets no TLS index: the OS never assigns one, so the
+payload's `_tls_index` keeps the zero the linker left and its static-TLS reads
+(`thread_local!`, `__declspec(thread)`, the CRT's own per-thread data) land in
+*another* module's slot. The mapper runs the payload's `DLL_PROCESS_ATTACH`
+callbacks — the loader step that initializes global state — and stops there.
 
-The reason is the two TLS namespaces: a CRT reads per-thread state through the
-*static* array `ThreadLocalStoragePointer` (`gs:[0x58]` / `fs:[0x2C]`), while
-`TlsAlloc`/`TlsSetValue` manage a separate *dynamic* array (`gs:[0x1480]` /
-`fs:[0xE10]`). Reserving a dynamic index and then writing it into the static
-array corrupts the heap at thread exit (ntdll frees static entries as heap
-blocks). Provisioning static TLS correctly needs the loader's
-`LdrpHandleTlsData` path, which is not implemented here.
+Provisioning the index the obvious way (a `TlsAlloc` index written into
+`ThreadLocalStoragePointer`) was implemented, measured and then removed, because
+both halves of that trick are wrong for an in-process mapper:
 
-Limitation: a payload whose CRT relies on `_tls_index` for per-thread state
-(`thread_local!`, `__declspec(thread)`, the CRT's own per-thread data) is out of
-scope. Payloads that only need the callbacks — which includes the message-box
-markers used to verify this technique — are unaffected. This matches the
-project's original `void-loader` mapper (`code_examples/void-loader`).
+- **The lowest free index belongs to a loaded module.** `TlsAlloc`'s counter and
+  the loader's module-index counter are separate, so the first free *dynamic*
+  index can be a module's *static* one: a plain process has module indices `0`
+  and `1`, and its `TlsAlloc` also returns `1` (measured 2026-10-18). Here it
+  returns `1` — `KERNELBASE`'s index (measured, 2026-09-27 and again 2026-10-18).
+  Writing that entry replaces `KERNELBASE`'s per-thread block in the calling
+  thread, and a payload that then runs UI code corrupts the heap in a release
+  build: the input-method/TSF path reads and frees that block through
+  `RtlFreeHeap` (measured 2026-10-17, `0xC0000374`, release only, reproducible;
+  `docs/measurements.md`).
+- **Skipping the collision is not enough: the loader owns the array itself.**
+  The next design picked an index past every loaded module's, reserved it with
+  `TlsAlloc`, built a wider private array seeded from the loader's and pointed
+  `gs:[0x58]` at it. It was implemented and measured on 2026-10-18: it still
+  dies. On thread exit `LdrShutdownThread` frees whatever
+  `ThreadLocalStoragePointer` points at — and the entries it holds — from a heap
+  private to ntdll, so an array we allocated faults reading the chunk header
+  just before its base (`array - 0x10`). A plain-exe reproducer reproduces it
+  deterministically; with no provisioning the same program exits cleanly.
+  `ExitProcess` does not run that teardown, which is why the failure shows up on
+  a thread that *returns*, not on a process that exits. No user-mode array can
+  stand in for the loader's own.
+
+Provisioning static TLS correctly needs the loader's own path — `LdrpHandleTlsData`
+or the `NtSetInformationProcess` TLS class it drives — which means a module entry
+in the loader's list and the loader lock. That is a feature of its own, not a
+patch to this fragment. Until then:
+
+- a payload that only needs the callbacks is unaffected (the marker payloads the
+  technique is verified with are in that group);
+- a **DLL/export** payload that reads a thread-local breaks, and so does a
+  **PE** payload whose CRT touches per-thread state — the failure is a wrong
+  value or a fault on the first access, not a silent success (measured: `tls=1`
+  instead of `tls=42`, 2026-10-18);
+- `build` warns when a `reflective_loading` payload carries a non-zero TLS
+  template (`payload_advisories`), because that is the case the mapper cannot
+  serve: the payload's thread-locals stay on `_tls_index` 0 and read and write
+  the host's block, which is `8` bytes in the stub while a Rust payload's
+  template is `88`. The warning fires for every Rust fixture, which is the point:
+  it is a real limitation, not a rare edge;
+- `DLL_THREAD_ATTACH` never fires for a thread the payload creates, either way.
 
 ## Measurements
 
@@ -184,6 +228,34 @@ project's original `void-loader` mapper (`code_examples/void-loader`).
   the measurement record: `packs_and_runs_a_reflective_payload` (marker + exit
   code, x64 and x86) and every probe-based round test (the preparation
   techniques run on top of it).
+- **TLS provisioning — measured, then removed (2026-10-18, x64):** with a
+  `TlsAlloc` index published into `_tls_index` and the block written into
+  `ThreadLocalStoragePointer`, a Rust payload that reads its own `thread_local`
+  (`examples/payloads/test_hollow_payload.rs`) wrote `tls=42` in release **and**
+  in a `--debug` build; with the provisioning disabled the same payload wrote
+  `tls=1`, so the check discriminates. The trace showed the index it took: `1`,
+  `KERNELBASE`'s. One release run of a UI payload (a self-dismissing message box)
+  was clean — exit `42`, nothing on screen (observed on the lab host) — but a
+  single clean run does not clear the 2026-10-17 finding that *this exact
+  condition* corrupts the heap in release with UI payloads. The provisioning is
+  therefore removed again and only the callbacks remain; see “TLS and per-thread
+  state” and `docs/measurements.md`.
+- **TLS provisioning, the collision-free design — measured, still crashes
+  (2026-10-18, x64, Docker image rustc 1.98.1 with the faithful stub config):**
+  the index-past-every-module design built into `dist/poc_faithful_fix.exe`
+  exits on an access violation before the box appears, under the same stub
+  configuration that runs a no-provisioning build cleanly. The decisive
+  measurement is a plain-exe reproducer (`build/tls_repro.exe`, scratch, not
+  shipped): installing a wider array on a thread and letting the thread return
+  faults in `LdrShutdownThread` reading `array - 0x10`, while the same program
+  with no provisioning exits `42`. Restoring the loader's array just before the
+  thread returns survives, which pins the free on the loader's own teardown and
+  rules the array replacement out as a fix.
+- **Compile-verified only:** the header/section/entry-point guards, the
+  no-relocations refusal and the forwarded-export refusal have no live run yet —
+  they are covered by `compiles_reflective_loading_stub_for_every_format` (x64,
+  three formats), `compiles_a_reflective_stub_for_i686` and the unit tests over
+  the rendered fragment.
 - **Unmeasured caveat:** a payload that raises a *native exception* on x64 cannot
   unwind through its own frames — the mapped image's unwind tables are never
   registered with `RtlAddFunctionTable` and the image is not in the loader list
@@ -215,6 +287,26 @@ project's original `void-loader` mapper (`code_examples/void-loader`).
   Win32 — the technique's syscall requirements (`NtAllocateVirtualMemory`,
   `NtProtectVirtualMemory`) include no thread call, so the layer renders no
   `nt_create_thread_ex` helper here.
+- **A `/FIXED` payload is refused when it has to move.** The mapper allocates at
+  the image's preferred base and only falls back to any address for an image that
+  can be fixed up. A payload without a relocation directory that did not land at
+  its preferred base fails the load with a diagnostic (and the build prints a
+  warning: the plan is valid, the run just depends on the base being free).
+- **The mapper is bounds-checked against the image it is given.** The headers,
+  the section table, `SizeOfHeaders`/`SizeOfImage`, each section's source and
+  destination, the base relocation directory and its blocks, the entry point and
+  every table the export lookup walks are validated before they are followed. A
+  malformed payload is a clean error, not an out-of-bounds read or a panic.
+- **A forwarded export is refused, not followed.** The payload's own export table
+  is read directly, so an entry that points back inside the export directory (a
+  forwarder string) is reported instead of being called as code. Exports by
+  ordinal only are not reachable either: the lookup walks the name table.
+- **The mapper does not provision TLS.** `run_tls_callbacks` runs the payload's
+  `DLL_PROCESS_ATTACH` callbacks only; `TlsAlloc` and the
+  `ThreadLocalStoragePointer` write were removed after the 2026-10-17
+  measurement (release-only heap corruption in UI payloads — see “TLS and
+  per-thread state”). A unit test asserts the fragment does not reintroduce
+  them.
 
 ## References
 

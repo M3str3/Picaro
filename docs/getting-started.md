@@ -143,7 +143,7 @@ the payload), `module_stomping` (a signed DLL's code section is overwritten) and
 `fibers` (the payload runs on a fiber). `process_hollowing` only
 runs `format: pe`; it runs a full PE (imports, TLS state, entry hand-off), with
 the payload's `DLL_PROCESS_ATTACH` TLS callbacks run on the main thread before
-the entry point (runtime verification pending) — see
+the entry point (runtime-verified on x64, 2026-10-14) — see
 [Process hollowing evidence](techniques/process_hollowing.md). A managed
 assembly is not native code: it needs `format: dotnet` and the `dotnet_hosting`
 technique, which hosts the CLR in the stub and loads the assembly from memory

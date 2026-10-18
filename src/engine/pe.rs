@@ -3,8 +3,8 @@
 //! Only what the packer needs to validate an input payload: `e_lfanew`, the
 //! `PE\0\0` signature, the machine type (to tell x86 from x64), the optional
 //! header magic (PE32 vs PE32+), the preferred image base, the size of the
-//! image and the section table. The generated stub performs its own equivalent
-//! parsing at runtime.
+//! image, the section table and whether the image carries base relocations. The
+//! generated stub performs its own equivalent parsing at runtime.
 
 use crate::plan::schema::Arch;
 
@@ -32,6 +32,14 @@ const PE32_PLUS_MAGIC: u16 = 0x020B;
 /// `IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR`: the data directory a managed
 /// assembly points at its CLR header with.
 const COM_DESCRIPTOR_DIRECTORY: usize = 14;
+
+/// `IMAGE_DIRECTORY_ENTRY_BASERELOC`: the data directory a relocatable image
+/// lists its base relocations in.
+const BASE_RELOCATION_DIRECTORY: usize = 5;
+
+/// `IMAGE_DIRECTORY_ENTRY_TLS`: the data directory an image with static TLS
+/// points at its `IMAGE_TLS_DIRECTORY` with.
+const TLS_DIRECTORY: usize = 9;
 
 /// `IMAGE_COR20_HEADER::Flags`: the assembly is IL-only (no native code, so it
 /// can run in either bitness).
@@ -90,6 +98,18 @@ pub struct PeInfo {
     pub size_of_image: u32,
     pub size_of_headers: u32,
     pub entry_point_rva: u32,
+    /// Whether the image carries base relocations (data directory 5 is
+    /// non-empty), so a loader can map it away from its preferred base. A
+    /// `/FIXED` image has none and only runs at `image_base`; the in-process
+    /// mapper refuses to relocate one (`reflective_loading`).
+    pub has_relocations: bool,
+    /// Bytes of per-thread data the image's static TLS needs (`End - Start` of
+    /// the raw template plus `SizeOfZeroFill`), or `None` when the image has no
+    /// TLS directory. A manually mapped image never receives a `_tls_index`, so
+    /// a payload with per-thread data reads and writes another module's block;
+    /// `reflective_loading` warns about it. An unreadable directory counts as
+    /// zero.
+    pub tls_template_size: Option<u32>,
     pub sections: Vec<SectionInfo>,
     /// The CLR header, when the image is a managed assembly (`.NET`).
     pub com: Option<ClrHeader>,
@@ -219,6 +239,54 @@ pub fn parse(data: &[u8]) -> Result<PeInfo, PeError> {
         None
     };
 
+    // Base relocations. An image with an empty directory 5 was linked `/FIXED`
+    // (or had its relocations stripped): it cannot be mapped at another base.
+    let has_relocations = if num_directories > BASE_RELOCATION_DIRECTORY {
+        let rva = read_u32(data, directories + BASE_RELOCATION_DIRECTORY * 8)?;
+        let size = read_u32(data, directories + BASE_RELOCATION_DIRECTORY * 8 + 4)?;
+        rva != 0 && size != 0
+    } else {
+        false
+    };
+
+    // Static TLS. The directory points at an `IMAGE_TLS_DIRECTORY`, whose raw
+    // template range is the bytes a thread copies before running; an image with
+    // per-thread data always reports more than zero. A directory that is present
+    // but unreadable (or a callbacks-only one) counts as zero rather than failing
+    // the parse: the advisory that uses this only fires on a non-zero size.
+    let tls_template_size = if num_directories > TLS_DIRECTORY {
+        let rva = read_u32(data, directories + TLS_DIRECTORY * 8)?;
+        let size = read_u32(data, directories + TLS_DIRECTORY * 8 + 4)?;
+        if rva == 0 || size == 0 {
+            None
+        } else {
+            let template = rva_to_offset(&sections, rva)
+                .and_then(|offset| {
+                    let (start, end) = if is_pe32plus {
+                        (
+                            read_u64(data, offset).ok()?,
+                            read_u64(data, offset + 8).ok()?,
+                        )
+                    } else {
+                        (
+                            u64::from(read_u32(data, offset).ok()?),
+                            u64::from(read_u32(data, offset + 4).ok()?),
+                        )
+                    };
+                    let zero_fill =
+                        read_u32(data, offset + if is_pe32plus { 32 } else { 16 }).ok()?;
+                    Some(
+                        end.saturating_sub(start)
+                            .saturating_add(u64::from(zero_fill)),
+                    )
+                })
+                .unwrap_or(0);
+            Some(template.min(u64::from(u32::MAX)) as u32)
+        }
+    } else {
+        None
+    };
+
     Ok(PeInfo {
         machine,
         is_pe32plus,
@@ -227,6 +295,8 @@ pub fn parse(data: &[u8]) -> Result<PeInfo, PeError> {
         size_of_image,
         size_of_headers,
         entry_point_rva,
+        has_relocations,
+        tls_template_size,
         sections,
         com,
     })
@@ -354,6 +424,130 @@ mod tests {
         assert!(!pe.sections.is_empty());
         assert!(pe.image_base > 0);
         assert!(pe.size_of_image > 0);
+        // rustc-linked images are relocatable, so the in-process mapper may move
+        // them off their preferred base.
+        assert!(pe.has_relocations, "the fixture carries base relocations");
+    }
+
+    /// Sets `NumberOfRvaAndSizes` and the base-relocation directory (index 5) of
+    /// a synthetic PE32+ image.
+    fn with_relocation_directory(mut pe: Vec<u8>, rva: u32, size: u32) -> Vec<u8> {
+        let opt = 88;
+        pe[opt + 108..opt + 112].copy_from_slice(&16u32.to_le_bytes()); // NumberOfRvaAndSizes
+        let dir = opt + 112 + BASE_RELOCATION_DIRECTORY * 8;
+        pe[dir..dir + 4].copy_from_slice(&rva.to_le_bytes());
+        pe[dir + 4..dir + 8].copy_from_slice(&size.to_le_bytes());
+        pe
+    }
+
+    #[test]
+    fn an_image_with_a_relocation_directory_reports_relocations() {
+        let pe = parse(&with_relocation_directory(
+            minimal_pe(IMAGE_FILE_MACHINE_AMD64, true),
+            0x2000,
+            0x40,
+        ))
+        .expect("valid PE");
+        assert!(pe.has_relocations);
+    }
+
+    #[test]
+    fn an_image_without_relocations_reports_none() {
+        // No directories at all...
+        let pe = parse(&minimal_pe(IMAGE_FILE_MACHINE_AMD64, true)).expect("valid PE");
+        assert!(!pe.has_relocations);
+
+        // ...and an empty directory 5 is not a relocation set either.
+        let pe = parse(&with_relocation_directory(
+            minimal_pe(IMAGE_FILE_MACHINE_AMD64, true),
+            0,
+            0,
+        ))
+        .expect("valid PE");
+        assert!(!pe.has_relocations);
+    }
+
+    /// Adds a TLS directory (data directory 9) at RVA `0x1000` with a synthetic
+    /// `IMAGE_TLS_DIRECTORY` describing a `start..end` raw range and `zero_fill`
+    /// bytes.
+    fn with_tls_directory(
+        mut pe: Vec<u8>,
+        pe32plus: bool,
+        start: u64,
+        end: u64,
+        zero_fill: u32,
+    ) -> Vec<u8> {
+        pe.resize(0x200 + 0x28, 0);
+        let opt = 88;
+        let (num_directories, directories) = if pe32plus { (108, 112) } else { (92, 96) };
+        pe[opt + num_directories..opt + num_directories + 4].copy_from_slice(&16u32.to_le_bytes());
+        let dir = opt + directories + TLS_DIRECTORY * 8;
+        pe[dir..dir + 4].copy_from_slice(&0x1000u32.to_le_bytes());
+        pe[dir + 4..dir + 8].copy_from_slice(&0x28u32.to_le_bytes());
+        let tls = 0x200;
+        if pe32plus {
+            pe[tls..tls + 8].copy_from_slice(&start.to_le_bytes());
+            pe[tls + 8..tls + 16].copy_from_slice(&end.to_le_bytes());
+            pe[tls + 32..tls + 36].copy_from_slice(&zero_fill.to_le_bytes());
+        } else {
+            pe[tls..tls + 4].copy_from_slice(&(start as u32).to_le_bytes());
+            pe[tls + 4..tls + 8].copy_from_slice(&(end as u32).to_le_bytes());
+            pe[tls + 16..tls + 20].copy_from_slice(&zero_fill.to_le_bytes());
+        }
+        pe
+    }
+
+    #[test]
+    fn a_pe32plus_tls_template_is_measured() {
+        let pe = parse(&with_tls_directory(
+            minimal_pe(IMAGE_FILE_MACHINE_AMD64, true),
+            true,
+            0x140001000,
+            0x140001058,
+            0x10,
+        ))
+        .expect("valid PE");
+        assert_eq!(pe.tls_template_size, Some(0x58 + 0x10));
+    }
+
+    #[test]
+    fn a_pe32_tls_template_is_measured() {
+        let pe = parse(&with_tls_directory(
+            minimal_pe(IMAGE_FILE_MACHINE_I386, false),
+            false,
+            0x00401000,
+            0x00401020,
+            0x8,
+        ))
+        .expect("valid PE");
+        assert_eq!(pe.tls_template_size, Some(0x20 + 0x8));
+    }
+
+    #[test]
+    fn a_callbacks_only_tls_directory_reports_zero() {
+        let pe = parse(&with_tls_directory(
+            minimal_pe(IMAGE_FILE_MACHINE_AMD64, true),
+            true,
+            0,
+            0,
+            0,
+        ))
+        .expect("valid PE");
+        assert_eq!(pe.tls_template_size, Some(0));
+    }
+
+    #[test]
+    fn an_image_without_a_tls_directory_reports_none() {
+        let pe = parse(&minimal_pe(IMAGE_FILE_MACHINE_AMD64, true)).expect("valid PE");
+        assert_eq!(pe.tls_template_size, None);
+
+        // A present but empty directory 9 is not a TLS template either.
+        let mut image = minimal_pe(IMAGE_FILE_MACHINE_AMD64, true);
+        image[88 + 108..88 + 112].copy_from_slice(&16u32.to_le_bytes());
+        let dir = 88 + 112 + TLS_DIRECTORY * 8;
+        image[dir..dir + 8].copy_from_slice(&[0u8; 8]);
+        let pe = parse(&image).expect("valid PE");
+        assert_eq!(pe.tls_template_size, None);
     }
 
     #[test]

@@ -54,24 +54,31 @@ payload (`examples/payloads/test_payload.exe`):
 | Hollowing, imports resolved, relocations truncated | `0xC0000005` / `0xC0000409` |
 | Hollowing, DIR64 relocations applied | TLS write hung on a low-half address |
 | Hollowing, relocations + TLS provisioned | payload runs; the stub relays exit `0` |
+| Hollowing + a `.CRT$XLB` callback, call based on the parked `rsp` | target dies: `0xC0000005`, fault address `-1` |
+| Same, call based on `(rsp & !0xF) - 8` and `rsp` restored | callback's marker written, then the entry point's; exit `42` |
 
-The last row is the current state: `.\.dist\test_packed.exe` exits with the
-payload's own exit code (`0`). In a debug build (`build.stub.debug: true`) the
-stub also prints its `STUB_MARKER_<hex>`, which has to be read in Process
-Explorer, because the hollowed `svchost.exe` has no console attached. The
-end-to-end test asserts only "the stub did not fail through its own error path".
+Rows 5–6 are the TLS-callback path (2026-10-14, Windows 11 26200). Row 5's
+`-1` fault address is the signature of a misaligned `movaps`: the debugger's live
+bytes at `rip` were `movaps [rbp+0x170], xmm0` with `rbp % 16 == 8`. The call
+was issued from the stack pointer the thread parked with, so the callback ran
+with `rsp % 16 == 0` while the ABI — and every frame the callback built — assumes
+`8`. Rounding the emulated call site down to 16 bytes and restoring the parked
+pointer before the hand-off fixed it, because the hand-off to the payload's entry
+point must also see the loader's state.
+
+The single-marker rows above are the current state: `.\dist\test_packed.exe`
+exits with the payload's own exit code (`0`). In a debug build
+(`build.stub.debug: true`) the stub also prints its `STUB_MARKER_<hex>`, which has
+to be read in Process Explorer, because the hollowed `svchost.exe` has no console
+attached. The end-to-end test asserts only "the stub did not fail through its own
+error path".
 
 ## Remaining work
 
-- **Runtime verification of the TLS callbacks is pending.** The callbacks are now
-  walked and invoked on the main thread (parked on a `jmp $` stub between calls,
-  so each has a TLS array in its TEB), and a malformed callback array fails
-  loudly through the fragment's diagnostics. What has **not** been measured on the
-  measurement host yet is that a callback actually fires and that the payload's
-  exit code is unaffected — the `#[ignore]` end-to-end test still asserts only
-  that the stub did not fail through its own error path.
-- The end-to-end test could assert the payload's exit code once the marker
-  question above is solved in a way that survives a console-less target.
+- The e2e tests are `#[ignore]`d by policy (`live-tests`): they compile a stub and
+  run a loader, so they run by hand on the lab host. The callback-bearing payload
+  one (`packs_and_runs_a_hollowed_payload_with_tls_callbacks`) is **green**
+  (2026-10-14); it was the red that motivated row 5.
 
 ## References
 

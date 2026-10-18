@@ -1,6 +1,6 @@
 //! Tests for the reflective loading technique.
 
-use super::{Params, DEF, SHELLCODE_FRAGMENT};
+use super::{Params, DEF, MESSAGES, SHELLCODE_FRAGMENT, SHELLCODE_MESSAGES};
 use crate::engine::obfuscation::StringsConfig;
 use crate::plan::schema::PayloadFormat;
 #[cfg(feature = "live-tests")]
@@ -156,6 +156,158 @@ fn erase_header_does_not_change_the_shellcode_fragment() {
     }
     .render_fragment_for(&strings, PayloadFormat::Shellcode, None);
     assert_eq!(plain, enabled);
+}
+
+/// A payload that did not land at its preferred base is only fixable with base
+/// relocations: without them the load has to fail instead of running with stale
+/// absolute addresses, so the mapper checks for relocations *after* it knows it
+/// has to move the image.
+#[test]
+fn the_mapper_refuses_to_run_a_relocated_image_without_relocations() {
+    let strings = StringsConfig::from_yaml(None).expect("default strings");
+    let fragment = Params::default().render_fragment(&strings);
+
+    let delta_check = fragment
+        .find("let delta = image_base as isize - preferred;")
+        .expect("the mapper must compute the relocation delta");
+    let landed = fragment
+        .find("if delta == 0 {")
+        .expect("landing at the preferred base skips the fixups");
+    let missing = fragment
+        .find("if reloc_dir.Size == 0 || reloc_dir.VirtualAddress == 0 {")
+        .expect("the mapper must look for the relocation directory");
+    assert!(
+        delta_check < landed && landed < missing,
+        "the no-relocation refusal must depend on the delta, not run before it"
+    );
+    let refusal = fragment[missing..]
+        .find('}')
+        .expect("the relocation guard must be a block");
+    assert!(
+        fragment[missing..missing + refusal].contains("return Err("),
+        "an image that cannot be relocated must fail the load"
+    );
+}
+
+/// A manually mapped image gets no static-TLS slot, and it cannot be faked: the
+/// loader frees the thread's `ThreadLocalStoragePointer` array (and every entry
+/// it holds) from a heap it owns when the thread exits, so an array we allocate
+/// faults there — measured 2026-10-18 with a plain-exe reproducer
+/// (`LdrShutdownThread` reading `array - 0x10`). The fragment therefore only
+/// runs the payload's `DLL_PROCESS_ATTACH` callbacks.
+#[test]
+fn the_mapper_does_not_provision_static_tls() {
+    let strings = StringsConfig::from_yaml(None).expect("default strings");
+    let fragment = Params::default().render_fragment(&strings);
+
+    assert!(
+        !fragment.contains("TlsAlloc()"),
+        "no dynamic index is taken"
+    );
+    assert!(
+        !fragment.contains("set_tls_array"),
+        "the TEB array is untouched"
+    );
+    assert!(
+        !fragment.contains("provision_tls"),
+        "nothing is provisioned"
+    );
+    assert!(
+        fragment.contains("fn run_tls_callbacks"),
+        "the payload's TLS callbacks still have to run"
+    );
+
+    let callbacks = fragment
+        .find("run_tls_callbacks(image_base, nt);")
+        .expect("the mapper must run the payload's callbacks");
+    let entry = fragment
+        .find("exe_main()")
+        .expect("the mapper must call the payload's entry point");
+    assert!(
+        callbacks < entry,
+        "the callbacks must run before the payload's entry point"
+    );
+}
+
+/// The export lookup is bounds-checked against the image and refuses a
+/// forwarded export, whose entry is a string inside the export directory rather
+/// than code.
+#[test]
+fn the_export_lookup_refuses_a_forwarder() {
+    let strings = StringsConfig::from_yaml(None).expect("default strings");
+    let fragment = Params::default().render_fragment(&strings);
+
+    assert!(
+        // The fragment keeps the source file's line endings (CRLF on a Windows
+        // checkout), so the signature is matched on a normalized copy.
+        fragment.replace("\r\n", "\n").contains(
+            "fn resolve_export(\n    image_base: *mut c_void,\n    nt: *const NtHeaders,\n    wanted: &str,\n) -> Result<usize, String>"
+        ),
+        "the lookup must report why it failed, not just miss"
+    );
+    assert!(
+        fragment.contains("function_rva >= dir_start && function_rva < dir_end"),
+        "a function RVA inside the export directory is a forwarder"
+    );
+    // The raw fragment, before the messages are substituted: each table and each
+    // name is checked against `SizeOfImage`.
+    assert!(
+        DEF.stub_fragment
+            .contains("ok_or_else(|| $MSG_EXPORT_OUT_OF_IMAGE$)"),
+        "the export tables must be bounds-checked"
+    );
+}
+
+/// The bounds the mapper relies on: the headers, the size fields, the section
+/// table, each section's source and destination, and the entry point.
+#[test]
+fn the_mapper_bounds_checks_the_image_it_maps() {
+    let strings = StringsConfig::from_yaml(None).expect("default strings");
+    let fragment = Params::default().render_fragment(&strings);
+
+    for guard in [
+        // The NT headers and the section table fit in the file buffer.
+        "checked_add(std::mem::size_of::<NtHeaders>())",
+        "(*nt).FileHeader.NumberOfSections as usize * std::mem::size_of::<IMAGE_SECTION_HEADER>()",
+        // `SizeOfHeaders` is copied into an image that has to hold it.
+        "size_of_headers > size_of_image",
+        // The entry point is inside the image (or zero for a DLL).
+        "entry_point != 0 && entry_point >= size_of_image",
+        // Both ends of a section copy, with checked arithmetic.
+        "checked_add(raw_size)",
+        // An executable without an entry point never jumps into its header.
+        "if entry_rva == 0 {",
+    ] {
+        assert!(
+            fragment.contains(guard),
+            "the mapper dropped a bounds guard: {guard}"
+        );
+    }
+}
+
+/// Every message in the tables is used by its fragment, and neither table
+/// repeats a token: a placeholder left in the text would reach the stub as a
+/// `$TOKEN$`, and one missing from a table would never be substituted.
+#[test]
+fn every_message_is_used_and_unique() {
+    for (messages, fragment) in [
+        (MESSAGES, DEF.stub_fragment),
+        (SHELLCODE_MESSAGES, SHELLCODE_FRAGMENT),
+    ] {
+        for (i, (placeholder, message)) in messages.iter().enumerate() {
+            assert!(
+                fragment.contains(placeholder),
+                "'{placeholder}' is in the table but not in the fragment"
+            );
+            assert!(
+                !message.is_empty(),
+                "'{placeholder}' has no diagnostic text"
+            );
+            for (other, _) in &messages[..i] {
+                assert_ne!(placeholder, other, "a placeholder is listed twice");
+            }
+        }
+    }
 }
 
 /// Every rendered fragment must be free of unsubstituted `$PLACEHOLDER$`

@@ -95,6 +95,38 @@ const MESSAGES: &[(&str, &str)] = &[
         "$MSG_EXPORT_NOT_FOUND$",
         "the payload does not export a requested symbol",
     ),
+    (
+        "$MSG_HEADERS_OUT_OF_BOUNDS$",
+        "the image's PE headers are out of bounds",
+    ),
+    (
+        "$MSG_IMAGE_SIZE_INVALID$",
+        "the image's SizeOfHeaders and SizeOfImage are not usable",
+    ),
+    (
+        "$MSG_ENTRY_POINT_OUT_OF_BOUNDS$",
+        "the entry point is outside the image",
+    ),
+    (
+        "$MSG_SECTION_OUT_OF_IMAGE$",
+        "a section does not fit in the mapped image",
+    ),
+    (
+        "$MSG_RELOCATIONS_OUT_OF_IMAGE$",
+        "the base relocation directory is out of bounds",
+    ),
+    (
+        "$MSG_NO_RELOCATIONS$",
+        "the image has no base relocations and was not mapped at its preferred base",
+    ),
+    (
+        "$MSG_EXPORT_OUT_OF_IMAGE$",
+        "the export directory is out of bounds",
+    ),
+    (
+        "$MSG_EXPORT_FORWARDER$",
+        "the export is a forwarder, which this loader does not resolve",
+    ),
 ];
 
 /// Runtime diagnostics the shellcode runner can emit, as `(placeholder,

@@ -1,6 +1,6 @@
 // --- Reflective loading (technique fragment) ---
 
-use std::ffi::{c_void, CStr};
+use std::ffi::c_void;
 use std::ptr;
 
 use windows::Win32::Foundation::{BOOL, HINSTANCE};
@@ -121,9 +121,9 @@ pub unsafe fn run_reflective(
     crate::tech_dbg!("reflective_loading", "relocations applied");
     fix_memory_protections(image_base, nt)?;
     crate::tech_dbg!("reflective_loading", "section protections applied");
-    // A manually mapped image never gets a TLS index from the OS. Running the
-    // payload's `DLL_PROCESS_ATTACH` callbacks initializes its global state;
-    // provisioning per-thread TLS is out of scope (see `run_tls_callbacks`).
+    // The payload's `DLL_PROCESS_ATTACH` callbacks initialize its global state,
+    // which is all this mapper can offer: it does not provision the per-thread
+    // TLS a manually mapped image has no index for (see `run_tls_callbacks`).
     run_tls_callbacks(image_base, nt);
     crate::tech_dbg!("reflective_loading", "TLS callbacks executed");
 
@@ -146,8 +146,7 @@ pub unsafe fn run_reflective(
             crate::tech_dbg!("reflective_loading", "running DllMain(DLL_PROCESS_ATTACH)");
             call_dll_main(image_base, nt);
         }
-        let address = resolve_export(image_base, nt, name)
-            .ok_or_else(|| format!("{}: '{name}'", $MSG_EXPORT_NOT_FOUND$))?;
+        let address = resolve_export(image_base, nt, name)?;
         crate::tech_dbg!("reflective_loading", "calling export '{name}' at 0x{address:x}");
         call_export(address);
         return Ok(0);
@@ -156,7 +155,13 @@ pub unsafe fn run_reflective(
     execute_entrypoint(image_base, nt, is_dll)
 }
 
-/// Validates the PE and returns pointers to its DOS and NT headers.
+/// Validates the image and returns pointers to its DOS and NT headers.
+///
+/// Everything the later steps index into is checked here, because they walk the
+/// *file* buffer (`copy_headers`, `copy_sections`) and the *mapped* image
+/// (`copy_sections`, the entry point) without re-reading the size fields: an
+/// image whose headers do not fit, or whose size fields are inconsistent, is
+/// rejected before a byte is copied or a page is committed.
 fn get_headers(
     payload: &[u8],
 ) -> Result<(*const IMAGE_DOS_HEADER, *const NtHeaders), String> {
@@ -170,7 +175,16 @@ fn get_headers(
             return Err($MSG_INVALID_DOS$);
         }
 
-        let nt = (dos as usize + (*dos).e_lfanew as usize) as *const NtHeaders;
+        // The NT headers must fit in the buffer *before* they are dereferenced.
+        let nt_offset = (*dos).e_lfanew as usize;
+        let section_table = nt_offset
+            .checked_add(std::mem::size_of::<NtHeaders>())
+            .ok_or_else(|| $MSG_HEADERS_OUT_OF_BOUNDS$)?;
+        if section_table > payload.len() {
+            return Err($MSG_HEADERS_OUT_OF_BOUNDS$);
+        }
+
+        let nt = payload.as_ptr().add(nt_offset) as *const NtHeaders;
         if (*nt).Signature != IMAGE_NT_SIGNATURE {
             return Err($MSG_INVALID_NT$);
         }
@@ -180,6 +194,33 @@ fn get_headers(
         let magic = (*nt).OptionalHeader.Magic.0;
         if magic != EXPECTED_MAGIC {
             return Err(format!("{} (magic 0x{magic:04x})", $MSG_UNSUPPORTED_ARCH$));
+        }
+
+        // `copy_headers` copies `SizeOfHeaders` bytes from the buffer into the
+        // mapped image, so both have to be big enough for them.
+        let size_of_image = (*nt).OptionalHeader.SizeOfImage as usize;
+        let size_of_headers = (*nt).OptionalHeader.SizeOfHeaders as usize;
+        if size_of_image == 0 || size_of_headers > size_of_image || size_of_headers > payload.len() {
+            return Err($MSG_IMAGE_SIZE_INVALID$);
+        }
+
+        // The section headers follow the NT headers; `copy_sections` walks all of
+        // them, so the whole table must be inside the buffer.
+        let table_len =
+            (*nt).FileHeader.NumberOfSections as usize * std::mem::size_of::<IMAGE_SECTION_HEADER>();
+        let table_end = section_table
+            .checked_add(table_len)
+            .ok_or_else(|| $MSG_HEADERS_OUT_OF_BOUNDS$)?;
+        if table_end > payload.len() {
+            return Err($MSG_HEADERS_OUT_OF_BOUNDS$);
+        }
+
+        // An entry point that is outside the image addresses memory the payload
+        // does not own. Zero is legal for a DLL (no entry point); an executable
+        // with a zero entry point is refused when it runs (`execute_entrypoint`).
+        let entry_point = (*nt).OptionalHeader.AddressOfEntryPoint as usize;
+        if entry_point != 0 && entry_point >= size_of_image {
+            return Err($MSG_ENTRY_POINT_OUT_OF_BOUNDS$);
         }
 
         Ok((dos, nt))
@@ -225,6 +266,9 @@ fn allocate_image(nt: *const NtHeaders) -> Result<*mut c_void, String> {
     }
 }
 
+/// Copies the `SizeOfHeaders` bytes at the start of the buffer into the mapped
+/// image. `get_headers` validated that length against both the buffer and
+/// `SizeOfImage`, so the copy cannot run past either.
 fn copy_headers(
     payload: &[u8],
     image_base: *mut c_void,
@@ -256,6 +300,13 @@ fn erase_mapped_header(image_base: *mut c_void, nt: *const NtHeaders) {
     }
 }
 
+/// Copies each section's raw data into the mapped image.
+///
+/// Both ends are checked: the source against the *file* buffer (a truncated
+/// payload) and the destination against `SizeOfImage` (a section that claims to
+/// live past the image would otherwise be written over whatever follows the
+/// allocation). The arithmetic is checked as well, since a malformed section can
+/// wrap the sum instead of failing the comparison.
 fn copy_sections(
     payload: &[u8],
     image_base: *mut c_void,
@@ -265,6 +316,7 @@ fn copy_sections(
         let section_header = (nt as usize + std::mem::size_of::<NtHeaders>())
             as *const IMAGE_SECTION_HEADER;
         let num = (*nt).FileHeader.NumberOfSections as usize;
+        let size_of_image = (*nt).OptionalHeader.SizeOfImage as usize;
 
         for i in 0..num {
             let section = section_header.add(i);
@@ -274,14 +326,30 @@ fn copy_sections(
             }
 
             let src = (*section).PointerToRawData as usize;
-            let dst = image_base as usize + (*section).VirtualAddress as usize;
-            if src + raw_size > payload.len() {
+            let dst = (*section).VirtualAddress as usize;
+            let src_end = src
+                .checked_add(raw_size)
+                .ok_or_else(|| section_error($MSG_SECTION_OUT_OF_BOUNDS$, &section_name(section)))?;
+            if src_end > payload.len() {
                 return Err(section_error(
                     $MSG_SECTION_OUT_OF_BOUNDS$,
                     &section_name(section),
                 ));
             }
-            ptr::copy_nonoverlapping(payload.as_ptr().add(src), dst as *mut u8, raw_size);
+            let dst_end = dst
+                .checked_add(raw_size)
+                .ok_or_else(|| section_error($MSG_SECTION_OUT_OF_IMAGE$, &section_name(section)))?;
+            if dst_end > size_of_image {
+                return Err(section_error(
+                    $MSG_SECTION_OUT_OF_IMAGE$,
+                    &section_name(section),
+                ));
+            }
+            ptr::copy_nonoverlapping(
+                payload.as_ptr().add(src),
+                (image_base as usize + dst) as *mut u8,
+                raw_size,
+            );
         }
     }
     Ok(())
@@ -325,31 +393,57 @@ fn fix_imports(
     Ok(())
 }
 
+/// Applies the image's base relocations when it did not land at its preferred
+/// base.
+///
+/// Landing away from the preferred base is only fixable with relocations: without
+/// them every absolute address in the image still points at the preferred base,
+/// so the load fails here — with a diagnostic — instead of faulting later inside
+/// the payload.
 fn fix_relocations(
     image_base: *mut c_void,
     nt: *const NtHeaders,
 ) -> Result<(), String> {
     unsafe {
-        let reloc_dir =
-            (*nt).OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC.0 as usize];
-        if reloc_dir.Size == 0 || reloc_dir.VirtualAddress == 0 {
-            return Ok(());
-        }
-
         let preferred = (*nt).OptionalHeader.ImageBase as isize;
         let delta = image_base as isize - preferred;
         if delta == 0 {
             return Ok(());
         }
 
+        let reloc_dir =
+            (*nt).OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC.0 as usize];
+        if reloc_dir.Size == 0 || reloc_dir.VirtualAddress == 0 {
+            return Err($MSG_NO_RELOCATIONS$);
+        }
+
+        // The walk below trusts the directory's own terminator, so the directory
+        // has to be inside the image before the first block is dereferenced.
+        let size_of_image = (*nt).OptionalHeader.SizeOfImage as usize;
+        let dir_end = (reloc_dir.VirtualAddress as usize)
+            .checked_add(reloc_dir.Size as usize)
+            .ok_or_else(|| $MSG_RELOCATIONS_OUT_OF_IMAGE$)?;
+        if dir_end > size_of_image {
+            return Err($MSG_RELOCATIONS_OUT_OF_IMAGE$);
+        }
+        let dir_limit = image_base as usize + dir_end;
+        let header_size = std::mem::size_of::<IMAGE_BASE_RELOCATION>();
+
         let mut block = (image_base as usize + reloc_dir.VirtualAddress as usize)
             as *const IMAGE_BASE_RELOCATION;
         while (*block).VirtualAddress != 0 {
             let block_size = (*block).SizeOfBlock as usize;
-            let count = (block_size - std::mem::size_of::<IMAGE_BASE_RELOCATION>())
-                / std::mem::size_of::<u16>();
-            let entries = (block as usize + std::mem::size_of::<IMAGE_BASE_RELOCATION>())
-                as *const BaseRelocationEntry;
+            // A block that is too small to hold its own header would underflow
+            // `count` below, and one that runs past the directory would read
+            // whatever follows it.
+            let block_end = (block as usize)
+                .checked_add(block_size)
+                .ok_or_else(|| $MSG_RELOCATIONS_OUT_OF_IMAGE$)?;
+            if block_size < header_size || block_end > dir_limit {
+                return Err($MSG_RELOCATIONS_OUT_OF_IMAGE$);
+            }
+            let count = (block_size - header_size) / std::mem::size_of::<u16>();
+            let entries = (block as usize + header_size) as *const BaseRelocationEntry;
 
             for i in 0..count {
                 let entry = entries.add(i);
@@ -378,7 +472,7 @@ fn fix_relocations(
                 }
             }
 
-            block = (block as usize + block_size) as *const IMAGE_BASE_RELOCATION;
+            block = block_end as *const IMAGE_BASE_RELOCATION;
         }
     }
     Ok(())
@@ -435,18 +529,33 @@ fn fix_memory_protections(
     Ok(())
 }
 
+
 /// Runs the payload's `DLL_PROCESS_ATTACH` TLS callbacks, the way the loader
 /// would, and nothing more.
 ///
-/// A manually mapped image has no TLS index: the OS never assigns one, and a
+/// A manually mapped image gets no TLS index: the OS never assigns one, so a
 /// payload whose CRT relies on `_tls_index` for per-thread state
-/// (`thread_local!`, `__declspec(thread)`, the CRT's own per-thread data) is
-/// out of scope. Provisioning that state correctly needs the loader's
-/// *static*-TLS path (`LdrpHandleTlsData`), not the dynamic `TlsAlloc`/`TlsSetValue`
-/// index space; writing a dynamic index into the static
-/// `ThreadLocalStoragePointer` array corrupts the heap at thread exit. This
-/// mirrors the project's original `void-loader` mapper, which only ran the
-/// callbacks and never provisioned a block.
+/// (`thread_local!`, `__declspec(thread)`, the CRT's own per-thread data) is out
+/// of scope, and its reads land in another module's slot.
+///
+/// Why the mapper does not provision one itself: `TlsAlloc`'s dynamic counter
+/// and the loader's static module indices are separate, so the first free
+/// dynamic index can be a module's own (measured: `1`, which is `KERNELBASE`'s),
+/// and the obvious implementation replaces that module's per-thread block in
+/// this thread. A UI payload then corrupts the heap in a release build
+/// (kernelbase's own thread state is what the input-method/TSF path frees;
+/// `docs/measurements.md`, 2026-10-17 and 2026-10-18). Taking an index *outside*
+/// the loaded modules' range and substituting a wider array is not the way out
+/// either: `LdrShutdownThread` frees the thread's `ThreadLocalStoragePointer`
+/// array, and every entry it holds, from a heap private to ntdll, so an array
+/// this fragment allocated faults there (measured 2026-10-18). Provisioning
+/// static TLS correctly needs the loader's own path (`LdrpHandleTlsData`, or the
+/// `NtSetInformationProcess` TLS class it uses), which this fragment does not
+/// implement.
+///
+/// The callbacks a thread created afterwards would get are not run either: the
+/// loader does not know about the mapped image, so there is nothing to trigger
+/// `DLL_THREAD_ATTACH`.
 fn run_tls_callbacks(image_base: *mut c_void, nt: *const NtHeaders) {
     unsafe {
         let tls_dir =
@@ -486,7 +595,13 @@ fn execute_entrypoint(
         return Ok(0);
     }
 
-    let entry_point = image_base as usize + unsafe { (*nt).OptionalHeader.AddressOfEntryPoint } as usize;
+    let entry_rva = unsafe { (*nt).OptionalHeader.AddressOfEntryPoint } as usize;
+    // An executable with no entry point would jump to the mapped header, which
+    // `get_headers` deliberately allows only for a DLL.
+    if entry_rva == 0 {
+        return Err($MSG_ENTRY_POINT_OUT_OF_BOUNDS$);
+    }
+    let entry_point = image_base as usize + entry_rva;
     crate::tech_dbg!(
         "reflective_loading",
         "jumping to entry point 0x{entry_point:x}"
@@ -518,32 +633,90 @@ struct ExportDirectory {
 
 /// Resolves an exported symbol by name in an already-mapped image (RVA ==
 /// offset from `image_base`).
+///
+/// Only named exports are reachable, and a *forwarded* export is refused: its
+/// entry points back into the export directory's own range, where the forwarder
+/// string ("DLL.Function") lives, so returning that address would run data as
+/// code. The directory, its three tables and every name are checked against
+/// `SizeOfImage` before they are walked: a malformed export table is the one
+/// part of the payload the loader still trusts blindly.
 fn resolve_export(
     image_base: *mut c_void,
     nt: *const NtHeaders,
     wanted: &str,
-) -> Option<usize> {
+) -> Result<usize, String> {
     unsafe {
         let dir = (*nt).OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT.0 as usize];
         if dir.VirtualAddress == 0 || dir.Size == 0 {
-            return None;
+            return Err(format!("{}: '{wanted}'", $MSG_EXPORT_NOT_FOUND$));
         }
 
         let base = image_base as usize;
-        let export = (base + dir.VirtualAddress as usize) as *const ExportDirectory;
-        let names = (base + (*export).address_of_names as usize) as *const u32;
-        let functions = (base + (*export).address_of_functions as usize) as *const u32;
-        let ordinals = (base + (*export).address_of_name_ordinals as usize) as *const u16;
+        let size_of_image = (*nt).OptionalHeader.SizeOfImage as usize;
+        // `dir_start + dir.Size` cannot overflow the u64 math even when both
+        // fields are at their maximum.
+        let dir_start = dir.VirtualAddress as u64;
+        let dir_end = dir_start + dir.Size as u64;
+        if dir_end > size_of_image as u64 {
+            return Err($MSG_EXPORT_OUT_OF_IMAGE$);
+        }
+
+        // The mapped image is a single allocation, so an RVA is a valid address
+        // exactly when `rva + len` stays inside `SizeOfImage`.
+        let within = |rva: u32, len: u64| -> Option<*const u8> {
+            let end = (rva as u64).checked_add(len)?;
+            (end <= size_of_image as u64).then(|| (base + rva as usize) as *const u8)
+        };
+
+        let export = within(dir.VirtualAddress, std::mem::size_of::<ExportDirectory>() as u64)
+            .ok_or_else(|| $MSG_EXPORT_OUT_OF_IMAGE$)?
+            as *const ExportDirectory;
+        let names = within(
+            (*export).address_of_names,
+            (*export).number_of_names as u64 * 4,
+        )
+        .ok_or_else(|| $MSG_EXPORT_OUT_OF_IMAGE$)? as *const u32;
+        let functions = within(
+            (*export).address_of_functions,
+            (*export).number_of_functions as u64 * 4,
+        )
+        .ok_or_else(|| $MSG_EXPORT_OUT_OF_IMAGE$)? as *const u32;
+        let ordinals = within(
+            (*export).address_of_name_ordinals,
+            (*export).number_of_names as u64 * 2,
+        )
+        .ok_or_else(|| $MSG_EXPORT_OUT_OF_IMAGE$)? as *const u16;
 
         for i in 0..(*export).number_of_names as usize {
-            let name_rva = *names.add(i);
-            let name_ptr = (base + name_rva as usize) as *const i8;
-            if CStr::from_ptr(name_ptr).to_bytes() == wanted.as_bytes() {
+            let name_rva = *names.add(i) as usize;
+            // The name is a NUL-terminated string in the image: it has to end
+            // before the image does, or reading it walks off the allocation.
+            if name_rva >= size_of_image {
+                return Err($MSG_EXPORT_OUT_OF_IMAGE$);
+            }
+            let name_bytes =
+                std::slice::from_raw_parts((base + name_rva) as *const u8, size_of_image - name_rva);
+            let Some(name_len) = name_bytes.iter().position(|&b| b == 0) else {
+                return Err($MSG_EXPORT_OUT_OF_IMAGE$);
+            };
+            if &name_bytes[..name_len] == wanted.as_bytes() {
                 let ordinal = *ordinals.add(i) as usize;
-                return Some(base + *functions.add(ordinal) as usize);
+                if ordinal >= (*export).number_of_functions as usize {
+                    return Err($MSG_EXPORT_OUT_OF_IMAGE$);
+                }
+                let function_rva = *functions.add(ordinal) as u64;
+                // A function RVA inside the export directory is the forwarder
+                // string, not code.
+                if function_rva >= dir_start && function_rva < dir_end {
+                    return Err(format!("{}: '{wanted}'", $MSG_EXPORT_FORWARDER$));
+                }
+                if function_rva == 0 || function_rva >= size_of_image as u64 {
+                    return Err(format!("{}: '{wanted}'", $MSG_EXPORT_NOT_FOUND$));
+                }
+                return Ok(base + function_rva as usize);
             }
         }
-        None
+        Err(format!("{}: '{wanted}'", $MSG_EXPORT_NOT_FOUND$))
     }
 }
 

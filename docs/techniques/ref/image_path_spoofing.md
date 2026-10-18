@@ -1,0 +1,1 @@
+--8<-- "src/techniques/image_path_spoofing/README.md"

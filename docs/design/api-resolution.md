@@ -165,6 +165,30 @@ that is the source of truth for: the proxy generation, the `GetProcAddress`
 name matching, and the plan validation. Adding an entry is a deliberate code
 change, not a config-only edit.
 
+### Expanded catalogue: injection and tokens
+
+Two families were added, all `route_to_nt`. `LogonUser` is deliberately absent:
+it is an LSA/ALPC interaction with no single `Nt*` equivalent.
+
+| API | Strategy | Nt\* target | Notes |
+|---|---|---|---|
+| `kernel32!VirtualAllocEx` | wrapper | `NtAllocateVirtualMemory` | — |
+| `kernel32!WriteProcessMemory` | wrapper | `NtWriteVirtualMemory` | count kept |
+| `kernel32!VirtualProtectEx` | wrapper | `NtProtectVirtualMemory` | old protection kept |
+| `kernel32!CreateRemoteThread` | rebuild | `NtCreateThreadEx` (native) | `lpThreadAttributes`/`lpThreadId` not honored |
+| `kernel32!QueueUserAPC` | wrapper | `NtQueueApcThread` | — |
+| `kernel32!ResumeThread` | wrapper | `NtResumeThread` | previous count kept |
+| `kernel32!SuspendThread` | wrapper | `NtSuspendThread` | previous count kept |
+| `kernel32!GetThreadContext` | wrapper | `NtGetContextThread` | — |
+| `kernel32!SetThreadContext` | wrapper | `NtSetContextThread` | — |
+| `advapi32!OpenProcessToken` | rebuild | `NtOpenProcessToken` | **new helper** |
+| `advapi32!DuplicateTokenEx` | rebuild | `NtDuplicateToken` | **new helper**; `lpTokenAttributes` ignored |
+| `advapi32!ImpersonateLoggedOnUser` | rebuild | `NtSetInformationThread` | `ThreadImpersonationToken` |
+
+The two new syscall helpers (`NtOpenProcessToken`, `NtDuplicateToken`) live in
+`src/engine/syscalls/mod.rs` with `none` + `indirect` bodies and direct
+`ntdll!Nt*` proxy metadata, so `ntdll:*` and `apis: all` now include them.
+
 ---
 
 ## 5. Semantics: forwarding vs routing (phase 2)
@@ -338,6 +362,15 @@ both execution techniques resolve imports, so the resolver is always emitted.
   (`apis: all` now includes them). `NtCreateThreadEx` and
   `NtWaitForSingleObject` are backed by native-signature helper variants, so all
   17 functions are proxeable.
+- [x] **Phase H — injection and token wrappers.** *Implemented 2026-10-16:* nine
+  `kernel32!*` injection wrappers and three `advapi32!*` token rebuilds join the
+  catalogue (`src/engine/api_resolution.rs`); `NtOpenProcessToken` and
+  `NtDuplicateToken` join the syscall layer (`src/engine/syscalls/mod.rs`, 18 → 20
+  functions). `CreateRemoteThread` is rebuilt on the native-signature helper
+  (`lpThreadAttributes`/`lpThreadId` not honored); `DuplicateTokenEx` ignores
+  `lpTokenAttributes`; `ImpersonateLoggedOnUser` routes to
+  `NtSetInformationThread(ThreadImpersonationToken)`. `LogonUser`, WinINet/
+  WinHTTP/ws2_32 and a Toolhelp snapshot rebuild remain out of scope.
 
 ---
 
@@ -399,6 +432,14 @@ Declared, not hidden:
   agree. On current Windows a zero access mask yields `ERROR_ACCESS_DENIED` (5),
   not the `ERROR_INVALID_PARAMETER` (87) the docs suggest; the export and the
   rebuild match.
+- **Injection/token wrapper fidelity.** The thin injection wrappers keep the
+  NTSTATUS→Win32 translation of `ReadProcessMemory` (partial-copy semantics are
+  not special-cased, matching the shipped `ReadProcessMemory` proxy).
+  `CreateRemoteThread` does not honor `lpThreadAttributes` or fill `lpThreadId`
+  (the native call takes no security attributes and returns no thread id);
+  `DuplicateTokenEx` ignores a non-null `lpTokenAttributes`; `GetThreadContext`/
+  `SetThreadContext` pass the `CONTEXT` pointer through unchanged, so the x64
+  `ContextFlags`/alignment contract stays the caller's responsibility.
 - **`audit` is static** and cannot see the payload's in-memory IAT (the payload is
   encrypted on disk); the check targets the **stub** and exempts the
   `GetProcAddress` handler (D-22).

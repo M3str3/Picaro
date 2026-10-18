@@ -19,7 +19,7 @@ const SELECT_OPTIONS = {
   action: ['abort', 'continue'],
   variant: ['ekko'],
   window: ['hidden', 'normal'],
-  downloader: ['auto', 'curl', 'certutil', 'powershell', 'bitsadmin'],
+  downloader: ['auto', 'winhttp', 'curl', 'certutil', 'powershell', 'bitsadmin'],
 };
 
 /** Payload formats a technique accepts, read from `TechniqueDef::formats`. */

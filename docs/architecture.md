@@ -173,6 +173,13 @@ in `src/engine/entry.rs` (the entry block) and `src/engine/compiler.rs`
 [DLL output design](design/dll-output.md). The lab verification of the host
 matrix (the design's Phase D) is still pending.
 
+A **shellcode** output (`kind: shellcode`) compiles that same DLL and wraps it
+in a reflective loader (`src/engine/shellcode.rs` shells out to sRDI), so the
+chain runs without a PE on disk; see [Shellcode output
+design](design/shellcode-output.md). The reflective loader is vendored and its
+blob is built in the Docker image (`vendor/srdi/`); execution of the packed
+Rust-std stub is verified on the lab host.
+
 ## Payload arguments (`build.payloads.<name>.args`)
 
 A packed binary is a stub, so the payload does not inherit the operator's command

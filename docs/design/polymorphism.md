@@ -199,7 +199,7 @@ default.
 The regression guard is the `#[ignore]` test
 `two_polymorphism_seeds_differ_in_the_text_section` (`src/engine/steps.rs`); it
 compiles the same stub with two seeds and asserts the `.text` sections differ. Run
-it with `cargo test -- --ignored`.
+it with `cargo test --features live-tests -- --ignored`.
 
 ---
 

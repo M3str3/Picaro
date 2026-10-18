@@ -121,7 +121,9 @@ Techniques fall into three categories:
   embedded payload.
 - **Control** (`living_off_the_land`, `network_stager`, `ppid_spoofing`,
   `sleep`): orchestrate the chain — launch a process and capture its exit code,
-  fetch a payload at run time, or wait.
+  fetch a payload at run time (in-process over WinHTTP by default for
+  `http(s)`; `fallback: embedded` keeps a copy that runs without a network), or
+  wait.
 
 `living_off_the_land` launches a process: `binary` (a bare name is resolved
 against `System32` at run time), `args`, `window` (`hidden`/`normal`), `wait`

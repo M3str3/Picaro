@@ -1,0 +1,39 @@
+# Shellcode output: `output.kind: shellcode` builds the same packed DLL as
+# `kind: dll`, then wraps it in a reflective loader (sRDI) and emits raw,
+# position-independent bytes instead of a PE. A host that can run shellcode maps
+# the `.bin` and jumps to it; the loader maps the DLL into memory, resolves its
+# imports and calls the plain export, so the chain runs with no DLL/EXE ever on
+# disk. That is what makes it usable where both "no new EXE" and "no unsigned
+# DLL" are enforced.
+#
+# `entry: export:Run` exports just the chain-runner the loader calls (the `auto`
+# default also advertises `JNI_OnLoad`, which no reflective host needs).
+#
+# The converter is vendored in `vendor/srdi/` (with a generated
+# `ShellcodeRDI.py`); the Docker image rebuilds the blob at image time and
+# points `PICARO_SRDI` at it. On a host, point `PICARO_SRDI` at the vendored
+# converter and have a Python 3 on PATH:
+#
+#   cargo run -- build examples/plans/shellcode-output.yaml
+#   # PICARO_SRDI=vendor/srdi/ConvertToShellcode.py cargo run -- build examples/plans/shellcode-output.yaml
+#
+# `demo_shellcode.bin` is 6 hand-written x64 bytes (`mov eax, 42; ret`), so the
+# chain relays exit code 42. x64 only; `sign`, `resources`, `entry: jni_on_load`
+# and `arch: x86` are rejected. See docs/design/shellcode-output.md.
+
+schema: 6
+name: shellcode-output
+
+build:
+  payloads:
+    shellcode:
+      source: ./calc.bin
+      format: shellcode
+
+  output:
+    path: ./dist/shellcode-output.bin
+    kind: shellcode
+    entry: export:Run
+
+runtime:
+  - technique: reflective_loading

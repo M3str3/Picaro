@@ -1,0 +1,1 @@
+--8<-- "src/techniques/erase_pe_header/README.md"

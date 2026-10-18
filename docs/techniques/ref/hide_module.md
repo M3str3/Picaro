@@ -1,0 +1,1 @@
+--8<-- "src/techniques/hide_module/README.md"
