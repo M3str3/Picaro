@@ -507,16 +507,26 @@ fn strip_flag(strip: bool) -> &'static str {
 /// The `-C panic=...` strategy for the requested output.
 ///
 /// A DLL runs inside a host process, so a panic must unwind into the entry
-/// block's `catch_unwind` instead of taking `java.exe`/`python.exe` down with
-/// it. An executable keeps `abort`: nothing catches a panic there, and the
+/// block's `catch_unwind` instead of taking the host down with it. Shellcode is
+/// the same DLL, mapped reflectively into a host, so it keeps the same
+/// strategy. An executable keeps `abort`: nothing catches a panic there, and the
 /// unwinding machinery is weight — and `panic` strings — the artifact does not
 /// need.
 fn panic_flag(kind: OutputKind) -> &'static str {
     match kind {
         // A psmodule build compiles C#, not a Rust stub; the value is unused.
-        OutputKind::Dll | OutputKind::PsModule => "panic=unwind",
+        OutputKind::Dll | OutputKind::Shellcode | OutputKind::PsModule => "panic=unwind",
         OutputKind::Exe => "panic=abort",
     }
+}
+
+/// Whether this output kind is compiled as a `cdylib`.
+///
+/// Both a host-loaded DLL and the shellcode that wraps one are built as a
+/// library: shellcode is the DLL plus a reflective loader, not a separate
+/// compile shape.
+fn compiles_as_dll(kind: OutputKind) -> bool {
+    matches!(kind, OutputKind::Dll | OutputKind::Shellcode)
 }
 
 /// A valid `rustc` crate name derived from the output file's stem.
@@ -669,11 +679,11 @@ pub fn compile_stub(
     if !is_native_target(options.arch) {
         cmd.arg("--target").arg(stub_target(options.arch));
     }
-    if options.kind == OutputKind::Dll {
-        // A library the host loads with the normal image loader. The crate name
-        // follows the output's stem so the artifact does not report the build's
-        // internal file name; the linker takes the export directory's `Name`
-        // from the link output itself.
+    if compiles_as_dll(options.kind) {
+        // A library the host loads with the normal image loader, or one a
+        // reflective shellcode wraps. The crate name follows the output's stem
+        // so the artifact does not report the build's internal file name; the
+        // linker takes the export directory's `Name` from the link output itself.
         cmd.arg("--crate-type").arg("cdylib");
         cmd.arg("--crate-name").arg(crate_name(output));
     }
@@ -757,11 +767,17 @@ fn verify_output_kind(path: &Path, kind: OutputKind) -> Result<()> {
     })?;
     let is_dll = crate::engine::pe::is_dll(info.characteristics);
     match (kind, is_dll) {
-        (OutputKind::Dll, false) => Err(BuildError::CompilationFailed(format!(
-            "'{}' was built as a DLL (build.output.kind: dll) but the compiled image is an \
+        // Shellcode is the packed DLL wrapped in a reflective loader: the
+        // intermediate image must be a DLL, or there is nothing to reflect.
+        (OutputKind::Dll | OutputKind::Shellcode, false) => {
+            Err(BuildError::CompilationFailed(format!(
+                "'{}' was built as a {} (build.output.kind: {}) but the compiled image is an \
              executable: no export was linked",
-            path.display()
-        ))),
+                path.display(),
+                kind.label(),
+                kind.label()
+            )))
+        }
         (OutputKind::Exe, true) => Err(BuildError::CompilationFailed(format!(
             "'{}' was built as an executable but the compiled image is a DLL",
             path.display()
@@ -788,6 +804,14 @@ mod tests {
     fn a_dll_build_unwinds_and_an_executable_aborts() {
         assert_eq!(panic_flag(OutputKind::Dll), "panic=unwind");
         assert_eq!(panic_flag(OutputKind::Exe), "panic=abort");
+    }
+
+    #[test]
+    fn shellcode_compiles_as_a_dll_and_keeps_unwind() {
+        assert_eq!(panic_flag(OutputKind::Shellcode), "panic=unwind");
+        assert!(compiles_as_dll(OutputKind::Shellcode));
+        assert!(compiles_as_dll(OutputKind::Dll));
+        assert!(!compiles_as_dll(OutputKind::Exe));
     }
 
     #[test]

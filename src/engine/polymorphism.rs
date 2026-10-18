@@ -162,10 +162,20 @@ impl std::str::FromStr for SeedSource {
     }
 }
 
-/// A `-C opt-level` value that is safe for the loader (0 is excluded: it turns
-/// `cfg(debug_assertions)` on and changes behavior).
+/// A `-C opt-level` value for the loader stub.
+///
+/// `0` is selectable on purpose. It is absent from the default pool (the stub is
+/// a small shim where size wins), but pinning it is the escape hatch for a build
+/// where the optimizer exposes a miscompile: `hardening_flags` passes
+/// `-C debug-assertions=off` explicitly, so `-C opt-level=0` does *not* switch
+/// `cfg(debug_assertions)` on (the reason a bare `opt-level=0` is usually
+/// avoided). The artifact stays a normal delivery build (stripped, no checks,
+/// polymorphism still applies) — only its code is unoptimized.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OptLevel {
+    /// `-C opt-level=0` (no optimization).
+    #[serde(rename = "0")]
+    Zero,
     /// `-C opt-level=1`.
     #[serde(rename = "1")]
     One,
@@ -188,6 +198,7 @@ impl OptLevel {
     /// The value for `-C opt-level=`.
     pub fn flag(self) -> &'static str {
         match self {
+            OptLevel::Zero => "0",
             OptLevel::One => "1",
             OptLevel::Two => "2",
             OptLevel::Three => "3",
@@ -530,6 +541,22 @@ mod tests {
         let yaml = YamlPolymorphismPlan::default();
         let config = PolymorphismConfig::from_yaml(Some(&yaml), false).unwrap();
         assert_eq!(config.mode, PolymorphismMode::Full);
+    }
+
+    #[test]
+    fn opt_level_zero_is_selectable() {
+        // `0` is not in the default pool, but a plan can pin it: it is the escape
+        // hatch for a build where the optimizer exposes a miscompile. The explicit
+        // `debug-assertions=off` in `hardening_flags` keeps `cfg(debug_assertions)`
+        // off, so it does not change behavior beyond not optimizing.
+        let yaml: YamlPolymorphismPlan =
+            serde_yml::from_str("mode: codegen\ncodegen:\n  opt_level: [\"0\"]\n")
+                .expect("opt-level 0 should parse");
+        yaml.validate().expect("opt-level 0 is a valid pool value");
+        assert_eq!(yaml.codegen.opt_level, vec![OptLevel::Zero]);
+        assert_eq!(OptLevel::Zero.flag(), "0");
+        assert_eq!(resolve_codegen(&yaml.codegen, 0).opt_level, OptLevel::Zero);
+        assert!(!CodegenPlan::default().opt_level.contains(&OptLevel::Zero));
     }
 
     #[test]

@@ -47,6 +47,7 @@ pub mod pe;
 pub mod polymorphism;
 pub mod resources;
 pub mod scrub;
+pub mod shellcode;
 pub mod signing;
 pub mod stager;
 pub mod steps;
@@ -98,6 +99,15 @@ pub enum BuildError {
     /// The compiled stub is not a Windows PE (it lacks the `MZ` header).
     #[error("the compiled stub is not a Windows PE (missing 'MZ' header): {0}")]
     NotPeExecutable(String),
+
+    /// The sRDI converter (a `ConvertToShellcode.py` on `PICARO_SRDI`) is not
+    /// available.
+    #[error("the sRDI converter is not available: {0}")]
+    ShellcodeConverterNotFound(String),
+
+    /// The sRDI converter ran but did not produce shellcode.
+    #[error("shellcode conversion failed: {0}")]
+    ShellcodeConversionFailed(String),
 
     /// `rustc --version` could not be read (build provenance).
     #[error("could not read the rustc version: {0}")]

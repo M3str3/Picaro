@@ -70,10 +70,10 @@ pub fn resolve(plan: &Plan) -> Result<Vec<ResolvedStep>> {
 
 /// Resolves one declared step.
 fn resolve_step(plan: &Plan, index: usize, step: &RuntimeStep) -> Result<ResolvedStep> {
-    let payload = if step.category() == Category::Execution {
-        Some(resolve_payload(plan, index, step)?)
-    } else {
-        None
+    let payload = match step.category() {
+        Category::Execution => Some(resolve_payload(plan, index, step)?),
+        Category::Preparation => resolve_preparation_asset(plan, index, step)?,
+        Category::Control => None,
     };
     let label = match &payload {
         Some(payload) => format!("{} '{}'", step.name(), payload.name),
@@ -95,17 +95,7 @@ fn resolve_step(plan: &Plan, index: usize, step: &RuntimeStep) -> Result<Resolve
 /// block, falling back to `build.crypto`.
 fn resolve_payload(plan: &Plan, index: usize, step: &RuntimeStep) -> Result<ResolvedPayload> {
     let (name, payload) = match step.technique.payload_name() {
-        Some(name) => {
-            let payload = plan.build.payloads.get(name).ok_or_else(|| {
-                PackerError::Validation(format!(
-                    "step {index} ('{}') loads payload '{name}', which is not declared in \
-                     'build.payloads'{}",
-                    step.name(),
-                    available_payloads(plan)
-                ))
-            })?;
-            (name.to_string(), payload)
-        }
+        Some(name) => return resolve_named_payload(plan, index, step, name),
         None => match plan.build.payloads.len() {
             0 => {
                 return Err(PackerError::Validation(format!(
@@ -141,6 +131,69 @@ fn resolve_payload(plan: &Plan, index: usize, step: &RuntimeStep) -> Result<Reso
 
     Ok(ResolvedPayload {
         name,
+        plan: payload.clone(),
+        crypto,
+    })
+}
+
+/// Resolves a Preparation step's embedded asset, if it carries one.
+///
+/// Today there are two: the `bouncer` decoy (`on_fail: decoy`) and the `drop`
+/// file. Both are inert `format: plain` payloads the stub writes to disk; the
+/// asset is embedded and encrypted exactly like an Execution payload, so it
+/// reuses [`resolve_named_payload`].
+fn resolve_preparation_asset(
+    plan: &Plan,
+    index: usize,
+    step: &RuntimeStep,
+) -> Result<Option<ResolvedPayload>> {
+    let name = match &step.technique {
+        TechniqueKind::Bouncer { params } if params.is_decoy() => params
+            .decoy
+            .as_ref()
+            .and_then(|decoy| decoy.payload.as_deref())
+            .ok_or_else(|| {
+                PackerError::Validation(format!(
+                    "step {index} ('{}') is 'bouncer' with `on_fail: decoy` but no \
+                     `params.decoy.payload`: name a `format: plain` payload to write",
+                    step.name()
+                ))
+            })?,
+        TechniqueKind::Drop { params } => params.payload.as_deref().ok_or_else(|| {
+            PackerError::Validation(format!(
+                "step {index} ('{}') is 'drop' but no `params.payload`: name a \
+                 `format: plain` payload to write",
+                step.name()
+            ))
+        })?,
+        _ => return Ok(None),
+    };
+    Ok(Some(resolve_named_payload(plan, index, step, name)?))
+}
+
+/// Resolves a payload by explicit name (the Execution `params.payload` path and
+/// the `bouncer` decoy asset).
+fn resolve_named_payload(
+    plan: &Plan,
+    index: usize,
+    step: &RuntimeStep,
+    name: &str,
+) -> Result<ResolvedPayload> {
+    let payload = plan.build.payloads.get(name).ok_or_else(|| {
+        PackerError::Validation(format!(
+            "step {index} ('{}') references payload '{name}', which is not declared in \
+             'build.payloads'{}",
+            step.name(),
+            available_payloads(plan)
+        ))
+    })?;
+    let crypto = payload
+        .crypto
+        .clone()
+        .or_else(|| plan.build.crypto.clone())
+        .unwrap_or_default();
+    Ok(ResolvedPayload {
+        name: name.to_string(),
         plan: payload.clone(),
         crypto,
     })

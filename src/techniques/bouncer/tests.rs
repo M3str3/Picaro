@@ -1,8 +1,8 @@
 //! Tests for the bouncer gate technique.
 
 use super::{
-    glob_match, Mode, OnFail, Params, ANALYSIS_PATH_TOKENS, ANALYSIS_PROCESSES, DEF,
-    HYPERVISOR_VENDOR_TOKENS,
+    glob_match, After, Mode, OnFail, Params, ProcessCheck, ProcessState, ANALYSIS_PATH_TOKENS,
+    ANALYSIS_PROCESSES, DEF, HYPERVISOR_VENDOR_TOKENS,
 };
 use crate::audit::strings::{find_sensitive_literals_in_source, strip_comments};
 use crate::engine::obfuscation::{StringStrategy, StringsConfig};
@@ -41,7 +41,7 @@ fn def_is_well_formed() {
 }
 
 #[test]
-fn defaults_are_all_and_silent() {
+fn defaults_are_all_silent_and_undecoyed() {
     let step: TechniqueKind =
         serde_yml::from_str("technique: bouncer\n").expect("bouncer should parse");
     let TechniqueKind::Bouncer { params } = step else {
@@ -50,6 +50,10 @@ fn defaults_are_all_and_silent() {
     assert_eq!(params, Params::default());
     assert_eq!(params.mode, Mode::All);
     assert_eq!(params.on_fail, OnFail::Silent);
+    assert_eq!(params.after, After::Silent);
+    assert!(params.processes.is_empty());
+    assert!(params.decoy.is_none());
+    assert!(!params.is_decoy());
     assert!(params.is_noop(), "an empty bouncer declares no check");
 }
 
@@ -57,7 +61,8 @@ fn defaults_are_all_and_silent() {
 fn parses_every_documented_field() {
     let params = full_params();
     assert_eq!(params.mode, Mode::All);
-    assert_eq!(params.on_fail, OnFail::Silent);
+    assert_eq!(params.on_fail, OnFail::Decoy);
+    assert_eq!(params.after, After::Silent);
     assert_eq!(params.hostname.as_deref(), Some("WORKSTATION-*"));
     assert_eq!(params.username.as_deref(), Some("admin"));
     assert_eq!(params.domain.as_deref(), Some("CORP"));
@@ -67,7 +72,41 @@ fn parses_every_documented_field() {
     assert!(params.requires_not_in_sandbox());
     assert_eq!(params.min_uptime_min, Some(10));
     assert_eq!(params.min_ram_mb, Some(4096));
+    assert_eq!(params.processes.len(), 2);
+    assert_eq!(params.processes[0].name, "corp-agent.exe");
+    assert_eq!(params.processes[0].state, ProcessState::Present);
+    assert_eq!(params.processes[1].state, ProcessState::Absent);
+    assert_eq!(
+        params.decoy.as_ref().map(|d| d.path.as_str()),
+        Some("%TEMP%\\report.docx")
+    );
+    assert_eq!(
+        params.decoy.as_ref().and_then(|d| d.payload.as_deref()),
+        Some("decoy_doc")
+    );
+    assert!(params.is_decoy());
     assert!(!params.is_noop());
+}
+
+#[test]
+fn a_process_check_covers_both_polarities() {
+    // `absent` rejects when the process is running; `present` rejects when it is
+    // not. One list expresses both directions of a targeting decision.
+    let step: TechniqueKind = serde_yml::from_str(
+        "technique: bouncer\nparams:\n  processes:\n    - { name: \"corp-agent\", state: present }\n",
+    )
+    .expect("bouncer should parse");
+    let TechniqueKind::Bouncer { params } = step else {
+        panic!("expected a bouncer step");
+    };
+    assert_eq!(
+        params.processes,
+        vec![ProcessCheck {
+            name: "corp-agent".to_string(),
+            state: ProcessState::Present,
+        }]
+    );
+    assert!(!params.is_noop(), "a process check is a real check");
 }
 
 #[test]
@@ -131,7 +170,10 @@ fn render_fragment_substitutes_every_placeholder() {
     assert!(fragment.contains("pub fn bouncer()"));
     assert!(fragment.contains("const MODE_ALL: bool = true;"));
     assert!(fragment.contains("const ON_FAIL_EXIT: bool = false;"));
+    assert!(fragment.contains("const ON_FAIL_DECOY: bool = true;"));
+    assert!(fragment.contains("const AFTER_EXIT: bool = false;"));
     assert!(fragment.contains("fn glob_match("));
+    assert!(fragment.contains("fn drop_decoy("));
 }
 
 #[test]
@@ -146,6 +188,18 @@ fn render_fragment_bakes_in_mode_and_on_fail() {
     let fragment = params.render_fragment(&xor_strings());
     assert!(fragment.contains("const MODE_ALL: bool = false;"));
     assert!(fragment.contains("const ON_FAIL_EXIT: bool = true;"));
+    assert!(fragment.contains("const ON_FAIL_DECOY: bool = false;"));
+    // `after` only matters with `on_fail: decoy`; check it is still baked in.
+    let decoy: TechniqueKind = serde_yml::from_str(
+        "technique: bouncer\nparams:\n  on_fail: decoy\n  after: exit\n  hostname: \"h\"\n  decoy: { path: \"x\", payload: p }\n",
+    )
+    .expect("bouncer should parse");
+    let TechniqueKind::Bouncer { params } = decoy else {
+        panic!("expected a bouncer step");
+    };
+    let decoy_fragment = params.render_fragment(&xor_strings());
+    assert!(decoy_fragment.contains("const ON_FAIL_DECOY: bool = true;"));
+    assert!(decoy_fragment.contains("const AFTER_EXIT: bool = true;"));
 }
 
 #[test]
@@ -160,6 +214,9 @@ fn render_fragment_obfuscates_every_check_literal() {
         "es-ES",
         "0409",
         "0C0A",
+        "corp-agent.exe",
+        "procmon*.exe",
+        "%TEMP%\\report.docx",
     ];
     let environment_names: Vec<&str> = ANALYSIS_PROCESSES
         .iter()

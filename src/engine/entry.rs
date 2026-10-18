@@ -11,7 +11,7 @@
 //! D-12) and the only message it prints is the chain's own, already obfuscated,
 //! error string.
 
-use crate::plan::schema::{DllEntry, OutputKind};
+use crate::plan::schema::{ConsoleMode, DllEntry, OutputKind};
 
 /// The executable entry: the chain's exit code is the process's.
 pub const EXE_ENTRY: &str = r#"fn main() {
@@ -25,13 +25,11 @@ pub const EXE_ENTRY: &str = r#"fn main() {
 }
 "#;
 
-/// What every DLL entry shares: the console attach, the chain call and the
-/// detached worker.
-///
-/// `dll_run_chain` is also the only place the error path exists, so both
-/// exports report the same way. Neither calls `std::process::exit`: the process
-/// belongs to the host (`java.exe`, `python.exe`, ...).
-const DLL_HELPERS: &str = r#"/// Attaches the console of the process that loaded this DLL, so the chain's
+/// `dll_attach_console` for `build.output.console: parent` (the default):
+/// attach the console of the process that loaded this DLL, so the chain's
+/// output (and the `build.stub.debug` trace) reaches a terminal instead of
+/// nowhere. Best effort: a host without a console runs the chain anyway.
+const DLL_ATTACH_CONSOLE_PARENT: &str = r#"/// Attaches the console of the process that loaded this DLL, so the chain's
 /// output (and the `build.stub.debug` trace) reaches a terminal instead of
 /// nowhere. Best effort: a host without a console runs the chain anyway.
 ///
@@ -41,8 +39,25 @@ fn dll_attach_console() {
     // ATTACH_PARENT_PROCESS: the console of the parent process.
     let _ = unsafe { windows::Win32::System::Console::AttachConsole(u32::MAX) };
 }
+"#;
 
-/// Runs the chain and reports its code. A terminal technique never returns
+/// `dll_attach_console` for `build.output.console: none`: leave the console
+/// alone. The chain writes to stdout and the host decides where that goes, so a
+/// host that redirects stdout (for example to a named pipe) keeps capturing the
+/// output. A no-op kept so the call sites below are identical in both modes.
+const DLL_ATTACH_CONSOLE_NONE: &str = r#"/// `build.output.console: none`: leave the console alone. The chain writes to
+/// stdout and the host decides where that goes, so a host that redirects stdout
+/// (for example to a named pipe) keeps capturing the output.
+///
+/// A no-op kept so the call sites below are identical in both modes.
+fn dll_attach_console() {}
+"#;
+
+/// The chain runner and the detached worker: the only place the error path
+/// exists, so both exports report the same way. Neither calls
+/// `std::process::exit`: the process belongs to the host (`java.exe`,
+/// `python.exe`, ...).
+const DLL_CHAIN_RUNNER: &str = r#"/// Runs the chain and reports its code. A terminal technique never returns
 /// here: it hands the thread to the payload.
 fn dll_run_chain() -> i32 {
     match run() {
@@ -135,10 +150,12 @@ pub extern "system" fn {name}(
 }
 
 /// Renders the entry block for the requested output kind.
-pub fn render(kind: OutputKind, entry: &DllEntry) -> String {
+pub fn render(kind: OutputKind, entry: &DllEntry, console: ConsoleMode) -> String {
     match kind {
         OutputKind::Exe => EXE_ENTRY.to_string(),
-        OutputKind::Dll => render_dll(entry),
+        // Shellcode wraps the same DLL: the reflective loader (sRDI) maps it and
+        // calls the plain export after `DllMain`, so the entry block is identical.
+        OutputKind::Dll | OutputKind::Shellcode => render_dll(entry, console),
         // A psmodule build never renders the Rust entry block (it is compiled
         // from generated C#); the placeholder keeps the match total.
         OutputKind::PsModule => String::new(),
@@ -152,10 +169,15 @@ pub fn render(kind: OutputKind, entry: &DllEntry) -> String {
 /// one place the host's thread notifications are dropped. What makes a build
 /// conspicuous is a chain-runner export *next to* `JNI_OnLoad` (`entry: auto`),
 /// not `DllMain` itself.
-fn render_dll(entry: &DllEntry) -> String {
+fn render_dll(entry: &DllEntry, console: ConsoleMode) -> String {
     let mut out = String::new();
     out.push_str("// --- Entry (build.output.kind: dll) ---\n");
-    out.push_str(DLL_HELPERS);
+    out.push_str(match console {
+        ConsoleMode::Parent => DLL_ATTACH_CONSOLE_PARENT,
+        ConsoleMode::None => DLL_ATTACH_CONSOLE_NONE,
+    });
+    out.push('\n');
+    out.push_str(DLL_CHAIN_RUNNER);
     out.push('\n');
     out.push_str(DLL_DLLMAIN);
     if entry.exports_jni_on_load() {
@@ -175,7 +197,10 @@ mod tests {
 
     #[test]
     fn the_exe_entry_is_the_single_binary_entry_point() {
-        assert_eq!(render(OutputKind::Exe, &DllEntry::Auto), EXE_ENTRY);
+        assert_eq!(
+            render(OutputKind::Exe, &DllEntry::Auto, ConsoleMode::Parent),
+            EXE_ENTRY
+        );
         assert!(EXE_ENTRY.contains("fn main()"));
         assert!(EXE_ENTRY.contains("std::process::exit(code)"));
     }
@@ -187,7 +212,7 @@ mod tests {
             DllEntry::JniOnLoad,
             DllEntry::Export("Go".to_string()),
         ] {
-            let block = render(OutputKind::Dll, &entry);
+            let block = render(OutputKind::Dll, &entry, ConsoleMode::Parent);
             assert!(
                 !block.contains("process::exit"),
                 "the host owns the process: {block}"
@@ -199,7 +224,7 @@ mod tests {
 
     #[test]
     fn auto_exports_every_entry_point() {
-        let block = render(OutputKind::Dll, &DllEntry::Auto);
+        let block = render(OutputKind::Dll, &DllEntry::Auto, ConsoleMode::Parent);
         assert!(block.contains("fn JNI_OnLoad"));
         assert!(block.contains("fn Run"));
         assert!(block.contains("JNI_VERSION_1_6"));
@@ -207,14 +232,18 @@ mod tests {
 
     #[test]
     fn jni_on_load_alone_does_not_export_a_plain_runner() {
-        let block = render(OutputKind::Dll, &DllEntry::JniOnLoad);
+        let block = render(OutputKind::Dll, &DllEntry::JniOnLoad, ConsoleMode::Parent);
         assert!(block.contains("fn JNI_OnLoad"));
         assert!(!block.contains("fn Run("));
     }
 
     #[test]
     fn an_explicit_export_name_is_used_verbatim() {
-        let block = render(OutputKind::Dll, &DllEntry::Export("StartChain".to_string()));
+        let block = render(
+            OutputKind::Dll,
+            &DllEntry::Export("StartChain".to_string()),
+            ConsoleMode::Parent,
+        );
         assert!(block.contains("fn StartChain("));
         assert!(!block.contains("fn Run("));
         assert!(!block.contains("fn JNI_OnLoad"));
@@ -222,7 +251,11 @@ mod tests {
 
     #[test]
     fn the_plain_export_takes_the_rundll32_shape_and_blocks() {
-        let block = render(OutputKind::Dll, &DllEntry::Export("Run".to_string()));
+        let block = render(
+            OutputKind::Dll,
+            &DllEntry::Export("Run".to_string()),
+            ConsoleMode::Parent,
+        );
         for parameter in ["_hwnd", "_hinstance", "_cmdline", "_show"] {
             assert!(block.contains(parameter), "missing {parameter}: {block}");
         }
@@ -233,10 +266,56 @@ mod tests {
 
     #[test]
     fn the_detached_worker_catches_panics() {
-        let block = render(OutputKind::Dll, &DllEntry::Auto);
+        let block = render(OutputKind::Dll, &DllEntry::Auto, ConsoleMode::Parent);
         assert!(block.contains("std::panic::catch_unwind"));
         assert!(block.contains("std::thread::spawn"));
         // The console is attached before the first print of the new thread.
         assert!(block.contains("AttachConsole"));
+    }
+
+    #[test]
+    fn shellcode_renders_the_same_entry_as_a_dll() {
+        // Shellcode wraps the packed DLL, so it reuses the DLL entry block
+        // verbatim: the reflective loader calls the plain export after DllMain.
+        let entry = DllEntry::Export("Run".to_string());
+        assert_eq!(
+            render(OutputKind::Shellcode, &entry, ConsoleMode::Parent),
+            render_dll(&entry, ConsoleMode::Parent)
+        );
+        let auto = render(OutputKind::Shellcode, &DllEntry::Auto, ConsoleMode::Parent);
+        assert!(!auto.contains("fn main("), "shellcode has no main: {auto}");
+        assert!(
+            auto.contains("fn Run("),
+            "the loader needs a plain export: {auto}"
+        );
+    }
+
+    #[test]
+    fn parent_console_emits_attachconsole() {
+        // `parent` (and the absence of the field, which deserializes to the
+        // default) is the current behavior: the console attach is emitted so the
+        // chain's output reaches the host's terminal.
+        for console in [ConsoleMode::Parent, ConsoleMode::default()] {
+            let block = render(OutputKind::Dll, &DllEntry::Auto, console);
+            assert!(
+                block.contains("AttachConsole"),
+                "parent must attach: {block}"
+            );
+        }
+    }
+
+    #[test]
+    fn none_console_does_not_emit_attachconsole() {
+        // `none` skips the attach: the chain writes to stdout and the host
+        // decides where that goes, so no `AttachConsole` call may appear.
+        let block = render(OutputKind::Dll, &DllEntry::Auto, ConsoleMode::None);
+        assert!(
+            !block.contains("AttachConsole"),
+            "none must not attach: {block}"
+        );
+        assert!(
+            block.contains("fn dll_run_chain"),
+            "the runner stays: {block}"
+        );
     }
 }

@@ -720,6 +720,7 @@ fn build(
         windows_subsystem: plan.build.output.subsystem == Subsystem::Windows,
         kind: plan.build.output.kind,
         entry: plan.build.output.entry.clone(),
+        console: plan.build.output.console,
         poly_seed: polymorphism.uses_source().then_some(polymorphism.seed),
     };
     let stub_src = if is_custom {
@@ -752,7 +753,10 @@ fn build(
     if polymorphism.mode != polymorphism::PolymorphismMode::None {
         stub_parts.push(format!("{} {}", ui.dim("poly"), polymorphism.mode.label()));
     }
-    if plan.build.output.kind == OutputKind::Dll {
+    if matches!(
+        plan.build.output.kind,
+        OutputKind::Dll | OutputKind::Shellcode
+    ) {
         stub_parts.push(ui.brand(format!(
             "{} {}",
             plan.build.output.kind.label(),
@@ -904,6 +908,19 @@ fn build(
                 );
             }
         }
+    }
+
+    // 5c. A `kind: shellcode` build is the packed DLL wrapped in a reflective
+    //     loader: convert the resource-bearing DLL in place, so the tail below
+    //     copies raw shellcode instead of a PE. This runs *after* the resource
+    //     step on purpose: resources are written into the PE, and converting
+    //     first would hand `resources::embed` raw shellcode. (Validation rejects
+    //     `resources` for shellcode, so the step above is a no-op today; the
+    //     order is what keeps the pipeline correct if that ever changes.)
+    if plan.build.output.kind == OutputKind::Shellcode {
+        let export = plan.build.output.entry.export_name().unwrap_or("Run");
+        let bytes = engine::shellcode::convert(&out, export)?;
+        std::fs::write(&out, &bytes)?;
     }
 
     // 6. Lock the shared output, then copy the compiled stub to the output path
@@ -1373,6 +1390,20 @@ fn inspect_payload(format: PayloadFormat, data: &[u8], arch: Arch) -> Result<Pay
                 pe: None,
             })
         }
+        PayloadFormat::Plain => {
+            // Opaque data with no execution semantics: the packer embeds and
+            // encrypts it as-is and a technique (the `bouncer` decoy) writes it
+            // back out. There is nothing to validate beyond "not empty".
+            if data.is_empty() {
+                return Err(error::PackerError::Validation(
+                    "the 'plain' payload is empty".to_string(),
+                ));
+            }
+            Ok(PayloadSummary {
+                label: "plain",
+                pe: None,
+            })
+        }
         PayloadFormat::Dotnet => {
             let info = pe::parse(data)?;
             let Some(clr) = info.com else {
@@ -1684,9 +1715,11 @@ fn apply_subsystem(source: String, subsystem: Subsystem) -> String {
 fn intermediate_path(build_dir: &Path, output: &plan::schema::OutputPlan) -> PathBuf {
     match output.kind {
         OutputKind::Exe => build_dir.join("out.exe"),
-        // A psmodule build has its own flow (see `build_psmodule`); this keeps
-        // the match total and names the scratch module after the artifact.
-        OutputKind::Dll | OutputKind::PsModule => {
+        // Shellcode wraps the same DLL, so the intermediate is a library named
+        // after the artifact. A psmodule build has its own flow (see
+        // `build_psmodule`); this keeps the match total and names the scratch
+        // module after the artifact.
+        OutputKind::Dll | OutputKind::Shellcode | OutputKind::PsModule => {
             let stem = output
                 .path
                 .file_stem()

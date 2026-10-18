@@ -217,6 +217,12 @@ pub enum PayloadFormat {
     /// time and the stub hosts that (`technique: powershell_hosting`), so the
     /// script never touches disk.
     Powershell,
+    /// Opaque bytes with no execution semantics: **data**, not a payload. It is
+    /// embedded and encrypted like any other payload but is never mapped or run;
+    /// the only consumer is a technique that writes it back out (the `bouncer`
+    /// `on_fail: decoy` asset). No Execution technique accepts it, so
+    /// `plan::validate` rejects a `plain` payload that a step tries to run.
+    Plain,
 }
 
 impl PayloadFormat {
@@ -228,6 +234,7 @@ impl PayloadFormat {
             PayloadFormat::Dll => "dll",
             PayloadFormat::Dotnet => "dotnet",
             PayloadFormat::Powershell => "powershell",
+            PayloadFormat::Plain => "plain",
         }
     }
 
@@ -276,18 +283,30 @@ pub enum KeySource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutputPlan {
-    /// Output path of the packed artifact (`.exe` or `.dll`; see `kind`).
+    /// Output path of the packed artifact (`.exe`, `.dll` or `.bin`; see `kind`).
     pub path: PathBuf,
 
-    /// What the artifact is: an executable (default) or a DLL a host process
-    /// loads (`docs/design/dll-output.md`).
+    /// What the artifact is: an executable (default), a DLL a host process
+    /// loads, or position-independent shellcode (`docs/design/dll-output.md`,
+    /// `docs/design/shellcode-output.md`).
     #[serde(default, skip_serializing_if = "OutputKind::is_exe")]
     pub kind: OutputKind,
 
-    /// What starts the chain in a `kind: dll` build (`auto`, `jni_on_load` or
-    /// `export:<name>`). Ignored — and rejected — for `kind: exe`.
+    /// What starts the chain in a `kind: dll` / `kind: shellcode` build
+    /// (`auto`, `jni_on_load` or `export:<name>`). Ignored — and rejected — for
+    /// `kind: exe`.
     #[serde(default, skip_serializing_if = "DllEntry::is_auto")]
     pub entry: DllEntry,
+
+    /// Console behavior for a `kind: dll` / `kind: shellcode` build.
+    ///
+    /// `parent` (default) attaches the host's console with
+    /// `AttachConsole(ATTACH_PARENT_PROCESS)` so `println!`/`eprintln!` reach the
+    /// host's terminal. `none` skips the attach and lets the chain write to
+    /// stdout, leaving the host to decide where that goes (a host that redirects
+    /// stdout to a pipe). Ignored for `kind: exe`.
+    #[serde(default, skip_serializing_if = "ConsoleMode::is_parent")]
+    pub console: ConsoleMode,
 
     /// Target architecture (default: `x64`).
     #[serde(default)]
@@ -343,6 +362,26 @@ pub struct OutputPlan {
     pub sign: Option<SignPlan>,
 }
 
+/// How a host-loaded artifact handles the console (`build.output.console`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConsoleMode {
+    /// Attach the host's console (`AttachConsole(ATTACH_PARENT_PROCESS)`), so
+    /// the chain's output reaches its terminal. The default.
+    #[default]
+    Parent,
+    /// Do not attach: the chain writes to stdout and the host decides where
+    /// that goes (for example, a host that redirects stdout to a named pipe).
+    None,
+}
+
+impl ConsoleMode {
+    /// Whether this is the default mode (used to skip it when serializing).
+    pub fn is_parent(&self) -> bool {
+        matches!(self, ConsoleMode::Parent)
+    }
+}
+
 /// Subsystem of the packed binary.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -384,6 +423,10 @@ pub enum OutputKind {
     Exe,
     /// A Windows DLL, loaded by a host process.
     Dll,
+    /// Position-independent shellcode: the packed DLL converted with sRDI, so a
+    /// host that runs shellcode can start the chain without a PE on disk
+    /// (`docs/design/shellcode-output.md`).
+    Shellcode,
     /// A managed (.NET) PowerShell binary module: `Import-Module` loads it and
     /// its `OnImport` injects the embedded scripts into the caller's session.
     PsModule,
@@ -400,6 +443,7 @@ impl OutputKind {
         match self {
             OutputKind::Exe => "exe",
             OutputKind::Dll => "dll",
+            OutputKind::Shellcode => "shellcode",
             OutputKind::PsModule => "psmodule",
         }
     }
@@ -1301,6 +1345,49 @@ runtime:
     }
 
     #[test]
+    fn console_defaults_to_parent() {
+        let plan: Plan = serde_yml::from_str(VALID_YAML).expect("valid YAML should parse");
+        assert_eq!(plan.build.output.console, ConsoleMode::Parent);
+    }
+
+    #[test]
+    fn parses_console_modes() {
+        for (mode, expected) in [("parent", ConsoleMode::Parent), ("none", ConsoleMode::None)] {
+            let yaml = VALID_YAML.replace(
+                "    path: ./dist/mimikatz_packed.exe\n",
+                &format!("    path: ./dist/loader.dll\n    kind: dll\n    console: {mode}\n"),
+            );
+            let plan: Plan = serde_yml::from_str(&yaml).expect("a console mode should parse");
+            assert_eq!(plan.build.output.console, expected, "mode: {mode}");
+        }
+    }
+
+    #[test]
+    fn console_parent_is_not_serialized() {
+        let parent = VALID_YAML.replace(
+            "    path: ./dist/mimikatz_packed.exe\n",
+            "    path: ./dist/loader.dll\n    kind: dll\n    console: parent\n",
+        );
+        let plan: Plan = serde_yml::from_str(&parent).expect("parent should parse");
+        let rendered = serde_yml::to_string(&plan).expect("serialize");
+        assert!(
+            !rendered.contains("console:"),
+            "the default console mode should be skipped: {rendered}"
+        );
+
+        let none = VALID_YAML.replace(
+            "    path: ./dist/mimikatz_packed.exe\n",
+            "    path: ./dist/loader.dll\n    kind: dll\n    console: none\n",
+        );
+        let plan: Plan = serde_yml::from_str(&none).expect("none should parse");
+        let rendered = serde_yml::to_string(&plan).expect("serialize");
+        assert!(
+            rendered.contains("console: none"),
+            "a non-default console mode should serialize: {rendered}"
+        );
+    }
+
+    #[test]
     fn the_default_output_kind_and_entry_are_not_serialized() {
         let plan: Plan = serde_yml::from_str(VALID_YAML).expect("valid YAML should parse");
         let yaml = serde_yml::to_string(&plan).expect("serialize");
@@ -1328,6 +1415,21 @@ runtime:
             again.build.output.entry,
             DllEntry::Export("Run".to_string())
         );
+    }
+
+    #[test]
+    fn a_shellcode_output_round_trips_through_yaml() {
+        let yaml = VALID_YAML.replace(
+            "    path: ./dist/mimikatz_packed.exe\n",
+            "    path: ./dist/loader.bin\n    kind: shellcode\n    entry: export:Run\n",
+        );
+        let plan: Plan = serde_yml::from_str(&yaml).expect("a shellcode output should parse");
+        assert_eq!(plan.build.output.kind, OutputKind::Shellcode);
+        assert_eq!(plan.build.output.kind.label(), "shellcode");
+        assert!(!plan.build.output.kind.is_exe());
+        let rendered = serde_yml::to_string(&plan).expect("serialize");
+        let again: Plan = serde_yml::from_str(&rendered).expect("a rendered plan should parse");
+        assert_eq!(again.build.output.kind, OutputKind::Shellcode);
     }
 
     #[test]

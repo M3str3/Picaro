@@ -1,15 +1,18 @@
 # Bouncer
 
-*Checks the host against declared requirements and aborts the pipeline before
-the payload runs when the target does not match.*
+*Checks the host against declared requirements and, when the target does not
+match, either aborts the pipeline before the payload runs or drops a decoy file.*
 
 ## What it does
 
 Checks the current host against a set of declared requirements and, when the
-host does not satisfy them, aborts the pipeline **before** the payload is
-decrypted-and-run. It is the runtime counterpart of a targeting decision: run
-only on the machine the engagement was scoped to, not on an analyst's sandbox,
-a research VM, or the wrong workstation.
+host does not satisfy them, reacts **before** the payload is decrypted-and-run.
+It is the runtime counterpart of a targeting decision: run only on the machine
+the engagement was scoped to, not on an analyst's sandbox, a research VM, or the
+wrong workstation. On rejection it either aborts the chain (`on_fail: silent` /
+`exit`) or writes a **decoy** file and then exits (`on_fail: decoy`), so a host
+that fails a check sees a plausible document instead of a loader that simply
+does nothing.
 
 Every field is optional and activates one check; undeclared checks are skipped.
 With no field declared the technique is a no-op (it always lets the payload
@@ -24,6 +27,10 @@ flowchart TD
     B -->|reject| D{on_fail}
     D -->|silent| E[exit 0]
     D -->|exit| F[exit 1]
+    D -->|decoy| G[write decoy]
+    G --> H{after}
+    H -->|silent| I[exit 0]
+    H -->|exit| J[exit 1]
 ```
 
 ### 1. The gate
@@ -31,7 +38,8 @@ flowchart TD
 The gate counts how many checks are declared and how many pass, then applies
 `mode` (`all`: `passed == declared`; `any`: `passed > 0`). No declared check is
 always a pass. On rejection the stub does not run the payload; `on_fail`
-chooses between a silent exit (`0`) and an explicit one (`1`).
+chooses between *silent* (`0`), *exit* (`1`) and *decoy* (write a file, then
+`after` picks the exit code).
 
 ### 2. The checks
 
@@ -56,8 +64,33 @@ chooses between a silent exit (`0`) and an explicit one (`1`).
   than 2 processors; less than 2 GiB of RAM; less than 10 minutes of uptime; or
   an image path / user name containing `sandbox`, `malware`, `test` or
   `analysis`. A score of **3 or more** rejects the host.
+- **`processes`** — arbitrary, configurable process-existence checks. Each entry
+  is `{ name, state }`: `state: present` passes when the process is running,
+  `state: absent` passes when it is not. `name` is a case-insensitive glob,
+  matched against the running process's file name and its `.exe`-stripped stem.
+  The whole list is **one** check: it passes only when every entry holds. The
+  two polarities are the same requirement with the sign flipped, so one list
+  covers both *"run the decoy if `X` is missing"* (`state: present`) and *"run
+  the decoy if `X` is present"* (`state: absent`).
 - **`min_uptime_min`** — `GetTickCount64() / 60000`.
 - **`min_ram_mb`** — `GlobalMemoryStatusEx().ullTotalPhys / 1024 / 1024`.
+
+### 3. The decoy
+
+With `on_fail: decoy` the stub writes an embedded asset before exiting:
+
+1. `params.decoy.path` is the destination, rebuilt at runtime through
+   `StringsConfig`. `%NAME%` references are expanded from the environment
+   (`%TEMP%\report.docx`), and an unknown name is left as written.
+2. `params.decoy.payload` names a `build.payloads` entry with `format: plain`:
+   raw bytes the packer embeds and XChaCha20-encrypts like any other payload,
+   but that no Execution technique runs. The stub decrypts it with the same
+   per-step key and writes it out.
+3. `params.after` chooses the exit code (`silent`, `0`, the default; or `exit`,
+   `1`).
+
+A write that fails is an error (the runner takes the step's `on_fail` action);
+nothing else about the reject path changes.
 
 ### Why the `not_in_sandbox` threshold is 3
 
@@ -73,8 +106,10 @@ option yet.
 ## Integration
 
 A **Preparation** step: the stub runs it before the Execution and it never
-receives the payload. Place it earlier in `runtime:` than the Execution step. When a declared check fails it can abort the pipeline, so the payload
-never runs.
+receives the payload. Place it earlier in `runtime:` than the Execution step.
+When a declared check fails it reacts per `on_fail`, so the payload never runs.
+With `on_fail: decoy`, the step also carries an embedded `format: plain` asset
+(the decoy) that the build decrypts and embeds like a payload.
 
 ## What it evades
 
@@ -82,7 +117,9 @@ never runs.
   tools and instrumented user path make them recognisable.
 - **Research VMs** that advertise a hypervisor vendor through CPUID.
 - Running on the **wrong machine**: a missing host/user/domain/locale/keyboard
-  match keeps the payload dormant.
+  match, or a missing/extra `processes` entry, keeps the payload dormant.
+- A failed check that would otherwise leave a silent no-op: `on_fail: decoy`
+  leaves a plausible document behind instead of nothing.
 
 ## What detects it
 
@@ -103,12 +140,20 @@ away are not in the file:
   signature built from that combination is the realistic detection.
 - Indirect detection is possible in principle via ETW-TI on
   `CreateToolhelp32Snapshot`, but the calls are ordinary and low-signal.
+- With `on_fail: decoy` the write itself is observable: a file appears in the
+  configured directory and its name is the configured (obfuscated) path. The
+  decoy's bytes are `format: plain` data, so they are embedded and encrypted
+  like a payload and do not show up in cleartext.
 
 ## Measurements
 
 - See `docs/measurements.md`: ~+28 KB and one import for a
   host-name-only gate, ~+56 KB and 13 imports (two extra DLLs) for the full
   gate, `sensitive 0` in the audit, and the runtime block/allow result.
+- The `processes` check reuses the process snapshot the `not_in_sandbox`
+  heuristic already takes, so it adds no import of its own. The `on_fail: decoy`
+  path adds no import either (standard-library file I/O) and grows the stub by
+  the size of the encrypted decoy asset.
 
 ## Implementation notes
 
@@ -118,7 +163,15 @@ away are not in the file:
   return `Ok(false)`; every other Preparation returns `Ok(true)`.
 - `on_fail: exit` is handled inside the fragment (`std::process::exit(1)`), so
   the exit code is preserved even though the dispatcher's `false` means "exit
-  silently" in the builtin template.
+  silently" in the builtin template. `on_fail: decoy` writes the file inside the
+  fragment too, then obeys `after`.
+- The decoy asset is an injected step-module constant (`ASSET_ENC` /
+  `ASSET_NONCE` / `ASSET_KEY` / `ASSET_LEN`) plus an `asset_bytes()` helper the
+  engine renders; the fragment calls it only on rejection. A `bouncer` without a
+  decoy gets a dead `asset_bytes()` stub so the fragment type-checks either way.
+- `decoy.payload` must name a `format: plain` payload; `plan::validate` rejects
+  any other format, and no Execution technique accepts `plain`, so the asset can
+  never be run by mistake.
 - A failing *API read* (not a failed check) propagates as an obfuscated message
   string and the stub reports it and exits `1`; only a policy rejection obeys
   `on_fail`.
@@ -127,8 +180,8 @@ away are not in the file:
   two copies are intentional and small.
 - The technique can be the first (or only) Preparation in the pipeline; there is
   no ordering restriction between preparations.
-- `on_fail: decoy` and checks beyond the documented list (MAC address, IP
-  ranges, …) are future phases.
+- Checks beyond the documented list (MAC address, IP ranges, …) are future
+  phases.
 
 ## References
 

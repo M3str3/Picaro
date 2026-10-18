@@ -30,8 +30,8 @@ use crate::engine::obfuscation::YamlStringsPlan;
 use crate::engine::syscalls::YamlSyscallsPlan;
 use crate::error::{PackerError, Result};
 use crate::plan::schema::{
-    Arch, BuildPlan, CryptoAlgorithm, CryptoPlan, DllEntry, KeySource, OutputKind, OutputPlan,
-    PayloadFormat, PayloadPlan, Plan, StubPlan, Subsystem, TrimPaths, SUPPORTED_SCHEMA,
+    Arch, BuildPlan, ConsoleMode, CryptoAlgorithm, CryptoPlan, DllEntry, KeySource, OutputKind,
+    OutputPlan, PayloadFormat, PayloadPlan, Plan, StubPlan, Subsystem, TrimPaths, SUPPORTED_SCHEMA,
 };
 use crate::plan::validate;
 use crate::techniques::{
@@ -1269,6 +1269,9 @@ fn preparation_defs() -> Vec<&'static TechniqueDef> {
     let mut defs: Vec<&'static TechniqueDef> = techniques::all()
         .iter()
         .filter(|def| def.category == Category::Preparation)
+        // `drop` needs a second payload (the `format: plain` asset), which the
+        // wizard's single-payload plan cannot declare, so it is not offered yet.
+        .filter(|def| def.name != "drop")
         .collect();
     defs.sort_by_key(|def| prep_rank(def.name));
     defs
@@ -1370,6 +1373,7 @@ fn assemble(payload: &Path, answers: &Answers) -> Plan {
                 path: PathBuf::from(&answers.output_path),
                 kind: answers.output_kind,
                 entry: answers.dll_entry.clone(),
+                console: ConsoleMode::Parent,
                 arch: if answers.arch == "x86" {
                     Arch::X86
                 } else {

