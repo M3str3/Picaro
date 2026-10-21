@@ -108,11 +108,18 @@ reflective loader) and the mixed export table under `entry: auto`.
 2. **Rust std's `#[thread_local]` needs the TLS data a manually-mapped DLL never
    gets.** Upstream sRDI only runs TLS *callbacks*, not the `.tls` *template*, so
    the first thread-local read aborted ("the global allocator may not use TLS
-   with destructors"). `vendor/srdi/ShellcodeRDI.c` now reserves a `TlsAlloc`
-   index, publishes `_tls_index`, materializes the template into
-   `TEB->ThreadLocalStoragePointer` (`gs:[0x58]` — the array a CRT reads, *not*
-   `TlsSetValue`'s `TlsSlots`) and restores the slot before the thread exits so
-   ntdll's teardown does not free the private block.
+   with destructors"). The 2026-10-17 fix (a `TlsAlloc` index published into
+   `TEB->ThreadLocalStoragePointer`) turned out to borrow KERNELBASE's static
+   index `1` and corrupt both sides (release-only), and removing the
+   provisioning leaves the linker's zero, which aliases the module that owns
+   index 0 — measured again 2026-10-21, see `docs/measurements.md`. The current
+   design is stub-side: the packer injects a TLS handoff block
+   (`src/engine/tls.rs`, `$TLS_HANDOFF_BLOCK$`) that gives the stub an index
+   *past every loaded module's* via a private per-thread array
+   (`gs:[0x58]` — the array a CRT reads, *not* `TlsSetValue`'s `TlsSlots`),
+   pauses around module loads and the payload handoff (a module with static TLS
+   loading while the private array is active makes the loader grow an array it
+   does not own), and restores the loader's array when the chain finishes.
 
 - Result: the full Rust-std stub (the packed DLL) runs from the `.bin`; a PE
   payload mapped reflectively prints `PAYLOAD_MARKER_7f3a9c2e`, and the runner

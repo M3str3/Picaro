@@ -515,8 +515,12 @@ fn strip_flag(strip: bool) -> &'static str {
 fn panic_flag(kind: OutputKind) -> &'static str {
     match kind {
         // A psmodule build compiles C#, not a Rust stub; the value is unused.
-        OutputKind::Dll | OutputKind::Shellcode | OutputKind::PsModule => "panic=unwind",
-        OutputKind::Exe => "panic=abort",
+        // Shellcode aborts like an executable: there is no host loader to
+        // protect, and `panic=unwind` pulls std's panic thread-locals into the
+        // stub, which gives the mapped image static TLS that sRDI cannot
+        // provision safely (see vendor/srdi/ShellcodeRDI.c, STEP 10b).
+        OutputKind::Dll | OutputKind::PsModule => "panic=unwind",
+        OutputKind::Exe | OutputKind::Shellcode => "panic=abort",
     }
 }
 
@@ -807,8 +811,8 @@ mod tests {
     }
 
     #[test]
-    fn shellcode_compiles_as_a_dll_and_keeps_unwind() {
-        assert_eq!(panic_flag(OutputKind::Shellcode), "panic=unwind");
+    fn shellcode_aborts_and_still_compiles_as_a_dll() {
+        assert_eq!(panic_flag(OutputKind::Shellcode), "panic=abort");
         assert!(compiles_as_dll(OutputKind::Shellcode));
         assert!(compiles_as_dll(OutputKind::Dll));
         assert!(!compiles_as_dll(OutputKind::Exe));

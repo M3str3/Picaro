@@ -25,6 +25,8 @@ use crate::techniques::{Category, RuntimeStep, TechniqueKind};
 /// The builtin template's required placeholders (its contract).
 const REQUIRED: &[&str] = &[
     "$STUB_HELPERS$",
+    "$TLS_HANDOFF_BLOCK$",
+    "$TLS_PROVISION$",
     "$ENTRY_BLOCK$",
     "$STEP_MODULES$",
     "$STEP_RUNNER_BODY$",
@@ -317,6 +319,21 @@ fn render_common(
         match params.poly_seed {
             Some(seed) => format!("{STUB_HELPERS}{}", poly_helpers(seed)),
             None => STUB_HELPERS.to_string(),
+        },
+    );
+    // The TLS handoff block renders into every stub (self-gated); only a
+    // release shellcode stub calls `provision` (a debug stub keeps the
+    // historical index-0 aliasing its traces were built around).
+    values.insert(
+        "$TLS_HANDOFF_BLOCK$".to_string(),
+        super::tls::BLOCK.to_string(),
+    );
+    values.insert(
+        "$TLS_PROVISION$".to_string(),
+        if params.kind == OutputKind::Shellcode && !params.debug {
+            "    tls_handoff::provision();\n".to_string()
+        } else {
+            String::new()
         },
     );
     // The entry point: `fn main()` for an executable, the exports for a DLL

@@ -1,0 +1,4 @@
+# Bash scripts run inside Linux containers (see the --docker option) and must
+# keep LF endings. With core.autocrlf=true a checkout would otherwise write CRLF
+# and the container's bash fails on the stray \r.
+*.sh text eol=lf

@@ -1518,7 +1518,15 @@ fn inspect_payload(format: PayloadFormat, data: &[u8], arch: Arch) -> Result<Pay
 /// may well be free), so this is a warning, not an error.
 fn payload_advisories(step: &ResolvedStep, summary: &PayloadSummary) -> Vec<String> {
     let mut warnings = Vec::new();
-    if matches!(step.technique, TechniqueKind::ReflectiveLoading { .. }) {
+    if let TechniqueKind::ReflectiveLoading { params } = &step.technique {
+        if params.erase_header {
+            warnings.push(format!(
+                "step {} ('{}'): params.erase_header is on; a payload whose startup code reads \
+                 its own PE header (the MSVC CRT, self-inspection) can break. Test this payload \
+                 with erase_header: false first",
+                step.index, step.label,
+            ));
+        }
         if let Some(pe) = &summary.pe {
             if !pe.has_relocations {
                 warnings.push(format!(

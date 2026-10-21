@@ -323,8 +323,14 @@ const IMPORTS_BLOCK: &str = r##"mod imports {
     /// failing outright.
     fn load_module(image: &[u8], name_off: usize, dll: &str) -> Result<HMODULE, ImportError> {
         let name_ptr = unsafe { image.as_ptr().add(name_off) };
-        if let Ok(module) = unsafe { LoadLibraryA(PCSTR(name_ptr)) } {
-            return Ok(module);
+        // A module with static TLS makes the loader grow this thread's TLS
+        // array, which must see the array it owns: the TLS handoff pauses for
+        // the load (a no-op unless a shellcode stub provisioned one).
+        {
+            let _pause = crate::tls_handoff::PauseGuard::enter();
+            if let Ok(module) = unsafe { LoadLibraryA(PCSTR(name_ptr)) } {
+                return Ok(module);
+            }
         }
 
         let apiset_prefix: String = $APISET_PREFIX_DEF$;
@@ -341,8 +347,11 @@ const IMPORTS_BLOCK: &str = r##"mod imports {
             };
             let mut host_buf = host.into_bytes();
             host_buf.push(0);
-            if let Ok(module) = unsafe { LoadLibraryA(PCSTR(host_buf.as_ptr())) } {
-                return Ok(module);
+            {
+                let _pause = crate::tls_handoff::PauseGuard::enter();
+                if let Ok(module) = unsafe { LoadLibraryA(PCSTR(host_buf.as_ptr())) } {
+                    return Ok(module);
+                }
             }
         }
 

@@ -565,8 +565,7 @@ fn direct_nt_proxy(index: usize, entry: &ApiEntry, info: syscalls::NtProxyInfo) 
     format!(
         "    /// {comment}: routed through the syscall layer.\n    \
          extern \"system\" fn {id}({params}) -> i32 {{\n        \
-         crate::tech_dbg!(\"api_resolution\", \"an intercepted call was routed to the \
-         syscall layer\");\n        crate::{helper}({forward})\n    }}\n",
+         crate::{helper}({forward})\n    }}\n",
         helper = info.helper_name,
         forward = info.forward,
     )
@@ -671,7 +670,6 @@ const WRAPPER_READ_PROCESS_MEMORY: &str = r#"    /// $COMMENT$: the Win32 wrappe
         size: usize,
         read: *mut usize,
     ) -> i32 {
-        crate::tech_dbg!("api_resolution", "an intercepted call was routed to the syscall layer");
         let status = crate::nt_read_vm(process, base, buffer, size, read);
         if status >= 0 {
             return 1;
@@ -711,7 +709,6 @@ const REBUILD_OPEN_PROCESS: &str = r#"    /// $COMMENT$: rebuilt on NtOpenProces
         }
 
         const OBJ_INHERIT: u32 = 0x0000_0002;
-        crate::tech_dbg!("api_resolution", "an intercepted call was routed to the syscall layer");
         let attributes = ObjectAttributes {
             length: core::mem::size_of::<ObjectAttributes>() as u32,
             root_directory: core::ptr::null_mut(),
@@ -754,7 +751,6 @@ const WRAPPER_VIRTUAL_ALLOC_EX: &str = r#"    /// $COMMENT$: the Win32 wrapper r
         alloc_type: u32,
         protect: u32,
     ) -> *mut core::ffi::c_void {
-        crate::tech_dbg!("api_resolution", "an intercepted call was routed to the syscall layer");
         let mut base = address;
         let mut region = size;
         let status = crate::nt_alloc_vm(process, &mut base, 0, &mut region, alloc_type, protect);
@@ -781,7 +777,6 @@ const WRAPPER_WRITE_PROCESS_MEMORY: &str = r#"    /// $COMMENT$: the Win32 wrapp
         size: usize,
         written: *mut usize,
     ) -> i32 {
-        crate::tech_dbg!("api_resolution", "an intercepted call was routed to the syscall layer");
         let status = crate::nt_write_vm(process, base, buffer, size, written);
         if status >= 0 {
             return 1;
@@ -806,7 +801,6 @@ const WRAPPER_VIRTUAL_PROTECT_EX: &str = r#"    /// $COMMENT$: the Win32 wrapper
         new_protect: u32,
         old_protect: *mut u32,
     ) -> i32 {
-        crate::tech_dbg!("api_resolution", "an intercepted call was routed to the syscall layer");
         let status = crate::nt_protect_vm(process, base, size, new_protect, old_protect);
         if status >= 0 {
             return 1;
@@ -838,7 +832,6 @@ const REBUILD_CREATE_REMOTE_THREAD: &str = r#"    /// $COMMENT$: rebuilt on NtCr
         const THREAD_CREATE_FLAGS_CREATE_SUSPENDED: u32 = 0x0000_0001;
         const THREAD_ALL_ACCESS: u32 = 0x001F_FFFF;
 
-        crate::tech_dbg!("api_resolution", "an intercepted call was routed to the syscall layer");
         let flags = if creation_flags & WIN32_CREATE_SUSPENDED != 0 {
             THREAD_CREATE_FLAGS_CREATE_SUSPENDED
         } else {
@@ -879,7 +872,6 @@ const WRAPPER_QUEUE_USER_APC: &str = r#"    /// $COMMENT$: the Win32 wrapper re-
         thread: windows::Win32::Foundation::HANDLE,
         data: usize,
     ) -> u32 {
-        crate::tech_dbg!("api_resolution", "an intercepted call was routed to the syscall layer");
         let status = crate::nt_queue_apc(
             thread,
             routine,
@@ -904,7 +896,6 @@ const WRAPPER_QUEUE_USER_APC: &str = r#"    /// $COMMENT$: the Win32 wrapper re-
 const WRAPPER_RESUME_THREAD: &str = r#"    /// $COMMENT$: the Win32 wrapper re-implemented on NtResumeThread (NTSTATUS ->
     /// previous suspend count, `GetLastError` preserved).
     extern "system" fn $ID$(thread: windows::Win32::Foundation::HANDLE) -> u32 {
-        crate::tech_dbg!("api_resolution", "an intercepted call was routed to the syscall layer");
         let mut previous = 0u32;
         let status = crate::nt_resume_thread(thread, &mut previous);
         if status >= 0 {
@@ -924,7 +915,6 @@ const WRAPPER_RESUME_THREAD: &str = r#"    /// $COMMENT$: the Win32 wrapper re-i
 const WRAPPER_SUSPEND_THREAD: &str = r#"    /// $COMMENT$: the Win32 wrapper re-implemented on NtSuspendThread (NTSTATUS ->
     /// previous suspend count, `GetLastError` preserved).
     extern "system" fn $ID$(thread: windows::Win32::Foundation::HANDLE) -> u32 {
-        crate::tech_dbg!("api_resolution", "an intercepted call was routed to the syscall layer");
         let mut previous = 0u32;
         let status = crate::nt_suspend_thread(thread, &mut previous);
         if status >= 0 {
@@ -947,7 +937,6 @@ const WRAPPER_GET_THREAD_CONTEXT: &str = r#"    /// $COMMENT$: the Win32 wrapper
         thread: windows::Win32::Foundation::HANDLE,
         context: *mut core::ffi::c_void,
     ) -> i32 {
-        crate::tech_dbg!("api_resolution", "an intercepted call was routed to the syscall layer");
         let status = crate::nt_get_context_thread(thread, context);
         if status >= 0 {
             return 1;
@@ -969,7 +958,6 @@ const WRAPPER_SET_THREAD_CONTEXT: &str = r#"    /// $COMMENT$: the Win32 wrapper
         thread: windows::Win32::Foundation::HANDLE,
         context: *mut core::ffi::c_void,
     ) -> i32 {
-        crate::tech_dbg!("api_resolution", "an intercepted call was routed to the syscall layer");
         let status = crate::nt_set_context_thread(thread, context);
         if status >= 0 {
             return 1;
@@ -992,7 +980,6 @@ const WRAPPER_OPEN_PROCESS_TOKEN: &str = r#"    /// $COMMENT$: rebuilt on NtOpen
         desired_access: u32,
         token: *mut core::ffi::c_void,
     ) -> i32 {
-        crate::tech_dbg!("api_resolution", "an intercepted call was routed to the syscall layer");
         let status = crate::nt_open_process_token(process, desired_access, core::ptr::null(), token);
         if status >= 0 {
             return 1;
@@ -1019,7 +1006,6 @@ const WRAPPER_DUPLICATE_TOKEN_EX: &str = r#"    /// $COMMENT$: rebuilt on NtDupl
         token_type: i32,
         new_token: *mut core::ffi::c_void,
     ) -> i32 {
-        crate::tech_dbg!("api_resolution", "an intercepted call was routed to the syscall layer");
         let status = crate::nt_duplicate_token(
             existing,
             desired_access,
@@ -1047,7 +1033,6 @@ const WRAPPER_IMPERSONATE_LOGGED_ON_USER: &str = r#"    /// $COMMENT$: rebuilt o
     extern "system" fn $ID$(token: windows::Win32::Foundation::HANDLE) -> i32 {
         const THREAD_IMPERSONATION_TOKEN: i32 = 5;
 
-        crate::tech_dbg!("api_resolution", "an intercepted call was routed to the syscall layer");
         let status = crate::nt_set_info_thread(
             unsafe { windows::Win32::System::Threading::GetCurrentThread() },
             THREAD_IMPERSONATION_TOKEN,
@@ -1084,19 +1069,11 @@ const HANDLER_TEMPLATE: &str = r#"    /// $COMMENT$: decides what to return. Cat
                     if len > 0 {
                         let path = String::from_utf8_lossy(&buf[..len as usize]);
                         if let crate::ImportPolicy::Proxy(proxy) = resolution_policy(&path, func) {
-                            crate::tech_dbg!(
-                                "api_resolution",
-                                "an intercepted resolution returned a proxy"
-                            );
                             return proxy as isize;
                         }
                     }
                 }
             }
-            crate::tech_dbg!(
-                "api_resolution",
-                "an intercepted resolution was forwarded to the original"
-            );
             let target: extern "system" fn(isize, *const u8) -> isize =
                 core::mem::transmute($ORIGINAL$());
             target(module, name)
@@ -1133,7 +1110,6 @@ const HANDLER_TEMPLATE: &str = r#"    /// $COMMENT$: decides what to return. Cat
 const FORWARD_TEMPLATE: &str = r#"    /// $COMMENT$: forwards to the original export, resolved at runtime (the
     /// intercepted name is never imported).
     extern "system" fn $PROXY$($PARAMS$) -> $RET$ {
-        crate::tech_dbg!("api_resolution", "an intercepted call was forwarded to the original");
         let original = $ORIGINAL$();
         let target: extern "system" fn($TYPES$) -> $RET$ =
             unsafe { core::mem::transmute(original) };
@@ -1276,7 +1252,10 @@ mod tests {
         let block = render_block(&config, &xor_strings());
         assert!(block.contains("extern \"system\" fn proxy_0"), "{block}");
         assert!(block.contains("crate::nt_close(handle)"), "{block}");
-        assert!(block.contains("routed to the syscall layer"), "{block}");
+        // Proxies must never trace: they run on payload threads too, where the
+        // stub's thread-locals are not provisioned (a debug `eprintln!` there
+        // reads garbage through the stub's TLS index and faults).
+        assert!(!block.contains("tech_dbg"), "proxy traces: {block}");
         assert!(!block.contains('$'), "leftover placeholder: {block}");
     }
 

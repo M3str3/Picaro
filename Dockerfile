@@ -162,6 +162,11 @@ ENV PICARO_SRDI=/usr/local/lib/srdi/ConvertToShellcode.py
 # above with the source.
 COPY examples ./examples
 
+# The web app's visual plan builder renders the technique catalogue the docs
+# site assembles. It is a generated, checked-in artifact, so the web image gets
+# a copy instead of needing Node and the docs toolchain at runtime.
+COPY docs/site/public/plan-catalog.json ./plan-catalog.json
+
 # ---------------------------------------------------------------------------
 # Development image: `toolchain` plus Metasploit's `msfvenom` and a non-root
 # shell, so payloads can be generated and packed/audited in one container with

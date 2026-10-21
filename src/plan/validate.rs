@@ -991,9 +991,9 @@ fn validate_api_resolution(plan: &Plan, steps: &[ResolvedStep]) -> Result<()> {
     let executions: Vec<&ResolvedStep> = steps.iter().filter(|step| step.is_execution()).collect();
     if executions.len() != 1 {
         return Err(PackerError::Validation(
-            "build.stub.api_resolution.mode 'proxy' is loader-wide (it rewrites the loader's own \
-             IAT), so it is not supported when the runtime loads more than one payload: use a \
-             single Execution step"
+            "build.stub.api_resolution.mode 'proxy' is loader-wide (it rewrites the loaded \
+             payload's IAT), so it is not supported when the runtime loads more than one payload: \
+             use a single Execution step"
                 .to_string(),
         ));
     }
@@ -1029,12 +1029,16 @@ fn validate_api_resolution(plan: &Plan, steps: &[ResolvedStep]) -> Result<()> {
     // A hollowed payload runs in a *different* process, which has none of that,
     // so its IAT there can only point at the real exports: the mode cannot apply.
     // Failing loudly beats silently not proxying. See Phase E in the doc.
-    if matches!(step.technique, TechniqueKind::ProcessHollowing { .. }) {
+    if matches!(
+        step.technique,
+        TechniqueKind::ProcessHollowing { .. } | TechniqueKind::PeInjection { .. }
+    ) {
         return Err(PackerError::Validation(
-            "build.stub.api_resolution.mode 'proxy' is not supported with process_hollowing: the \
-             proxies live in the loader image, which is not mapped in the target process, so the \
-             payload's IAT there can only point at the real exports. Use reflective_loading (the \
-             payload runs in the loader's process). See docs/api-resolution.md (Phase E)."
+            "build.stub.api_resolution.mode 'proxy' is not supported with process_hollowing or \
+             pe_injection: the proxies live in the loader image, which is not the process where \
+             the payload runs, so the payload's IAT there can only point at the real exports. Use \
+             reflective_loading (the payload runs in the loader's process). See \
+             docs/api-resolution.md (Phase E)."
                 .to_string(),
         ));
     }
@@ -1782,6 +1786,15 @@ mod tests {
             err.to_string().contains("process_hollowing"),
             "unclear: {err}"
         );
+    }
+
+    #[test]
+    fn proxy_rejects_pe_injection() {
+        let plan = parse(
+            "schema: 6\nname: t\nbuild:\n  crypto: { algo: xchacha20poly1305, key: random }\n  payloads:\n    a: { source: ./a.exe, format: pe }\n  stub:\n    syscalls: { mode: indirect }\n    api_resolution: { mode: proxy, apis: [\"ntdll!NtReadVirtualMemory\"] }\n  output: { path: ./dist/o.exe, arch: x64, strip: true, trim_paths: all }\nruntime:\n  - technique: pe_injection\n    params: { payload: a, target: \"C:\\\\x.exe\" }\n",
+        );
+        let err = validate(&plan).expect_err("proxy with pe_injection");
+        assert!(err.to_string().contains("pe_injection"), "unclear: {err}");
     }
 
     #[test]

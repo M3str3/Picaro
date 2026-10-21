@@ -1021,3 +1021,61 @@ a module entry and the loader lock — which also makes the image visible in the
 load list, a product decision rather than a fragment patch. The fragment stays
 with the callbacks only, pinned by
 `the_mapper_does_not_provision_static_tls`.
+
+## Shellcode TLS — the stub-side handoff (2026-10-21)
+
+Host: Windows x64, Defender real-time protection off (checked at the start of
+the round). Method: the Xenon Mythic agent packed as `kind: shellcode`
+(`reflective_loading`, `syscalls: indirect` + `api_hash`, `api_resolution:
+proxy` + `all`, `strings: xor`) run through the MetricsCollector .NET host and a
+plain gcc runner, live-inspected under lldb (attach + batch) with minidumps from
+WER's LocalDumps.
+
+- **Index 0 is not free either.** With the sRDI provisioning removed (the stub
+  keeps the linker's zero), the stub aliases the static-TLS block of the module
+  that owns index 0 on the bootstrap thread — in the dotnet host that is
+  `dotnet.exe` (the walk measured indices 0..9, `KERNELBASE` = 1). The host's
+  CRT writes into that block, the stub's `DTORS` `RefCell` header (std
+  `thread_local`) reads as borrowed, and the first registration aborts:
+  `fatal runtime error: the global allocator may not use TLS with destructors`
+  (release; debug survives by layout luck, which is what made the failure look
+  release-only).
+- **The `TlsAlloc` index really is KERNELBASE's.** Live under lldb:
+  `TlsAlloc()` returns `1` while the in-memory module walk reads KERNELBASE's
+  `_tls_index` = 1 — the dynamic and static index spaces overlap numerically,
+  exactly as the 2026-09-27 entry measured.
+- **A private array cannot coexist with module loads.** The first stub-side
+  design (private array, index past every module, installed before the chain)
+  crashed in ntdll during the payload's import walk: loading `WININET.dll` (a
+  TLS-bearing import) makes `LdrpHandleTlsData` grow the per-thread array, and
+  the loader ran heap operations on the private `VirtualAlloc` block (`mov
+  -0x8(%r8); RtlFreeHeap`, AV on a 4 KiB RW page with a guard page below).
+  Confirmed by bisect: the chain dies exactly on the TLS-bearing load, and a
+  plain-process reproducer of the swap survives a non-TLS load.
+- **The fix: the stub owns its TLS, the loader stays out.** `src/engine/tls.rs`
+  renders `$TLS_HANDOFF_BLOCK$`: `provision()` (called only by release shellcode
+  stubs, before the first thread-local use) walks the PEB module list for the
+  highest static index, copies the loader's per-thread array into a private one
+  with the stub's template block at `max+1`, publishes `_tls_index` and swaps
+  `gs:[0x58]` for the calling thread. `PauseGuard` restores the loader's array
+  around every `LoadLibraryA` in the import walk and around the payload handoff
+  (`run_tls_callbacks`/`DllMain`/export/entry point); a resume rebuilds the
+  private array from the loader's *current* array, so modules loaded during the
+  pause get their entries. The export wrapper holds a `RestoreGuard` so a panic
+  still leaves the thread with the array its teardown expects.
+- **Verified live.** The release artifact's mapped stub reads `_tls_index` = 4
+  (the runner process's `max+1`) while the payload blocks in its 24 h export;
+  five 30 s and two 150 s runs stay alive where the unprovisioned control
+  aborts in seconds. `panic=abort` for shellcode (`src/engine/compiler.rs`)
+  coexists as hardening — on this toolchain the stub still carries a TLS
+  directory, so it does not replace the handoff.
+- **Debug builds keep the historical aliasing.** With the handoff gated to
+  release, a debug stub's traces flow but its stdio thread-locals stay on
+  index 0 and can panic under the wrong host CRT writes (observed in a gcc
+  runner; the dotnet host survived). The proxy traces were removed: a proxy
+  runs on payload threads, where the stub's TLS index is not provisioned, and
+  its debug print faulted there.
+- **Known limit, unchanged:** a module with static TLS loaded while the private
+  array is *active* (no pause around it — a concurrent load from another
+  thread) makes the loader try to grow an array it does not own. The pauses
+  cover the chain's own loads; other-thread loads are the historical hazard.

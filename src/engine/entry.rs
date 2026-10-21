@@ -131,7 +131,15 @@ pub extern "system" fn JNI_OnLoad(
 /// `extern "system"` is `stdcall`, so the callee must pop exactly what the
 /// caller pushed. Every other host may pass none — on x64 the extra argument
 /// slots are simply ignored.
-fn export_entry(name: &str) -> String {
+fn export_entry(name: &str, shellcode: bool) -> String {
+    let restore = if shellcode {
+        // A shellcode stub runs on a thread whose TLS array is the stub's
+        // private one; the guard puts the loader's array back when the chain
+        // finishes or unwinds, so the host thread's teardown sees its own.
+        "    let _restore = crate::tls_handoff::RestoreGuard::new();\n"
+    } else {
+        ""
+    };
     format!(
         r#"/// `{name}`: what a host calls to run the chain. Returns the chain's code.
 #[allow(non_snake_case)]
@@ -143,7 +151,7 @@ pub extern "system" fn {name}(
     _show: i32,
 ) -> i32 {{
     dll_attach_console();
-    dll_run_chain()
+{restore}    dll_run_chain()
 }}
 "#
     )
@@ -154,8 +162,11 @@ pub fn render(kind: OutputKind, entry: &DllEntry, console: ConsoleMode) -> Strin
     match kind {
         OutputKind::Exe => EXE_ENTRY.to_string(),
         // Shellcode wraps the same DLL: the reflective loader (sRDI) maps it and
-        // calls the plain export after `DllMain`, so the entry block is identical.
-        OutputKind::Dll | OutputKind::Shellcode => render_dll(entry, console),
+        // calls the plain export after `DllMain`, so the entry block is identical
+        // except for the TLS restore guard the shellcode export carries.
+        OutputKind::Dll | OutputKind::Shellcode => {
+            render_dll(entry, console, kind == OutputKind::Shellcode)
+        }
         // A psmodule build never renders the Rust entry block (it is compiled
         // from generated C#); the placeholder keeps the match total.
         OutputKind::PsModule => String::new(),
@@ -169,7 +180,7 @@ pub fn render(kind: OutputKind, entry: &DllEntry, console: ConsoleMode) -> Strin
 /// one place the host's thread notifications are dropped. What makes a build
 /// conspicuous is a chain-runner export *next to* `JNI_OnLoad` (`entry: auto`),
 /// not `DllMain` itself.
-fn render_dll(entry: &DllEntry, console: ConsoleMode) -> String {
+fn render_dll(entry: &DllEntry, console: ConsoleMode, shellcode: bool) -> String {
     let mut out = String::new();
     out.push_str("// --- Entry (build.output.kind: dll) ---\n");
     out.push_str(match console {
@@ -186,7 +197,7 @@ fn render_dll(entry: &DllEntry, console: ConsoleMode) -> String {
     }
     if let Some(name) = entry.export_name() {
         out.push('\n');
-        out.push_str(&export_entry(name));
+        out.push_str(&export_entry(name, shellcode));
     }
     out
 }
@@ -274,13 +285,20 @@ mod tests {
     }
 
     #[test]
-    fn shellcode_renders_the_same_entry_as_a_dll() {
-        // Shellcode wraps the packed DLL, so it reuses the DLL entry block
-        // verbatim: the reflective loader calls the plain export after DllMain.
+    fn shellcode_entry_adds_only_the_tls_restore_guard() {
+        // Shellcode wraps the packed DLL, so it reuses the DLL entry block; the
+        // only difference is the TLS restore guard the shellcode export carries
+        // (its thread runs on a private TLS array the stub provisioned).
         let entry = DllEntry::Export("Run".to_string());
+        let dll = render(OutputKind::Dll, &entry, ConsoleMode::Parent);
+        let shellcode = render(OutputKind::Shellcode, &entry, ConsoleMode::Parent);
         assert_eq!(
-            render(OutputKind::Shellcode, &entry, ConsoleMode::Parent),
-            render_dll(&entry, ConsoleMode::Parent)
+            shellcode,
+            dll.replace(
+                "    dll_run_chain()",
+                "    let _restore = crate::tls_handoff::RestoreGuard::new();\n    dll_run_chain()"
+            ),
+            "the shellcode export must only add the restore guard"
         );
         let auto = render(OutputKind::Shellcode, &DllEntry::Auto, ConsoleMode::Parent);
         assert!(!auto.contains("fn main("), "shellcode has no main: {auto}");

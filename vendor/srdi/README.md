@@ -6,15 +6,18 @@ loader so the output is raw, position-independent bytes. That loader comes from
 `9fdd5c44383039519accd1e6bac4acd5a046a92c`), vendored here as source instead of
 downloaded, with three fixes the upstream Python no longer matches:
 
-- **`ShellcodeRDI.c`** — the C reflective loader, extended to *provision
-  thread-local storage* for the mapped DLL (upstream only runs TLS callbacks,
-  not TLS data). A Rust `#[thread_local]` otherwise reads an uninitialized slot
-  and aborts. The block is written into `TEB->ThreadLocalStoragePointer`
-  (`gs:[0x58]`), the array a CRT reads — never `TlsSetValue`, which writes
-  `TEB->TlsSlots` — and the slot is restored before the thread exits so ntdll's
-  teardown does not try to free our private block. See
-  `docs/design/shellcode-output.md` and `docs/measurements.md` ("TLS
-  provisioning for a manually mapped image").
+- **`ShellcodeRDI.c`** — the C reflective loader. It does **not** provision
+  static TLS: a manually-mapped image never gets a TLS index, and every
+  user-mode attempt to fabricate one collides with the loader's own state
+  (measured: `TlsAlloc` returns `1` = KERNELBASE's static index, which
+  corrupts both sides; leaving the linker's zero aliases the module that owns
+  index 0 and aborts the stub's first `#[thread_local]` registration in
+  release). The generated stub provisions its own TLS for `kind: shellcode`
+  builds instead — see `src/engine/tls.rs` and the `$TLS_HANDOFF_BLOCK$` the
+  packer injects — with a private per-thread array, an index past every loaded
+  module's and pause/resume around module loads and the payload handoff. TLS
+  *callbacks* still run (STEP 8). See `docs/measurements.md` (2026-10-21) and
+  `docs/design/shellcode-output.md`.
 - **`build_blob.py`** — compiles `ShellcodeRDI.c` with MinGW-w64, extracts the
   position-independent `.text` as the x64 loader blob and emits `ShellcodeRDI.py`
   (the converter Picaro imports). It also corrects the x64 bootstrap, whose 5th

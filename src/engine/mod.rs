@@ -53,6 +53,7 @@ pub mod stager;
 pub mod steps;
 pub mod stub;
 pub mod syscalls;
+pub mod tls;
 
 /// Build engine error (stub rendering and compilation).
 #[derive(Debug, thiserror::Error)]

@@ -14,10 +14,12 @@ use chacha20poly1305::{
 
 $STUB_HELPERS$
 
+$TLS_HANDOFF_BLOCK$
+
 $ENTRY_BLOCK$
 
 fn run() -> Result<i32, String> {
-    init_syscalls()?;
+$TLS_PROVISION$    init_syscalls()?;
     #[allow(unused_mut, unused_assignments)]
     let mut last: i32 = 0;
 $STEP_RUNNER_BODY$

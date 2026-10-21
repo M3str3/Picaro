@@ -13,6 +13,22 @@
 #define SRDI_OBFUSCATEIMPORTS 0x4
 #define SRDI_PASS_SHELLCODE_BASE 0x8
 
+//
+// Picaro note: this vendored loader does NOT provision static TLS for the
+// mapped DLL. A manually-mapped image never goes through the image loader's
+// TLS pass, so its `_tls_index` keeps the zero the linker left; borrowing a
+// `TlsAlloc` index instead collides numerically with the loader's static
+// module indices (measured: index 1 = KERNELBASE, release-only corruption;
+// docs/measurements.md 2026-09-27, 2026-10-17, 2026-10-18), and leaving the
+// zero aliases the module that owns index 0 (measured 2026-10-21: the host's
+// CRT writes there and the stub aborts on its first thread-local
+// registration in release). The generated stub provisions its own TLS for
+// `kind: shellcode` builds instead — see `src/engine/tls.rs` and the
+// `$TLS_HANDOFF_BLOCK$` the packer injects — which keeps this loader free of
+// the loader-internal knowledge a correct provisioning needs. TLS *callbacks*
+// still run (STEP 8).
+//
+
 #define DEREF( name )*(UINT_PTR *)(name)
 #define DEREF_64( name )*(DWORD64 *)(name)
 #define DEREF_32( name )*(DWORD *)(name)
@@ -65,7 +81,6 @@ typedef BOOL(WINAPI * VIRTUALPROTECT)(LPVOID, SIZE_T, DWORD, PDWORD);
 typedef int (WINAPI * MESSAGEBOXA)(HWND, LPSTR, LPSTR, UINT);
 typedef BOOL(WINAPI * VIRTUALFREE)(LPVOID, SIZE_T, DWORD);
 typedef BOOL(WINAPI * LOCALFREE)(LPVOID);
-typedef DWORD(WINAPI * TLSALLOC)(VOID);
 typedef VOID(WINAPI* SLEEP)(DWORD);
 typedef BOOLEAN(WINAPI* RTLADDFUNCTIONTABLE)(PVOID, DWORD, DWORD64);
 
@@ -135,7 +150,6 @@ ULONG_PTR LoadDLL(PBYTE pbModule, DWORD dwFunctionHash, LPVOID lpUserData, DWORD
 	LOCALFREE pLocalFree = NULL;
 	SLEEP pSleep = NULL;
 	RTLADDFUNCTIONTABLE pRtlAddFunctionTable = NULL;
-	TLSALLOC pTlsAlloc = NULL;
 
 	//CHAR msg[2] = { 'a','\0' };
 	//MESSAGEBOXA pMessageBoxA = NULL;
@@ -194,7 +208,6 @@ ULONG_PTR LoadDLL(PBYTE pbModule, DWORD dwFunctionHash, LPVOID lpUserData, DWORD
 
 	BYTE sSleep[] = { 'S', 'l', 'e', 'e', 'p' };
 	BYTE sLoadLibrary[] = { 'L', 'o', 'a', 'd', 'L', 'i', 'b', 'r', 'a', 'r', 'y', 'A' };
-	BYTE sTlsAlloc[] = { 'T', 'l', 's', 'A', 'l', 'l', 'o', 'c' };
 	BYTE sVirtualAlloc[] = { 'V', 'i', 'r', 't', 'u', 'a', 'l', 'A', 'l', 'l', 'o', 'c' };
 	BYTE sVirtualProtect[] = { 'V', 'i', 'r', 't', 'u', 'a', 'l', 'P', 'r', 'o', 't', 'e', 'c', 't' };
 	BYTE sFlushInstructionCache[] = { 'F', 'l', 'u', 's', 'h', 'I', 'n', 's', 't', 'r', 'u', 'c', 't', 'i', 'o', 'n', 'C', 'a', 'c', 'h', 'e' };
@@ -210,11 +223,6 @@ ULONG_PTR LoadDLL(PBYTE pbModule, DWORD dwFunctionHash, LPVOID lpUserData, DWORD
 
 	// Relocated base
 	ULONG_PTR baseAddress;
-
-	// TLS slot the loader restores on the way out, so ntdll's thread teardown
-	// does not mistake our private block for a loader-allocated one.
-	PVOID tlsSlotAddress = NULL;
-	PVOID tlsSlotOriginal = NULL;
 
 	// -------
 
@@ -253,9 +261,6 @@ ULONG_PTR LoadDLL(PBYTE pbModule, DWORD dwFunctionHash, LPVOID lpUserData, DWORD
 
 	FILL_STRING_WITH_BUF(aString, sLoadLibrary);
 	pLdrGetProcAddress(library, &aString, 0, (PVOID*)&pLoadLibraryA);
-
-	FILL_STRING_WITH_BUF(aString, sTlsAlloc);
-	pLdrGetProcAddress(library, &aString, 0, (PVOID*)&pTlsAlloc);
 
 	//FILL_STRING_WITH_BUF(aString, sMessageBox);
 	//pLdrGetProcAddress(library, &aString, 0, (PVOID*)&pMessageBoxA);
@@ -557,55 +562,6 @@ ULONG_PTR LoadDLL(PBYTE pbModule, DWORD dwFunctionHash, LPVOID lpUserData, DWORD
 	dllMain((HINSTANCE)baseAddress, DLL_PROCESS_ATTACH, (LPVOID)1);
 
 	///
-	// STEP 10b: provision thread-local storage for the current thread.
-	//
-	// A manually-mapped DLL never goes through the image loader's TLS pass, so
-	// the `_tls_index` slot and the per-thread template are left unset. Rust
-	// `#[thread_local]` (and the UCRT's own `__declspec(thread)` state) read that
-	// slot, so without this the first TLS access sees garbage and the runtime
-	// aborts. The chain below runs synchronously on this one thread, so copying
-	// the template into the current thread's slot is sufficient.
-	///
-
-	dataDir = &ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
-	if (dataDir->Size && pTlsAlloc) {
-		tlsDir = RVA(PIMAGE_TLS_DIRECTORY, baseAddress, dataDir->VirtualAddress);
-		PDWORD pTlsIndex = (PDWORD)(ULONG_PTR)tlsDir->AddressOfIndex;
-
-		if (pTlsIndex && tlsDir->StartAddressOfRawData && tlsDir->EndAddressOfRawData) {
-			if (*pTlsIndex == 0) {
-				*pTlsIndex = pTlsAlloc();
-			}
-
-			if (*pTlsIndex != TLS_OUT_OF_INDEXES) {
-				SIZE_T tlsSize = (SIZE_T)((ULONG_PTR)tlsDir->EndAddressOfRawData - (ULONG_PTR)tlsDir->StartAddressOfRawData);
-				SIZE_T zeroFill = (SIZE_T)tlsDir->SizeOfZeroFill;
-
-					if (tlsSize) {
-						PVOID tlsBlock = pVirtualAlloc(NULL, tlsSize + zeroFill, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-						if (tlsBlock) {
-							for (c = 0; c < tlsSize; c++) {
-								((PBYTE)tlsBlock)[c] = ((PBYTE)(ULONG_PTR)tlsDir->StartAddressOfRawData)[c];
-							}
-							// The CRT reads TEB->ThreadLocalStoragePointer (gs:[0x58]),
-							// not the array TlsSetValue writes (TEB->TlsSlots). Write the
-							// block directly; the index is reserved by TlsAlloc above, so
-							// accepting a collision with a loaded module is the safe path
-							// (the alternative is an unreserved entry ntdll faults on).
-							PVOID tlsArray = (PVOID)__readgsqword(0x58);
-							PVOID* slot = (PVOID*)((PBYTE)tlsArray + (SIZE_T)*pTlsIndex * 8);
-							if (slot) {
-								tlsSlotAddress = slot;
-								tlsSlotOriginal = *slot;
-								*slot = tlsBlock;
-							}
-						}
-					}
-			}
-		}
-	}
-
-	///
 	// STEP 11: call our exported function
 	///
 
@@ -654,13 +610,10 @@ ULONG_PTR LoadDLL(PBYTE pbModule, DWORD dwFunctionHash, LPVOID lpUserData, DWORD
 		} while (0);
 	}
 
-	// Restore the TLS slot we borrowed for this thread. The chain has finished
-	// and the export returned; ntdll's thread teardown now sees the original
-	// entry (or null) instead of our private VirtualAlloc block, whose header
-	// the teardown would otherwise try to read.
-	if (tlsSlotAddress) {
-		*(PVOID*)tlsSlotAddress = tlsSlotOriginal;
-	}
+	// (The TLS slot Picaro once borrowed for the stub is no longer taken: the
+	// generated stub provisions its own TLS for shellcode builds, see the note
+	// at the top of this file. The export above is the last code that runs
+	// before the optional memory wipe.)
 
 	if (dwFlags & SRDI_CLEARMEMORY && pVirtualFree && pLocalFree) {
 		if (!pVirtualFree((LPVOID)pbModule, 0, 0x8000))
