@@ -119,6 +119,11 @@ fn is_native_target(arch: Arch) -> bool {
     ON_WINDOWS && stub_target(arch) == host_target()
 }
 
+/// Whether the stub target links with MSVC's `link.exe`.
+fn target_is_msvc(arch: Arch) -> bool {
+    stub_target(arch).ends_with("-msvc")
+}
+
 /// The `rustc --version` line of the compiler the stub is built with.
 ///
 /// Recorded in the build manifest so an artifact can be traced back to the
@@ -443,7 +448,8 @@ fn package_field<'a>(block: &'a str, key: &str) -> Option<&'a str> {
 /// are threaded down from the plan instead of being display-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompileOptions {
-    /// Strip symbols and debug info (`-C strip=symbols`) when true.
+    /// Strip symbols and debug info (`-C strip=symbols`, plus `/DEBUG:NONE` on
+    /// MSVC so the linker emits no debug directory) when true.
     pub strip: bool,
     /// How build-time paths embedded in the binary are rewritten.
     pub trim_paths: PathTrim,
@@ -626,6 +632,14 @@ fn hardening_flags(
         ]);
     }
     flags.extend(["-C".to_string(), strip_flag(options.strip).to_string()]);
+    // `strip=symbols` empties the symbol and debug tables but leaves the
+    // linker's debug directory (RSDS) pointing at a PDB next to the scratch
+    // output, so the stub's file stem and a path-shaped reference survive into
+    // the artifact. `/DEBUG:NONE` stops link.exe from emitting the record (and
+    // the PDB) at all. MSVC-only: the GNU linker rejects the flag.
+    if options.strip && target_is_msvc(options.arch) {
+        flags.extend(["-C".to_string(), "link-arg=/DEBUG:NONE".to_string()]);
+    }
     match options.trim_paths {
         PathTrim::None => {}
         PathTrim::Relative => push_remap(manifest_dir, REMAP_TO, &mut flags),
@@ -1089,6 +1103,30 @@ dependencies = [
         assert!(flags.contains(&"strip=symbols".to_string()));
         assert!(!flags.contains(&"-O".to_string()));
         assert!(!flags.contains(&"opt-level=0".to_string()));
+    }
+
+    /// `strip: true` also drops the linker's debug directory on MSVC, where
+    /// `strip=symbols` alone leaves an RSDS record pointing at a PDB; the GNU
+    /// linker does not take the flag, and a debug or unstripped build keeps the
+    /// record on purpose.
+    #[test]
+    fn stripping_drops_the_msvc_debug_directory() {
+        let flag = "link-arg=/DEBUG:NONE".to_string();
+        let stripped = hardening_flags(CompileOptions::default(), Path::new("/proj"), None);
+        let unstripped = hardening_flags(
+            CompileOptions {
+                strip: false,
+                ..CompileOptions::default()
+            },
+            Path::new("/proj"),
+            None,
+        );
+        if target_is_msvc(Arch::X64) {
+            assert!(stripped.contains(&flag), "flags: {stripped:?}");
+        } else {
+            assert!(!stripped.contains(&flag), "flags: {stripped:?}");
+        }
+        assert!(!unstripped.contains(&flag), "flags: {unstripped:?}");
     }
 
     /// `build.polymorphism` reaches the flags through `CompileOptions`:

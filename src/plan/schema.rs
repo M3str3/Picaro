@@ -315,7 +315,9 @@ pub struct OutputPlan {
     /// Whether to strip the symbol table from the final binary (default: `true`).
     ///
     /// Stripping removes the symbol and debug tables `rustc` emits, so the
-    /// artifact is smaller and carries no function names or debug type info.
+    /// artifact is smaller and carries no function names or debug type info. On
+    /// MSVC it also suppresses the linker's debug directory, so the artifact
+    /// stops naming the `.pdb` of the build.
     #[serde(default = "default_true")]
     pub strip: bool,
 
