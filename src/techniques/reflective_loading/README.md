@@ -70,6 +70,17 @@ exits 0 once the export returns. Only *named* exports are reachable, and a
 forwarded export (`DLL.Function`) is refused: its entry is a string inside the
 export directory, not code.
 
+Once the export address is resolved, the loader zeroes the decrypted payload
+buffer before calling the export. That is the buffer's last read: TLS callbacks,
+`DllMain`, the optional header erasure and the lookup itself need its `nt`
+headers, while the resolved address points into the mapped image (the image base
+plus the function RVA), not into the buffer. The buffer belongs to the stub's
+caller, so it is zeroed rather than freed; without this, a blocking export
+(Xenon's `DllRegisterServer` sleeps 24h) would keep the pristine decrypted DLL
+in memory for its whole lifetime. Zeroing removes only that file copy: the
+mapped image, the payload's heap state (Xenon's config block) and the mapped
+`.rdata` remain.
+
 A `format: dll` payload **must** set `export`: `plan::validate` rejects a mapped
 DLL without one, because its `DllMain` only initializes the library (a
 Picaro-packed inner DLL's `DllMain` does nothing beyond
@@ -92,8 +103,10 @@ image's PE header — the MSVC CRT reads the subsystem from the optional header
 (`__scrt_get_show_window_mode`) and the load config for the security cookie, and
 `RtlImageNtHeader(GetModuleHandleW(NULL))` is a common self-inspection. Enable it
 only for payloads known not to. It also only removes the *mapped* image's
-header: the stub still holds the decrypted payload buffer until the step
-returns, and a whole-address-space scan can find a PE copy there.
+header. The stub's decrypted payload buffer is zeroed on the export path after
+the export lookup and before the export runs; on the entry-point path it stays
+until the step returns. A whole-address-space scan can find the file copy only
+on that latter path.
 
 ## Payload formats
 
@@ -155,9 +168,9 @@ it must be the last step; for a DLL or shellcode it returns, and another step ma
   signatures that flag the file on disk apply in memory). With
   `params.erase_header: true` the mapped image's header is zeroed before any
   payload code runs, so a scan that finds a second PE image by its `MZ`/`PE`
-  pair at the mapped base no longer matches; the decrypted payload buffer the
-  stub holds until the step returns still contains a PE copy (see “PE-header
-  erasure”).
+  pair at the mapped base no longer matches; the decrypted file copy is zeroed
+  early on the export path (after the export lookup, before a blocking export
+  runs) and stays only on the entry-point path (see “PE-header erasure”).
 - High-entropy executable regions that do not map to a loaded module.
 
 ## Architectures
@@ -268,7 +281,8 @@ patch to this fragment. Until then:
   zeroes the first `SizeOfHeaders` bytes at the mapped base after the loader's
   fixups and before any payload code runs. It is opt-in because startup code
   that reads its own header (the MSVC CRT, self-inspection) can break, and it
-  does not cover the decrypted payload buffer the stub still holds.
+  does not cover the decrypted payload buffer (zeroed only on the export path,
+  after the export lookup).
 - **A payload that raises a native exception cannot unwind on x64.** The mapped
   image's unwind tables (`IMAGE_DIRECTORY_ENTRY_EXCEPTION`) are not registered
   with `RtlAddFunctionTable` and the image is absent from the loader list, so a
