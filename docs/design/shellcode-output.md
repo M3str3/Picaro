@@ -82,6 +82,16 @@ Rejected (errors):
 Advisories (informational): the `.bin` extension, the detection surface (RWX +
 reflective loader) and the mixed export table under `entry: auto`.
 
+## Static surface
+
+The intermediate DLL is `out.dll`, not a name derived from the artifact: sRDI
+converts it in place and the stage is delivered as raw bytes, so echoing the
+operator's file stem would leave that codename in the export directory's `Name`
+field and in the linker's PDB reference. A release build also passes
+`/DEBUG:NONE` on MSVC, because `-C strip=symbols` alone leaves an RSDS record
+pointing at `<stem>.pdb`. `kind: dll` keeps the delivered name on purpose (the
+DLL is the artifact; see `docs/design/dll-output.md`, D-15).
+
 ## Code touchpoints
 
 - `src/plan/schema.rs` — `OutputKind::Shellcode`, `OutputPlan.entry` doc.

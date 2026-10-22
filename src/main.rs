@@ -1762,18 +1762,21 @@ fn apply_subsystem(source: String, subsystem: Subsystem) -> String {
 
 /// Where the compiled stub is written inside the build directory.
 ///
-/// An executable keeps the fixed `out.exe`. A DLL is named after the artifact
-/// the operator asked for: the linker records the link output's name inside the
-/// PE (the export directory's `Name` field), so the file should report the name
-/// it will be delivered under rather than the build's scratch name.
+/// An executable keeps the fixed `out.exe`, and a shellcode build keeps
+/// `out.dll`: its intermediate is never delivered (sRDI converts it in place),
+/// so a neutral name leaves no codename in the stage's export directory or PDB.
+/// A DLL is named after the artifact the operator asked for: the linker records
+/// the link output's name inside the PE (the export directory's `Name` field),
+/// so the file should report the name it will be delivered under rather than
+/// the build's scratch name.
 fn intermediate_path(build_dir: &Path, output: &plan::schema::OutputPlan) -> PathBuf {
     match output.kind {
         OutputKind::Exe => build_dir.join("out.exe"),
-        // Shellcode wraps the same DLL, so the intermediate is a library named
-        // after the artifact. A psmodule build has its own flow (see
-        // `build_psmodule`); this keeps the match total and names the scratch
-        // module after the artifact.
-        OutputKind::Dll | OutputKind::Shellcode | OutputKind::PsModule => {
+        OutputKind::Shellcode => build_dir.join("out.dll"),
+        // A psmodule build has its own flow (see `build_psmodule`); keeping it
+        // in this arm keeps the match total and names the scratch module after
+        // the artifact.
+        OutputKind::Dll | OutputKind::PsModule => {
             let stem = output
                 .path
                 .file_stem()
@@ -2117,6 +2120,23 @@ mod tests {
     fn unique_scratch_dir_lives_in_a_run_folder_under_build() {
         let dir = unique_scratch_dir_in(Path::new("/usr/src/picaro"), "42-123");
         assert_eq!(dir, Path::new("/usr/src/picaro/build/run-42-123"));
+    }
+
+    #[test]
+    fn shellcode_intermediates_keep_a_neutral_name() {
+        let output: plan::schema::OutputPlan =
+            serde_yml::from_str("path: dist/xenon-stage.bin\nkind: shellcode\n")
+                .expect("output plan");
+        let path = intermediate_path(Path::new("/build"), &output);
+        assert_eq!(path, Path::new("/build").join("out.dll"));
+    }
+
+    #[test]
+    fn dll_intermediates_follow_the_delivered_name() {
+        let output: plan::schema::OutputPlan =
+            serde_yml::from_str("path: dist/metrics.dll\nkind: dll\n").expect("output plan");
+        let path = intermediate_path(Path::new("/build"), &output);
+        assert_eq!(path, Path::new("/build").join("metrics.dll"));
     }
 
     #[test]
