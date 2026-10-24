@@ -621,7 +621,7 @@ Also record: the C path must not regress the Rust path;
 
 | # | Decision | Resolution | Status |
 |---|---|---|---|
-| D-1 | `bouncer` `on_fail: exit` from inside the library | **The library never calls `exit()`.** Gates return `PICARO_DECLINED`; other failures return `PICARO_ERR`. The C stub decides. Diverges from the Rust path intentionally. | decided |
+| D-1 | `bouncer` with an exiting `on_reject` action from inside the library | **The library never calls `exit()`.** Gates return `PICARO_DECLINED`; other failures return `PICARO_ERR`. The C stub decides. Diverges from the Rust path intentionally. | decided |
 | D-2 | `strip` implementation for the C path | `llvm-strip --strip-all` when available + `/DEBUG:NONE`; measured with `audit` | decided |
 | D-3 | Preferred C compiler | clang (+ lld-link) first, `cl` fallback, MinGW only for the GNU triple | decided (Phase 0 confirms) |
 | D-4 | Ship a builtin `main.c.tpl` | Yes — `language: c` with no `path` must just work; it uses `$PICARO.RUNTIME$` | agreed |

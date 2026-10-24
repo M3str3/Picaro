@@ -36,10 +36,10 @@ pub mod reflective_loading;
 pub mod self_deletion;
 pub mod sleep;
 pub mod sleep_obfuscation;
-pub mod stack_spoofing;
 pub mod thread_hijacking;
 pub mod timestomping;
 pub mod unhook_ntdll;
+pub mod veh_execution;
 
 use std::path::Path;
 
@@ -274,13 +274,6 @@ pub enum TechniqueKind {
         #[serde(default)]
         params: self_deletion::Params,
     },
-    /// Stack spoofing: fabricate the top of the stack for every syscall
-    /// (preparation).
-    StackSpoofing {
-        /// Technique parameters (`decoy_bytes`).
-        #[serde(default)]
-        params: stack_spoofing::Params,
-    },
     /// Sleep obfuscation: encrypt the image region during a timer-driven
     /// sleep (preparation).
     SleepObfuscation {
@@ -339,6 +332,13 @@ pub enum TechniqueKind {
         #[serde(default)]
         params: process_ghosting::Params,
     },
+    /// Vectored-exception execution: enter the payload by redirecting a
+    /// breakpoint through a vectored handler (execution).
+    VehExecution {
+        /// Technique parameters (`payload`).
+        #[serde(default)]
+        params: veh_execution::Params,
+    },
 }
 
 impl TechniqueKind {
@@ -393,7 +393,6 @@ impl TechniqueKind {
                 params.render_fragment_for(strings, format, export)
             }
             TechniqueKind::SelfDeletion { params } => params.render_fragment(strings),
-            TechniqueKind::StackSpoofing { params } => params.render_fragment(strings),
             TechniqueKind::PpidSpoofing { params } => params.render_fragment(strings),
             TechniqueKind::LivingOffTheLand { params } => params.render_fragment(strings),
             TechniqueKind::Sleep { params } => params.render_fragment(strings),
@@ -404,6 +403,9 @@ impl TechniqueKind {
                 params.render_fragment_for(strings, format, export)
             }
             TechniqueKind::ProcessGhosting { params } => {
+                params.render_fragment_for(strings, format, export)
+            }
+            TechniqueKind::VehExecution { params } => {
                 params.render_fragment_for(strings, format, export)
             }
         }
@@ -435,7 +437,6 @@ impl TechniqueKind {
             TechniqueKind::PeInjection { .. } => pe_injection::DEF.name,
             TechniqueKind::ThreadHijacking { .. } => thread_hijacking::DEF.name,
             TechniqueKind::SelfDeletion { .. } => self_deletion::DEF.name,
-            TechniqueKind::StackSpoofing { .. } => stack_spoofing::DEF.name,
             TechniqueKind::PpidSpoofing { .. } => ppid_spoofing::DEF.name,
             TechniqueKind::UnhookNtdll { .. } => unhook_ntdll::DEF.name,
             TechniqueKind::SleepObfuscation { .. } => sleep_obfuscation::DEF.name,
@@ -446,6 +447,7 @@ impl TechniqueKind {
             TechniqueKind::Timestomping { .. } => timestomping::DEF.name,
             TechniqueKind::DllHollowing { .. } => dll_hollowing::DEF.name,
             TechniqueKind::ProcessGhosting { .. } => process_ghosting::DEF.name,
+            TechniqueKind::VehExecution { .. } => veh_execution::DEF.name,
         }
     }
 
@@ -468,6 +470,7 @@ impl TechniqueKind {
             TechniqueKind::ThreadHijacking { params } => params.payload.as_deref(),
             TechniqueKind::DllHollowing { params } => params.payload.as_deref(),
             TechniqueKind::ProcessGhosting { params } => params.payload.as_deref(),
+            TechniqueKind::VehExecution { params } => params.payload.as_deref(),
             _ => None,
         }
     }
@@ -512,7 +515,6 @@ impl TechniqueKind {
             TechniqueKind::PeInjection { .. } => pe_injection::DEF.category,
             TechniqueKind::ThreadHijacking { .. } => thread_hijacking::DEF.category,
             TechniqueKind::SelfDeletion { .. } => self_deletion::DEF.category,
-            TechniqueKind::StackSpoofing { .. } => stack_spoofing::DEF.category,
             TechniqueKind::PpidSpoofing { .. } => ppid_spoofing::DEF.category,
             TechniqueKind::UnhookNtdll { .. } => unhook_ntdll::DEF.category,
             TechniqueKind::SleepObfuscation { .. } => sleep_obfuscation::DEF.category,
@@ -523,6 +525,7 @@ impl TechniqueKind {
             TechniqueKind::Timestomping { .. } => timestomping::DEF.category,
             TechniqueKind::DllHollowing { .. } => dll_hollowing::DEF.category,
             TechniqueKind::ProcessGhosting { .. } => process_ghosting::DEF.category,
+            TechniqueKind::VehExecution { .. } => veh_execution::DEF.category,
         }
     }
 }
@@ -717,7 +720,6 @@ pub fn all() -> &'static [TechniqueDef] {
         thread_hijacking::DEF,
         ppid_spoofing::DEF,
         self_deletion::DEF,
-        stack_spoofing::DEF,
         unhook_ntdll::DEF,
         patch_amsi::DEF,
         anti_debug::DEF,
@@ -738,12 +740,40 @@ pub fn all() -> &'static [TechniqueDef] {
         hide_module::DEF,
         dll_hollowing::DEF,
         process_ghosting::DEF,
+        veh_execution::DEF,
     ]
 }
 
 /// Looks up a technique by its YAML key.
+///
+/// The lookup ignores case and underscores (see [`canonical_name`]), so the CLI
+/// and the plan loader agree on what a name means.
 pub fn find(name: &str) -> Option<&'static TechniqueDef> {
-    all().iter().find(|def| def.name == name)
+    let canonical = canonical_name(name)?;
+    all().iter().find(|def| def.name == canonical)
+}
+
+/// The registry's canonical key for `name`, ignoring case and underscores.
+///
+/// Both sides are normalized before matching, so a plan may write
+/// `reflective_loading`, `ReflectiveLoading`, `REFLECTIVElOADING` or
+/// `reflectiveloading` interchangeably. This is the compatibility layer for the
+/// eventual migration to CamelCase keys: the canonical names in `DEF` stay the
+/// source of truth, and the parser does not need to change.
+pub fn canonical_name(name: &str) -> Option<&'static str> {
+    let wanted = normalize_key(name);
+    all()
+        .iter()
+        .map(|def| def.name)
+        .find(|candidate| normalize_key(candidate) == wanted)
+}
+
+/// Lowercases `name` and drops underscores.
+fn normalize_key(name: &str) -> String {
+    name.chars()
+        .filter(|character| *character != '_')
+        .collect::<String>()
+        .to_ascii_lowercase()
 }
 
 /// Section headings every technique README must contain (see
@@ -1352,6 +1382,30 @@ mod tests {
                 def.name
             );
         }
+    }
+
+    /// Technique keys are matched ignoring case and underscores, so a plan is
+    /// free to name a step `ReflectiveLoading`, `reflectiveloading` or
+    /// `REFLECTIVE_loading` while the registry keeps one canonical spelling.
+    #[test]
+    fn technique_names_ignore_case_and_underscores() {
+        let canonical = canonical_name("reflective_loading").expect("canonical name");
+        assert_eq!(canonical, "reflective_loading");
+        for alias in [
+            "reflectiveloading",
+            "REFLECTIVEloading",
+            "ReflectiveLoading",
+            "Reflective_Loading",
+            "REFLECTIVE_LOADING",
+        ] {
+            assert_eq!(
+                canonical_name(alias),
+                Some("reflective_loading"),
+                "{alias} must resolve to reflective_loading"
+            );
+            assert_eq!(find(alias).map(|def| def.name), Some("reflective_loading"));
+        }
+        assert_eq!(canonical_name("no_such_technique"), None);
     }
 
     /// A technique fragment must not declare a `thiserror` diagnostic: its

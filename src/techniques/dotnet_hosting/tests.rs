@@ -102,6 +102,30 @@ runtime:
     assert!(err.to_string().contains("format: dotnet"), "unclear: {err}");
 }
 
+/// The entry point is retried only for `DISP_E_BADPARAMCOUNT`. A `Main()`
+/// that threw reports `COR_E_TARGETINVOCATION`; it already ran, so a blanket
+/// retry on any `hr < 0` would run it twice.
+#[test]
+fn the_entry_point_is_retried_only_for_a_bad_parameter_count() {
+    let rendered = Params::default()
+        .render_fragment(&StringsConfig::from_yaml(None).expect("default strings"));
+
+    assert!(
+        rendered.contains("const DISP_E_BADPARAMCOUNT: i32 = 0x8002_000E_u32 as i32;"),
+        "the retry must be keyed on the documented HRESULT"
+    );
+    let guard = rendered
+        .find("if hr != DISP_E_BADPARAMCOUNT")
+        .expect("the retry must be gated on the HRESULT");
+    let retry = rendered
+        .find("let retry = invoke_3")
+        .expect("the parameterless retry must exist");
+    assert!(
+        guard < retry,
+        "the HRESULT check must run before the entry point is invoked again"
+    );
+}
+
 /// Canary for the raw `VARIANT` layout the fragment writes through. It cannot
 /// be asserted from here — the fragment is a template compiled only inside a
 /// stub, where its own `const` assertion catches a mismatch — so this pins the

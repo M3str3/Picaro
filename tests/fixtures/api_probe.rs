@@ -24,6 +24,17 @@ const PROBE_ACCESS: u32 = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ;
 /// A process id that cannot exist (the value is reserved and never handed out).
 const BOGUS_PID: u32 = 0xFFFF_FFFE;
 
+/// `MEM_COMMIT`.
+const MEM_COMMIT: u32 = 0x1000;
+/// `MEM_RESERVE`.
+const MEM_RESERVE: u32 = 0x2000;
+/// `MEM_RELEASE`.
+const MEM_RELEASE: u32 = 0x8000;
+/// `PAGE_READONLY`.
+const PAGE_READONLY: u32 = 0x02;
+/// `PAGE_READWRITE`.
+const PAGE_READWRITE: u32 = 0x04;
+
 /// The 8 bytes the probe reads back: `0x1122_3344_5566_7788` little-endian.
 const VALUE: u64 = 0x1122_3344_5566_7788;
 /// The bytes `VALUE` decomposes into.
@@ -55,6 +66,30 @@ extern "system" {
     ) -> Handle;
     fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
     fn CloseHandle(handle: Handle) -> Bool;
+    fn VirtualAlloc(
+        address: *const core::ffi::c_void,
+        size: usize,
+        alloc_type: u32,
+        protect: u32,
+    ) -> *mut core::ffi::c_void;
+    fn VirtualProtect(
+        address: *const core::ffi::c_void,
+        size: usize,
+        new_protect: u32,
+        old_protect: *mut u32,
+    ) -> Bool;
+    fn VirtualFree(address: *mut core::ffi::c_void, size: usize, free_type: u32) -> Bool;
+    fn GetCurrentThread() -> Handle;
+    fn VirtualQuery(
+        address: *const core::ffi::c_void,
+        buffer: *mut MemoryBasicInformation,
+        length: usize,
+    ) -> usize;
+}
+
+#[link(name = "advapi32")]
+extern "system" {
+    fn OpenThreadToken(thread: Handle, access: u32, open_as_self: i32, token: *mut Handle) -> Bool;
 }
 
 #[link(name = "ntdll")]
@@ -90,6 +125,21 @@ struct ObjectAttributes {
 struct ClientId {
     unique_process: *mut u8,
     unique_thread: *mut u8,
+}
+
+/// The x64 `MEMORY_BASIC_INFORMATION` layout `VirtualQuery` fills.
+#[repr(C)]
+struct MemoryBasicInformation {
+    base_address: *mut u8,
+    allocation_base: *mut u8,
+    allocation_protect: u32,
+    partition_id: u16,
+    _pad0: u16,
+    region_size: usize,
+    state: u32,
+    protect: u32,
+    type_: u32,
+    _pad1: u32,
 }
 
 /// Signature of the real `OpenProcess` export.
@@ -220,6 +270,82 @@ fn run_probe() {
     // IAT: NtClose (a plain direct Nt* route).
     let nt_close = unsafe { NtClose(nt_handle) };
 
+    // IAT: VirtualAlloc -> write -> VirtualProtect -> read -> VirtualFree.
+    let block = unsafe {
+        VirtualAlloc(
+            core::ptr::null(),
+            0x1000,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_READWRITE,
+        )
+    };
+    let mut old_protect = 0u32;
+    let mut protect_rc = -1;
+    let mut free_rc = -1;
+    let mut mem_ok = 0i32;
+    if !block.is_null() {
+        unsafe { *(block as *mut u8) = 0xAB };
+        protect_rc = unsafe { VirtualProtect(block, 0x1000, PAGE_READONLY, &mut old_protect) };
+        mem_ok = (unsafe { *(block as *const u8) == 0xAB }) as i32;
+        free_rc = unsafe { VirtualFree(block, 0, MEM_RELEASE) };
+    }
+
+    // IAT: WaitForSingleObject on the current-process pseudo-handle with a zero
+    // timeout (always a timeout), then CloseHandle on the real OpenProcess
+    // handle.
+    let wait_rc = unsafe { WaitForSingleObject(GetCurrentProcess(), 0) };
+    let close_rc = unsafe { CloseHandle(handle) };
+    let _ = unsafe { CloseHandle(inherit_handle) };
+
+    // IAT: VirtualQuery on the probe's own stack value.
+    let mut mbi = MemoryBasicInformation {
+        base_address: core::ptr::null_mut(),
+        allocation_base: core::ptr::null_mut(),
+        allocation_protect: 0,
+        partition_id: 0,
+        _pad0: 0,
+        region_size: 0,
+        state: 0,
+        protect: 0,
+        type_: 0,
+        _pad1: 0,
+    };
+    let query_len = unsafe {
+        VirtualQuery(
+            src as *const core::ffi::c_void,
+            &mut mbi,
+            core::mem::size_of::<MemoryBasicInformation>(),
+        )
+    };
+
+    // IAT: CreateThread with a real TID out-parameter, then wait and close.
+    unsafe extern "system" fn thread_proc(param: *mut core::ffi::c_void) -> u32 {
+        unsafe { *(param as *mut u32) = 0x5A5A };
+        0
+    }
+    let mut thread_marker = 0u32;
+    let mut thread_id = 0u32;
+    let thread = unsafe {
+        CreateThread(
+            core::ptr::null(),
+            0,
+            Some(thread_proc),
+            &mut thread_marker as *mut u32 as *mut core::ffi::c_void,
+            0,
+            &mut thread_id,
+        )
+    };
+    let thread_wait = unsafe { WaitForSingleObject(thread, 0xFFFF_FFFF) };
+    let thread_ok = (thread != 0 && thread_id != 0 && thread_marker == 0x5A5A && thread_wait == 0) as i32;
+    let thread_close = unsafe { CloseHandle(thread) };
+
+    // IAT: OpenThreadToken on a thread that is not impersonating. Both the proxy
+    // and the real export must fail with ERROR_NO_TOKEN (1008).
+    let mut token: Handle = 0;
+    unsafe { SetLastError(0) };
+    let open_token = unsafe { OpenThreadToken(GetCurrentThread(), 0x0008, 1, &mut token) };
+    let token_err = unsafe { GetLastError() };
+
     // IAT: NtWaitForSingleObject with the native argument list (alertable = 0,
     // zero relative timeout -> STATUS_TIMEOUT). This one is served by a
     // native-signature proxy helper.
@@ -271,6 +397,25 @@ fn run_probe() {
         "API_PROBE ntopen=0x{nt_open:08x} handle=0x{nt_handle:x}"
     );
     let _ = writeln!(out, "API_PROBE ntclose=0x{nt_close:08x}");
+    let _ = writeln!(
+        out,
+        "API_PROBE mem block=0x{:x} old=0x{old_protect:x} protect={protect_rc} free={free_rc} ok={mem_ok}",
+        block as usize
+    );
+    let _ = writeln!(out, "API_PROBE wait=0x{wait_rc:08x} close={close_rc}");
+    let _ = writeln!(
+        out,
+        "API_PROBE query len={query_len} state=0x{:x} protect=0x{:x} region={}",
+        mbi.state, mbi.protect, mbi.region_size
+    );
+    let _ = writeln!(
+        out,
+        "API_PROBE thread handle=0x{thread:x} tid={thread_id} marker=0x{thread_marker:x} wait={thread_wait} ok={thread_ok} close={thread_close}"
+    );
+    let _ = writeln!(
+        out,
+        "API_PROBE token rc={open_token} err={token_err} handle=0x{token:x}"
+    );
     let _ = writeln!(out, "API_PROBE ntwait=0x{nt_wait:08x}");
     let _ = writeln!(
         out,

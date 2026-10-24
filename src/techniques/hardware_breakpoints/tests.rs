@@ -135,6 +135,62 @@ fn fragment_arms_the_debug_registers_and_returns_clean() {
 }
 
 #[test]
+fn selecting_the_optional_amsi_exports_without_the_buffer_scan_is_refused() {
+    let strings = StringsConfig::from_yaml(None).expect("default strings");
+    let fragment = Params {
+        amsi: false,
+        scan_string: true,
+        open_session: true,
+        etw: false,
+    }
+    .render_fragment(&strings);
+
+    let guard = fragment
+        .find("if !WATCH_AMSI && (WATCH_SCAN_STRING || WATCH_OPEN_SESSION)")
+        .expect("the impossible combination must be refused");
+    let error = fragment[guard..]
+        .find("return Err(")
+        .expect("the refusal must return an error");
+    let resolve = fragment[guard..]
+        .find("load_module(")
+        .expect("the watch table must still be built");
+    assert!(
+        error < resolve,
+        "the check must run before anything is resolved or armed"
+    );
+}
+
+#[test]
+fn open_session_clears_the_session_pointer_and_the_handler_is_checked() {
+    let strings = StringsConfig::from_yaml(None).expect("default strings");
+    let fragment = Params {
+        amsi: true,
+        scan_string: false,
+        open_session: true,
+        etw: false,
+    }
+    .render_fragment(&strings);
+
+    assert!(fragment.contains("const AMSI_OPEN_SESSION_SENTINEL: usize = usize::MAX;"));
+    assert!(fragment.contains("const AMSI_OPEN_SESSION_SESSION_OFFSET: usize = 0x28;"));
+    assert!(fragment.contains("(address, AMSI_OPEN_SESSION_SENTINEL)"));
+    assert!(
+        fragment.contains("if handler.is_null()"),
+        "a missing handler must fail before the debug registers are armed"
+    );
+    let clear = fragment
+        .find("offset == AMSI_OPEN_SESSION_SENTINEL")
+        .expect("the handler must special-case the sentinel");
+    let resume = fragment
+        .find("context.Rip = return_address;")
+        .expect("the handler must resume the caller");
+    assert!(
+        clear < resume,
+        "the session must be cleared before resuming"
+    );
+}
+
+#[test]
 fn render_fragment_bakes_in_the_selected_exports() {
     let strings = StringsConfig::from_yaml(None).expect("default strings");
     let fragment = Params {

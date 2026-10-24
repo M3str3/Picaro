@@ -138,9 +138,9 @@ fn resolve_payload(plan: &Plan, index: usize, step: &RuntimeStep) -> Result<Reso
 
 /// Resolves a Preparation step's embedded asset, if it carries one.
 ///
-/// Today there are two: the `bouncer` decoy (`on_fail: decoy`) and the `drop`
-/// file. Both are inert `format: plain` payloads the stub writes to disk; the
-/// asset is embedded and encrypted exactly like an Execution payload, so it
+/// Today there are two: the `bouncer` decoy (`on_reject.action: decoy`) and the
+/// `drop` file. Both are inert `format: plain` payloads the stub writes to disk;
+/// the asset is embedded and encrypted exactly like an Execution payload, so it
 /// reuses [`resolve_named_payload`].
 fn resolve_preparation_asset(
     plan: &Plan,
@@ -149,13 +149,12 @@ fn resolve_preparation_asset(
 ) -> Result<Option<ResolvedPayload>> {
     let name = match &step.technique {
         TechniqueKind::Bouncer { params } if params.is_decoy() => params
-            .decoy
-            .as_ref()
+            .decoy()
             .and_then(|decoy| decoy.payload.as_deref())
             .ok_or_else(|| {
                 PackerError::Validation(format!(
-                    "step {index} ('{}') is 'bouncer' with `on_fail: decoy` but no \
-                     `params.decoy.payload`: name a `format: plain` payload to write",
+                    "step {index} ('{}') is 'bouncer' with `on_reject.action: decoy` but no \
+                     `params.on_reject.decoy.payload`: name a `format: plain` payload to write",
                     step.name()
                 ))
             })?,

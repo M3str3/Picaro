@@ -99,24 +99,29 @@ Process hollowing with `build.stub.syscalls.mode` `none` (before) vs `indirect`
 
 `reflective_loading` with an optional `bouncer` gate.
 
-- 514,560 B (503 KB) baseline → 542,720 B (530 KB) for a host-name-only gate
-  (+28 KB, +1 import) → ~571 KB for every check (+56 KB, +13 imports, two extra
-  DLLs: `user32`, `advapi32`).
+- Pre-rework baseline: 514,560 B (503 KB) → 542,720 B (530 KB) for a
+  host-name-only gate (+28 KB, +1 import) → ~571 KB for every old check
+  (+56 KB, +13 imports, two extra DLLs: `user32`, `advapi32`).
 - The full import set (`GetComputerName*`, `GetUserNameW`,
   `GetUserDefaultLocaleName`, `GetKeyboardLayout*`, `CreateToolhelp32Snapshot`,
   `GetSystemInfo`, `GlobalMemoryStatusEx`) is the technique's most observable
-  static signature.
+  static signature. The reworked checks add `GetAdaptersAddresses`
+  (`iphlpapi`) plus the token calls (`OpenProcessToken`, `GetTokenInformation`,
+  `LookupPrivilegeValueW`, `PrivilegeCheck`); a fresh byte-level baseline for
+  that set has not been taken yet, so the numbers above do not cover `ip`,
+  `elevation`, `integrity` or `privilege`.
 - `sensitive 0` and `total flagged 0`: every check literal (host/user patterns,
-  analysis process names, hypervisor vendor tokens) is rebuilt at runtime.
+  analysis process names, hypervisor vendor tokens, privilege names) is rebuilt
+  at runtime. CIDRs are rendered as integer masks, so they are not in `.rdata`
+  at all.
 - Runtime: a host that does not match aborts the pipeline silently (exit `0`),
   the intended host runs the payload. Covered by
   `tests/cli.rs::bouncer_gate_blocks_and_allows_on_windows`.
-- The `processes` check (arbitrary, `state: present|absent`) reuses the single
-  `CreateToolhelp32Snapshot` enumeration the `not_in_sandbox` heuristic already
-  needs, so it adds no import of its own. The `on_fail: decoy` path writes the
-  file with standard-library I/O (no new import) and grows the artifact by the
-  encrypted decoy asset (a `format: plain` payload). Neither has its own
-  byte-level baseline yet.
+- The `process` and `ip` requirements reuse the enumerations their heuristics
+  already need, so they add no import of their own. The `action: decoy` path
+  writes the file with standard-library I/O (no new import) and grows the
+  artifact by the encrypted decoy asset (a `format: plain` payload). Neither has
+  its own byte-level baseline yet.
 
 ## x86 — static baseline (reflective loading, 2026-09-27)
 
@@ -290,7 +295,8 @@ Host: `x86_64-pc-windows-msvc` (rustc 1.90), release stub unless noted, Windows 
   when the point is the proof. The target's own exit code can only be relayed
   when `wait_ms` covers its death.
 
-- **`stack_spoofing`** (T1036, preparation, x64): indirect syscalls with
+- **`stack_spoofing`** (T1036, loader feature
+  `build.stub.syscalls.stack_spoofing`, x64): indirect syscalls with
   `resolver: tartarus_gate`, a shellcode payload through `reflective_loading`.
   The payload's exit code (`42`) is relayed, so every syscall in the chain ran
   with the stack shifted by 4 KB and its arguments copied — the copy is the part
@@ -868,6 +874,34 @@ corrected detection bullet, the `DEF` comment states why the state stays
 (`sleep_obfuscation_sleeps_and_still_runs_the_payload`) asserts the part that
 needs no observer: the wait really takes `sleep_ms` and the chain continues.
 
+## `hooks.sleep` — on-demand concealment (2026-10-23)
+
+Host: Windows 11 Pro 26200 (x64), Defender real-time off. Debug stub, indirect
+syscalls, `reflective_loading` of a 140 KB PE probe that calls `Sleep(2500)` and
+measures the wall clock. The hook (`min_ms: 1000`) intercepts the IAT slot; the
+proxy encrypts the mapped image for the sleep and restores it before returning.
+
+| Build | `Sleep(2500)` wall clock | Overhead |
+|---|---|---|
+| before tuning (`CHUNK` 64 KiB, `STEP` 50 ms, `FIRST_STEP` 100 ms) | 3586 ms | ~1086 ms |
+| after tuning (`CHUNK` 1 MiB, `STEP` 10 ms, `FIRST_STEP` 20 ms) | 2717–2718 ms | ~217 ms |
+
+The payload printed `after`, so the caller resumed after the chain. A Rust
+payload exits with `ExitProcess`, so the loader never regains control and the
+post-payload trace cannot report the conceal count; the live test asserts the
+wall clock and that the process survives. A passive sampler over the mapped
+payload (the one used for the technique above) is the open measurement: the
+mechanism is the same `sleep_runtime` block, but the region is the payload's
+own allocation, not the loader image.
+
+Why the tuning: every chunk and every restored run is one timer step, and each
+step paid the 50 ms stagger. 64 KiB chunks made a multi-megabyte payload pay
+seconds of ROP overhead per sleep. 1 MiB chunks are safe (`SystemFunction032`
+takes a 32-bit length, and RC4 on 1 MiB is far below the stagger) and the
+stagger now sits just under the ~15.6 ms system timer granularity. The
+technique's own measurement in the section above was taken with the old
+constants; the window's shape is unchanged, its transitions are faster.
+
 ## `packs_and_runs_sharphound` red under real-time protection (2026-10-15)
 
 The full cli suite came back 34/35: `packs_and_runs_sharphound` failed with
@@ -1079,3 +1113,28 @@ WER's LocalDumps.
   array is *active* (no pause around it — a concurrent load from another
   thread) makes the loader try to grow an array it does not own. The pauses
   cover the chain's own loads; other-thread loads are the historical hazard.
+
+## `veh_execution` and `halos_gate` — first live round (2026-10-24)
+
+Host: Windows x64, Defender real-time protection off (checked at the start of
+the round). The full ignored suite ran: `42` bin tests and `36` CLI tests, all
+green, including the new VEH end-to-end test and the resolver matrix with
+`halos_gate` added.
+
+- **`veh_execution`** (Execution, x64 shellcode, `Experimental`):
+  `mode: indirect` + `resolver: api_hash`, payload
+  `examples/payloads/demo_shellcode.bin` (6 bytes, `mov eax, 42; ret`). The
+debug build logged `handler registered`, `trigger returned: ran=1, result=42`
+  and `the payload returned 42`; the process exited `42`. The delivery-style
+  artifact built by `packs_and_runs_a_veh_execution_payload` also exited `42`.
+  The first run exposed the bug this measurement pins: `EXCEPTION_BREAKPOINT`
+  hands the handler the `int3` address, so the trampoline's resume address must
+  be `Rip + 1`; using `Rip` sent the payload's `ret` back into the `int3` and
+  exited `0x80000003`.
+- **`halos_gate`** (syscall resolver, `Experimental`): the live CLI matrix
+  (`indirect_syscall_resolvers_run_the_payload`) now compiles and runs one stub
+  per resolver, `halos_gate` included, so the normal path is exercised. The
+  hooked-`ntdll` neighbour path is still unmeasured: the lab host's ntdll is
+  clean, so only the direct-prologue branch ran. The arithmetic itself is
+  pinned by the packer-side `neighbour_ssn` mirror and its unit tests; a
+  deliberate hook or an EDR in the lab is the next measurement.

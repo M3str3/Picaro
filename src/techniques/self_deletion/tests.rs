@@ -112,6 +112,53 @@ fn the_mode_selects_the_variant() {
 }
 
 #[test]
+fn the_rename_information_layout_covers_both_architectures() {
+    // `FILE_RENAME_INFO` is pointer-sized: the length field sits at 8 on x86
+    // and 16 on x64, and the UTF-16 name starts at 12 and 20 respectively. The
+    // fragment must pick between them instead of hard-coding the x64 numbers.
+    let fragment = DEF.stub_fragment.replace("\r\n", "\n");
+    assert!(
+        fragment.contains("fn rename_info_layout(is_x86: bool) -> (usize, usize)"),
+        "the layout must be a pure, argument-driven helper"
+    );
+    assert!(
+        fragment.contains("(12, 8)"),
+        "the x86 header is 12 bytes and its length field starts at 8"
+    );
+    assert!(
+        fragment.contains("(20, 16)"),
+        "the x64 header is 20 bytes and its length field starts at 16"
+    );
+    assert!(
+        fragment.contains("rename_info_layout(cfg!(target_arch = \"x86\"))"),
+        "the layout must follow the architecture the stub is compiled for"
+    );
+}
+
+#[test]
+fn the_fragment_writes_the_structure_at_the_arch_specific_offsets() {
+    let fragment = render(&Params::default());
+    assert!(
+        fragment.contains(
+            "let (header, length_offset) = rename_info_layout(cfg!(target_arch = \"x86\"));"
+        ),
+        "the header size and the length offset must come from the layout helper"
+    );
+    assert!(
+        fragment.contains("info[length_offset..length_offset + 4]"),
+        "FileNameLength must be written at the architecture's offset"
+    );
+    assert!(
+        fragment.contains("let at = header + index * 2;"),
+        "the name must follow the architecture's header"
+    );
+    assert!(
+        !fragment.contains("RENAME_INFO_HEADER"),
+        "the hard-coded x64 header must be gone"
+    );
+}
+
+#[test]
 fn the_stream_name_never_appears_in_cleartext() {
     let params = Params {
         mode: Mode::RenameAds,
@@ -125,6 +172,70 @@ fn the_stream_name_never_appears_in_cleartext() {
     assert!(
         !fragment.contains(":unique_stream_marker"),
         "no fragment of the stream name may appear"
+    );
+}
+
+#[test]
+fn the_stream_name_is_validated_before_the_rename() {
+    let fragment = render(&Params::default());
+    assert!(
+        fragment.contains("fn stream_name_is_valid(stream: &str) -> bool"),
+        "the fragment must validate the configured stream name"
+    );
+    assert!(
+        fragment.contains("if !stream_name_is_valid(&stream)"),
+        "the rename must reject an invalid stream before it touches the file"
+    );
+    assert!(
+        fragment.contains("stream.is_empty()"),
+        "an empty stream name must be rejected"
+    );
+    assert!(
+        fragment.contains("stream.starts_with(':')"),
+        "a stream name must start with ':'"
+    );
+    assert!(
+        fragment.contains(r"stream.contains('\\')"),
+        "a stream name must not contain a backslash"
+    );
+    assert!(
+        fragment.contains("stream.contains('/')"),
+        "a stream name must not contain a forward slash"
+    );
+    assert!(
+        !fragment.contains("$MSG_INVALID_STREAM$"),
+        "the rejection diagnostic must be rebuilt at run time"
+    );
+    let check = fragment
+        .find("if !stream_name_is_valid(&stream)")
+        .expect("the validation must be present");
+    let open = fragment
+        .find("let handle = open_image(path)?")
+        .expect("the rename must open the image");
+    assert!(
+        check < open,
+        "an invalid stream must be rejected before the file is opened"
+    );
+}
+
+#[test]
+fn the_invalid_stream_diagnostic_is_registered_and_obfuscated() {
+    let text = MESSAGES
+        .iter()
+        .find_map(|(placeholder, text)| (*placeholder == "$MSG_INVALID_STREAM$").then_some(*text))
+        .expect("the invalid-stream diagnostic must be registered");
+    let fragment = render(&Params::default());
+    assert!(
+        DEF.stub_fragment.contains("$MSG_INVALID_STREAM$"),
+        "the fragment must use the registered diagnostic"
+    );
+    assert!(
+        !DEF.stub_fragment.contains(text),
+        "the diagnostic must not be a cleartext literal in the fragment"
+    );
+    assert!(
+        !fragment.contains(text),
+        "the diagnostic must be rebuilt from obfuscated bytes"
     );
 }
 

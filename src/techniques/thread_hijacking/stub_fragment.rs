@@ -425,7 +425,11 @@ pub fn execute_payload(image: &mut [u8]) -> Result<i32, String> {
         let _ = crate::nt_close(thread);
         hijacked
     });
-    result?;
+    if let Err(error) = result {
+        // Every later path closes the target handle; the error path must too.
+        let _ = crate::nt_close(process);
+        return Err(error);
+    }
 
     if $WAIT_MS$ == 0 {
         // Fire and forget: the target's exit cannot be observed later, and a real

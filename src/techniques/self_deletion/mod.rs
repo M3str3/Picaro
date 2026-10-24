@@ -46,8 +46,11 @@ pub struct Params {
     /// Name of the alternate data stream the image is moved into, for
     /// `mode: rename_ads`.
     ///
-    /// Must start with `:`. Left unset the packer draws a random one per build,
-    /// so the stream name is not a constant across artifacts.
+    /// Must start with `:` and contain no path separator; the fragment rejects
+    /// anything else at run time, since a bare name would rename the image to a
+    /// visible sibling file instead of hiding it. Left unset the packer draws a
+    /// random one per build, so the stream name is not a constant across
+    /// artifacts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<String>,
 }
@@ -156,6 +159,10 @@ pub const DEF: TechniqueDef = TechniqueDef {
 /// at run time (using `strings`'s active strategy), so no diagnostic lands in the
 /// artifact's `.rdata`.
 const MESSAGES: &[(&str, &str)] = &[
+    (
+        "$MSG_INVALID_STREAM$",
+        "the alternate data stream name must start with ':' and contain no path separator",
+    ),
     (
         "$MSG_PATH_FAILED$",
         "could not determine the running image's path",

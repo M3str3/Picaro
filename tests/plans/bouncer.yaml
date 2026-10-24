@@ -22,8 +22,7 @@ runtime:
   # Always accepts the host (`*` matches any computer name), so the payload runs.
   - technique: bouncer
     params:
-      mode: all
-      on_fail: silent
-      hostname: "*"
+      require:
+        - hostname: "*"
   - technique: reflective_loading
     params: { payload: payload }

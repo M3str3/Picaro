@@ -14,6 +14,7 @@
 
 pub mod api_resolution;
 pub mod args;
+pub mod stack_spoofing;
 pub mod strings;
 pub mod syscalls;
 
@@ -76,7 +77,13 @@ pub struct FeatureDef {
 
 /// All registered loader features.
 pub fn all() -> &'static [FeatureDef] {
-    &[syscalls::DEF, api_resolution::DEF, strings::DEF, args::DEF]
+    &[
+        syscalls::DEF,
+        stack_spoofing::DEF,
+        api_resolution::DEF,
+        strings::DEF,
+        args::DEF,
+    ]
 }
 
 /// Looks up a loader feature by its name.

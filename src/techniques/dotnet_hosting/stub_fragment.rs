@@ -161,6 +161,10 @@ unsafe fn argument_array(args: &[String]) -> Result<*mut SAFEARRAY, String> {
 /// code (its entry point would call `mscoree.dll!_CorExeMain`, which starts the
 /// CLR for the process's *main* module, i.e. the stub). `_AppDomain.Load_3`
 /// takes the assembly's bytes, so the payload stays in memory.
+///
+/// A failed `Invoke_3` is retried only for `DISP_E_BADPARAMCOUNT`: any other
+/// HRESULT may mean the managed entry point already ran, and invoking it again
+/// would repeat its side effects.
 fn run_assembly(image: &[u8], args: &[String]) -> Result<i32, String> {
     let version: String = $CLR_VERSION_DEF$;
     let version_name: String = $CLR_VERSION_NAME_DEF$;
@@ -255,8 +259,16 @@ fn run_assembly(image: &[u8], args: &[String]) -> Result<i32, String> {
         let hr = invoke_3(method, &mut null_variant(), parameters, &mut result);
 
         if hr < 0 {
-            // A managed `Main()` without parameters rejects the array; retry
-            // with an empty one before giving up.
+            // A managed `Main()` that takes no parameters rejects the array with
+            // `DISP_E_BADPARAMCOUNT`, and only that code means the entry point
+            // was never entered, so it is the only safe case to retry. Any
+            // other failure — `COR_E_TARGETINVOCATION` from a `Main()` that
+            // threw, for instance — already ran the entry point, and retrying
+            // would run it a second time.
+            const DISP_E_BADPARAMCOUNT: i32 = 0x8002_000E_u32 as i32;
+            if hr != DISP_E_BADPARAMCOUNT {
+                return Err(nt_error($MSG_ENTRY_POINT_FAILED$, hr));
+            }
             crate::tech_dbg!("dotnet_hosting", "the entry point rejected its arguments");
             let empty = SafeArrayCreateVector(VT_VARIANT, 0, 0);
             #[cfg(target_arch = "x86")]

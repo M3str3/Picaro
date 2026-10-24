@@ -404,11 +404,14 @@ pub fn unhook_ntdll() -> Result<bool, String> {
     };
 
     // 5. Apply the fixups the loader applied to this section when it mapped the
-    //    image, so the restored bytes are valid at the module's actual base.
-    apply_section_relocations(&file, &clean, module.0 as usize, target as *mut u8)?;
+    //    image, so the restored bytes are valid at the module's actual base. The
+    //    result is held until the original protection is back: returning here
+    //    would leave the section writable (and, on x86, unrelocated).
+    let relocated = apply_section_relocations(&file, &clean, module.0 as usize, target as *mut u8);
 
     // 6. Restore what the loader had, so the section is executable — and no
-    //    longer writable — before the next step runs.
+    //    longer writable — before the next step runs. This happens even when the
+    //    fixups failed.
     let mut restored = 0u32;
     let status = crate::nt_protect_vm(
         process,
@@ -420,6 +423,7 @@ pub fn unhook_ntdll() -> Result<bool, String> {
     if status < 0 {
         return Err(with_status($MSG_RESTORE_FAILED$, status));
     }
+    relocated?;
 
     crate::tech_dbg!(
         "unhook_ntdll",

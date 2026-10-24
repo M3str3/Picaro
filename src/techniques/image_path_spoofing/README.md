@@ -56,7 +56,10 @@ receives the payload. Place it **after** any step that needs the real path
 `GetModuleFileNameW(NULL)` at run time and would otherwise act on the decoy.
 `plan::validate` warns about a `timestomping`/`self_deletion` that follows it.
 
-`self_deletion` and this technique are declared conflicting. The step does not
+`self_deletion` and this technique are declared conflicting in the registry
+(`DEF.conflicts`). That entry is display-only — `plan::validate` does not reject
+the pair. It emits an advisory (as it does for a `timestomping` without an
+explicit `target`) telling the operator to reorder the steps. The step does not
 interact with the memory/telemetry steps (`unhook_ntdll`, `patch_*`,
 `process_mitigations`): they do not read the image path.
 

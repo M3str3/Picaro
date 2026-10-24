@@ -31,11 +31,19 @@ build:
     path: null            # null = builtin stub; or a path to a custom .rs
     syscalls:
       mode: indirect      # none | indirect
-      resolver: hells_gate  # hells_gate | tartarus_gate | api_hash
+      resolver: hells_gate  # hells_gate | tartarus_gate | api_hash | halos_gate
+      stack_spoofing:     # optional, x64 + indirect only
+        decoy_bytes: 4096
     api_resolution:       # optional: serve selected payload imports from the loader
       mode: none          # none | proxy (proxy needs syscalls: indirect + pe/dll)
       apis: []            # catalogue entries, e.g. "kernel32!ReadProcessMemory"
       unmatched: forward  # forward | abort
+      hooks:              # optional runtime hooks (need mode: proxy)
+        sleep:            # conceal the mapped payload while it sleeps
+          obfuscate: ekko
+          min_ms: 1000
+          max_ms: 600000
+          assume_single_threaded: true
     strings:
       strategy: xor       # xor | stack
       key: random         # random | literal:<64 hex chars>
@@ -77,7 +85,7 @@ runtime:                  # ordered technique steps
 | `build.payloads.<name>.args` / `args_mode` | Fixed arguments handed to the payload (`join` = YAML args then the packed binary's own; `override` = runtime args replace the YAML ones). |
 | `build.payloads.<name>.sha256` | Optional SHA-256 of the input. A mismatch aborts before anything is encrypted, so a URL (or a swapped file) cannot silently change what gets packed. |
 | `build.stub.strings` | How every runtime literal in the stub is obfuscated (`xor` or `stack`). Defaults to `xor` + random key, with a warning. |
-| `build.stub.api_resolution` | Serve selected payload imports (`apis`) from proxies generated in the loader instead of the real exports (`mode: proxy`). Needs `syscalls.mode: indirect` and a `pe`/`dll` payload; not usable with `process_hollowing`. |
+| `build.stub.api_resolution` | Serve selected payload imports (`apis`) from proxies generated in the loader instead of the real exports (`mode: proxy`), and install runtime hooks (`hooks`). Needs `syscalls.mode: indirect` and a `pe`/`dll` payload; not usable with `process_hollowing`. `hooks.sleep` also needs `reflective_loading` and `assume_single_threaded: true`. |
 | `build.stub.debug` | Compile a debuggable stub: no hardening, source paths kept, techniques log to stderr. Markedly less evasive — for the lab, never for delivery. |
 | `build.stub` | The stub itself: a custom template (`path`, `null` = builtin), the syscall layer (`syscalls`), API resolution (`api_resolution`) and string obfuscation (`strings`). |
 | `build.output` | Where the packed artifact goes and how it is finalized. `arch` selects the stub's architecture (`x64` or `x86`) and the payload must match it. `manifest` writes the provenance file. |
@@ -86,6 +94,32 @@ runtime:                  # ordered technique steps
 | `build.output.resources` | Optional PE resources embedded into the artifact: `icon` (a `.ico` path or `random`), `version_info` and `manifest` (Windows app manifest / UAC). Built in Rust and written into a `.rsrc` section. |
 | `build.output.sign` | Optional Authenticode signing: `lab` (self-signed), `store` (an existing cert, Windows only) or `file` (a `.pfx`). Uses `signtool` on Windows and `osslsigncode` elsewhere. |
 | `runtime` | The ordered technique steps. Only Execution techniques (`reflective_loading`, `process_hollowing`, `pe_injection`, `early_bird`, `thread_hijacking`, `dll_hollowing`, `process_ghosting`, `dotnet_hosting`, `execution_callbacks`, `module_stomping`, `fibers`) take `params.payload` (optional with one payload, required with several); Preparation and Control steps never do. A technique's parameters go under a nested `params:` mapping, and each step carries the loader's own `on_success`/`on_fail`/`delay_ms`. See [Runtime steps](multistage.md). |
+
+### Nested technique params
+
+A technique's `params` may hold groups and lists of groups, not just scalars. The
+visual builders (the [Plan builder](/plan-builder/) and the `experimental/webapp`
+builder) edit those as JSON and emit them back as YAML; the catalogue is generated
+from each technique's `params_example`, so it follows the current API. A gate such
+as `bouncer` is the common case:
+
+```yaml
+runtime:
+  - technique: bouncer
+    params:
+      require:                     # AND: all of these
+        - hostname: "WORKSTATION-*"
+        - not: { username: "analyst*" }
+      any_of:                      # OR: at least one of these
+        - locale: ["en-US"]
+        - keyboard: ["0409"]
+      anti_analysis: { sandbox: true }
+      on_reject: { action: abort }
+```
+
+The technique's own page documents each key and the negation semantics; the
+builder's JSON editor is only a generic way to edit those groups without a
+bespoke widget per check.
 
 **Build arguments.** Positional args after the plan path are substituted in
 the YAML as `$arg.N$` (0-based); an arg of the form `name=value` is available

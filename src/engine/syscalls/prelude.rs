@@ -19,13 +19,16 @@ pub(crate) const EMPTY_BODY: &str = r#"    /// Initializes the syscall layer. A 
 /// Prelude shared by every `mode: none` block (imports + no-op init).
 pub(crate) const NONE_PRELUDE: &str = r#"    use windows::core::PCSTR;
     use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
+    use windows::Win32::Security::TOKEN_ACCESS_MASK;
     use windows::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory};
     use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
     use windows::Win32::System::Memory::{
-        VirtualAllocEx, VirtualProtectEx, PAGE_PROTECTION_FLAGS, VIRTUAL_ALLOCATION_TYPE,
+        VirtualAllocEx, VirtualFree, VirtualProtectEx, PAGE_PROTECTION_FLAGS, VIRTUAL_ALLOCATION_TYPE,
+        VIRTUAL_FREE_TYPE,
     };
     use windows::Win32::System::Threading::{
-        CreateRemoteThread, QueueUserAPC, ResumeThread, SuspendThread, WaitForSingleObject,
+        CreateRemoteThread, OpenThreadToken, QueueUserAPC, ResumeThread, SuspendThread,
+        WaitForSingleObject,
     };
 
     const STATUS_SUCCESS: i32 = 0;

@@ -21,8 +21,8 @@
 # The DLL must match the host's bitness (it runs in-process), and the host loads
 # it with the normal image loader, so it is scanned on load — `output.sign` is
 # the mitigation with the most value here. `subsystem`, `resources.manifest`,
-# `self_deletion` and `bouncer` with `on_fail: exit` are rejected for DLL
-# builds: the host owns the process. See docs/design/dll-output.md.
+# `self_deletion` and `bouncer` with an exiting `on_reject` action are rejected
+# for DLL builds: the host owns the process. See docs/design/dll-output.md.
 #
 #   cargo run -- build examples/plans/dll.yaml
 

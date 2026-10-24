@@ -90,6 +90,11 @@ const MESSAGES: &[(&str, &str)] = &[
     ("$MSG_BAD_DOS$", "invalid DOS header (missing MZ signature)"),
     ("$MSG_BAD_NT$", "invalid NT header (missing PE signature)"),
     ("$MSG_BAD_ARCH$", "unsupported architecture"),
+    (
+        "$MSG_BAD_IMAGE_SIZE$",
+        "inconsistent SizeOfImage in the payload headers",
+    ),
+    ("$MSG_HEADERS_OOB$", "headers out of bounds"),
     ("$MSG_SECTION_TABLE_OOB$", "section table out of bounds"),
     (
         "$MSG_RELOC_TABLE_UNMAPPED$",
@@ -97,6 +102,10 @@ const MESSAGES: &[(&str, &str)] = &[
     ),
     ("$MSG_RELOC_TABLE_OOB$", "relocation table out of bounds"),
     ("$MSG_BAD_RELOC_BLOCK$", "malformed relocation block"),
+    (
+        "$MSG_NO_RELOCATIONS$",
+        "the image has no base relocations and was not mapped at its preferred base",
+    ),
     (
         "$MSG_RESOLVE_IMPORTS$",
         "could not resolve the payload's imports",

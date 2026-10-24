@@ -254,6 +254,29 @@ fn the_runtime_guard_rejects_a_non_shellcode_format() {
 }
 
 #[test]
+fn a_failed_hijack_closes_the_process_handle() {
+    let fragment = render(&Params::default());
+    assert!(
+        !fragment.contains("result?;"),
+        "the hijack result must be matched so the handle can be closed first"
+    );
+
+    let branch = fragment
+        .find("if let Err(error) = result {")
+        .expect("the hijack result must be matched");
+    let close = fragment[branch..]
+        .find("crate::nt_close(process)")
+        .expect("the process handle must be closed on the error path");
+    let propagate = fragment[branch..]
+        .find("return Err(error);")
+        .expect("the original error must be propagated");
+    assert!(
+        close < propagate,
+        "the handle must be closed before the error returns"
+    );
+}
+
+#[test]
 fn the_memory_is_written_before_the_thread_is_suspended() {
     let fragment = render(&Params::default());
     let write = fragment

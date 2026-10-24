@@ -88,12 +88,18 @@ export function fieldsOf(def) {
         else if (d.type === 'boolean') type = 'bool';
         else if (d.type === 'integer') type = 'number';
         else if (d.type === 'list') type = 'list';
+        else if (d.type === 'json') type = 'json';
 
-        let value = d.default == null ? (type === 'select' ? options[0] : '') : d.default;
-        // `paramDocs` stringifies every default; a boolean must stay a boolean so
-        // the checkbox and the emitted `true`/`false` are correct.
-        if (type === 'bool') value = value === true || value === 'true';
-        if (type === 'select' && value === '') value = options[0];
+        let value;
+        if (type === 'json') {
+          value = jsonDefault(d.default);
+        } else {
+          value = d.default == null ? (type === 'select' ? options[0] : '') : d.default;
+          // `paramDocs` stringifies every default; a boolean must stay a boolean so
+          // the checkbox and the emitted `true`/`false` are correct.
+          if (type === 'bool') value = value === true || value === 'true';
+          if (type === 'select' && value === '') value = options[0];
+        }
 
         let label = humanize(d.key);
         if (type === 'list') label += ' (comma-separated)';
@@ -110,6 +116,7 @@ export function fieldsOf(def) {
   }
   return (def?.fields || []).map((f) => ({
     ...f,
+    def: f.type === 'json' ? jsonDefault(f.def) : f.def,
     options: f.options || [],
     help: '',
     required: false,
@@ -121,7 +128,7 @@ export function makeStep(id, TECH, overrides = {}) {
   const params = {};
   for (const f of fieldsOf(TECH[id])) {
     if (f.type === 'fixed') continue;
-    params[f.key] = overrides[f.key] !== undefined ? overrides[f.key] : f.def;
+    params[f.key] = overrides[f.key] !== undefined ? overrides[f.key] : cloneParam(f.def);
   }
   if (takesPayload(id, TECH)) params.payload = overrides.payload ?? '';
   return { id, params, open: false };
@@ -159,6 +166,7 @@ export function isTerminal(step, state) {
 /** The step's params as the plan emits them (ordered, payload first). */
 export function buildParams(step, state, TECH) {
   const out = {};
+  const known = new Set();
   // The payload a step loads, for readability. An Execution step names it only
   // when the plan declares more than one — with a single payload,
   // `plan::steps::resolve` treats it as implicit; the stager must always name it.
@@ -168,6 +176,7 @@ export function buildParams(step, state, TECH) {
     }
   }
   for (const f of fieldsOf(TECH[step.id])) {
+    known.add(f.key);
     if (f.type === 'fixed') {
       out[f.key] = f.def;
       continue;
@@ -188,7 +197,19 @@ export function buildParams(step, state, TECH) {
       if (parts.length) out[f.key] = parts;
       continue;
     }
+    if (f.type === 'json') {
+      if (Array.isArray(v) && v.length === 0) continue;
+      if (isPlainObject(v) && Object.keys(v).length === 0) continue;
+      out[f.key] = v;
+      continue;
+    }
     out[f.key] = v;
+  }
+  // Parameters without a widget (nested params from a newer catalog, an
+  // unknown technique, ...) survive verbatim instead of being dropped.
+  for (const [key, value] of Object.entries(step.params || {})) {
+    if (key === 'payload' || known.has(key)) continue;
+    out[key] = value;
   }
   return out;
 }
@@ -249,9 +270,7 @@ export function emitYaml(state, TECH) {
     lines.push(indent(2, 'params:'));
     for (const k of keys) {
       const v = params[k];
-      if (Array.isArray(v)) lines.push(indent(3, `${k}: [${v.map(yamlEscape).join(', ')}]`));
-      else if (typeof v === 'boolean' || typeof v === 'number') lines.push(indent(3, `${k}: ${v}`));
-      else lines.push(indent(3, `${k}: ${yamlEscape(v)}`));
+      lines.push(...emitEntry(k, v, 3));
     }
   }
   return `${lines.join('\n')}\n`;
@@ -400,8 +419,8 @@ export function advisories(state, TECH) {
   }
 
   if (state.kind === 'dll'
-    && state.steps.some((s) => ['self_deletion', 'sleep_obfuscation', 'stack_spoofing'].includes(s.id))) {
-    add('err', 'Self-deletion, sleep obfuscation and stack spoofing are rejected for a DLL.');
+    && state.steps.some((s) => ['self_deletion', 'sleep_obfuscation'].includes(s.id))) {
+    add('err', 'Self-deletion and sleep obfuscation are rejected for a DLL.');
   }
 
   return notes;
@@ -417,9 +436,7 @@ export function stepWarning(step, state, TECH) {
       return { level: 'err', text: `Does not accept format '${format}'; needs ${def.formats.join(' / ')}.` };
     }
   }
-  if (step.id === 'stack_spoofing' && state.syscalls !== 'indirect') {
-    return { level: 'warn', text: 'Only changes indirect syscalls.' };
-  }
+
   return null;
 }
 
@@ -441,6 +458,86 @@ function yamlEscape(s) {
   return JSON.stringify(String(s));
 }
 
+function yamlInline(value) {
+  if (value === null) return 'null';
+  if (typeof value === 'boolean' || typeof value === 'number') return String(value);
+  return yamlEscape(value);
+}
+
+function isScalar(value) {
+  return value === null || typeof value !== 'object';
+}
+
+function isPlainObject(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Parse the catalogue's JSON default for a structured param. */
+function jsonDefault(raw) {
+  if (typeof raw !== 'string') return raw ?? {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
+/** Deep-copy a structured default so two steps never share one object. */
+function cloneParam(value) {
+  return value !== null && typeof value === 'object'
+    ? JSON.parse(JSON.stringify(value))
+    : value;
+}
+
+function emitEntry(key, value, level) {
+  const prefix = `${indent(level)}${yamlKey(key)}:`;
+  if (Array.isArray(value) && value.length > 0 && value.every(isScalar)) {
+    return [`${prefix} [${value.map(yamlInline).join(', ')}]`];
+  }
+  if (Array.isArray(value) || isPlainObject(value)) {
+    if (Array.isArray(value) && value.length === 0) return [`${prefix} []`];
+    if (isPlainObject(value) && Object.keys(value).length === 0) return [`${prefix} {}`];
+    return [prefix, ...emitNode(value, level + 1)];
+  }
+  return [`${prefix} ${yamlInline(value)}`];
+}
+
+function emitNode(value, level) {
+  if (Array.isArray(value)) {
+    const lines = [];
+    for (const item of value) {
+      if (isPlainObject(item) && Object.keys(item).length > 0) {
+        const entries = Object.entries(item);
+        const first = emitEntry(entries[0][0], entries[0][1], level);
+        first[0] = `${indent(level)}- ${first[0].slice(indent(level).length)}`;
+        // The `- ` marker shifts the first key two columns right, so its nested
+        // block needs the same shift; sibling keys are already at `level + 1`.
+        for (let index = 1; index < first.length; index += 1) {
+          first[index] = `  ${first[index]}`;
+        }
+        lines.push(...first);
+        for (const [key, entry] of entries.slice(1)) {
+          lines.push(...emitEntry(key, entry, level + 1));
+        }
+      } else if (Array.isArray(item)) {
+        lines.push(`${indent(level)}-`);
+        lines.push(...emitNode(item, level + 1));
+      } else {
+        lines.push(`${indent(level)}- ${yamlInline(item)}`);
+      }
+    }
+    return lines;
+  }
+  if (isPlainObject(value)) {
+    const lines = [];
+    for (const [key, entry] of Object.entries(value)) {
+      lines.push(...emitEntry(key, entry, level));
+    }
+    return lines;
+  }
+  return [`${indent(level)}${yamlInline(value)}`];
+}
+
 /** A mapping key: a bare word where possible, quoted otherwise. */
 function yamlKey(name) {
   const s = String(name ?? '').trim();
@@ -448,6 +545,6 @@ function yamlKey(name) {
   return /^[\w.-]+$/.test(s) ? s : JSON.stringify(s);
 }
 
-function indent(n, line) {
+function indent(n, line = '') {
   return `${'  '.repeat(n)}${line}`;
 }

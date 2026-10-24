@@ -256,7 +256,7 @@ fn the_mapper_does_not_provision_static_tls() {
     );
 
     let callbacks = fragment
-        .find("run_tls_callbacks(image_base, nt);")
+        .find("run_tls_callbacks(image_base, nt)?;")
         .expect("the mapper must run the payload's callbacks");
     let entry = fragment
         .find("exe_main()")
@@ -321,6 +321,147 @@ fn the_mapper_bounds_checks_the_image_it_maps() {
             "the mapper dropped a bounds guard: {guard}"
         );
     }
+}
+
+/// Packer-side mirror of the fragment's `reloc_target_in_image`. The fragment is
+/// a source string the inert suite never compiles, so the boundary arithmetic is
+/// exercised here while [`the_mapper_bounds_checks_every_relocation`] asserts the
+/// fragment carries the same guard.
+fn reloc_target_fits(page_rva: u32, offset: u16, width: usize, size_of_image: usize) -> bool {
+    (page_rva as usize)
+        .checked_add(offset as usize)
+        .and_then(|target| target.checked_add(width))
+        .map(|end| end <= size_of_image)
+        .unwrap_or(false)
+}
+
+#[test]
+fn a_relocation_target_must_fit_in_the_image() {
+    // A DIR64 fixup that ends exactly at the image end is the last legal one.
+    assert!(reloc_target_fits(0x1000, 0xFF8, 8, 0x2000));
+    assert!(!reloc_target_fits(0x1000, 0xFF9, 8, 0x2000));
+    // A page RVA near the top of the address space must not be added blindly.
+    assert!(!reloc_target_fits(0x7FFF_0000, 0, 8, 0x2000));
+    // Nor may the sum wrap around to a small value.
+    assert!(!reloc_target_fits(u32::MAX, 0xFFF, 8, 0x2000));
+    // The width is the fixup type's, not a fixed 8 bytes.
+    assert!(reloc_target_fits(0x1FFC, 0, 4, 0x2000));
+    assert!(!reloc_target_fits(0x1FFC, 0, 8, 0x2000));
+}
+
+/// Packer-side mirror of the fragment's `tls_dir_in_image`, with the directory
+/// size as a parameter so both stub architectures (40-byte x64, 24-byte x86) can
+/// be checked.
+fn tls_dir_fits(tls_rva: u32, dir_size: usize, size_of_image: usize) -> bool {
+    (tls_rva as usize)
+        .checked_add(dir_size)
+        .map(|end| end <= size_of_image)
+        .unwrap_or(false)
+}
+
+#[test]
+fn a_tls_directory_must_fit_in_the_image() {
+    for dir_size in [40usize, 24] {
+        assert!(tls_dir_fits(0x2000, dir_size, 0x2000 + dir_size));
+        assert!(!tls_dir_fits(0x2000, dir_size, 0x2000 + dir_size - 1));
+        assert!(!tls_dir_fits(0x7FFF_0000, dir_size, 0x8000));
+    }
+}
+
+/// The relocation walk reads a block header only after it is known to fit in the
+/// directory, and writes a fixup only after its target is known to fit in the
+/// image: a page RVA near `0x7fff_0000` must fail the load, not write outside
+/// the mapping.
+#[test]
+fn the_mapper_bounds_checks_every_relocation() {
+    let strings = StringsConfig::from_yaml(None).expect("default strings");
+    let fragment = Params::default().render_fragment(&strings);
+
+    assert!(
+        fragment.contains("fn reloc_target_in_image(page_rva: u32, offset: u16,"),
+        "the fixup target arithmetic must stay a checked helper"
+    );
+    assert!(
+        fragment.contains("if !reloc_target_in_image(page_rva, offset, width, size_of_image)"),
+        "each fixup target must be checked before it is written"
+    );
+    for arm in [
+        "IMAGE_REL_BASED_DIR64 => std::mem::size_of::<u64>()",
+        "IMAGE_REL_BASED_HIGHLOW => std::mem::size_of::<u32>()",
+        "IMAGE_REL_BASED_HIGH | IMAGE_REL_BASED_LOW => std::mem::size_of::<u16>()",
+    ] {
+        assert!(
+            fragment.contains(arm),
+            "a fixup type must be validated for its own width: {arm}"
+        );
+    }
+
+    // The directory is inside the image and large enough to hold a block, and
+    // neither a short block nor one past the directory is walked.
+    for guard in [
+        "dir_end > size_of_image || (reloc_dir.Size as usize) < header_size",
+        "block_size < header_size || block_end > dir_end",
+    ] {
+        assert!(
+            fragment.contains(guard),
+            "the relocation walk dropped a bounds guard: {guard}"
+        );
+    }
+
+    // The first dereference of a block comes after its 8-byte header is known
+    // to fit in the directory, and the walk never dereferences in its condition.
+    let header_guard = fragment
+        .find("if header_end > dir_end {")
+        .expect("the block header must be checked against the directory first");
+    let page_rva = fragment
+        .find("let page_rva = (*block).VirtualAddress;")
+        .expect("the block's page RVA must be read after the header check");
+    assert!(
+        header_guard < page_rva,
+        "the block header is dereferenced before it is bounds-checked"
+    );
+    assert!(
+        !fragment.contains("while (*block).VirtualAddress != 0"),
+        "the block pointer must not be dereferenced in the loop condition"
+    );
+}
+
+/// The TLS directory, the callback array and each callback are payload-
+/// controlled: all three are checked against the mapped image before they are
+/// read or called, and the walk is bounded by the image.
+#[test]
+fn the_tls_callback_walk_is_bounded_by_the_image() {
+    let strings = StringsConfig::from_yaml(None).expect("default strings");
+    let fragment = Params::default().render_fragment(&strings);
+
+    assert!(
+        fragment.contains("fn tls_dir_in_image(tls_rva: u32, size_of_image: usize) -> bool"),
+        "the TLS directory arithmetic must stay a checked helper"
+    );
+    assert!(
+        fragment.contains("if !tls_dir_in_image(tls_dir.VirtualAddress, size_of_image)"),
+        "the directory must fit in the image before its fields are read"
+    );
+    assert!(
+        fragment.contains("if callbacks_va < image_start || callbacks_va >= image_end"),
+        "the callback array must point inside the mapped image"
+    );
+    assert!(
+        fragment.contains("if slot_end > image_end"),
+        "the walk must stop at the image end, not read past it"
+    );
+    assert!(
+        fragment.contains("let Some(callback) = *(slot as *const PIMAGE_TLS_CALLBACK) else {"),
+        "the walk must terminate on the first null callback"
+    );
+    assert!(
+        fragment.contains("if address < image_start || address >= image_end"),
+        "a callback outside the image must not be called"
+    );
+    assert!(
+        fragment.contains("run_tls_callbacks(image_base, nt)?;"),
+        "a malformed TLS directory must fail the load, on the entry-point and export paths alike"
+    );
 }
 
 /// Every message in the tables is used by its fragment, and neither table
@@ -591,6 +732,28 @@ fn run_proxy_case_with(
     unmatched: &str,
     args: &[&str],
 ) -> (std::process::ExitStatus, String, String) {
+    run_case(name, probe_src, apis_yaml, unmatched, args, "")
+}
+
+/// Packs a probe with a hook-only `api_resolution` block (no `apis:`).
+#[cfg(feature = "live-tests")]
+fn run_hook_case(
+    name: &str,
+    probe_src: &std::path::Path,
+    hooks_yaml: &str,
+) -> (std::process::ExitStatus, String, String) {
+    run_case(name, probe_src, "", "forward", &[], hooks_yaml)
+}
+
+#[cfg(feature = "live-tests")]
+fn run_case(
+    name: &str,
+    probe_src: &std::path::Path,
+    apis_yaml: &str,
+    unmatched: &str,
+    args: &[&str],
+    hooks_yaml: &str,
+) -> (std::process::ExitStatus, String, String) {
     use std::path::Path;
 
     let build_dir =
@@ -620,8 +783,14 @@ fn run_proxy_case_with(
     let syscalls = crate::engine::syscalls::SyscallsConfig {
         mode: crate::engine::syscalls::SyscallsMode::Indirect,
         resolver: crate::engine::syscalls::Resolver::HellsGate,
+        ..Default::default()
     };
-    let yaml = format!("mode: proxy\nunmatched: {unmatched}\napis:\n{apis_yaml}");
+    let mut yaml = format!("mode: proxy\nunmatched: {unmatched}\n");
+    if !apis_yaml.trim().is_empty() {
+        yaml.push_str("apis:\n");
+        yaml.push_str(apis_yaml);
+    }
+    yaml.push_str(hooks_yaml);
     let yaml: crate::engine::api_resolution::YamlApiResolutionPlan =
         serde_yml::from_str(&yaml).unwrap();
     let api_resolution =
@@ -682,12 +851,8 @@ fn run_proxy_case_with(
 #[cfg(feature = "live-tests")]
 #[ignore = "requires rustc and the compiled dependencies"]
 fn api_resolution_rebuilds_openprocess() {
-    let (_, stdout, stderr) =
+    let (_, stdout, _stderr) =
         run_proxy_case("rebuild", "  - \"kernel32!OpenProcess\"\n", "forward");
-    assert!(
-        stderr.contains("routed to the syscall layer"),
-        "no route trace:\n{stderr}"
-    );
     assert!(
         !stdout.contains("open=0x0 via_handle"),
         "null handle:\n{stdout}"
@@ -706,18 +871,18 @@ fn api_resolution_rebuilds_openprocess() {
 fn api_resolution_routes_ntopenprocess() {
     let (_, stdout, stderr) = run_proxy_case("ntopen", "  - \"ntdll!NtOpenProcess\"\n", "forward");
     assert!(
-        stderr.contains("routed to the syscall layer"),
-        "no route trace:\n{stderr}"
-    );
-    assert!(
-        !stderr.contains("forwarded to the original"),
-        "unexpected forward trace:\n{stderr}"
+        !stderr.contains("routed to the syscall layer")
+            && !stderr.contains("forwarded to the original"),
+        "proxies must not trace on payload threads:\n{stderr}"
     );
     assert!(
         stdout.contains("ntopen=0x00000000 handle=0x"),
         "wrong status:\n{stdout}"
     );
-    assert!(!stdout.contains("handle=0x0\n"), "null handle:\n{stdout}");
+    assert!(
+        !stdout.contains("ntopen=0x00000000 handle=0x0\n"),
+        "null handle:\n{stdout}"
+    );
 }
 
 /// The `GetProcAddress` handler: a catalogue name gets its proxy, an ordinal is
@@ -732,12 +897,8 @@ fn api_resolution_handler_returns_proxies() {
         "forward",
     );
     assert!(
-        stderr.contains("returned a proxy"),
-        "the handler did not return a proxy:\n{stderr}"
-    );
-    assert!(
-        stderr.contains("forwarded to the original"),
-        "the ordinal was not forwarded:\n{stderr}"
+        !stderr.contains("returned a proxy") && !stderr.contains("forwarded to the original"),
+        "proxies must not trace on payload threads:\n{stderr}"
     );
     assert!(
         stdout.contains("rc=1 bytes=[88, 77, 66, 55, 44, 33, 22, 11]"),
@@ -754,12 +915,9 @@ fn api_resolution_routes_ntreadvirtualmemory() {
     let (_, stdout, stderr) =
         run_proxy_case("direct", "  - \"ntdll!NtReadVirtualMemory\"\n", "forward");
     assert!(
-        stderr.contains("routed to the syscall layer"),
-        "no route trace:\n{stderr}"
-    );
-    assert!(
-        !stderr.contains("forwarded to the original"),
-        "unexpected forward trace:\n{stderr}"
+        !stderr.contains("routed to the syscall layer")
+            && !stderr.contains("forwarded to the original"),
+        "proxies must not trace on payload threads:\n{stderr}"
     );
     assert!(
         stdout.contains("API_PROBE ntrvm=0x00000000 read=8 bytes=[88, 77, 66, 55, 44, 33, 22, 11]"),
@@ -776,12 +934,9 @@ fn api_resolution_wraps_readprocessmemory() {
     let (_, stdout, stderr) =
         run_proxy_case("wrapper", "  - \"kernel32!ReadProcessMemory\"\n", "forward");
     assert!(
-        stderr.contains("routed to the syscall layer"),
-        "no route trace:\n{stderr}"
-    );
-    assert!(
-        !stderr.contains("forwarded to the original"),
-        "unexpected forward trace:\n{stderr}"
+        !stderr.contains("routed to the syscall layer")
+            && !stderr.contains("forwarded to the original"),
+        "proxies must not trace on payload threads:\n{stderr}"
     );
     assert!(
         stdout.contains("API_PROBE rpm=1 read=8 bytes=[88, 77, 66, 55, 44, 33, 22, 11]"),
@@ -820,8 +975,8 @@ fn api_resolution_openprocess_matches_error_semantics() {
     let (_, stdout, stderr) =
         run_proxy_case("openfidelity", "  - \"kernel32!OpenProcess\"\n", "forward");
     assert!(
-        stderr.contains("routed to the syscall layer"),
-        "no route trace:\n{stderr}"
+        !stderr.contains("routed to the syscall layer"),
+        "proxies must not trace on payload threads:\n{stderr}"
     );
     // The proxy's `OpenProcess` must match the real export case for case
     // (null-or-not and the error code): a zero access mask, a bogus pid, a
@@ -925,12 +1080,112 @@ fn api_resolution_proxies_every_direct_nt_route() {
         "the native-signature proxy helper misbehaved:\n{stdout}"
     );
     assert!(
-        stderr.contains("routed to the syscall layer"),
-        "no route trace:\n{stderr}"
+        !stderr.contains("routed to the syscall layer")
+            && !stderr.contains("forwarded to the original"),
+        "proxies must not trace on payload threads:\n{stderr}"
+    );
+}
+
+/// The Win32 memory/handle wrappers rebuilt on the native helpers keep their
+/// documented semantics: allocate, protect, free, wait and close all succeed.
+#[test]
+#[cfg(feature = "live-tests")]
+#[ignore = "requires rustc and the compiled dependencies"]
+fn api_resolution_rebuilds_the_process_memory_wrappers() {
+    let (status, stdout, stderr) = run_proxy_case_with(
+        "memwrappers",
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("api_probe.rs"),
+        "  - \"kernel32!VirtualAlloc\"\n  - \"kernel32!VirtualProtect\"\n  - \"kernel32!VirtualFree\"\n  - \"kernel32!CloseHandle\"\n  - \"kernel32!WaitForSingleObject\"\n",
+        "forward",
+        &[],
+    );
+    assert!(status.success(), "the probe failed:\n{stdout}\n{stderr}");
+    assert!(
+        stdout.contains("API_PROBE mem block=0x") && stdout.contains("protect=1 free=1 ok=1"),
+        "the memory wrappers misbehaved:\n{stdout}\n{stderr}"
     );
     assert!(
-        !stderr.contains("forwarded to the original"),
-        "a direct route was forwarded instead of proxied:\n{stderr}"
+        stdout.contains("old=0x4"),
+        "VirtualProtect did not report the original PAGE_READWRITE protection:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("API_PROBE wait=0x00000102 close=1"),
+        "WaitForSingleObject/CloseHandle misbehaved:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("routed to the syscall layer")
+            && !stderr.contains("forwarded to the original"),
+        "proxies must not trace on payload threads:\n{stderr}"
+    );
+}
+
+/// The batch-2 wrappers: `VirtualQuery`, `CreateThread` (with a real TID and a
+/// worker that runs) and `OpenThreadToken` (same failure as the real export on
+/// a non-impersonating thread).
+#[test]
+#[cfg(feature = "live-tests")]
+#[ignore = "requires rustc and the compiled dependencies"]
+fn api_resolution_rebuilds_query_thread_and_token_wrappers() {
+    let (status, stdout, stderr) = run_proxy_case(
+        "batch2",
+        "  - \"kernel32!VirtualQuery\"\n  - \"kernel32!CreateThread\"\n  - \"advapi32!OpenThreadToken\"\n  - \"kernel32!CloseHandle\"\n  - \"kernel32!WaitForSingleObject\"\n",
+        "forward",
+    );
+    assert!(status.success(), "the probe failed:\n{stdout}\n{stderr}");
+    assert!(
+        stdout.contains("API_PROBE query len=48 state=0x1000"),
+        "VirtualQuery did not return the basic information block:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("API_PROBE thread handle=0x") && stdout.contains(" ok=1 close=1"),
+        "CreateThread did not run the worker or fill the TID:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("tid=0 "),
+        "CreateThread left lpThreadId unset:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("API_PROBE token rc=0 err=1008"),
+        "OpenThreadToken did not match the real export's ERROR_NO_TOKEN:\n{stdout}"
+    );
+    assert!(
+        !stderr.contains("routed to the syscall layer")
+            && !stderr.contains("forwarded to the original"),
+        "proxies must not trace on payload threads:\n{stderr}"
+    );
+}
+
+/// The `Sleep` hook: the payload's IAT slot is replaced by the ekko proxy, the
+/// mapped image is encrypted for the duration of the sleep, and the caller
+/// resumes with at least the requested delay.
+#[test]
+#[cfg(feature = "live-tests")]
+#[ignore = "requires rustc and the compiled dependencies"]
+fn api_resolution_sleep_hook_conceals_and_still_returns() {
+    let (status, stdout, stderr) = run_hook_case(
+        "sleephook",
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("sleep_probe.rs"),
+        "hooks:\n  sleep:\n    assume_single_threaded: true\n    min_ms: 1000\n",
+    );
+    assert!(status.success(), "the probe failed:\n{stdout}\n{stderr}");
+    assert!(
+        stdout.contains("SLEEP_PROBE before"),
+        "no start line:\n{stdout}"
+    );
+    let elapsed = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("SLEEP_PROBE after elapsed="))
+        .and_then(|value| value.trim().parse::<u128>().ok())
+        .expect("the payload did not resume after the sleep");
+    assert!(
+        elapsed >= 2400,
+        "the obfuscated sleep returned before the requested delay: {elapsed} ms"
     );
 }
 

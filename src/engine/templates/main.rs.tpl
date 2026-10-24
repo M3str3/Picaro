@@ -14,6 +14,9 @@ use chacha20poly1305::{
 
 $STUB_HELPERS$
 
+// --- Shared sleep-obfuscation runtime (injected; ekko) ---
+$SLEEP_RUNTIME_BLOCK$
+
 $TLS_HANDOFF_BLOCK$
 
 $ENTRY_BLOCK$

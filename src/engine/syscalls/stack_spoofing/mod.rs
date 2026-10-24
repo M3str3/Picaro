@@ -2,20 +2,23 @@
 //!
 //! Indirect syscalls put the *instruction pointer* inside ntdll for the duration
 //! of the syscall, but the *stack* still shows the loader's own frames. This
-//! technique replaces the top of the stack with a run of plausible ntdll code
+//! block replaces the top of the stack with a run of plausible ntdll code
 //! addresses before every syscall, so a checker that walks the stack during the
 //! call no longer sees the stub.
 //!
-//! The technique is not a step: nothing runs at pipeline time. It rewrites the
-//! syscall layer's trampoline (`nt_invoke`) and initializes the fabricated-frame
-//! table from `init_syscalls`. See `README.md` for the full write-up, including
-//! what this does *not* hide.
+//! It is a property of `build.stub.syscalls`, not a `runtime:` step: it rewrites
+//! the trampoline (`nt_invoke`) every `nt_*` helper calls, and `init_syscalls`
+//! installs it before the runner starts. See the loader-feature README at
+//! `src/features/stack_spoofing/README.md` for the full write-up, including what
+//! this does *not* hide.
 
 use serde::{Deserialize, Serialize};
 
 use crate::engine::obfuscation::StringsConfig;
 
-use super::{Capability, Category, Stability, TechniqueDef};
+/// The generated block: a `nt_invoke` replacement injected into the syscall
+/// layer.
+const BLOCK: &str = include_str!("stub_fragment.rs");
 
 /// Lower bound of `decoy_bytes`: the fabricated frames live between the new
 /// stack pointer and the first copied argument, so the shift has to be at least
@@ -29,7 +32,7 @@ pub const MIN_DECOY_BYTES: usize = 0x80;
 pub const MAX_DECOY_BYTES: usize = 0x8000;
 
 /// Parameters for stack spoofing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Params {
     /// How many bytes of decoy stack to fabricate below the real stack pointer
     /// on every syscall.
@@ -47,8 +50,8 @@ impl Default for Params {
     /// Defaults to a page of decoy stack per syscall.
     ///
     /// The manual impl keeps `Params::default()` and the `serde` field default
-    /// in step: a runtime step with no `params:` mapping gets the default
-    /// struct, not the field-level defaults.
+    /// in step: a block with no fields gets the default struct, not the
+    /// field-level default.
     fn default() -> Self {
         Self {
             decoy_bytes: default_decoy_bytes(),
@@ -60,27 +63,6 @@ impl Default for Params {
 pub fn default_decoy_bytes() -> usize {
     0x1000
 }
-
-/// Static metadata for stack spoofing.
-pub const DEF: TechniqueDef = TechniqueDef {
-    name: "stack_spoofing",
-    attck: &["T1036"],
-    stability: Stability::Stable,
-    requires: &[Capability::WindowsX64],
-    conflicts: &[],
-    category: Category::Preparation,
-    doc_path: "src/techniques/stack_spoofing/README.md",
-    stub_fragment: include_str!("stub_fragment.rs"),
-    formats: &[],
-    requires_indirect_syscalls: true,
-    params_example: "technique: stack_spoofing\nparams:\n  decoy_bytes: 4096\n",
-    readme: include_str!("README.md"),
-    // The technique issues no syscall of its own: it rewrites the trampoline the
-    // other techniques call. A pipeline whose techniques use no syscalls at all
-    // has a no-op syscall layer, and then there is nothing to spoof.
-    syscalls: &[],
-    resolves_imports: false,
-};
 
 /// Runtime diagnostics the fragment can emit, as `(placeholder, plaintext)`
 /// pairs.
@@ -102,17 +84,16 @@ const MESSAGES: &[(&str, &str)] = &[
 impl Params {
     /// Renders the stack-spoofing block for these parameters.
     ///
-    /// The block is not a step module: the renderer injects it into
-    /// `$SYSCALLS_BLOCK$`, next to the trampoline it replaces. Only the ntdll
-    /// name and the diagnostics go through the obfuscator; the fabricated
-    /// addresses are discovered at run time and never appear in the artifact.
+    /// Only the ntdll name and the diagnostics go through the obfuscator; the
+    /// fabricated addresses are discovered at run time and never appear in the
+    /// artifact.
     pub fn render_fragment(&self, strings: &StringsConfig) -> String {
         let ntdll_def = strings
             .obfuscate("ntdll.dll")
             .render_stub_expr("stack_spoofing_ntdll");
         let decoy = self.clamped_decoy_bytes();
 
-        let mut rendered = DEF.stub_fragment.to_string();
+        let mut rendered = BLOCK.to_string();
         for (index, (placeholder, text)) in MESSAGES.iter().enumerate() {
             rendered = rendered.replace(
                 placeholder,

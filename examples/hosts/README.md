@@ -185,6 +185,6 @@ calls `DllRegisterServer` and the default artifact does not export it; the
 ## 7. Not supported for a DLL build
 
 `subsystem: windows`, `resources.manifest`, `self_deletion`, `sleep_obfuscation`
-(both act on the *running image* — the host, here), `bouncer` with
-`on_fail: exit` (it would `ExitProcess` the host) and custom stubs. The build
+(both act on the *running image* — the host, here), `bouncer` with an exiting
+`on_reject` action (it would `ExitProcess` the host) and custom stubs. The build
 rejects each one with a message naming the reason.

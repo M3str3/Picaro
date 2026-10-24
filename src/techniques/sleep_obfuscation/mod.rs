@@ -7,8 +7,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use rand::RngCore;
-
 use crate::engine::obfuscation::StringsConfig;
 
 use super::{Capability, Category, Stability, TechniqueDef};
@@ -164,125 +162,17 @@ pub const DEF: TechniqueDef = TechniqueDef {
     resolves_imports: false,
 };
 
-/// Runtime diagnostics the fragment can emit, as `(placeholder, plaintext)`
-/// pairs.
-///
-/// `render_fragment` replaces each placeholder with code that rebuilds the
-/// message at runtime, so no diagnostic text — least of all a technique keyword
-/// like `loader` — lands in the generated stub's `.rdata`. Messages that
-/// interpolate an error code keep a keyword-free `format!` literal in the
-/// fragment's `step_error` helper and take the label from here.
-const MESSAGES: &[(&str, &str)] = &[
-    (
-        "$MSG_CAPTURE_CONTEXT_FAILED$",
-        "could not capture a timer-thread context",
-    ),
-    (
-        "$MSG_CREATE_TIMER_QUEUE_FAILED$",
-        "could not create the timer queue",
-    ),
-    (
-        "$MSG_CREATE_TIMER_QUEUE_TIMER_FAILED$",
-        "could not queue a timer",
-    ),
-    (
-        "$MSG_VIRTUAL_QUERY_FAILED$",
-        "could not walk the image memory",
-    ),
-    (
-        "$MSG_VIRTUAL_PROTECT_FAILED$",
-        "could not change the image memory protection",
-    ),
-    (
-        "$MSG_CRYPT_FUNCTION_NOT_FOUND$",
-        "could not resolve the RC4 system function",
-    ),
-    (
-        "$MSG_CRYPT_FUNCTION_FAILED$",
-        "the RC4 system function failed",
-    ),
-    (
-        "$MSG_NO_TARGET_REGIONS$",
-        "no committed region of the image to encrypt",
-    ),
-];
-
 impl Params {
-    /// Renders the ekko stub fragment, baking in the sleep length and the
-    /// obfuscated API/DLL names.
+    /// Renders the thin adapter that calls the shared `sleep_runtime` block.
     ///
-    /// `plan::validate` rejects non-`ekko` variants and region lists other
-    /// than `[payload]` before this runs, so only the ekko body is rendered.
-    pub fn render_fragment(&self, strings: &StringsConfig) -> String {
-        // Every runtime name is rebuilt at runtime through `strings` so it
-        // never appears in cleartext in the generated stub.
-        let substitutions: [(&str, &str, &str); 12] = [
-            ("$KERNEL32_DLL_DEF$", "kernel32.dll", "kernel32_dll"),
-            ("$NTDLL_DLL_DEF$", "ntdll.dll", "ntdll_dll"),
-            ("$ADVAPI32_DLL_DEF$", "advapi32.dll", "advapi32_dll"),
-            (
-                "$CREATE_TIMER_QUEUE_DEF$",
-                "CreateTimerQueue",
-                "create_timer_queue",
-            ),
-            (
-                "$CREATE_TIMER_QUEUE_TIMER_DEF$",
-                "CreateTimerQueueTimer",
-                "create_timer_queue_timer",
-            ),
-            (
-                "$DELETE_TIMER_QUEUE_EX_DEF$",
-                "DeleteTimerQueueEx",
-                "delete_timer_queue_ex",
-            ),
-            (
-                "$WAIT_FOR_SINGLE_OBJECT_DEF$",
-                "WaitForSingleObject",
-                "wait_for_single_object",
-            ),
-            ("$SET_EVENT_DEF$", "SetEvent", "set_event"),
-            ("$VIRTUAL_PROTECT_DEF$", "VirtualProtect", "virtual_protect"),
-            (
-                "$RTL_CAPTURE_CONTEXT_DEF$",
-                "RtlCaptureContext",
-                "rtl_capture_context",
-            ),
-            ("$NT_CONTINUE_DEF$", "NtContinue", "nt_continue"),
-            (
-                "$SYSTEM_FUNCTION_032_DEF$",
-                "SystemFunction032",
-                "system_function_032",
-            ),
-        ];
-
-        let mut fragment = DEF.stub_fragment.to_string();
-        for (placeholder, name, var) in substitutions {
-            let expr = strings.obfuscate(name).render_stub_expr(var);
-            fragment = fragment.replace(placeholder, &expr);
-        }
-
-        // The error labels get the same treatment as the resolved names: each
-        // message is rebuilt at runtime, so no diagnostic text reaches `.rdata`.
-        for (index, (placeholder, text)) in MESSAGES.iter().enumerate() {
-            fragment = fragment.replace(
-                placeholder,
-                &strings
-                    .obfuscate(text)
-                    .render_stub_expr(&format!("sleep_msg_{index}")),
-            );
-        }
-
-        fragment = fragment.replace("$SLEEP_MS$", &self.sleep_ms.to_string());
-
-        // The sleeping image is RC4-encrypted with a fresh per-build key; its
-        // hex form is rebuilt at runtime through `strings`, so it never lands in
-        // cleartext in the generated stub.
-        let mut key = [0u8; 16];
-        rand::thread_rng().fill_bytes(&mut key);
-        let key_def = strings
-            .obfuscate(&hex::encode(key))
-            .render_stub_expr("sleep_key");
-        fragment.replace("$SLEEP_KEY_DEF$", &key_def)
+    /// The ekko mechanism, its API/DLL names, its RC4 key and its diagnostics
+    /// are rendered once by [`crate::engine::sleep_runtime`], so the technique
+    /// and the `Sleep` API proxy share one implementation. `plan::validate`
+    /// rejects non-`ekko` variants and region lists other than `[payload]`
+    /// before this runs.
+    pub fn render_fragment(&self, _strings: &StringsConfig) -> String {
+        DEF.stub_fragment
+            .replace("$SLEEP_MS$", &self.sleep_ms.to_string())
     }
 }
 

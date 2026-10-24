@@ -70,7 +70,9 @@ sequenceDiagram
    from obfuscated bytes, follows redirects (`curl -L` behavior), fails on an
    HTTP status of 400 or more, and reads the body straight into memory. The
    child-process one waits for the downloader up to `timeout_ms` and reads the
-   temp file. Both retry up to `retries` extra times.
+   temp file. Both retry up to `retries` extra times, and a later attempt that
+   succeeds is the one that is used — only an exhausted set of attempts is a
+   failure.
 4. When `crypto: xchacha20poly1305`, the fetched blob is decrypted in the stub
    (key/nonce declared on the step). The embedded copy, when there is one, uses
    the payload's own crypto instead — the two layers are independent.

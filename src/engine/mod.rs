@@ -14,6 +14,8 @@
 //! - `fetch`: in-memory HTTP(S) fetch of the input payload (URL input).
 //! - `api_resolution`: how the loader resolves the payload's imports
 //!   (`build.stub.api_resolution`) — the proxy catalogue and its validation.
+//! - `sleep_runtime`: the shared ekko block used by the `sleep_obfuscation`
+//!   step and the `Sleep` API proxy.
 //! - `args`: payload command-line construction and argument spoofing.
 //! - `build_lock`: a dependency-free per-output lock that serializes the
 //!   copy/sign/manifest section of concurrent builds targeting one artifact.
@@ -49,6 +51,7 @@ pub mod resources;
 pub mod scrub;
 pub mod shellcode;
 pub mod signing;
+pub mod sleep_runtime;
 pub mod stager;
 pub mod steps;
 pub mod stub;

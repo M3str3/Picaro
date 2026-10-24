@@ -20,6 +20,7 @@ metadata only (`src/features/syscalls/mod.rs`); the implementation is
 | 6a | [Hell's Gate](../features/ref/syscalls/hells_gate.md) | SSN read from the live `Nt*` export prologue; trampoline through the ntdll gadget |
 | 6b | [Tartarus Gate](../features/ref/syscalls/tartarus_gate.md) | SSN read from a clean on-disk copy of ntdll, so live hooks do not hide it; gadget still from live ntdll |
 | 6c | [API hashing](../features/ref/syscalls/api_hash.md) | Same clean copy, matched by FNV-1a 64-bit hash of the export name (no `GetProcAddress`, no name string) |
+| 6d | [Halo's Gate](../features/ref/syscalls/halos_gate.md) | Live export table; a hooked stub's SSN is derived from the nearest intact 32-byte neighbour, with the clean copy as fallback |
 
 ## Design notes
 
@@ -41,9 +42,9 @@ metadata only (`src/features/syscalls/mod.rs`); the implementation is
 
 ## Related
 
-- **Stack spoofing** is a *technique* (`stack_spoofing`), not part of this
-  feature: it rewrites the `nt_invoke` trampoline at load time, so it applies on
-  top of `mode: indirect`. Its position in `runtime:` is a no-op.
+- **Stack spoofing** (`build.stub.syscalls.stack_spoofing`) is a property of
+  this layer: it rewrites the `nt_invoke` trampoline at load time, so it applies
+  on top of `mode: indirect`. It has no position in `runtime:`.
 - **ntdll unhooking** (`unhook_ntdll`) is a *technique* too; it restores the live
   ntdll's `.text` from disk and runs in pipeline order (see the advisory about
   running it before the patchers).
@@ -60,8 +61,8 @@ See [Measurements](../measurements.md).
 
 - `mode: indirect` is x64-only; x86 indirect syscalls are a parked workstream
   ([x86 support](../x86.md)).
-- No stack spoofing or ntdll unhooking in the layer itself: those are separate
-  techniques.
+- Stack spoofing lives in the layer (`build.stub.syscalls.stack_spoofing`); ntdll
+  unhooking is a separate technique.
 - Direct syscalls (no ntdll gadget) are **not** implemented; the layer supports
   `none` and `indirect` only.
 

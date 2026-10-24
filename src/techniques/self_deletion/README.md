@@ -133,7 +133,13 @@ self-deleting loader that then runs an in-process shellcode payload:
   unless `build.stub.debug: true`.
 - `FILE_RENAME_INFO` is built as a byte buffer with the exact layout class 10
   expects (`ReplaceIfExists`, `RootDirectory`, the byte length, the UTF-16 name);
-  the variable-length tail is why it is not a struct.
+  the variable-length tail is why it is not a struct. The header is 20 bytes on
+  x64 (length at 16, name at 20) and 12 bytes on x86 (length at 8, name at 12):
+  the structure is pointer-sized, so the x64 offsets cannot be reused on x86.
+- The stream name is validated at run time: it must start with `:` and contain
+  no path separator. A bare name would rename the image to a visible sibling
+  file instead of hiding it in a stream, so the step rejects it with an
+  obfuscated error.
 - `IO_STATUS_BLOCK` is a local `[u64; 2]`: the loader only needs the space to be
   the right size.
 - The stream name defaults to random six bytes per build, so it is not a constant

@@ -309,6 +309,28 @@
     border-color: var(--sl-color-accent);
     box-shadow: 0 0 0 3px color-mix(in oklab, var(--sl-color-accent) 25%, transparent);
   }
+  .pb textarea.pb-json {
+    width: 100%;
+    box-sizing: border-box;
+    min-height: 7rem;
+    padding: 0.5rem 0.7rem;
+    border: 1px solid var(--pb-line);
+    border-radius: 8px;
+    background: var(--sl-color-bg);
+    color: inherit;
+    font-family: var(--sl-font-mono);
+    font-size: 0.78rem;
+    line-height: 1.45;
+    outline: none;
+    resize: vertical;
+  }
+  .pb textarea.pb-json:focus {
+    border-color: var(--sl-color-accent);
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--sl-color-accent) 25%, transparent);
+  }
+  .pb textarea.pb-json.is-invalid {
+    border-color: var(--pb-err);
+  }
   .pb select {
     background-image:
       linear-gradient(45deg, transparent 50%, var(--sl-color-accent) 50%),

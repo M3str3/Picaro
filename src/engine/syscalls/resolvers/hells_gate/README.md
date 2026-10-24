@@ -60,7 +60,8 @@ to the `runtime:` chain order. `mode: indirect` is x64-only (see `docs/x86.md`).
 - If the fallback file itself is unreadable the load still fails
   (`SyscallError::NtdllNotFound`).
 - Stack inspection: the call stack does not show the expected `ntdll` frames
-  (mitigated by the `stack_spoofing` technique).
+  (mitigated by the `stack_spoofing` loader feature,
+  `build.stub.syscalls.stack_spoofing`).
 
 ## Implementation notes
 

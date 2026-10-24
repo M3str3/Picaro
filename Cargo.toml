@@ -74,6 +74,10 @@ windows = { version = "0.58", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     # Bouncer: CreateToolhelp32Snapshot + PROCESSENTRY32W (T1497).
     "Win32_System_Diagnostics_ToolHelp",
+    # Bouncer: GetAdaptersAddresses (T1016) and the adapter types it returns.
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
     # dotnet_hosting: CLRCreateInstance + the hosting interfaces.
     "Win32_System_ClrHosting",
     # dotnet_hosting: CoInitializeEx + SAFEARRAY.

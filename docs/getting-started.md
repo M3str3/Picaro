@@ -191,10 +191,10 @@ offline Defender scan.
   `dotnet_hosting`) must be last.
 - `build.output.arch` is `x64` or `x86`, and the payload must match it: the stub
   and the payload share one address space. Both execution techniques and the
-  preparations support `x86` (see [x86 support](x86.md)); `sleep_obfuscation`,
-  `stack_spoofing`, `syscalls.mode: indirect` and `api_resolution` stay
-  `x64`-only, and an `x86` pipeline that needs one of them is rejected at
-  validation with a message naming the technique.
+  preparations support `x86` (see [x86 support](x86.md)); `sleep_obfuscation`
+  stays `x64`-only, and so do the loader features `syscalls.mode: indirect`,
+  `api_resolution` and `stack_spoofing`. An `x86` pipeline that needs one is
+  rejected at validation with a message naming it.
 - Positional CLI args after the plan path are substituted as `$arg.0$`,
   `$arg.1$`, … (and `name=value` as `$arg.name$`), so one plan can target
   several hosts.

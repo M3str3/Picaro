@@ -4,9 +4,10 @@
 #   cargo run -- build examples/plans/evasion.yaml
 #   .\dist\evasion.exe
 #
-#   - `stack_spoofing` (x64) replaces the syscall trampoline and fabricates the
-#     top of the call stack for every indirect syscall, so a stack walk during
-#     the call sees ntdll return addresses. It requires `syscalls.mode: indirect`.
+#   - `build.stub.syscalls.stack_spoofing` (x64) replaces the syscall trampoline
+#     and fabricates the top of the call stack for every indirect syscall, so a
+#     stack walk during the call sees ntdll return addresses. It requires
+#     `syscalls.mode: indirect`.
 #   - `sleep_obfuscation` encrypts the image region during a timer-driven sleep
 #     (ekko), so a memory scanner sees ciphertext while the loader dwells.
 #   - `self_deletion` (`rename_ads`) moves the running image into an alternate
@@ -26,16 +27,14 @@ build:
     syscalls:
       mode: indirect
       resolver: tartarus_gate
+      stack_spoofing:
+        decoy_bytes: 4096
     strings:
       strategy: xor
   output:
     path: ./dist/evasion.exe
 
 runtime:
-  - technique: stack_spoofing
-    params:
-      decoy_bytes: 4096
-
   - technique: sleep_obfuscation
     params:
       variant: ekko

@@ -308,9 +308,14 @@ patch to this fragment. Until then:
   warning: the plan is valid, the run just depends on the base being free).
 - **The mapper is bounds-checked against the image it is given.** The headers,
   the section table, `SizeOfHeaders`/`SizeOfImage`, each section's source and
-  destination, the base relocation directory and its blocks, the entry point and
-  every table the export lookup walks are validated before they are followed. A
-  malformed payload is a clean error, not an out-of-bounds read or a panic.
+  destination, every relocation block header (checked to fit in the directory
+  before it is read) and every fixup target (`page RVA + offset + width` against
+  `SizeOfImage`), the TLS directory, its callback array and each callback
+  address, the entry point and every table the export lookup walks are validated
+  before they are followed. A relocation directory that ends without a zero
+  terminator (legal, and common: `kernel32.dll`'s ends exactly at `Size`) is
+  walked only up to its declared end. A malformed payload is a clean error, not
+  an out-of-bounds read or a panic.
 - **A forwarded export is refused, not followed.** The payload's own export table
   is read directly, so an entry that points back inside the export directory (a
   forwarder string) is reported instead of being called as code. Exports by

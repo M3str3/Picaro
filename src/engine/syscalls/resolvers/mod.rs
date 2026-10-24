@@ -8,6 +8,7 @@
 //! maps it to an implementation and describes it for the CLI and the docs.
 
 pub mod api_hash;
+pub mod halos_gate;
 pub mod hells_gate;
 pub mod tartarus_gate;
 
@@ -45,7 +46,12 @@ pub struct ResolverDef {
 }
 
 /// Every registered resolver, in build order.
-const ALL: &[ResolverDef] = &[hells_gate::DEF, tartarus_gate::DEF, api_hash::DEF];
+const ALL: &[ResolverDef] = &[
+    hells_gate::DEF,
+    tartarus_gate::DEF,
+    api_hash::DEF,
+    halos_gate::DEF,
+];
 
 /// All registered resolvers, in build order.
 pub fn all() -> &'static [ResolverDef] {
@@ -215,6 +221,7 @@ pub(crate) fn render_body(
         Resolver::HellsGate => hells_gate::FRAGMENT,
         Resolver::TartarusGate => tartarus_gate::FRAGMENT,
         Resolver::ApiHash => api_hash::FRAGMENT,
+        Resolver::HalosGate => halos_gate::FRAGMENT,
     };
     fragment
         .replace("$SSN_INIT$", ssn_init)

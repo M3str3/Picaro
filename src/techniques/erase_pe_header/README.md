@@ -13,9 +13,10 @@ points at a committed, mapped image, but `*(u16*)base` is `0x0000` instead of
 lookups return `NULL`, and the section table is gone.
 
 It never runs the payload and takes no payload argument: it only rewrites process
-state, which is why it is a **Preparation**. It is `Experimental` because
-removing the header removes the loader's own map of itself (see *Implementation
-notes*); treat it as a last-step finishing move, not a free win.
+state, which is why it is a **Preparation**. It is `Stable` (measured end to end
+on Windows 11 26200), but removing the header removes the loader's own map of
+itself (see *Implementation notes*); treat it as a last-step finishing move, not
+a free win.
 
 ## How it works
 
@@ -73,8 +74,11 @@ runtime:
 ```
 
 It is declared **conflicting with `sleep_obfuscation`** (see *Implementation
-notes*), so a plan that selects both is rejected. `plan::validate`'s order
-advisories do not cover this pair; the conflict list is what stops it.
+notes*), but that registry entry is metadata for display only: `plan::validate`
+does not reject the pair. Instead it emits an advisory when a
+`sleep_obfuscation` step follows an `erase_pe_header` step, because the erased
+header no longer carries the `SizeOfImage` the sleep reads. In a plan that wants
+both, run the header erase *after* the last sleep, or drop one.
 
 ## What it evades
 
@@ -140,9 +144,10 @@ the module:
 `sleep_obfuscation` fetches `GetModuleHandleA(PCSTR::null())` and then reads
 `SizeOfImage` (optional-header offset `0x38`) out of the loader's header to size
 the region it encrypts. With the header zeroed first, `SizeOfImage` reads `0`
-and the step fails. The two are therefore declared mutually exclusive
-(`DEF.conflicts`); in a plan that wants both, run the header erase *after* the
-last sleep, or drop one.
+and the step fails. The two are therefore declared conflicting
+(`DEF.conflicts`), a display-only metadata entry that `plan::validate` surfaces
+as the order advisory above rather than a rejection; in a plan that wants both,
+run the header erase *after* the last sleep, or drop one.
 
 ### The offsets, precisely
 

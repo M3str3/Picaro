@@ -48,7 +48,7 @@ flowchart TD
 
 ## Resolvers
 
-`build.stub.syscalls.resolver` selects how the SSNs are learned. Three are
+`build.stub.syscalls.resolver` selects how the SSNs are learned. Four are
 implemented; each is a self-contained module under
 `src/engine/syscalls/resolvers/<name>/` with its own page:
 
@@ -57,6 +57,7 @@ implemented; each is a self-contained module under
 | `hells_gate` | 6a | the live `Nt*` stub prologue (falls back to the on-disk copy if hooked) |
 | `tartarus_gate` | 6b | a clean on-disk copy of `ntdll` |
 | `api_hash` | 6c | the clean copy, matching exports by a per-build FNV-1a hash |
+| `halos_gate` | 6d | the live export table; a hooked stub's SSN comes from an intact neighbour |
 
 ## Integration
 
@@ -82,7 +83,8 @@ Configured under `build.stub.syscalls` (loader-wide), **not** in `runtime:`. It 
 - Kernel callbacks (PsSetCreateProcessNotifyRoutine, ObRegisterCallbacks) and
   ETW-TI: the syscall is indistinguishable from a legitimate `ntdll` call.
 - Stack inspection / stack-spoofing detectors (the call stack does not show
-  `ntdll`). Mitigated by the `stack_spoofing` technique; otherwise pending.
+  `ntdll`). Mitigated by the `stack_spoofing` loader feature
+  (`build.stub.syscalls.stack_spoofing`); otherwise pending.
 - SSN anomalies: signatures built from SSNs that change between Windows builds.
 
 ## Implementation notes

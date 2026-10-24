@@ -161,7 +161,9 @@ mod tls_handoff {
             return None;
         }
         let mut index_addr = read_u64(base + tls_rva + 16)?;
-        if index_addr < 0x1_0000_0000 {
+        // Compare through u64 so the literal also compiles for an i686 stub,
+        // where `usize` cannot hold 4 GiB. `index_addr` stays `usize`.
+        if (index_addr as u64) < 0x1_0000_0000u64 {
             index_addr += base;
         }
         read_u32(index_addr)

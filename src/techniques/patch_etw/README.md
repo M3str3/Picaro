@@ -42,7 +42,7 @@ sequenceDiagram
     L->>N: LoadLibraryA(ntdll.dll)
     L->>N: GetProcAddress(EtwEventWrite)
     L->>N: nt_protect_vm(RWX)
-    L->>N: write 33 C0 C3 (xor eax, eax then ret)
+    L->>N: write 33 C0 C3 (x64) or 33 C0 C2 NN 00 (x86)
     L->>N: restore original protection
     opt full / ex / nt_trace
         L->>N: repeat for each selected variant
@@ -56,10 +56,15 @@ sequenceDiagram
 
 ### 2. Overwrite the prologue
 
-3. Make the first three bytes writable (`nt_protect_vm` →
-   `PAGE_EXECUTE_READWRITE`).
-4. Write `xor eax, eax; ret` (`33 C0 C3`): return `STATUS_SUCCESS` (0) without
-   writing an event.
+3. Make the patch bytes writable (`nt_protect_vm` → `PAGE_EXECUTE_READWRITE`):
+   three bytes on x64, five on x86.
+4. Write `xor eax, eax` then `ret` (`33 C0 C3`): return `STATUS_SUCCESS` (0)
+   without writing an event. On x86 the exports are `stdcall`, so the `ret`
+   carries the argument-byte count (`ret imm16`, `C2 NN 00`, five bytes) and the
+   callee pops the caller's arguments: `0x14` for `EtwEventWrite` (`@20`),
+   `0x20` for `EtwEventWriteFull` (`@32`), `0x28` for `EtwEventWriteEx` (`@40`)
+   and `0x10` for `NtTraceEvent` (`@16`). A bare `ret` would leave those bytes
+   on the stack and corrupt the frame after the first event.
 5. Restore the original page protection.
 
 ### 3. Optionally patch the other variants
@@ -90,7 +95,7 @@ receives the payload. Place it earlier in `runtime:` than the Execution step.
 - ETW-TI (`Microsoft-Windows-Threat-Intelligence`, kernel-side) on suspicious
   memory writes to `ntdll`.
 - Memory integrity checks / periodic re-reads of the event-writing exports,
-  which find the `33 C0 C3` prologue.
+  which find the `33 C0 C3` (x64) or `33 C0 C2 NN 00` (x86) prologue.
 - Kernel callbacks (`PsSetCreateProcessNotifyRoutineEx`, etc.) are unaffected:
   this blinds user-mode events, not kernel telemetry.
 
@@ -104,6 +109,16 @@ receives the payload. Place it earlier in `runtime:` than the Execution step.
   export returns a `ULONG` NTSTATUS, and a bare `ret` would leak whatever was in
   EAX. On x64, writing EAX zero-extends to RAX, so `33 C0` clears the full
   64-bit return register.
+- On x86 the exports are `stdcall`, so the patch is `33 C0 C2 NN 00`
+  (`xor eax, eax; ret imm16`, five bytes) and `NN` is the export's `@N`
+  decoration — the argument bytes the callee must pop. Verified with `nm` on
+  `libwinapi_ntdll.a`: `_EtwEventWrite@20` (`ret 0x14`),
+  `_EtwEventWriteFull@32` (`ret 0x20`), `_EtwEventWriteEx@40` (`ret 0x28`) and
+  `_NtTraceEvent@16` (`ret 0x10`). A bare `ret` leaves 20, 32, 40 or 16 bytes on
+  the caller's stack, corrupting the frame after the first event.
+- The page protection covers exactly the bytes written: `patch.len()` is three
+  on x64 and five on x86, so neither build protects more or less than it
+  overwrites.
 - `NtTraceEvent` is patched exactly like the `Etw*` writers: returning
   `STATUS_SUCCESS` without writing the event record is what stops it reaching a
   consumer. It is resolved through `GetProcAddress` on the same `ntdll.dll`

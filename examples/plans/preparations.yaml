@@ -12,8 +12,9 @@
 #   - `unhook_ntdll` restores ntdll's `.text` from a clean on-disk copy, which
 #     would silently undo `patch_etw` if it ran after it (both rewrite ntdll).
 #     Pick one or the other.
-#   - `self_deletion`, `sleep_obfuscation` and `stack_spoofing` live in
-#     `evasion.yaml` (they act on the running image or the syscall layer).
+#   - `self_deletion` and `sleep_obfuscation` live in `evasion.yaml` (they act
+#     on the running image); `stack_spoofing` is a `build.stub.syscalls` feature,
+#     not a runtime step.
 
 schema: 6
 name: preparations
@@ -32,9 +33,8 @@ runtime:
   # Gate the chain on host properties (here: at least 512 MiB of RAM).
   - technique: bouncer
     params:
-      mode: all
-      on_fail: silent
-      min_ram_mb: 512
+      require:
+        - ram_mb: 512
 
   # Killswitch: abort past a deadline (and, optionally, after N runs).
   - technique: guardrail

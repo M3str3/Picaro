@@ -37,6 +37,17 @@ const AMSI_SCAN_BUFFER_RESULT_OFFSET: usize = 0x30;
 /// ([`Rsp+0x28`]).
 const AMSI_SCAN_STRING_RESULT_OFFSET: usize = 0x28;
 
+/// Sentinel stored in `WATCHED_RESULT_OFFSET` for `AmsiOpenSession`. It has no
+/// `AMSI_RESULT*` to fill, but it does hand the caller a `HAMSISESSION*` that
+/// must not stay uninitialized (the caller later passes it to
+/// `AmsiCloseSession`), so the handler clears that slot instead.
+const AMSI_OPEN_SESSION_SENTINEL: usize = usize::MAX;
+
+/// Stack offset of the caller's `HAMSISESSION*` slot from `Rsp` at
+/// `AmsiOpenSession`'s entry: the return address plus the 32-byte shadow space
+/// ([`Rsp+0x28`]).
+const AMSI_OPEN_SESSION_SESSION_OFFSET: usize = 0x28;
+
 /// `NtGetContextThread`/`NtSetContextThread` require a 16-byte aligned `CONTEXT`
 /// on x64; the `windows` binding only guarantees 8, so force it (the same
 /// wrapper the other context fragments use).
@@ -52,9 +63,10 @@ static WATCHED_ADDR: [AtomicUsize; 4] = [
     AtomicUsize::new(0),
 ];
 
-/// Stack offset of the `AMSI_RESULT*` for the function in each slot, or zero
-/// when the function has no out-parameter to clear (`EtwEventWrite`,
-/// `AmsiOpenSession`).
+/// Stack offset of the `AMSI_RESULT*` for the function in each slot, zero when
+/// the function has no out-parameter to clear (`EtwEventWrite`), or
+/// `AMSI_OPEN_SESSION_SENTINEL` when it has a `HAMSISESSION*` to clear
+/// (`AmsiOpenSession`).
 static WATCHED_RESULT_OFFSET: [AtomicUsize; 4] = [
     AtomicUsize::new(0),
     AtomicUsize::new(0),
@@ -91,10 +103,27 @@ unsafe extern "system" fn breakpoint_handler(info: *mut EXCEPTION_POINTERS) -> i
         }
 
         // Return clean: S_OK, and AMSI_RESULT_CLEAN when there is an
-        // out-parameter to fill.
+        // out-parameter to fill. `AmsiOpenSession` reports itself with the
+        // sentinel: it has no result out-parameter, but its caller-owned
+        // `HAMSISESSION*` must be initialized to NULL.
         context.Rax = 0;
         let offset = WATCHED_RESULT_OFFSET[slot].load(Ordering::Relaxed);
-        if offset != 0 {
+        if offset == AMSI_OPEN_SESSION_SENTINEL {
+            // `AmsiOpenSession`'s second argument is the caller's
+            // `HAMSISESSION*` (in RDX on x64). The real export initializes it
+            // on success, so the emulation writes NULL — as `patch_amsi` does —
+            // instead of leaving an uninitialized value behind for
+            // `AmsiCloseSession`.
+            let session = context.Rdx as *mut usize;
+            if !session.is_null() {
+                *session = 0;
+            }
+            // Also clear the documented second-argument slot
+            // ([`Rsp+0x28`]).
+            let session_slot = (context.Rsp as usize)
+                .wrapping_add(AMSI_OPEN_SESSION_SESSION_OFFSET) as *mut usize;
+            *session_slot = 0;
+        } else if offset != 0 {
             let result_slot = (context.Rsp as usize).wrapping_add(offset) as *const *mut u32;
             let result = *result_slot;
             if !result.is_null() {
@@ -141,6 +170,13 @@ fn try_resolve_export(module: HMODULE, name: &str) -> Option<usize> {
 /// export names are substituted at build time by `Params::render_fragment` with
 /// code that rebuilds them at runtime, so none reaches `.rdata`.
 pub fn hardware_breakpoints() -> Result<bool, String> {
+    // The optional AMSI exports are watched through `amsi.dll` and only make
+    // sense alongside `AmsiScanBuffer`; selecting them on their own would arm
+    // nothing while reporting success.
+    if !WATCH_AMSI && (WATCH_SCAN_STRING || WATCH_OPEN_SESSION) {
+        return Err($MSG_WATCH_DEPENDENCY$);
+    }
+
     // 1. Resolve the watched exports, each taking one of the four debug
     //    registers (DR0-DR3).
     let mut watch: [(usize, usize); 4] = [(0, 0); 4];
@@ -161,7 +197,7 @@ pub fn hardware_breakpoints() -> Result<bool, String> {
         }
         if WATCH_OPEN_SESSION && count < 4 {
             if let Some(address) = try_resolve_export(amsi, &$AMSI_OPEN_SESSION_DEF$) {
-                watch[count] = (address, 0);
+                watch[count] = (address, AMSI_OPEN_SESSION_SENTINEL);
                 count += 1;
             }
         }
@@ -182,8 +218,11 @@ pub fn hardware_breakpoints() -> Result<bool, String> {
         WATCHED_ADDR[slot].store(*address, Ordering::Relaxed);
         WATCHED_RESULT_OFFSET[slot].store(*offset, Ordering::Relaxed);
     }
-    unsafe {
-        AddVectoredExceptionHandler(1, Some(breakpoint_handler));
+    let handler = unsafe { AddVectoredExceptionHandler(1, Some(breakpoint_handler)) };
+    if handler.is_null() {
+        // Arming the debug registers without a handler would turn the first
+        // trap into an unhandled single-step.
+        return Err($MSG_HANDLER_INSTALL_FAILED$);
     }
 
     // 3. Arm the debug registers of the current thread.

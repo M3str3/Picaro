@@ -1,0 +1,51 @@
+# Sleep hook: `build.stub.api_resolution.hooks.sleep` replaces the payload's
+# `Sleep` slot with a proxy that runs the shared ekko runtime over the mapped
+# payload for the duration of the sleep, then restores it.
+#
+#   cargo run -- build examples/plans/sleep-hook.yaml
+#   .\dist\sleep_hook_packed.exe
+#
+# Requirements (enforced by validation):
+#   - `api_resolution.mode: proxy` and `syscalls.mode: indirect`;
+#   - a `pe`/`dll` payload executed by `reflective_loading`, which records the
+#     mapped region the hook conceals;
+#   - `assume_single_threaded: true`: no other payload thread may execute from
+#     the image while it sleeps.
+#
+# `test_payload.exe` does not sleep, so this plan demonstrates the build, not the
+# concealment. Point `source` at an implant that calls `Sleep` (the minimal lab
+# fixture is `tests/fixtures/sleep_probe.rs`). Sleeps shorter than `min_ms`,
+# longer than `max_ms`, `Sleep(0)` and `INFINITE` stay plain delays; `SleepEx`,
+# a direct `NtDelayExecution` and waits on objects are not intercepted.
+
+schema: 6
+name: sleep-hook
+
+build:
+  payloads:
+    payload:
+      source: ./examples/payloads/test_payload.exe
+  stub:
+    syscalls:
+      mode: indirect
+      resolver: hells_gate
+    strings:
+      strategy: xor
+    api_resolution:
+      mode: proxy
+      # Optional: also cover a `Sleep` resolved dynamically at runtime.
+      apis:
+        - "kernel32!GetProcAddress"
+      unmatched: forward
+      hooks:
+        sleep:
+          obfuscate: ekko
+          min_ms: 1000
+          max_ms: 600000
+          assume_single_threaded: true
+  output:
+    path: ./dist/sleep_hook_packed.exe
+
+runtime:
+  - technique: patch_etw
+  - technique: reflective_loading

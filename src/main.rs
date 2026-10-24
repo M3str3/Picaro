@@ -17,7 +17,7 @@ mod techniques;
 mod ui;
 mod wizard;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -757,6 +757,9 @@ fn build(
         format!("{} {}", ui.dim("strings"), strings.strategy.label()),
         format!("{} {}", ui.dim("syscalls"), syscalls.mode.label()),
     ];
+    if syscalls.stack_spoofing.is_some() {
+        stub_parts.push(format!("{} {}", ui.dim("stack_spoofing"), "on"));
+    }
     if polymorphism.mode != polymorphism::PolymorphismMode::None {
         stub_parts.push(format!("{} {}", ui.dim("poly"), polymorphism.mode.label()));
     }
@@ -844,7 +847,7 @@ fn build(
     compiler::compile_stub(&stub_path, &out, &deps, options)?;
     // D-21: a proxy must never import the API it intercepts, or the signature
     // would simply move from the payload's IAT into the stub's.
-    verify_no_intercepted_imports(&out, &api_resolution)?;
+    verify_no_intercepted_imports(&out, &api_resolution, &steps)?;
 
     // 5a. Scrub build-path literals the compiler remap cannot reach: the scratch
     //     dir when it sits outside the manifest dir, and the paths baked into
@@ -1709,13 +1712,21 @@ fn stub_mode_label(plan: &plan::Plan) -> &'static str {
 /// proxy that imported the very API it intercepts would move the signature from
 /// the payload's IAT into the stub's instead of removing it.
 ///
-/// `Strategy::Handler` entries are exempt: `GetProcAddress` is imported by the
-/// loader itself (the import resolver and the syscall resolvers use it), so its
-/// presence is not a regression and cannot be told apart from the handler's own
-/// dynamic resolver.
+/// Two kinds of hit are expected and skipped:
+///
+/// - `Strategy::Handler` entries (D-22): `GetProcAddress` is imported by the
+///   loader itself (the import resolver and the syscall resolvers use it), so its
+///   presence is not a regression and cannot be told apart from the handler's own
+///   dynamic resolver.
+/// - An export an active technique's stub fragment references (D-24): the
+///   technique needs it (the `bouncer` opens the current process token), so the
+///   name is in the stub's IAT whatever the proxies do. The post-build audit
+///   cannot tell that import from one a proxy added by mistake; without this
+///   exemption `apis: all` makes the two features mutually exclusive.
 fn verify_no_intercepted_imports(
     artifact: &Path,
     config: &api_resolution::ApiResolutionConfig,
+    steps: &[ResolvedStep],
 ) -> Result<()> {
     if config.mode != api_resolution::ApiResolutionMode::Proxy || config.apis.is_empty() {
         return Ok(());
@@ -1724,8 +1735,11 @@ fn verify_no_intercepted_imports(
     let audit = audit::pe_info::analyze(&bytes).map_err(|e| {
         error::PackerError::Validation(format!("could not audit the compiled stub: {e}"))
     })?;
+    let technique_imports = technique_imported_functions(steps, &config.apis);
     for entry in &config.apis {
-        if entry.strategy == api_resolution::Strategy::Handler {
+        if entry.strategy == api_resolution::Strategy::Handler
+            || technique_imports.contains(entry.func)
+        {
             continue;
         }
         for dll in &audit.imports {
@@ -1743,6 +1757,42 @@ fn verify_no_intercepted_imports(
         }
     }
     Ok(())
+}
+
+/// Catalogued exports that an active technique's own stub fragment references.
+///
+/// A technique that opens a token (`bouncer`) imports the Win32 API directly, so
+/// the name lands in the stub's IAT no matter how the proxies are implemented.
+/// The audit can only see the IAT, so it must treat those names as expected;
+/// matching is per identifier, so `bouncer`'s `OpenProcessToken` does not exempt
+/// `OpenProcess`.
+fn technique_imported_functions(
+    steps: &[ResolvedStep],
+    entries: &[api_resolution::ApiEntry],
+) -> BTreeSet<&'static str> {
+    let defs = techniques::all();
+    let mut names = BTreeSet::new();
+    for step in steps {
+        let Some(def) = defs.iter().find(|def| def.name == step.technique.name()) else {
+            continue;
+        };
+        for entry in entries {
+            if mentions_identifier(def.stub_fragment, entry.func) {
+                names.insert(entry.func);
+            }
+        }
+    }
+    names
+}
+
+/// Whether `haystack` contains `needle` as a whole ASCII identifier.
+fn mentions_identifier(haystack: &str, needle: &str) -> bool {
+    let is_identifier = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    haystack.match_indices(needle).any(|(at, _)| {
+        let before = haystack[..at].chars().next_back();
+        let after = haystack[at + needle.len()..].chars().next();
+        !before.is_some_and(is_identifier) && !after.is_some_and(is_identifier)
+    })
 }
 
 /// Prepends `#![windows_subsystem = "windows"]` for a GUI build.
@@ -2081,6 +2131,49 @@ mod tests {
         let source = "#![windows_subsystem = \"console\"]\nfn main() {}\n".to_string();
         let out = apply_subsystem(source.clone(), Subsystem::Windows);
         assert_eq!(out, source, "a stub that sets its own subsystem wins");
+    }
+
+    fn proxy_config(body: &str) -> api_resolution::ApiResolutionConfig {
+        let yaml: api_resolution::YamlApiResolutionPlan = serde_yml::from_str(body).expect("yaml");
+        api_resolution::ApiResolutionConfig::from_yaml(Some(&yaml)).expect("valid")
+    }
+
+    #[test]
+    fn identifier_matching_rejects_substring_hits() {
+        assert!(mentions_identifier(
+            "OpenProcessToken()",
+            "OpenProcessToken"
+        ));
+        assert!(!mentions_identifier("OpenProcessToken()", "OpenProcess"));
+        assert!(!mentions_identifier(
+            "MyOpenProcessToken",
+            "OpenProcessToken"
+        ));
+    }
+
+    #[test]
+    fn an_active_technique_import_exempts_its_api_from_the_proxy_audit() {
+        let config = proxy_config("mode: proxy\napis: all\n");
+        let bouncer = ResolvedStep {
+            index: 0,
+            label: "bouncer".to_string(),
+            technique: TechniqueKind::Bouncer {
+                params: techniques::bouncer::Params::default(),
+            },
+            payload: None,
+            control: plan::schema::StepControl::default(),
+        };
+
+        let exempt = technique_imported_functions(&[bouncer], &config.apis);
+        assert!(exempt.contains("OpenProcessToken"));
+        // `OpenProcess` is not exempted by `OpenProcessToken`.
+        assert!(!exempt.contains("OpenProcess"));
+    }
+
+    #[test]
+    fn no_active_technique_exempts_nothing() {
+        let config = proxy_config("mode: proxy\napis: all\n");
+        assert!(technique_imported_functions(&[], &config.apis).is_empty());
     }
 
     #[test]

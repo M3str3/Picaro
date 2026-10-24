@@ -46,7 +46,8 @@ the step runs and writes the bytes with `std::fs::write`.
 
 A **Preparation** step: the stub runs it before the Execution and it never
 receives the payload. Put it anywhere before the step that needs the file. It
-interacts with `bouncer`: a `bouncer` `on_fail: decoy` writes a file *only* when
+interacts with `bouncer`: a `bouncer` `on_reject.action: decoy` writes a file
+*only* when
 the gate rejects the host, while `drop` writes it *always*; use `drop` for a file
 the POC must place regardless of the environment, and the `bouncer` decoy for one
 that appears only on a rejected host.

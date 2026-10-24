@@ -77,7 +77,7 @@ Rejected (errors):
 | `shellcode` + `resources` | the mapped DLL is absent from the module list, so its resources cannot be queried |
 | `shellcode` + `entry: jni_on_load` | the loader calls the plain export; `jni_on_load` exports none |
 | `shellcode` + `arch: x86` | sRDI's two-arg `cdecl` call unbalances the four-arg `stdcall` export |
-| `shellcode` + a host-resolving technique (`self_deletion`, `sleep_obfuscation`) or `bouncer` `on_fail: exit` | shared with `kind: dll`: they act on the *host* process, not the artifact |
+| `shellcode` + a host-resolving technique (`self_deletion`, `sleep_obfuscation`) or `bouncer` with an exiting `on_reject` action | shared with `kind: dll`: they act on the *host* process, not the artifact |
 
 Advisories (informational): the `.bin` extension, the detection surface (RWX +
 reflective loader) and the mixed export table under `entry: auto`.

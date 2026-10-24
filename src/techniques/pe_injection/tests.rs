@@ -265,6 +265,29 @@ fn fragment_carries_the_pe_guards() {
 }
 
 #[test]
+fn the_tls_callback_array_must_fit_its_page() {
+    let fragment = DEF.stub_fragment;
+    assert!(
+        fragment.contains("const PROLOGUE_PAGE_BYTES: usize = 0x1000;"),
+        "the page size must be a named constant"
+    );
+    let check = fragment
+        .find("callbacks_end > PROLOGUE_PAGE_BYTES")
+        .expect("the callback array must be bounds-checked against its page");
+    let write = fragment
+        .find("write_remote(process, callbacks_ptr, &callback_bytes)")
+        .expect("the callback array must still be written");
+    assert!(
+        check < write,
+        "the bounds check must run before the array is written"
+    );
+    assert!(
+        fragment.contains("$MSG_WRITE_OOB$"),
+        "an over-long array must fail with the out-of-bounds diagnostic"
+    );
+}
+
+#[test]
 fn validate_rejects_a_non_pe_payload_format() {
     let plan: crate::plan::schema::Plan =
         serde_yml::from_str(&plan_yaml("shellcode")).expect("the plan should parse");

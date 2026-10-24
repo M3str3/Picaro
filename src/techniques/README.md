@@ -117,7 +117,7 @@ block per step. For a Preparation it matches on `step_<index>::run()`:
 
 Most preparations always return `Ok(true)` (e.g. `patch_amsi`, `patch_etw`).
 The `bouncer` and `guardrail` gates return `Ok(false)`; `bouncer` configured
-with `on_fail: exit` exits the process with code `1` itself.
+with an exiting `on_reject` action exits the process with that code itself.
 
 ## 4. Register the technique
 

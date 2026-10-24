@@ -581,6 +581,46 @@ fn build_dry_run_validates_without_writing() {
     assert!(!manifest.exists(), "a dry run must not write a manifest");
 }
 
+/// A `kind: dll` build whose export name is a Rust keyword is rejected by the
+/// plan validator before anything is compiled (dry run, no `rustc`).
+#[test]
+fn build_rejects_a_keyword_export_name() {
+    let out = std::env::temp_dir().join("picaro_keyword_export.dll");
+    let out = out.display().to_string().replace('\\', "/");
+    let plan = write_temp_plan(
+        "picaro_keyword_export.yaml",
+        &format!(
+            r#"schema: 6
+name: cli-keyword-export
+build:
+  crypto:
+    algo: xchacha20poly1305
+    key: random
+  payloads:
+    payload:
+      source: examples/payloads/test_payload.exe
+  output:
+    path: "{out}"
+    kind: dll
+    entry: export:fn
+runtime:
+  - technique: reflective_loading
+    params: {{ payload: payload }}
+"#
+        ),
+    );
+
+    let output = picaro(&[
+        "--quiet".as_ref(),
+        "build".as_ref(),
+        plan.as_os_str(),
+        "--dry-run".as_ref(),
+    ]);
+    assert!(!output.status.success(), "a keyword export must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Rust keyword"), "unclear error: {stderr}");
+}
+
 /// A `build.payloads.<name>.sha256` that does not match the payload aborts the build
 /// with a clear message, before anything is compiled.
 #[test]
@@ -624,6 +664,22 @@ fn build_dry_run_validates_resources() {
     assert!(
         stdout.contains("resources"),
         "resources not shown: {stdout}"
+    );
+}
+
+/// The shipped `hooks.sleep` example validates as-is (dry run, no `rustc`).
+#[test]
+fn build_dry_run_accepts_the_sleep_hook_example() {
+    let output = picaro(&[
+        "--quiet".as_ref(),
+        "build".as_ref(),
+        "examples/plans/sleep-hook.yaml".as_ref(),
+        "--dry-run".as_ref(),
+    ]);
+    assert!(
+        output.status.success(),
+        "the sleep-hook example does not validate: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
@@ -1065,7 +1121,7 @@ runtime:
   - technique: patch_etw
   - technique: bouncer
     params:
-      min_ram_mb: 1
+      require: [{{ ram_mb: 1 }}]
   - technique: reflective_loading
     params: {{ payload: payload }}
 "#
@@ -1642,10 +1698,10 @@ fn a_dll_artifact_runs_the_chain_when_a_host_loads_it() {
 
 /// Every SSN resolver builds a stub that reaches the kernel and runs the
 /// payload: `mode: indirect` with reflective loading, once per resolver
-/// (`hells_gate`, `tartarus_gate`, `api_hash`). Windows-only, since the stub is
-/// a Windows PE and indirect syscalls are x64-only.
+/// (`hells_gate`, `tartarus_gate`, `api_hash`, `halos_gate`). Windows-only,
+/// since the stub is a Windows PE and indirect syscalls are x64-only.
 ///
-/// `#[ignore]`: compiles three stubs and runs them, so it belongs to the
+/// `#[ignore]`: compiles four stubs and runs them, so it belongs to the
 /// hand-run lab suite (`cargo test --features live-tests -- --ignored`).
 #[test]
 #[cfg(feature = "live-tests")]
@@ -1657,7 +1713,7 @@ fn indirect_syscall_resolvers_run_the_payload() {
 
     const MARKER: &str = "PAYLOAD_MARKER_7f3a9c2e";
 
-    for resolver in ["hells_gate", "tartarus_gate", "api_hash"] {
+    for resolver in ["hells_gate", "tartarus_gate", "api_hash", "halos_gate"] {
         let artifact = format!("dist/picaro_resolver_{resolver}.exe");
         let _ = std::fs::remove_file(&artifact);
         let plan = write_temp_plan(
@@ -1688,6 +1744,48 @@ fn indirect_syscall_resolvers_run_the_payload() {
             String::from_utf8_lossy(&run.stderr)
         );
     }
+}
+
+/// `veh_execution` stages the shellcode in an RX region and enters it by
+/// redirecting an `int3` through a vectored handler. The fixture returns `42`,
+/// so the artifact's exit code proves the handler redirected execution, the
+/// payload ran on the dedicated stack, and the trampoline returned to the
+/// loader's trigger.
+#[test]
+#[cfg(feature = "live-tests")]
+#[ignore = "requires rustc, the compiled dependencies and a Windows host"]
+fn packs_and_runs_a_veh_execution_payload() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    let artifact = "dist/picaro_veh_execution.exe";
+    let _ = std::fs::remove_file(artifact);
+    let plan = write_temp_plan(
+        "picaro_veh_execution.yaml",
+        "schema: 6\nname: veh-execution\nbuild:\n  payloads:\n    payload:\n      source: \
+         ./examples/payloads/demo_shellcode.bin\n      format: shellcode\n  stub:\n    syscalls:\n      \
+         mode: indirect\n      resolver: api_hash\n  output:\n    path: ./dist/picaro_veh_execution.exe\n\
+         runtime:\n  - technique: veh_execution\n",
+    );
+
+    let build = picaro(&["--quiet".as_ref(), "build".as_ref(), plan.as_os_str()]);
+    assert!(
+        build.status.success(),
+        "veh_execution build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let run = Command::new(artifact)
+        .output()
+        .expect("run the packed binary");
+    assert_eq!(
+        run.status.code(),
+        Some(42),
+        "the payload did not run through the vectored handler: stdout={} stderr={}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
 }
 
 // --- network stager (live) ---

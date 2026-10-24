@@ -119,12 +119,14 @@ build:
 
 ---
 
-## 4. The minimal catalogue (phase 1)
+## 4. The catalogue
 
-Only what the spike requires and what covers a mimikatz-style payload's critical
-path to LSASS. `NtQuerySystemInformation` is deliberately **not** included yet:
-its semantics vary per information class, each with its own struct — a rabbit hole
-until needed.
+The first cut was deliberately minimal: only what the spike required and what
+covers a mimikatz-style payload's critical path to LSASS. Later batches widened
+it to the process-memory, handle, thread and token primitives most payloads use.
+`NtQuerySystemInformation` remains deliberately **not** included: its semantics
+vary per information class, each with its own struct — a rabbit hole until
+needed.
 
 The catalogue has two layers. The **hand-written** entries below carry per-API
 semantics (a wrapper, a rebuild, a handler) and are added by hand. The
@@ -182,12 +184,39 @@ it is an LSA/ALPC interaction with no single `Nt*` equivalent.
 | `kernel32!GetThreadContext` | wrapper | `NtGetContextThread` | — |
 | `kernel32!SetThreadContext` | wrapper | `NtSetContextThread` | — |
 | `advapi32!OpenProcessToken` | rebuild | `NtOpenProcessToken` | **new helper** |
-| `advapi32!DuplicateTokenEx` | rebuild | `NtDuplicateToken` | **new helper**; `lpTokenAttributes` ignored |
+| `advapi32!DuplicateTokenEx` | rebuild | `NtDuplicateToken` | **new helper**; `lpTokenAttributes` ignored; impersonation level not applied (deferred) |
 | `advapi32!ImpersonateLoggedOnUser` | rebuild | `NtSetInformationThread` | `ThreadImpersonationToken` |
 
 The two new syscall helpers (`NtOpenProcessToken`, `NtDuplicateToken`) live in
 `src/engine/syscalls/mod.rs` with `none` + `indirect` bodies and direct
 `ntdll!Nt*` proxy metadata, so `ntdll:*` and `apis: all` now include them.
+`NtOpenProcessToken` takes three arguments (there is no object-attributes
+parameter; `NtOpenProcessTokenEx` is the four-argument variant), and
+`NtDuplicateToken`'s fourth argument is `EffectiveOnly`, not an impersonation
+level.
+
+### Expanded catalogue: memory, handles, threads and tokens
+
+These entries use `Strategy::Handler`: the Win32 signature takes the current
+process implicitly, fills an out-parameter or translates a result, so the proxy
+rebuilds the call on the native helper instead of forwarding it.
+
+| API | Strategy | Nt\* target | Notes |
+|---|---|---|---|
+| `kernel32!VirtualAlloc` | handler | `NtAllocateVirtualMemory` | current-process pseudo-handle; `lpAddress` stays a hint |
+| `kernel32!VirtualProtect` | handler | `NtProtectVirtualMemory` | old protection kept |
+| `kernel32!VirtualFree` | handler | `NtFreeVirtualMemory` | **new helper**; `MEM_RELEASE` still needs `size == 0` |
+| `kernel32!CloseHandle` | handler | `NtClose` | — |
+| `kernel32!WaitForSingleObject` | handler | `NtWaitForSingleObject` (native) | `INFINITE` → null timeout; `WAIT_*` preserved |
+| `kernel32!VirtualQuery` | handler | `NtQueryVirtualMemory` | **new helper**; class 0 is the Win32 block |
+| `kernel32!CreateThread` | rebuild | `NtCreateThreadEx` (native) + `NtQueryInformationThread` | `lpThreadAttributes` and `STACK_SIZE_PARAM_IS_A_RESERVATION` not honored; `lpThreadId` filled from `ThreadBasicInformation` |
+| `advapi32!OpenThreadToken` | handler | `NtOpenThreadToken` | **new helper** |
+
+The three new helpers (`NtFreeVirtualMemory`, `NtQueryVirtualMemory`,
+`NtOpenThreadToken`) follow the same pattern: `none` + `indirect` bodies and
+direct `ntdll!Nt*` proxy metadata. `CreateThread` is the one entry that needs a
+second helper; the pair lives in `EXTRA_SYSCALLS` next to the catalogue so the
+entry itself stays one-helper-per-row.
 
 ---
 
@@ -368,7 +397,8 @@ both execution techniques resolve imports, so the resolver is always emitted.
   `NtDuplicateToken` join the syscall layer (`src/engine/syscalls/mod.rs`, 18 → 20
   functions). `CreateRemoteThread` is rebuilt on the native-signature helper
   (`lpThreadAttributes`/`lpThreadId` not honored); `DuplicateTokenEx` ignores
-  `lpTokenAttributes`; `ImpersonateLoggedOnUser` routes to
+  `lpTokenAttributes` and does not apply the requested impersonation level
+  (deferred: needs `NtSetInformationToken`); `ImpersonateLoggedOnUser` routes to
   `NtSetInformationThread(ThreadImpersonationToken)`. `LogonUser`, WinINet/
   WinHTTP/ws2_32 and a Toolhelp snapshot rebuild remain out of scope.
 
@@ -437,12 +467,16 @@ Declared, not hidden:
   not special-cased, matching the shipped `ReadProcessMemory` proxy).
   `CreateRemoteThread` does not honor `lpThreadAttributes` or fill `lpThreadId`
   (the native call takes no security attributes and returns no thread id);
-  `DuplicateTokenEx` ignores a non-null `lpTokenAttributes`; `GetThreadContext`/
+  `DuplicateTokenEx` ignores a non-null `lpTokenAttributes` and does not apply
+  the requested `SECURITY_IMPERSONATION_LEVEL` (the rebuild passes
+  `EffectiveOnly = 0`, so the duplicate is unfiltered; applying the level needs
+  `NtSetInformationToken(TokenImpersonationLevel, ...)`); `GetThreadContext`/
   `SetThreadContext` pass the `CONTEXT` pointer through unchanged, so the x64
   `ContextFlags`/alignment contract stays the caller's responsibility.
 - **`audit` is static** and cannot see the payload's in-memory IAT (the payload is
   encrypted on disk); the check targets the **stub** and exempts the
-  `GetProcAddress` handler (D-22).
+  `GetProcAddress` handler (D-22) and exports an active technique's own fragment
+  imports (D-24).
 
 ---
 
@@ -473,10 +507,72 @@ Declared, not hidden:
 | D-21 | The `audit` "the stub's IAT must not gain the intercepted names" check is deferred to Phase C | `audit` is plan-agnostic; the render tests cover the structural guarantee for now | accepted (implemented in C, `verify_no_intercepted_imports`) |
 | D-22 | The audit check exempts `Strategy::Handler` entries | The loader itself imports `GetProcAddress` (import resolver, SSN resolvers), so its presence cannot be told apart from the handler's resolver and is not a regression | accepted |
 | D-23 | `mode: proxy` with `process_hollowing` is a validation error, and Phase E is parked | The proxies are Rust functions bound to the loader image (statics, obfuscated data, CRT); the target has none of it. Closing it needs a position-independent proxy emitter written into the target | accepted (E parked) |
+| D-24 | The stub-IAT audit also exempts an export that an active technique's fragment references | That import is the technique's own (e.g. `bouncer` → `advapi32!OpenProcessToken`), so it lands in the stub's IAT whatever the proxies do; the post-build audit cannot tell it apart from a proxy regression. Without the exemption `apis: all` rejects a legitimate chain | accepted (2026-10-24) |
+| D-24 | A hook is not a catalogue entry; it lives in `hooks:` and implies its proxy | The action has parameters (`min_ms`, `max_ms`) and is not a route; a selector cannot carry them | accepted |
+| D-25 | The `Sleep` hook matches by **function name only** | `Sleep` commonly arrives through `api-ms-win-core-synch-*`, whose module is virtual; the name is unambiguous | accepted |
+| D-26 | The hook encrypts the **mapped payload region**, recorded by the loader in `payload_region` | Encrypting the loader image would miss the payload (it lives in its own allocation); the registry is two atomics, TLS-free | accepted |
+| D-27 | `assume_single_threaded: true` is mandatory for the hook | Ekko cannot encrypt a region another payload thread is executing; the field forces the acknowledgement instead of a lab crash | accepted (a runtime thread-count guard is future work) |
+| D-28 | The hook and `sleep_obfuscation` share one rendered `sleep_runtime` | One ROP chain, one RC4 key and one measurement; the step is a thin adapter | accepted |
 
 ---
 
-## 13. References
+## 13. Runtime hooks (`hooks:`)
+
+A hook uses the same seam as a proxy (the payload's IAT slot) but does something
+the payload did not ask for. It is declared inside `api_resolution` because it
+shares the policy, the syscall dependency and the validation:
+
+```yaml
+build:
+  stub:
+    syscalls: { mode: indirect }
+    api_resolution:
+      mode: proxy
+      apis: ["kernel32!GetProcAddress"]   # optional; the hook implies its own entry
+      hooks:
+        sleep:
+          obfuscate: ekko        # only ekko today
+          min_ms: 1000           # shorter sleeps are plain delays
+          max_ms: 600000         # longer sleeps are plain delays
+          assume_single_threaded: true
+```
+
+`hooks.sleep` replaces `kernel32!Sleep` (and its API-set alias) with a proxy
+that runs the shared ekko runtime over the **mapped payload image** for the
+duration of the sleep. The region comes from `payload_region`, which
+`reflective_loading` fills right after mapping (`image_base` + `SizeOfImage`).
+The scheme is validated like a proxy: `mode: proxy`, indirect syscalls, one
+Execution, a PE/DLL payload and `reflective_loading`. A buildable example lives
+in `examples/plans/sleep-hook.yaml`.
+
+### Semantics
+
+- `Sleep(0)` is a yield; `INFINITE` and sleeps outside `[min_ms, max_ms]` are
+  plain delays.
+- No recorded region, a failed ekko setup, or a concurrent concealed sleep falls
+  back to `NtDelayExecution` with the requested time. The payload keeps the
+  Win32 contract on every path.
+- One chain at a time (`AtomicBool` compare-exchange): Ekko is not reentrant.
+- The proxy never traces: it runs on payload threads, where the stub's TLS index
+  is not provisioned (`tech_dbg!` is TLS-based). The shared runtime is
+  trace-free; the technique adapter traces on the loader thread instead.
+
+### Limitations
+
+- Only `Sleep` (and its API-set alias). `SleepEx`, a direct `NtDelayExecution`
+  and waits on objects are not obfuscated.
+- Only the mapped image (`base .. base + SizeOfImage`), not the payload's heap or
+  thread stacks.
+- The payload must not execute from the mapped image on another thread. A
+  runtime thread-count guard is future work; today the operator asserts it.
+- IAT/`GetProcAddress` callers only, like every proxy.
+- Detection: an IAT slot pointing outside `kernel32`, the Ekko timer/RC4
+  signature (already measured for the technique), and the sleep's extra
+  wall-clock time.
+
+---
+
+## 14. References
 
 - Spike evidence: `code_examples/spike_iat_proxy/REPORT.md` (gitignored scratch;
   summary reproduced in section 1).

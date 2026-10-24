@@ -98,10 +98,18 @@ impl StringsConfig {
 
         match yaml.strategy.as_str() {
             "xor" => Ok(Self::xor(resolve_key(&yaml.key)?)),
-            "stack" => Ok(Self {
-                strategy: StringStrategy::Stack,
-                key: None,
-            }),
+            "stack" => {
+                if yaml.key != "random" {
+                    return Err(PackerError::Validation(format!(
+                        "invalid strings.key '{}' with strategy 'stack': the stack strategy has no key, use 'random' or omit it",
+                        yaml.key
+                    )));
+                }
+                Ok(Self {
+                    strategy: StringStrategy::Stack,
+                    key: None,
+                })
+            }
             other => Err(PackerError::Validation(format!(
                 "invalid strings.strategy '{other}': expected 'xor' or 'stack'"
             ))),
@@ -176,7 +184,7 @@ impl ObfuscatedString {
     pub fn render_stub_expr(&self, var_name: &str) -> String {
         match self {
             ObfuscatedString::Xor { bytes, key } => format!(
-                "crate::dec_xor(&{}, &{}).into_iter().map(|b| b as char).collect::<String>()",
+                "String::from_utf8_lossy(&crate::dec_xor(&{}, &{})).into_owned()",
                 byte_array_literal(bytes),
                 byte_array_literal(key),
             ),
@@ -210,6 +218,11 @@ fn resolve_key(spec: &str) -> Result<[u8; XOR_KEY_LEN]> {
             }
             let mut key = [0u8; XOR_KEY_LEN];
             key.copy_from_slice(&bytes);
+            if key.iter().all(|&byte| byte == 0) {
+                return Err(PackerError::Validation(format!(
+                    "invalid strings.key 'literal:{hex}': the key must not be all zero bytes, which would leave every literal in cleartext"
+                )));
+            }
             Ok(key)
         }
         None if spec == "random" => Ok(generate_xor_key()),
@@ -250,7 +263,7 @@ fn render_stack_expr(var_name: &str, bytes: &[u8]) -> String {
         ));
     }
     out.push_str(&format!(
-        "    {buf}.into_iter().map(|b| b as char).collect::<String>()\n}}"
+        "    String::from_utf8_lossy(&{buf}).into_owned()\n}}"
     ));
     out
 }
@@ -290,14 +303,9 @@ mod tests {
         };
         let code = obf.render_stub_expr("stub_marker");
 
-        assert!(
-            code.starts_with("crate::dec_xor(&[0x01, 0x02, 0x03], &[0xaa, 0xaa"),
-            "unexpected code: {code}"
-        );
-        assert!(
-            code.ends_with(".into_iter().map(|b| b as char).collect::<String>()"),
-            "unexpected code: {code}"
-        );
+        let prefix = "String::from_utf8_lossy(&crate::dec_xor(&[0x01, 0x02, 0x03], &[0xaa, 0xaa";
+        assert!(code.starts_with(prefix), "unexpected code: {code}");
+        assert!(code.ends_with(").into_owned()"), "unexpected code: {code}");
     }
 
     #[test]
@@ -313,10 +321,65 @@ mod tests {
             "    stub_marker_buf[0] = std::hint::black_box(0x41);\n",
             "    stub_marker_buf[1] = std::hint::black_box(0x42);\n",
             "    stub_marker_buf[2] = std::hint::black_box(0x43);\n",
-            "    stub_marker_buf.into_iter().map(|b| b as char).collect::<String>()\n",
+            "    String::from_utf8_lossy(&stub_marker_buf).into_owned()\n",
             "}",
         );
         assert_eq!(code, expected);
+    }
+
+    /// Test-only: undo the XOR and decode as UTF-8, the same way the generated
+    /// stub does.
+    fn decode_xor(bytes: &[u8], key: &[u8; XOR_KEY_LEN]) -> String {
+        let decoded: Vec<u8> = bytes
+            .iter()
+            .enumerate()
+            .map(|(i, b)| b ^ key[i % XOR_KEY_LEN])
+            .collect();
+        String::from_utf8(decoded).expect("the round trip must stay valid UTF-8")
+    }
+
+    #[test]
+    fn non_ascii_plaintext_round_trips_as_utf8() {
+        let config = StringsConfig {
+            strategy: StringStrategy::Xor,
+            key: Some([0x11u8; XOR_KEY_LEN]),
+        };
+
+        for plaintext in ["café", "Grüße"] {
+            let ObfuscatedString::Xor { bytes, key } = config.obfuscate(plaintext) else {
+                panic!("expected an xor obfuscation");
+            };
+            let decoded = decode_xor(&bytes, &key);
+            assert_eq!(decoded, plaintext);
+            assert_eq!(decoded.as_bytes(), plaintext.as_bytes());
+        }
+    }
+
+    #[test]
+    fn rendered_expressions_decode_as_utf8() {
+        let xor = StringsConfig {
+            strategy: StringStrategy::Xor,
+            key: Some([0x11u8; XOR_KEY_LEN]),
+        };
+        let xor_code = xor.obfuscate("café").render_stub_expr("stub_marker");
+        assert!(
+            xor_code.contains("String::from_utf8_lossy(&crate::dec_xor("),
+            "the xor expression must decode as UTF-8: {xor_code}"
+        );
+        assert!(
+            xor_code.ends_with(").into_owned()"),
+            "unexpected code: {xor_code}"
+        );
+
+        let stack = StringsConfig {
+            strategy: StringStrategy::Stack,
+            key: None,
+        };
+        let stack_code = stack.obfuscate("Grüße").render_stub_expr("stub_marker");
+        assert!(
+            stack_code.contains("String::from_utf8_lossy(&stub_marker_buf).into_owned()"),
+            "the stack expression must decode as UTF-8: {stack_code}"
+        );
     }
 
     #[test]
@@ -377,10 +440,30 @@ mod tests {
     fn from_yaml_parses_literal_key() {
         let yaml = YamlStringsPlan {
             strategy: "xor".into(),
-            key: format!("literal:{}", "00".repeat(XOR_KEY_LEN)),
+            key: format!("literal:{}", "11".repeat(XOR_KEY_LEN)),
         };
         let plan = StringsConfig::from_yaml(Some(&yaml)).expect("literal key should be valid");
-        assert_eq!(plan.key, Some([0u8; XOR_KEY_LEN]));
+        assert_eq!(plan.key, Some([0x11u8; XOR_KEY_LEN]));
+    }
+
+    #[test]
+    fn from_yaml_rejects_all_zero_literal_key() {
+        let yaml = YamlStringsPlan {
+            strategy: "xor".into(),
+            key: format!("literal:{}", "00".repeat(XOR_KEY_LEN)),
+        };
+        let err = StringsConfig::from_yaml(Some(&yaml)).expect_err("an all-zero key should fail");
+        assert!(err.to_string().contains("all zero"), "unclear error: {err}");
+    }
+
+    #[test]
+    fn from_yaml_rejects_stack_with_explicit_key() {
+        let yaml = YamlStringsPlan {
+            strategy: "stack".into(),
+            key: format!("literal:{}", "11".repeat(XOR_KEY_LEN)),
+        };
+        let err = StringsConfig::from_yaml(Some(&yaml)).expect_err("stack takes no key");
+        assert!(err.to_string().contains("stack"), "unclear error: {err}");
     }
 
     #[test]

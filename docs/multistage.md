@@ -37,7 +37,11 @@ build:
 
 runtime:
   - technique: bouncer
-    params: { mode: all, on_fail: silent, min_ram_mb: 512, not_in_sandbox: true }
+    params:
+      require:
+        - ram_mb: 512
+      anti_analysis:
+        sandbox: true
     on_fail: stop
   - technique: patch_amsi
   - technique: patch_etw
@@ -93,7 +97,8 @@ default, so a minimal plan only needs `output.path`.
 (`dll`), and `build.output.entry` (`auto`) picks which exports start the chain
 (`jni_on_load`, `export:<name>`). A DLL build rejects what only an executable
 can do — `subsystem`, `resources.manifest`, `self_deletion`, `bouncer` with
-`on_fail: exit`, a custom stub — because the host owns the process. See
+an `on_reject` action that exits the process, a custom stub — because the host
+owns the process. See
 [DLL output design](design/dll-output.md).
 
 ## Step fields
@@ -111,7 +116,7 @@ Each step is `technique:` + optional `params:` + the orchestration fields:
 Techniques fall into three categories:
 
 - **Preparation** (`bouncer`, `guardrail`, `anti_debug`, `patch_amsi`,
-  `patch_etw`, `unhook_ntdll`, `sleep_obfuscation`, `stack_spoofing`,
+  `patch_etw`, `unhook_ntdll`, `sleep_obfuscation`,
   `timestomping`, `self_deletion`): modify the process state. A preparation
   returns `Result<bool, _>`; `Ok(false)` aborts the chain before the payload
   runs (the `bouncer` and `guardrail` gates do this).

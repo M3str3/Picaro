@@ -23,8 +23,7 @@ runtime:
   # payload never runs.
   - technique: bouncer
     params:
-      mode: all
-      on_fail: silent
-      hostname: "picaro-no-such-host-*"
+      require:
+        - hostname: "picaro-no-such-host-*"
   - technique: reflective_loading
     params: { payload: payload }

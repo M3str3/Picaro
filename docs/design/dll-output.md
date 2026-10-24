@@ -285,9 +285,9 @@ DLL builds, so it takes the plain-stderr variant: `AllocConsole` would open a
 - The catch covers Rust panics only. An access violation inside a fragment is
   still a host crash; nothing in-process can make that graceful.
 - No `process::exit` anywhere on the DLL path. Its one current caller is
-  rejected at build time (`bouncer` with `on_fail: exit`); `self_deletion` is
-  rejected for a different reason — it resolves the *running image*, the host
-  (§5).
+  rejected at build time (`bouncer` with an exiting `on_reject` action);
+  `self_deletion` is rejected for a different reason — it resolves the *running
+  image*, the host (§5).
 
 ---
 
@@ -301,7 +301,7 @@ DLL builds, so it takes the plain-stderr variant: `AllocConsole` would open a
 | `kind: dll` + `resources.manifest: true` | a `RT_MANIFEST` in a DLL sets the *DLL's* activation context; UAC and DPI awareness are per-process, so it cannot do what the operator expects (§10 D-9) |
 | `kind: dll` + any `self_deletion` step | it resolves the running image with `GetModuleFileNameW(NULL)` — in a DLL build that is the **host** (`java.exe`/`python.exe`), so it would rename or delete the interpreter. A mapped DLL cannot be deleted anyway (§10 D-7) |
 | `kind: dll` + any `sleep_obfuscation` step | it encrypts the *running image* (`GetModuleHandleA(NULL)` + `SizeOfImage`), which in a DLL build is the **host's** image — whose code the host's other threads keep executing. It would also miss the payload, which lives in its own allocation outside that image (§10 D-16) |
-| `kind: dll` + `bouncer` with `on_fail: exit` | `std::process::exit` kills the host (§10 D-8) |
+| `kind: dll` + `bouncer` with an exiting `on_reject` action | `std::process::exit` kills the host (§10 D-8) |
 | `kind: dll` + `build.stub.path` | the custom-stub contract is `fn main()`; the `$ENTRY_BLOCK$` contract lands in Phase E (§10 D-13) |
 | `entry: export:<name>` with an invalid name | empty, not `[A-Za-z_][A-Za-z0-9_]*`, or colliding with `DllMain`/`JNI_OnLoad` |
 | `entry` set to anything but the default `auto` with `kind: exe` | the field does nothing there; explicit is better than ignored (the default is indistinguishable from unset) |
@@ -480,7 +480,7 @@ Declared, not hidden:
 | D-5 | `entry: export:<name>` uses the four-argument rundll32 shape and returns `i32` | Compatible with `rundll32` (natively four arguments, `stdcall` on x86) and harmless for zero-argument x64 callers; a zero-argument `stdcall` export would be the one that breaks `rundll32` | accepted |
 | D-6 | `panic=unwind` + `catch_unwind` for DLL builds (exe keeps `panic=abort`) | A panic must abort the chain, not the host; unwind tables are the accepted cost | accepted |
 | D-7 | `self_deletion` is a validation error with `kind: dll` | It resolves the running image — the host — and a mapped DLL cannot be deleted anyway | accepted |
-| D-8 | `bouncer` `on_fail: exit` is a validation error with `kind: dll` | `process::exit` kills the host | accepted |
+| D-8 | `bouncer` with an exiting `on_reject` action is a validation error with `kind: dll` | `process::exit` kills the host | accepted |
 | D-9 | `resources.manifest` is a validation error with `kind: dll` | A DLL manifest cannot express UAC/DPI (both per-process) | accepted |
 | D-10 | `patch_amsi` is allowed but advised against | The technique loads `amsi.dll` when absent, which is the opposite of useful in a host that had no AMSI | accepted |
 | D-11 | `entry: auto` is the default, with an advisory | One artifact for every host in the lab; a mixed export table is a delivery tell, so a host-specific entry is preferred where it matters | accepted |

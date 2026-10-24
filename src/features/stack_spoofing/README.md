@@ -8,10 +8,10 @@ walk sees ntdll instead of the loader while the kernel runs.*
 Fabricates the top of the thread's stack for the duration of every syscall, so a
 checker that walks the stack while the kernel is running sees ntdll code
 addresses instead of the loader's own frames. Indirect syscalls put the
-*instruction pointer* inside ntdll; this technique is the other half — the
-*stack* half.
+*instruction pointer* inside ntdll; this block is the other half — the *stack*
+half.
 
-It is not a step: nothing runs at pipeline time. The technique rewrites the
+It is not a `runtime:` step: nothing runs at pipeline time. It rewrites the
 syscall layer's trampoline, so every `nt_*` helper in the stub goes through it.
 
 ## How it works
@@ -84,19 +84,31 @@ what it loses is the long decoy run above them.
 | Top five frames during the syscall | ntdll |
 | First ~4 KB of a stack scan | a run of ntdll `ret` sites |
 | The loader's own frames further up | **still there** — the decoy buries them, it does not remove them |
-| The instruction pointer at the syscall | ntdll (that is `indirect` mode, not this technique) |
+| The instruction pointer at the syscall | ntdll (that is `indirect` mode, not this block) |
 
 A full stack walk that reaches the whole thread stack still finds the loader.
 Defeating *that* needs a synthetic unwind chain (SilentMoonwalk-style gadget
 synthesis) rather than a fabricated region — a known improvement, not a defect
-of this technique. It is meant to be combined with `unhook_ntdll` and
+of this block. It is meant to be combined with `unhook_ntdll` and
 `sleep_obfuscation` rather than to replace them.
 
 ## Integration
 
-A **Preparation** step: the stub runs it before the Execution and it never
-receives the payload. Place it earlier in `runtime:` than the Execution step. It requires `build.stub.syscalls.mode: indirect`; it is installed with
-the syscall layer at load time and runs nothing at pipeline time.
+Configured under `build.stub.syscalls.stack_spoofing`; it requires
+`mode: indirect` and is x86_64 only. It is installed with the syscall layer
+(`init_stack_spoofing`, called from `init_syscalls`) before the runner starts, so
+it has no position in `runtime:` and no `on_fail`/`delay_ms`. Its parameters live
+in the loader-feature registry: `picaro techniques show stack_spoofing`.
+
+```yaml
+build:
+  stub:
+    syscalls:
+      mode: indirect
+      resolver: hells_gate
+      stack_spoofing:
+        decoy_bytes: 4096
+```
 
 ## What it evades
 
@@ -115,7 +127,7 @@ the syscall layer at load time and runs nothing at pipeline time.
 - **Unwind-info consistency.** The fabricated frames have plausible addresses
   but no consistent call chain; a checker that unwinds with `RtlVirtualUnwind`
   and validates the result gets nowhere sensible. (This cuts both ways: it is
-  also what makes the technique detectable as *inconsistent* rather than
+  also what makes the block detectable as *inconsistent* rather than
   merely hidden.)
 - **The stack pointer itself.** During the syscall `Rsp` points far below where
   the thread's frames are; a heuristic that compares `Rsp` against the thread's
@@ -161,7 +173,9 @@ first syscall in the chain (`NtAllocateVirtualMemory`) faults (`0xC0000005`).
 - **The save slots are process-global.** `SPOOF_STACK` and `SPOOF_RBX` are
   statics, so a payload that drives the loader's `nt_*` helpers from two threads
   at the same time can corrupt them. The builtin techniques are single-threaded;
-  a multi-threaded custom stub should not enable this technique.
+  a multi-threaded custom stub should not enable this block. This also applies to
+  API-resolution proxies: a multi-threaded payload calling a proxied API
+  concurrently can race the slots.
 - **The decoy needs free stack.** Writing `decoy_bytes` below `Rsp` grows the
   thread's stack by that much. The loader's own call depth is shallow, so a page
   is nothing; a caller that is already near the stack limit would fault.
@@ -169,13 +183,13 @@ first syscall in the chain (`NtAllocateVirtualMemory`) faults (`0xC0000005`).
   instead of failing to link.
 - The block is emitted next to the helpers it drives, inside the syscall layer's
   module; its `nt_invoke` is a global symbol, which is why the raw trampoline is
-  renamed to `nt_invoke_raw` when this technique is selected.
+  renamed to `nt_invoke_raw` when this block is selected.
 
 ## References
 
 - MITRE ATT&CK T1036 — Masquerading.
 - namazso, *Spoofing call stacks with a synthetic call chain* (the reference
-  write-up for the deeper variant this technique approximates).
+  write-up for the deeper variant this block approximates).
 - SilentMoonwalk (klezvirus) and Vulcan (SpiderLabs): ROP-based synthetic frame
   chains, the natural next step for the "full stack walk" gap.
 - `code_examples/stack_spoofing/refs/` (local references).

@@ -114,6 +114,14 @@ const MESSAGES: &[(&str, &str)] = &[
         "$MSG_CONTEXT_ARM_FAILED$",
         "failed to arm the debug registers",
     ),
+    (
+        "$MSG_WATCH_DEPENDENCY$",
+        "AmsiScanString and AmsiOpenSession require amsi: true",
+    ),
+    (
+        "$MSG_HANDLER_INSTALL_FAILED$",
+        "failed to install the vectored exception handler",
+    ),
 ];
 
 impl Params {

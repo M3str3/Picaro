@@ -1,1 +1,0 @@
---8<-- "src/techniques/stack_spoofing/README.md"

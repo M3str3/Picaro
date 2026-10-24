@@ -220,7 +220,7 @@ pub enum PayloadFormat {
     /// Opaque bytes with no execution semantics: **data**, not a payload. It is
     /// embedded and encrypted like any other payload but is never mapped or run;
     /// the only consumer is a technique that writes it back out (the `bouncer`
-    /// `on_fail: decoy` asset). No Execution technique accepts it, so
+    /// `on_reject.action: decoy` asset). No Execution technique accepts it, so
     /// `plan::validate` rejects a `plain` payload that a step tries to run.
     Plain,
 }

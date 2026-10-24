@@ -52,6 +52,8 @@ examples/hosts/dotnet_host/obj/
 *.ilk
 *.exp
 *.exe
+*.dll
+*.bin
 
 # Signing material: never commit a private key or certificate.
 *.pfx

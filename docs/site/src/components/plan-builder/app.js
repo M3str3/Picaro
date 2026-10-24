@@ -353,7 +353,14 @@ export async function mount(root) {
         if (key === 'payload') step.params.payload = node.value;
         else if (f.type === 'bool') step.params[key] = node.checked;
         else if (f.type === 'number') step.params[key] = node.value === '' ? '' : Number(node.value);
-        else step.params[key] = node.value;
+        else if (f.type === 'json') {
+          try {
+            step.params[key] = JSON.parse(node.value);
+            node.classList.remove('is-invalid');
+          } catch {
+            node.classList.add('is-invalid');
+          }
+        } else step.params[key] = node.value;
         refreshYaml();
         refreshNotes();
         refreshStatus();
@@ -610,6 +617,10 @@ function fieldHtml(f, value, attrs) {
   }
   if (f.type === 'select') {
     return `<label class="pb-field"${help}><span>${esc(f.label)}</span><select ${attrs}>${opts(f.options, value)}</select></label>`;
+  }
+  if (f.type === 'json') {
+    const text = JSON.stringify(value ?? {}, null, 2);
+    return `<label class="pb-field"${help}><span>${esc(f.label)}</span><textarea class="pb-json" rows="6" spellcheck="false" ${attrs}>${esc(text)}</textarea></label>`;
   }
   const type = f.type === 'number' ? 'number' : 'text';
   return `<label class="pb-field"${help}><span>${esc(f.label)}</span><input type="${type}" ${attrs} value="${escAttr(value ?? '')}" /></label>`;

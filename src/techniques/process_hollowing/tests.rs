@@ -70,6 +70,9 @@ fn render_fragment_substitutes_and_obfuscates_target() {
     assert!(!fragment.contains("entry patch failed"));
     assert!(!fragment.contains("timed out waiting for the target loader to initialize"));
     assert!(!fragment.contains("the target could not allocate a TLS index"));
+    assert!(!fragment.contains("the image has no base relocations"));
+    assert!(!fragment.contains("inconsistent SizeOfImage"));
+    assert!(!fragment.contains("headers out of bounds"));
 
     // The fragment must carry the hollowing entry point and the runtime decoder.
     assert!(fragment.contains("fn run_stage_two"));
@@ -99,6 +102,57 @@ fn render_fragment_obfuscates_every_diagnostic() {
             "diagnostic leaked in cleartext: {text:?}"
         );
     }
+}
+
+#[test]
+fn render_fragment_refuses_relocation_free_images_off_base() {
+    let strings = StringsConfig {
+        strategy: StringStrategy::Xor,
+        key: Some([0x22u8; 32]),
+    };
+    let fragment = Params::default().render_fragment(&strings);
+    let code = crate::audit::strings::strip_comments(&fragment);
+
+    // An image with no relocation table cannot be rebased, so the grace path
+    // must be an error, not `Ok(())`.
+    let check = code
+        .find("if pe.reloc_size == 0 {")
+        .expect("the relocation-free guard must be present");
+    let after = &code[check..];
+    let body = &after[..after.find('}').expect("the guard must have a body")];
+    assert!(
+        body.contains("return Err("),
+        "a relocation-free image that moved must be a clean error, not a success: {body}"
+    );
+    assert!(
+        !body.contains("return Ok(())"),
+        "a relocation-free image that moved must not report success: {body}"
+    );
+}
+
+#[test]
+fn render_fragment_guards_the_write_path() {
+    let strings = StringsConfig {
+        strategy: StringStrategy::Xor,
+        key: Some([0x33u8; 32]),
+    };
+    let fragment = Params::default().render_fragment(&strings);
+    let code = crate::audit::strings::strip_comments(&fragment);
+
+    // Headers are validated in the parser and re-checked with `get` before the
+    // write; the section end is a checked add and the destination RVA is
+    // clamped to `SizeOfImage`.
+    assert!(code.contains("size_of_headers as usize > image.len()"));
+    assert!(code.contains(".get(..pe.size_of_headers as usize)"));
+    assert!(code.contains(".checked_add(length)"));
+    assert!(code.contains("pe.size_of_image.saturating_sub(sec.virtual_address)"));
+    // The DLL name tail is not indexed blindly.
+    assert!(code.contains(".get(name_off..)"));
+    // A 32-bit stub patches 4-byte IAT slots; a 64-bit one patches 8.
+    assert!(code.contains("write_u32(image, offset, address as u32)"));
+    assert!(code.contains("write_u64(image, offset, address)"));
+    // A remote `LoadLibraryA` thread's exit status is inspected (NULL = failed).
+    assert!(code.contains("info.exit_status == 0"));
 }
 
 #[test]

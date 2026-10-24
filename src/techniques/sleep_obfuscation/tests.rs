@@ -1,6 +1,6 @@
 //! Tests for the sleep-obfuscation technique.
 
-use super::{EncryptRegion, Params, Variant, DEF, MESSAGES};
+use super::{EncryptRegion, Params, Variant, DEF};
 use crate::audit::strings::find_sensitive_literals_in_source;
 use crate::engine::obfuscation::StringsConfig;
 use crate::techniques::TechniqueKind;
@@ -116,7 +116,7 @@ fn no_debug_artifacts_in_fragment() {
 }
 
 #[test]
-fn render_fragment_obfuscates_api_names() {
+fn render_fragment_emits_a_thin_adapter() {
     let strings = StringsConfig::from_yaml(None).expect("default strings");
     let fragment = Params {
         variant: Variant::Ekko,
@@ -125,41 +125,14 @@ fn render_fragment_obfuscates_api_names() {
     }
     .render_fragment(&strings);
 
-    // The entry point is present and every placeholder is substituted.
+    // The step delegates the mechanism to the shared block emitted by the
+    // renderer; only the sleep length is baked in here.
     assert!(fragment.contains("pub fn sleep_obfuscation"));
-    assert!(fragment.contains("const SLEEP_MS: u64 = 5000;"));
-    for placeholder in [
-        "$KERNEL32_DLL_DEF$",
-        "$NTDLL_DLL_DEF$",
-        "$ADVAPI32_DLL_DEF$",
-        "$CREATE_TIMER_QUEUE_DEF$",
-        "$CREATE_TIMER_QUEUE_TIMER_DEF$",
-        "$DELETE_TIMER_QUEUE_EX_DEF$",
-        "$WAIT_FOR_SINGLE_OBJECT_DEF$",
-        "$SET_EVENT_DEF$",
-        "$VIRTUAL_PROTECT_DEF$",
-        "$RTL_CAPTURE_CONTEXT_DEF$",
-        "$NT_CONTINUE_DEF$",
-        "$SYSTEM_FUNCTION_032_DEF$",
-        "$SLEEP_MS$",
-        "$SLEEP_KEY_DEF$",
-        "$MSG_CAPTURE_CONTEXT_FAILED$",
-        "$MSG_CREATE_TIMER_QUEUE_FAILED$",
-        "$MSG_CREATE_TIMER_QUEUE_TIMER_FAILED$",
-        "$MSG_VIRTUAL_QUERY_FAILED$",
-        "$MSG_VIRTUAL_PROTECT_FAILED$",
-        "$MSG_CRYPT_FUNCTION_NOT_FOUND$",
-        "$MSG_CRYPT_FUNCTION_FAILED$",
-        "$MSG_NO_TARGET_REGIONS$",
-    ] {
-        assert!(
-            !fragment.contains(placeholder),
-            "placeholder not substituted: {placeholder}"
-        );
-    }
-
-    // No `$` token survives at all, and no sensitive literal (nor an
-    // obfuscated diagnostic's plaintext) leaks in cleartext into the source.
+    assert!(fragment.contains("crate::sleep_runtime::current_image()"));
+    assert!(
+        fragment.contains("crate::sleep_runtime::ekko_sleep(image_base, image_size, 5000)"),
+        "the adapter must call the shared runtime with the configured sleep: {fragment}"
+    );
     assert!(
         !fragment.contains('$'),
         "an unsubstituted placeholder survived"
@@ -169,37 +142,6 @@ fn render_fragment_obfuscates_api_names() {
         leaked.is_empty(),
         "the rendered fragment leaks sensitive literals: {leaked:?}"
     );
-    for (_, text) in MESSAGES {
-        assert!(
-            !fragment.contains(text),
-            "a diagnostic message leaked in cleartext: {text}"
-        );
-    }
-
-    // No resolved API/DLL name may appear as a string literal in the
-    // generated source: the quoted form is what would leak into `.rdata`.
-    for name in [
-        "kernel32.dll",
-        "ntdll.dll",
-        "advapi32.dll",
-        "CreateTimerQueue",
-        "CreateTimerQueueTimer",
-        "DeleteTimerQueueEx",
-        "WaitForSingleObject",
-        "SetEvent",
-        "VirtualProtect",
-        "RtlCaptureContext",
-        "NtContinue",
-        "SystemFunction032",
-    ] {
-        assert!(
-            !fragment.contains(&format!("\"{name}\"")),
-            "cleartext literal leaked: {name}"
-        );
-    }
-
-    // The xor strategy routes every name through the runtime decoder.
-    assert!(fragment.contains("crate::dec_xor"));
 }
 
 /// Full e2e: render + compile a `sleep_obfuscation → reflective_loading` stub,

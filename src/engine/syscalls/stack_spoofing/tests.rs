@@ -1,25 +1,12 @@
-//! Tests for stack spoofing.
+//! Tests for the stack-spoofing syscall-layer block.
 
-use super::{default_decoy_bytes, Params, DEF, MAX_DECOY_BYTES, MESSAGES, MIN_DECOY_BYTES};
+use super::{default_decoy_bytes, Params, BLOCK, MAX_DECOY_BYTES, MESSAGES, MIN_DECOY_BYTES};
 use crate::engine::obfuscation::StringsConfig;
-use crate::techniques::{Capability, Category, TechniqueKind};
 
 /// Renders the block with the default (obfuscating) string strategy.
 fn render(params: &Params) -> String {
     let strings = StringsConfig::from_yaml(None).expect("default strings");
     params.render_fragment(&strings)
-}
-
-#[test]
-fn parses_params_from_empty_yaml() {
-    let step: TechniqueKind =
-        serde_yml::from_str("technique: stack_spoofing\n").expect("stack_spoofing should parse");
-    assert_eq!(
-        step,
-        TechniqueKind::StackSpoofing {
-            params: Params::default()
-        }
-    );
 }
 
 #[test]
@@ -29,31 +16,17 @@ fn defaults_to_a_page_of_decoy() {
 }
 
 #[test]
-fn def_is_well_formed() {
-    assert_eq!(DEF.name, "stack_spoofing");
-    assert_eq!(DEF.category, Category::Preparation);
-    assert_eq!(DEF.attck, ["T1036"]);
-    assert_eq!(DEF.requires, [Capability::WindowsX64]);
-    assert!(
-        DEF.syscalls.is_empty(),
-        "the technique replaces the trampoline instead of adding syscalls of its own"
-    );
-    assert!(!DEF.stub_fragment.is_empty());
-    assert!(!DEF.readme.is_empty());
-}
-
-#[test]
 fn the_block_replaces_the_trampoline() {
     assert!(
-        DEF.stub_fragment.contains("\".global nt_invoke\""),
+        BLOCK.contains("\".global nt_invoke\""),
         "the block must define the symbol the nt_* helpers call"
     );
     assert!(
-        DEF.stub_fragment.contains("jmp nt_invoke_raw"),
+        BLOCK.contains("jmp nt_invoke_raw"),
         "the raw trampoline has to stay reachable under its renamed symbol"
     );
     assert!(
-        DEF.stub_fragment.contains("fn nt_invoke("),
+        BLOCK.contains("fn nt_invoke("),
         "the Rust side needs the declaration with the trampoline's signature"
     );
 }
@@ -73,7 +46,7 @@ fn every_diagnostic_is_obfuscated() {
     let block = render(&Params::default());
     for (placeholder, text) in MESSAGES {
         assert!(
-            !DEF.stub_fragment.contains(text),
+            !BLOCK.contains(text),
             "cleartext diagnostic for {placeholder} in the fragment"
         );
         assert!(
@@ -179,7 +152,7 @@ fn fragment_has_no_forbidden_patterns() {
         "panic!",
     ] {
         assert!(
-            !DEF.stub_fragment.contains(forbidden),
+            !BLOCK.contains(forbidden),
             "the fragment must not use {forbidden}"
         );
     }

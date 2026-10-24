@@ -264,6 +264,8 @@ fn map_payload(
 const TLS_OUT_OF_INDEXES: u32 = u32::MAX;
 /// Byte offset of the null-terminated callback array within the prologue page.
 const CALLBACKS_OFFSET: usize = 0x200;
+/// The single page that holds the prologue and the callback array.
+const PROLOGUE_PAGE_BYTES: usize = 0x1000;
 
 /// The payload's TLS directory, rebased onto the target's image base.
 struct TlsInfo {
@@ -615,12 +617,20 @@ fn start_with_tls(
     provision: &TlsProvision,
 ) -> Result<HANDLE, String> {
     let callback_bytes = render_callback_array(&provision.callbacks);
+    // The array shares one page with the prologue: an image with many callbacks
+    // must not spill past it.
+    let callbacks_end = CALLBACKS_OFFSET
+        .checked_add(callback_bytes.len())
+        .ok_or_else(|| $MSG_WRITE_OOB$)?;
+    if callbacks_end > PROLOGUE_PAGE_BYTES {
+        return Err($MSG_WRITE_OOB$);
+    }
 
     // One executable page holds the prologue and the null-terminated callback
     // array; the array sits at a fixed offset so the prologue's immediate is
     // known before any byte is written.
     let mut region: *mut core::ffi::c_void = core::ptr::null_mut();
-    let mut region_size = 0x1000usize;
+    let mut region_size = PROLOGUE_PAGE_BYTES;
     let status = crate::nt_alloc_vm(
         process,
         &mut region,

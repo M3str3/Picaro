@@ -34,10 +34,11 @@ pub const DEF: FeatureDef = FeatureDef {
             key: "resolver",
             description: "How `mode: indirect` learns each SSN: `hells_gate` reads the live ntdll \
                           stub, `tartarus_gate` a clean on-disk copy, `api_hash` matches exports \
-                          by a precomputed FNV-1a hash.",
+                          by a precomputed FNV-1a hash, and `halos_gate` derives a hooked \
+                          stub's SSN from its intact neighbours.",
             required: false,
             default: Some("hells_gate"),
-            kind: ParamKind::Enum(&["hells_gate", "tartarus_gate", "api_hash"]),
+            kind: ParamKind::Enum(&["hells_gate", "tartarus_gate", "api_hash", "halos_gate"]),
         },
     ],
     params_example: "mode: indirect\nresolver: hells_gate\n",

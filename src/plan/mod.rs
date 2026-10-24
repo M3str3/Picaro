@@ -59,11 +59,41 @@ fn parse_and_substitute(
         })?;
 
     build_args::substitute(&mut value, build_args)?;
+    normalize_technique_names(&mut value);
 
     serde_yml::from_value(value).map_err(|source| PackerError::ParsePlan {
         path: path.to_path_buf(),
         source,
     })
+}
+
+/// Rewrites every `runtime[].technique` to the registry's canonical spelling.
+///
+/// The match ignores case and underscores, so `ReflectiveLoading`,
+/// `Reflective_Loading` and `reflectiveloading` all resolve to
+/// `reflective_loading`. An unknown name is left untouched and fails later in
+/// `serde` with the usual "unknown variant" error.
+fn normalize_technique_names(value: &mut serde_yml::Value) {
+    let Some(steps) = value
+        .get_mut("runtime")
+        .and_then(serde_yml::Value::as_sequence_mut)
+    else {
+        return;
+    };
+    for step in steps {
+        let Some(name) = step.get_mut("technique") else {
+            continue;
+        };
+        let replacement = match name.as_str() {
+            Some(raw) => crate::techniques::canonical_name(raw)
+                .filter(|canonical| *canonical != raw)
+                .map(str::to_string),
+            None => None,
+        };
+        if let Some(canonical) = replacement {
+            *name = serde_yml::Value::String(canonical);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -131,5 +161,20 @@ runtime:
             }
             other => panic!("expected process_hollowing, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn load_plan_accepts_a_technique_name_in_any_case_or_separator() {
+        let yaml = ARGS_YAML.replace("process_hollowing", "Process_Hollowing");
+        let path = write_temp("mixed_case_technique.yaml", &yaml);
+        let args = build_args::parse(&["C:\\Windows\\System32\\notepad.exe".to_string()]);
+
+        let plan = load_plan(&path, &args).expect("the mixed-case technique name must load");
+
+        assert_eq!(plan.runtime[0].name(), "process_hollowing");
+        assert!(matches!(
+            plan.runtime[0].technique,
+            crate::techniques::TechniqueKind::ProcessHollowing { .. }
+        ));
     }
 }

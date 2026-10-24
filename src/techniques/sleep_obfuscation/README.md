@@ -82,6 +82,13 @@ A **Preparation** step: the stub runs it before the Execution and it never
 receives the payload. Place it earlier in `runtime:` than the Execution step. It encrypts the image region for the duration of the sleep and
 restores it afterwards.
 
+The mechanism lives in the shared `sleep_runtime` block, not in the step. The
+`Sleep` API hook (`build.stub.api_resolution.hooks.sleep`) calls the same
+`ekko_sleep` over the **mapped payload** instead of the loader image, so a
+payload that sleeps is concealed without a `runtime:` step. A buildable example
+is `examples/plans/sleep-hook.yaml`; see `docs/design/api-resolution.md` section
+13 and `docs/measurements.md`.
+
 ## What it evades
 
 - **Memory scans during the sleep.** An EDR that walks the process's
@@ -112,6 +119,9 @@ restores it afterwards.
   continued). What remains true: one 16-byte key seeds every call, so the
   *image* is protected by RC4 only.
 - **The RC4 key sits in the heap** in cleartext during the whole sleep.
+- **Wall-clock overhead**: every concealed sleep pays the ROP chain's timer
+  steps, so `Sleep(ms)` takes longer than `ms` (measured ~217 ms for a 140 KB
+  image with the current constants; see Measurements).
 
 ## Measurements
 
@@ -144,6 +154,11 @@ technique and not the sampler.
 - The e2e `sleep_obfuscation_sleeps_and_still_runs_the_payload` asserts what
   needs no observer: the wait really takes `sleep_ms` and the chain reaches the
   payload afterwards.
+- **2026-10-23 — tuning**: the shared runtime now uses 1 MiB chunks and a 10 ms
+  stagger (20 ms first step) instead of 64 KiB / 50 ms / 100 ms. The table above
+  was measured with the old constants; the plateau is still `sleep_ms`, but the
+  transitions are faster. On a 140 KB mapped payload the hook went from ~1086 ms
+  of overhead to ~217 ms for `Sleep(2500)` (`docs/measurements.md`).
 
 ## Implementation notes
 
@@ -151,15 +166,19 @@ technique and not the sampler.
   is ready for foliage and cronos.
 - **Timing option C (demo)**: the technique performs one encrypted sleep of
   `sleep_ms` and returns; the payload then runs once, after the sleep. The
-  operational form — encrypting *during the payload's own sleeps* — requires
-  hooking `Sleep`/`SleepEx` in the target, which is a future phase.
-- **Region scope**: this phase encrypts the whole image
-  (`image_base + SizeOfImage`), the original Ekko region. Note that at
-  Preparation time the decrypted payload buffer still lives on the heap (it is
-  only mapped into executable regions by the Execution technique afterwards),
-  so this MVP demonstrates the mechanism, not the operational region set; the
-  VirtualQuery-based enumeration of the payload's mapped RX/RWX regions is the
-  follow-up.
+  operational form — encrypting *during the payload's own sleeps* — is the
+  `hooks.sleep` API proxy, which calls the same runtime with the mapped payload
+  region and the payload's requested duration.
+- **One shared runtime**: the ekko chain, its RC4 key and its diagnostics live in
+  `src/engine/templates/sleep_runtime.rs.tpl`, rendered once into `mod
+  sleep_runtime`; this step is a thin adapter that resolves the loader image.
+- **Region scope**: the step encrypts the whole loader image
+  (`image_base + SizeOfImage`), the original Ekko region. The hook instead uses
+  the region `reflective_loading` records for the mapped payload, which is the
+  operational target; the payload's heap and thread stacks are outside both.
+- **Chunking and timing**: `CHUNK` is 1 MiB (the `ustring` length is 32-bit) and
+  `STEP` is 10 ms, just under the ~15.6 ms timer granularity, so a multi-megabyte
+  image pays tens of steps, not hundreds.
 - **CONTEXT alignment**: windows-rs 0.58 exposes the x64 `CONTEXT` with the
   correct field offsets but only 8-byte alignment; the fragment wraps it in
   `#[repr(align(16))]` (same workaround as the `Get/SetThreadContext`

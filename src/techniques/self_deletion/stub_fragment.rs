@@ -65,13 +65,25 @@ const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
 /// documented shape of `FILE_RENAME_INFORMATION` operations on a mapped image).
 const SYNCHRONIZE: u32 = 0x0010_0000;
 
-/// `FILE_RENAME_INFO` (`winbase.h`), the layout `FileRenameInformation` expects:
-/// a `ReplaceIfExists` dword (with its padding), the optional root directory
-/// handle, the name length in bytes and the UTF-16 name itself.
+/// `FILE_RENAME_INFO`'s header size and the offset of its `FileNameLength`
+/// field, for the architecture the stub is compiled for.
 ///
-/// Written as a byte buffer instead of a struct because the name is variable
-/// length and the union's padding is not something to leave to the compiler.
-const RENAME_INFO_HEADER: usize = 20;
+/// The structure is pointer-sized, not fixed: on x86 the `ReplaceIfExists`
+/// union is four bytes and `RootDirectory` follows at 4, so the length lives at
+/// 8 and the UTF-16 name at 12; on x64 both fields are 8-byte aligned, which
+/// puts the length at 16 and the name at 20. Reusing the x64 offsets on an x86
+/// build makes the kernel read `FileNameLength = 0` and reject the rename with
+/// `STATUS_INVALID_PARAMETER`.
+///
+/// Taking the architecture as a flag keeps both layouts reachable from a test
+/// on either host; the fragment itself passes `cfg!(target_arch = "x86")`.
+fn rename_info_layout(is_x86: bool) -> (usize, usize) {
+    if is_x86 {
+        (12, 8)
+    } else {
+        (20, 16)
+    }
+}
 
 /// The running image's path as a NUL-terminated UTF-16 buffer.
 fn image_path() -> Result<Vec<u16>, String> {
@@ -109,18 +121,33 @@ fn open_image(path: &[u16]) -> Result<HANDLE, String> {
     }
 }
 
+/// Whether `stream` names one alternate data stream of the image: it must start
+/// with `:` and contain no path separator, or the rename would move the file to
+/// a different directory entry (or leave it visible under another name).
+fn stream_name_is_valid(stream: &str) -> bool {
+    if stream.is_empty() || !stream.starts_with(':') {
+        return false;
+    }
+    !stream.contains('\\') && !stream.contains('/')
+}
+
 /// Moves the image into an alternate data stream of its own path.
 fn hide_in_stream(path: &[u16]) -> Result<(), String> {
     let stream: String = $STREAM_DEF$;
+    if !stream_name_is_valid(&stream) {
+        return Err($MSG_INVALID_STREAM$);
+    }
     let name: Vec<u16> = stream.encode_utf16().collect();
-    let mut info = vec![0u8; RENAME_INFO_HEADER + name.len() * 2];
+    let (header, length_offset) = rename_info_layout(cfg!(target_arch = "x86"));
+    let mut info = vec![0u8; header + name.len() * 2];
     // `ReplaceIfExists = TRUE`.
     info[0..4].copy_from_slice(&1u32.to_le_bytes());
     // The root directory handle stays null: the name is a stream of the file the
     // handle already refers to.
-    info[16..20].copy_from_slice(&((name.len() * 2) as u32).to_le_bytes());
+    info[length_offset..length_offset + 4]
+        .copy_from_slice(&((name.len() * 2) as u32).to_le_bytes());
     for (index, unit) in name.iter().enumerate() {
-        let at = RENAME_INFO_HEADER + index * 2;
+        let at = header + index * 2;
         info[at..at + 2].copy_from_slice(&unit.to_le_bytes());
     }
 

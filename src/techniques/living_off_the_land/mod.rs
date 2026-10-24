@@ -29,7 +29,8 @@ pub struct Params {
     /// Wait for the child and capture its exit code (default: true).
     #[serde(default = "default_wait")]
     pub wait: bool,
-    /// Seconds to wait before terminating the child (0 = no limit).
+    /// Seconds to wait for the child (0 = no limit). On timeout the child keeps
+    /// running.
     #[serde(default)]
     pub timeout_s: u64,
 }

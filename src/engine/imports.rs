@@ -154,9 +154,11 @@ const IMPORTS_BLOCK: &str = r##"mod imports {
             IMAGE_ORDINAL_FLAG32
         };
 
-        let mut desc = rva_to_offset(import_dir_rva).ok_or(ImportError::DirectoryUnmapped {
-            rva: import_dir_rva,
-        })?;
+        let mut desc = mapped_offset(image, &rva_to_offset, import_dir_rva).ok_or(
+            ImportError::DirectoryUnmapped {
+                rva: import_dir_rva,
+            },
+        )?;
 
         loop {
             let name_rva = read_u32(image, desc + 12)?;
@@ -166,19 +168,24 @@ const IMPORTS_BLOCK: &str = r##"mod imports {
                 break;
             }
 
-            let name_off = rva_to_offset(name_rva).ok_or_else(|| {
+            let name_off = mapped_offset(image, &rva_to_offset, name_rva).ok_or_else(|| {
                 ImportError::Malformed(format!("DLL name RVA 0x{name_rva:08x} is not mapped"))
             })?;
-            let dll = unsafe { CStr::from_ptr(image.as_ptr().add(name_off) as *const i8) }
-                .to_string_lossy()
-                .into_owned();
+            let dll = read_cstring(image, name_off)?;
+            // The PE spec makes the ILT optional: a stripped `OriginalFirstThunk`
+            // means the thunk array is the IAT itself (`FirstThunk`).
+            let thunk_source = if original_thunk != 0 { original_thunk } else { first_thunk };
             let module = load_module(image, name_off, &dll)?;
             crate::tech_dbg!("imports", "loading '{dll}'");
 
             let mut i = 0u32;
             loop {
-                let thunk_rva = original_thunk + i * thunk_size;
-                let thunk_off = rva_to_offset(thunk_rva).ok_or_else(|| {
+                let thunk_rva = indexed_rva(thunk_source, i, thunk_size).ok_or_else(|| {
+                    ImportError::Malformed(format!(
+                        "import thunk {i} of DLL '{dll}' overflows the RVA space"
+                    ))
+                })?;
+                let thunk_off = mapped_offset(image, &rva_to_offset, thunk_rva).ok_or_else(|| {
                     ImportError::Malformed(format!("thunk RVA 0x{thunk_rva:08x} is not mapped"))
                 })?;
                 let value = if pe32plus {
@@ -197,33 +204,46 @@ const IMPORTS_BLOCK: &str = r##"mod imports {
                         format!("#{ordinal}"),
                     )
                 } else {
-                    let by_name_off = rva_to_offset(value as u32).ok_or_else(|| {
-                        ImportError::Malformed(format!(
-                            "import name RVA 0x{:08x} is not mapped",
-                            value as u32
-                        ))
-                    })?;
+                    let by_name_off = mapped_offset(image, &rva_to_offset, value as u32)
+                        .ok_or_else(|| {
+                            ImportError::Malformed(format!(
+                                "import name RVA 0x{:08x} is not mapped",
+                                value as u32
+                            ))
+                        })?;
                     // IMAGE_IMPORT_BY_NAME: `WORD Hint; CHAR Name[];`
-                    let name_ptr = unsafe { image.as_ptr().add(by_name_off + 2) } as *const i8;
-                    let name = unsafe { CStr::from_ptr(name_ptr) }
-                        .to_string_lossy()
-                        .into_owned();
+                    let func_name_off = by_name_off + 2;
+                    let name = read_cstring(image, func_name_off)?;
+                    let name_ptr = unsafe { image.as_ptr().add(func_name_off) };
                     (
-                        unsafe { GetProcAddress(module, PCSTR(name_ptr as *const u8)) },
+                        unsafe { GetProcAddress(module, PCSTR(name_ptr)) },
                         name,
                     )
                 };
 
+                // The caller writes this slot: reject an unmapped destination
+                // here instead of letting the write land past the image.
+                let iat_rva = indexed_rva(first_thunk, i, thunk_size).ok_or_else(|| {
+                    ImportError::Malformed(format!(
+                        "IAT slot {i} of DLL '{dll}' overflows the RVA space"
+                    ))
+                })?;
+                if mapped_offset(image, &rva_to_offset, iat_rva).is_none() {
+                    return Err(ImportError::Malformed(format!(
+                        "IAT slot RVA 0x{iat_rva:08x} is not mapped"
+                    )));
+                }
+
                 match policy(&dll, &func) {
                     ImportPolicy::Proxy(proxy) => {
-                        resolved.push((first_thunk + i * thunk_size, proxy));
+                        resolved.push((iat_rva, proxy));
                     }
                     ImportPolicy::Forward => {
                         let real = address.ok_or_else(|| ImportError::ResolveFailed {
                             dll: dll.clone(),
                             func,
                         })?;
-                        resolved.push((first_thunk + i * thunk_size, real as u64));
+                        resolved.push((iat_rva, real as u64));
                     }
                     ImportPolicy::Abort => {
                         return Err(ImportError::Abort {
@@ -249,6 +269,9 @@ const IMPORTS_BLOCK: &str = r##"mod imports {
     /// read-only) and every touched page is restored to its original protection
     /// afterwards, so the IAT does not stay writable (which is itself an
     /// IAT-hook signal). The mapped image uses identity RVA→offset mapping.
+    /// Every destination is validated against `image` before any page is made
+    /// writable, so a malformed table cannot turn the write below into a wild
+    /// one.
     pub fn patch_imports<P>(
         image: &mut [u8],
         import_dir_rva: u32,
@@ -274,9 +297,22 @@ const IMPORTS_BLOCK: &str = r##"mod imports {
         let mut lo = usize::MAX;
         let mut hi = 0usize;
         for (rva, _) in &imports {
+            // `resolve_imports` only proves the RVA is mapped; the slot also has
+            // to fit in the buffer (a mapped-but-unbacked tail or an overflow
+            // would otherwise write past it).
+            let end = (*rva as usize)
+                .checked_add(slot_size)
+                .filter(|end| *end <= image.len())
+                .ok_or_else(|| {
+                    ImportError::Malformed(format!(
+                        "IAT slot RVA 0x{:08x} (+{slot_size} bytes) is outside the {}-byte image",
+                        *rva,
+                        image.len()
+                    ))
+                })?;
             let at = base + *rva as usize;
             lo = lo.min(at);
-            hi = hi.max(at + slot_size);
+            hi = hi.max(base + end);
         }
 
         // Record each page's original protection and make the range writable.
@@ -294,6 +330,8 @@ const IMPORTS_BLOCK: &str = r##"mod imports {
 
         let count = imports.len();
         for (iat_rva, address) in imports {
+            // The slot range was validated above, before any page was made
+            // writable.
             let slot = base + iat_rva as usize;
             if slot_size == 8 {
                 unsafe { *(slot as *mut u64) = address };
@@ -314,6 +352,9 @@ const IMPORTS_BLOCK: &str = r##"mod imports {
     }
 
     /// Loads an imported DLL by name.
+    ///
+    /// `name_off` must point at a NUL-terminated name inside `image`;
+    /// `resolve_imports` guarantees that through `read_cstring`.
     ///
     /// API set names are virtual: no such file exists on disk. On Windows 10+
     /// the loader resolves them through the API set schema in the PEB, so
@@ -360,6 +401,43 @@ const IMPORTS_BLOCK: &str = r##"mod imports {
         })
     }
 
+    /// `base + index * stride` in RVA space, rejecting overflow.
+    ///
+    /// Thunk and IAT RVAs come from untrusted headers; a wrapped sum would
+    /// point at unrelated bytes in the image, so the arithmetic is checked.
+    fn indexed_rva(base: u32, index: u32, stride: u32) -> Option<u32> {
+        index.checked_mul(stride).and_then(|delta| base.checked_add(delta))
+    }
+
+    /// Maps an RVA to an offset that is actually backed by `image`.
+    ///
+    /// A section's zero-fill tail maps RVAs past the end of the file data;
+    /// treating such an offset as mapped would let a read or a write land
+    /// outside the buffer.
+    fn mapped_offset<F>(image: &[u8], rva_to_offset: &F, rva: u32) -> Option<usize>
+    where
+        F: Fn(u32) -> Option<usize>,
+    {
+        rva_to_offset(rva).filter(|offset| *offset < image.len())
+    }
+
+    /// Reads a NUL-terminated string at `offset`, staying inside `image`.
+    ///
+    /// An unbounded `CStr` scan walks until it finds a NUL wherever that lands
+    /// in the address space, so an unterminated name would read past the
+    /// payload buffer. Bounding the slice turns that case into an error.
+    fn read_cstring(image: &[u8], offset: usize) -> Result<String, ImportError> {
+        let tail = image.get(offset..).ok_or_else(|| {
+            ImportError::Malformed(format!("string offset 0x{offset:x} is past the image"))
+        })?;
+        let name = CStr::from_bytes_until_nul(tail).map_err(|_| {
+            ImportError::Malformed(format!(
+                "string at offset 0x{offset:x} is not NUL-terminated inside the image"
+            ))
+        })?;
+        Ok(name.to_string_lossy().into_owned())
+    }
+
     fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, ImportError> {
         let s = bytes.get(offset..offset.checked_add(2).ok_or_else(bounds)?).ok_or_else(bounds)?;
         Ok(u16::from_le_bytes([s[0], s[1]]))
@@ -401,6 +479,11 @@ mod tests {
 
     fn pipeline(yaml: &str) -> Vec<RuntimeStep> {
         vec![serde_yml::from_str(yaml).expect("pipeline step")]
+    }
+
+    /// The resolver block as rendered for a technique that resolves imports.
+    fn resolver_block() -> String {
+        render_block(&pipeline("technique: process_hollowing\n"), &xor_config())
     }
 
     #[test]
@@ -464,5 +547,89 @@ mod tests {
         assert!(!block.contains("crate::dec_xor"));
         assert!(!block.contains("ucrtbase.dll"));
         assert!(block.contains("std::hint::black_box"));
+    }
+
+    /// The PE spec makes the ILT optional: `OriginalFirstThunk == 0` must fall
+    /// back to `FirstThunk` instead of walking RVA 0 (which a stripped-ILT but
+    /// otherwise loadable payload used to hit as "thunk RVA 0x00000000").
+    #[test]
+    fn an_absent_ilt_falls_back_to_the_first_thunk() {
+        let block = resolver_block();
+        assert!(
+            block.contains("if original_thunk != 0 { original_thunk } else { first_thunk }"),
+            "the walk does not select the thunk source: {block}"
+        );
+        assert!(
+            block.contains("indexed_rva(thunk_source, i, thunk_size)"),
+            "the walk does not use the selected thunk source: {block}"
+        );
+    }
+
+    /// Thunk and IAT RVAs come from untrusted headers: `base + i * stride` has
+    /// to be checked, so a wrap is `Malformed` and not a bogus RVA.
+    #[test]
+    fn thunk_and_iat_rvas_use_checked_arithmetic() {
+        let block = resolver_block();
+        assert!(
+            block.contains("index.checked_mul(stride).and_then(|delta| base.checked_add(delta))"),
+            "the RVA arithmetic is not checked: {block}"
+        );
+        assert!(
+            block.contains("indexed_rva(first_thunk, i, thunk_size)"),
+            "the IAT slot is not computed with the checked helper: {block}"
+        );
+        assert!(
+            !block.contains("+ i * thunk_size"),
+            "unchecked thunk arithmetic: {block}"
+        );
+        assert!(block.contains("overflows the RVA space"));
+    }
+
+    /// A destination outside the image must be refused before a single byte is
+    /// written, and the check has to run before any page is made writable.
+    #[test]
+    fn an_out_of_range_iat_slot_is_rejected_before_any_write() {
+        let block = resolver_block();
+        assert!(
+            block.contains("IAT slot RVA 0x{iat_rva:08x} is not mapped"),
+            "the IAT destination is not validated through rva_to_offset: {block}"
+        );
+        assert!(
+            block.contains("checked_add(slot_size)") && block.contains("<= image.len()"),
+            "patch_imports does not bound the slot against the image: {block}"
+        );
+        let validated = block
+            .find("checked_add(slot_size)")
+            .expect("slot bound check");
+        let protect = block
+            .find("VirtualProtect(page as *const c_void")
+            .expect("VirtualProtect");
+        let write = block
+            .find("*(slot as *mut u64) = address")
+            .expect("IAT write");
+        assert!(
+            validated < protect && protect < write,
+            "the slot must be validated before the IAT is unprotected: {block}"
+        );
+    }
+
+    /// Names are read with a bounded helper: an unbounded `CStr` scan stops at
+    /// the first NUL wherever it lands, so an unterminated payload string would
+    /// read past the image buffer.
+    #[test]
+    fn names_are_read_inside_the_image() {
+        let block = resolver_block();
+        assert!(block.contains("CStr::from_bytes_until_nul"));
+        assert!(block.contains("image.get(offset..)"));
+        assert!(
+            !block.contains("CStr::from_ptr"),
+            "unbounded C string read: {block}"
+        );
+        assert!(block.contains("not NUL-terminated"));
+        // Both the DLL name and the import-by-name go through the helper.
+        let dll_name_read = "let dll = read_cstring(image, name_off)?;";
+        let func_name_read = "let name = read_cstring(image, func_name_off)?;";
+        assert!(block.contains(dll_name_read));
+        assert!(block.contains(func_name_read));
     }
 }

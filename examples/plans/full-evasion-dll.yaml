@@ -17,8 +17,8 @@
 # The DLL runs in-process, so it must match the host's bitness and it is scanned
 # by the image loader on load — `output.sign` is the mitigation that matters most
 # here. `subsystem`, `resources.manifest`, `self_deletion`, `sleep_obfuscation`
-# and `bouncer` with `on_fail: exit` are rejected for a DLL build (the host owns
-# the process). See docs/design/dll-output.md.
+# and `bouncer` with an exiting `on_reject` action are rejected for a DLL build
+# (the host owns the process). See docs/design/dll-output.md.
 
 schema: 6
 name: full-evasion-dll
