@@ -1,0 +1,24 @@
+# Defaults for `picaro pack`. Every key is optional; CLI flags always win.
+#
+# Copy this file to `picaro.config.yaml` in the directory you run `picaro` from,
+# or point at it with `picaro pack --config examples/picaro.config.yaml`.
+pack:
+  # Root of the per-payload output folders.
+  dir: packed
+  # Execution technique, or `auto` to choose it from the payload format.
+  exec: auto
+  arch: x64
+  kind: exe
+  # Loader features.
+  syscalls: indirect
+  resolver: hells_gate
+  stack_spoofing: false
+  strings: xor
+  # Output.
+  sign: none
+  strip: true
+  gui: false
+  # Save `<dir>/<payload>/plan.yaml` next to the artifact.
+  plan: true
+  # Accept non-Stable techniques without --allow-experimental.
+  allow_experimental: false

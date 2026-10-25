@@ -5,8 +5,8 @@
 #   cargo run -- build examples/plans/preparations.yaml
 #   .\dist\preparations.exe
 #
-# Order matters: the gate (`bouncer`) and the killswitch (`guardrail`) run first,
-# then the debugger check, then the AMSI/ETW patches, then the timestamp fix-up.
+# Order matters: the gate (`bouncer`) and the killswitch run first, then the
+# debugger check, then the AMSI/ETW patches, then the timestamp fix-up.
 #
 # NOT chained here on purpose:
 #   - `unhook_ntdll` restores ntdll's `.text` from a clean on-disk copy, which
@@ -37,7 +37,7 @@ runtime:
         - ram_mb: 512
 
   # Killswitch: abort past a deadline (and, optionally, after N runs).
-  - technique: guardrail
+  - technique: killswitch
     params:
       expire_on: "2099-01-01"
 

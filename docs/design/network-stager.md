@@ -32,7 +32,7 @@ then runs it with the usual execution techniques.
 Today `build.payloads.<name>.source` is resolved by the **packer** at build time:
 `http(s)://` is fetched in memory, `file://` is read from disk, and the result is
 embedded as ciphertext (`include_bytes!` + `decrypt_step` in the runner — see
-`src/engine/steps.rs::render_execution_block`). A stager moves that fetch to the
+`src/engine/steps/mod.rs::render_execution_block`). A stager moves that fetch to the
 **stub** at run time, which is a different thing and belongs in the ordered
 `runtime:` list next to the step that consumes the result.
 
@@ -238,8 +238,8 @@ step prefers the fetched bytes.)*
 
 ## 13. References
 
-- `src/engine/steps.rs` — `render_execution_block`, `STUB_HELPERS` (`decrypt_step`).
+- `src/engine/steps/mod.rs` — `render_execution_block`, `STUB_HELPERS` (`decrypt_step`).
 - `src/engine/fetch.rs` — build-time URL scheme handling to mirror.
 - `src/techniques/` — technique registry + `Category::Control`.
-- `src/plan/schema.rs` — `PayloadPlan`, `CryptoPlan`, `StepControl`.
+- `src/plan/schema/mod.rs` — `PayloadPlan`, `CryptoPlan`, `StepControl`.
 - `examples/stubs/runtime-key.rs` — runtime key material via `$arg.N$`.

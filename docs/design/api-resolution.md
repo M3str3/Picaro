@@ -162,7 +162,7 @@ So the minimal cut adds **one** syscall helper (`NtOpenProcess`; the syscall lay
 lists 14 today) and one special handler. `NtReadVirtualMemory` already exists in
 `NT_FUNCTIONS` as `read_vm` / `nt_read_vm`.
 
-The catalogue is a single Rust const (`src/engine/api_resolution.rs`)
+The catalogue is a single Rust const (`src/engine/api_resolution/mod.rs`)
 that is the source of truth for: the proxy generation, the `GetProcAddress`
 name matching, and the plan validation. Adding an entry is a deliberate code
 change, not a config-only edit.
@@ -282,7 +282,7 @@ with the loader's own resolution. When the handler forwards, it calls the
 
 ## 7. Validation (phase 3)
 
-In `src/plan/validate.rs` (mirroring the existing technique checks):
+In `src/plan/validate/mod.rs` (mirroring the existing technique checks):
 
 1. **`api_resolution.mode: proxy` requires `syscalls.mode: indirect`** — otherwise
    the re-routed calls fall back to the direct Win32 APIs and the intercepted
@@ -328,8 +328,8 @@ both execution techniques resolve imports, so the resolver is always emitted.
 
 ## 9. Code touchpoints
 
-- `src/plan/schema.rs` — `StubPlan.api_resolution: Option<YamlApiResolutionPlan>`.
-- `src/engine/api_resolution.rs` — the catalogue, the resolved config, and the
+- `src/plan/schema/mod.rs` — `StubPlan.api_resolution: Option<YamlApiResolutionPlan>`.
+- `src/engine/api_resolution/mod.rs` — the catalogue, the resolved config, and the
   renderer (`render_block`: policy, proxies, handler; `required_syscalls`).
 - `src/engine/imports.rs` — `resolve_imports` takes the policy; `patch_imports`
   resolves, protects the slot range per page, writes and restores (safe API: the
@@ -342,8 +342,8 @@ both execution techniques resolve imports, so the resolver is always emitted.
   `render_block_with` (merges the `Nt*` names `api_resolution` routes to).
 - `src/engine/stub.rs` + `src/engine/templates/main.rs.tpl` — `$API_RESOLUTION_BLOCK$`
   and the `render_*_with` variants that thread the config.
-- `src/plan/validate.rs` — section 7.
-- `src/main.rs` — `verify_no_intercepted_imports` (D-21/D-22).
+- `src/plan/validate/mod.rs` — section 7.
+- `src/cli/helpers.rs` — `verify_no_intercepted_imports` (D-21/D-22).
 - Every catalogue/compare name goes through `StringsConfig`; nothing new in
   clear text (the proxy identifiers are index-based, names live in comments).
 
@@ -354,11 +354,11 @@ both execution techniques resolve imports, so the resolver is always emitted.
 - [x] **Phase A — schema + validation, no behavior change.** `mode: none` only;
   parse, default, validate the coupling and the catalogue names. *Implemented
   2026-09-27: `build.stub.api_resolution` (`YamlApiResolutionPlan`), the
-  `CATALOGUE` const (`src/engine/api_resolution.rs`), and
+  `CATALOGUE` const (`src/engine/api_resolution/mod.rs`), and
   `validate_api_resolution` + the no-op advisory.*
 - [x] **Phase B — resolver policy + proxies, `reflective_loading` only.**
   *Implemented 2026-09-27:* the shared `patch_imports` (per-page protect/restore),
-  generated proxies + policy (`src/engine/api_resolution.rs`), the
+  generated proxies + policy (`src/engine/api_resolution/mod.rs` + `templates.rs`), the
   `$API_RESOLUTION_BLOCK$` placeholder, and `route_to_nt` for
   `ntdll!NtReadVirtualMemory` (direct) and `kernel32!ReadProcessMemory` (wrapper:
   NTSTATUS → BOOL, `GetLastError`, partial count). Entries not implemented yet
@@ -393,7 +393,7 @@ both execution techniques resolve imports, so the resolver is always emitted.
   17 functions are proxeable.
 - [x] **Phase H — injection and token wrappers.** *Implemented 2026-10-16:* nine
   `kernel32!*` injection wrappers and three `advapi32!*` token rebuilds join the
-  catalogue (`src/engine/api_resolution.rs`); `NtOpenProcessToken` and
+  catalogue (`src/engine/api_resolution/mod.rs`); `NtOpenProcessToken` and
   `NtDuplicateToken` join the syscall layer (`src/engine/syscalls/mod.rs`, 18 → 20
   functions). `CreateRemoteThread` is rebuilt on the native-signature helper
   (`lpThreadAttributes`/`lpThreadId` not honored); `DuplicateTokenEx` ignores

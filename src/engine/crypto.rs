@@ -20,9 +20,9 @@ use chacha20poly1305::{
 use rand::RngCore;
 
 /// Key size (256 bits).
-const KEY_LEN: usize = 32;
+pub const KEY_LEN: usize = 32;
 /// XChaCha20 nonce size (192 bits).
-const NONCE_LEN: usize = 24;
+pub const NONCE_LEN: usize = 24;
 
 /// Encrypted payload ready to be embedded into the stub.
 ///
@@ -72,6 +72,10 @@ pub enum CryptoError {
 type Result<T> = std::result::Result<T, CryptoError>;
 
 /// Generates a 256-bit symmetric key using the system CSPRNG.
+///
+/// Builds derive their key from [`crate::engine::entropy::BuildEntropy`]; this
+/// stays as the API for tests and out-of-tree callers.
+#[allow(dead_code)]
 pub fn generate_key() -> [u8; KEY_LEN] {
     let mut key = [0u8; KEY_LEN];
     rand::thread_rng().fill_bytes(&mut key);
@@ -79,6 +83,7 @@ pub fn generate_key() -> [u8; KEY_LEN] {
 }
 
 /// Generates a random 192-bit nonce.
+#[allow(dead_code)]
 fn generate_nonce() -> [u8; NONCE_LEN] {
     let mut nonce = [0u8; NONCE_LEN];
     rand::thread_rng().fill_bytes(&mut nonce);
@@ -88,18 +93,34 @@ fn generate_nonce() -> [u8; NONCE_LEN] {
 /// Encrypts `plaintext` with `key`, generating a fresh random nonce.
 ///
 /// An empty payload is a valid case: it encrypts to a ciphertext that only
-/// contains the authentication tag (16 bytes).
+/// contains the authentication tag (16 bytes). Builds use
+/// [`encrypt_payload_with_nonce`]; this remains the convenience API.
+#[allow(dead_code)]
 pub fn encrypt_payload(plaintext: &[u8], key: &[u8; KEY_LEN]) -> Result<EncryptedPayload> {
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
     let nonce = generate_nonce();
+    encrypt_payload_with_nonce(plaintext, key, &nonce)
+}
+
+/// Encrypts `plaintext` with an explicit key and nonce.
+///
+/// This is the replay path: a build records both values, so feeding them back
+/// must reproduce the ciphertext byte for byte. The nonce is never derived
+/// here; the caller owns it (the build derives it from
+/// [`crate::engine::entropy::BuildEntropy`]).
+pub fn encrypt_payload_with_nonce(
+    plaintext: &[u8],
+    key: &[u8; KEY_LEN],
+    nonce: &[u8; NONCE_LEN],
+) -> Result<EncryptedPayload> {
+    let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
 
     let ciphertext = cipher
-        .encrypt(XNonce::from_slice(&nonce), plaintext)
+        .encrypt(XNonce::from_slice(nonce), plaintext)
         .map_err(|_| CryptoError::Encryption)?;
 
     Ok(EncryptedPayload {
         ciphertext,
-        nonce,
+        nonce: *nonce,
         key: *key,
         plaintext_len: plaintext.len(),
     })
@@ -215,5 +236,19 @@ mod tests {
 
         // The ciphertext adds the 16-byte Poly1305 tag.
         assert_eq!(enc.ciphertext.len(), plaintext.len() + 16);
+    }
+
+    #[test]
+    fn an_explicit_nonce_is_preserved_and_reproduces_the_bytes() {
+        let key = [0x11u8; KEY_LEN];
+        let nonce = [0x22u8; NONCE_LEN];
+        let first =
+            encrypt_payload_with_nonce(b"replay me", &key, &nonce).expect("first encryption");
+        let second =
+            encrypt_payload_with_nonce(b"replay me", &key, &nonce).expect("second encryption");
+
+        assert_eq!(first.nonce, nonce);
+        assert_eq!(first.key, key);
+        assert_eq!(first.ciphertext, second.ciphertext);
     }
 }

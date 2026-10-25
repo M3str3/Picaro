@@ -1,13 +1,16 @@
-# Guardrail
+# Killswitch
 
 *Aborts the chain once a configured deadline has passed or a stored run count
 is exceeded, so a build can be time- or use-limited.*
 
 ## What it does
 
-`guardrail` is a killswitch / gate that runs as a Preparation step *before* the
-payload executes. It evaluates two independent conditions and, when either
-trips, returns `Ok(false)` to abort the chain so the payload never runs:
+`killswitch` runs as a Preparation step *before* the payload executes. It
+evaluates two independent conditions and, when either trips, returns
+`Ok(false)` to abort the chain so the payload never runs. It is a killswitch for
+the chain, not a destructive one: nothing is deleted or wiped (`self_deletion`
+covers that). ATT&CK files this family under [Execution Guardrails
+(T1480)](https://attack.mitre.org/techniques/T1480/).
 
 - **Deadline** (`expire_on`): the loader refuses to run once the system clock
   is past a given ISO date (`YYYY-MM-DD`).
@@ -22,14 +25,14 @@ clock, and the counter needs only the standard library's file I/O.
 
 ```mermaid
 flowchart TD
-    A[guardrail runs] --> B{Deadline passed?}
+    A[killswitch runs] --> B{Deadline passed?}
     B -- yes --> X[Return Ok false - abort the chain]
     B -- no --> C{Run count over max_runs?}
     C -- yes --> X
     C -- no --> D[Return Ok true - continue]
 ```
 
-The fragment exposes `guardrail() -> Result<bool, String>`:
+The fragment exposes `killswitch() -> Result<bool, String>`:
 
 ### 1. Deadline check
 
@@ -83,7 +86,7 @@ the chain, so the payload does not run out of scope.
 ## Measurements
 
 - The fragment is standard-library-only (system clock + file I/O), so a
-  `guardrail` build adds no new import-table entry; the deadline, the counter
+  `killswitch` build adds no new import-table entry; the deadline, the counter
   file name and every diagnostic are rebuilt at run time and do not appear in
   `.rdata` (enforced by
   `render_fragment_has_no_placeholders_or_sensitive_literals`).

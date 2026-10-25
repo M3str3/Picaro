@@ -111,7 +111,7 @@ pub const SENSITIVE_LITERALS: &[&str] = &[
     "living_off_the_land",
     "ppid_spoofing",
     "network_stager",
-    "guardrail",
+    "killswitch",
     "timestomping",
     "dll_hollowing",
     "process_ghosting",

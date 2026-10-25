@@ -32,8 +32,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
+use crate::paths::find_in_path;
 use crate::plan::schema::SignPlan;
 
 /// Subject used by `mode: lab` when none is configured.
@@ -108,7 +109,7 @@ pub enum SigningError {
 }
 
 /// What was used to sign the artifact (recorded in the build manifest).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Signature {
     /// Signing mode (`lab`, `store` or `file`).
     pub mode: String,
@@ -282,14 +283,6 @@ fn find_in_windows_kits() -> Option<PathBuf> {
         }
     }
     best.map(|(_, path)| path)
-}
-
-/// Searches `PATH` for `name`, returning the first match that is a file.
-fn find_in_path(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(name))
-        .find(|candidate| candidate.is_file())
 }
 
 /// Signs with `signtool.exe` (the Windows-native backend).

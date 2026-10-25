@@ -1,1 +1,0 @@
---8<-- "src/techniques/guardrail/README.md"

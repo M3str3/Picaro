@@ -4,23 +4,36 @@
   <img src="/card-back-512.webp" alt="Picaro joker card back" style="width:100px" />
 </p>
 
-This is the whole loop: generate a payload, write the YAML, pack it, run it and
-measure the result.
+This is the whole loop: generate a payload, pack it (with flags or a YAML plan),
+run it and measure the result.
 
 :::caution[Authorized use only]
 Pack only binaries you own or are explicitly permitted to test.
 :::
 
-## Recommended: Docker + the Python wrapper
+## Recommended: local `cargo run`
 
-The preferred way to run Picaro is the bundled Docker wrapper. It needs only
-Docker and Python — nothing is installed on your machine — and the commands are
-the same on Linux, macOS and Windows:
+With a Rust toolchain (Windows, or Linux/WSL cross-compiling to Windows):
 
 ```bash
-python scripts/picaro.py build payload.yaml   # builds the image on first use
-python scripts/picaro.py audit dist/demo.exe
+cargo run -- build payload.yaml
+cargo run -- audit dist/demo.exe
 ```
+
+### Docker without a host toolchain
+
+The compose dev container builds its image once and bind-mounts the repo, so an
+edit does not trigger a rebuild:
+
+```bash
+docker compose build dev
+docker compose run --rm dev-run build payload.yaml
+docker compose run --rm dev cargo test
+```
+
+`python scripts/picaro.py` runs the **production** image (no toolchain, Docker
+and Python only) and is the right choice for a machine that will not build the
+packer itself.
 
 The container cross-compiles the Windows PE, so run the artifact on a Windows
 host. Details, flags and the compose services are in the repository `README.md`.
@@ -39,6 +52,27 @@ Skip this if you use the wrapper above. To run the packer directly you need:
 - **Windows**, or Linux/WSL to cross-compile to the matching `-pc-windows-gnu`
   target. The stub is built for `arch: x64` or `arch: x86`, and the payload
   must match it (see [How it fits together](architecture.md)).
+
+## Fast path: pack without a plan
+
+If you only need a packed artifact, `picaro pack` composes the plan for you:
+
+```bash
+cargo run -- pack payload.exe
+cargo run -- pack payload.bin --patch-amsi --erase-header
+cargo run -- pack payload.exe --hollow
+```
+
+It detects the format (PE/shellcode → `reflective_loading`, .NET →
+`dotnet_hosting`, `.ps1` → `powershell_hosting`), defaults to indirect syscalls
+with `hells_gate`, and writes `packed/<payload>/` with the artifact, the build
+manifest and `plan.yaml`. Change the defaults in `picaro.config.yaml` (an
+example lives in `examples/picaro.config.yaml`); `--print-plan` emits the YAML
+when you want to continue with `picaro build`.
+
+The rest of this page is the plan-first path, which is still the right one for
+multi-payload builds and structured technique parameters. The full reference for
+the flag frontend is [CLI pack design](design/cli-pack.md).
 
 ## 1. Generate a payload
 
@@ -130,10 +164,16 @@ The blocks:
 
 | `build.payloads.<name>.format` | Input | Runs with |
 | --- | --- | --- |
-| `pe` (default) | an executable matching `output.arch` | `reflective_loading`, or `process_hollowing` |
+| `auto` (default) | the file decides: PE → `pe`/`dll`/`dotnet`, `.ps1` → `powershell`, anything else → `shellcode` | whatever the detected format allows |
+| `pe` (alias `exe`) | an executable matching `output.arch` | `reflective_loading`, or `process_hollowing` |
 | `dll` | a library matching `output.arch` | `reflective_loading` (set `export` to call a function) |
 | `shellcode` | a raw code blob | `reflective_loading`, or the in-process runners `execution_callbacks`, `module_stomping` and `fibers` |
 | `dotnet` | a managed (.NET) assembly | `dotnet_hosting` (the stub hosts the CLR) |
+| `powershell` | a `.ps1`/`.psm1` script | `powershell_hosting` (the script is compiled to a managed launcher) |
+
+With `format: auto` the packer reads a local source before validating the plan;
+a remote `http(s)://` source must state its format explicitly. Writing the format
+is optional for a local file.
 
 `reflective_loading` maps the payload into the packed binary's own process and
 handles the native formats, so it is the safe default. Three lighter in-process

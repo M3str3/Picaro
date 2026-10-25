@@ -16,9 +16,9 @@
 //!   decoder and no key, but it emits one store per byte (more code, slightly
 //!   slower). Ideal for short strings that must appear zero times in `.rdata`.
 
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
+use crate::engine::entropy::{BuildEntropy, Domain};
 use crate::error::{PackerError, Result};
 
 /// Length of the XOR key in bytes (256 bits).
@@ -87,17 +87,32 @@ impl std::fmt::Debug for StringsConfig {
 }
 
 impl StringsConfig {
+    /// Resolves the obfuscation plan with a fresh random entropy seed.
+    ///
+    /// Kept as the convenient entry point for callers that only need a
+    /// validated configuration (tests, validation). A build uses
+    /// [`Self::from_yaml_with_entropy`] so the key can be reproduced.
+    pub fn from_yaml(yaml: Option<&YamlStringsPlan>) -> Result<Self> {
+        Self::from_yaml_with_entropy(yaml, &BuildEntropy::random())
+    }
+
     /// Resolves the obfuscation plan from the (optional) YAML block.
     ///
-    /// `None` means "defaults" (`xor` + a fresh random key). An invalid
-    /// strategy or an ill-formed `literal:` key is a validation error.
-    pub fn from_yaml(yaml: Option<&YamlStringsPlan>) -> Result<Self> {
+    /// `None` means "defaults" (`xor` + a key derived from the build entropy).
+    /// An invalid strategy or an ill-formed `literal:` key is a validation
+    /// error. A literal key still wins, so a pinned plan keeps its bytes.
+    pub fn from_yaml_with_entropy(
+        yaml: Option<&YamlStringsPlan>,
+        entropy: &BuildEntropy,
+    ) -> Result<Self> {
         let Some(yaml) = yaml else {
-            return Ok(Self::xor(generate_xor_key()));
+            return Ok(Self::xor(
+                entropy.derive_bytes::<XOR_KEY_LEN>(Domain::StringsKey),
+            ));
         };
 
         match yaml.strategy.as_str() {
-            "xor" => Ok(Self::xor(resolve_key(&yaml.key)?)),
+            "xor" => Ok(Self::xor(resolve_key(&yaml.key, entropy)?)),
             "stack" => {
                 if yaml.key != "random" {
                     return Err(PackerError::Validation(format!(
@@ -127,11 +142,15 @@ impl StringsConfig {
     pub fn obfuscate(&self, plaintext: &str) -> ObfuscatedString {
         match self.strategy {
             StringStrategy::Xor => {
-                // `from_yaml` always stores a key for xor; the fallback only
-                // defends against a hand-constructed plan missing its key.
+                // `from_yaml` always stores a key for xor; the fallback defends
+                // against a hand-constructed plan missing its key. It derives
+                // from a fixed seed rather than drawing a sixth RNG, so the
+                // build's entropy stays the only source of per-build values.
                 let key = match self.key {
                     Some(key) => key,
-                    None => generate_xor_key(),
+                    None => {
+                        BuildEntropy::from_seed(0).derive_bytes::<XOR_KEY_LEN>(Domain::StringsKey)
+                    }
                 };
                 let bytes = plaintext
                     .bytes()
@@ -193,15 +212,8 @@ impl ObfuscatedString {
     }
 }
 
-/// Generates a fresh 256-bit XOR key.
-fn generate_xor_key() -> [u8; XOR_KEY_LEN] {
-    let mut key = [0u8; XOR_KEY_LEN];
-    rand::thread_rng().fill_bytes(&mut key);
-    key
-}
-
 /// Parses a key spec (`random` or `literal:<hex>`) into 32 bytes.
-fn resolve_key(spec: &str) -> Result<[u8; XOR_KEY_LEN]> {
+fn resolve_key(spec: &str, entropy: &BuildEntropy) -> Result<[u8; XOR_KEY_LEN]> {
     match spec.strip_prefix("literal:") {
         Some(hex) => {
             let bytes = hex::decode(hex).map_err(|e| {
@@ -225,7 +237,7 @@ fn resolve_key(spec: &str) -> Result<[u8; XOR_KEY_LEN]> {
             }
             Ok(key)
         }
-        None if spec == "random" => Ok(generate_xor_key()),
+        None if spec == "random" => Ok(entropy.derive_bytes::<XOR_KEY_LEN>(Domain::StringsKey)),
         None => Err(PackerError::Validation(format!(
             "invalid strings.key '{spec}': expected 'random' or 'literal:<hex>'"
         ))),
@@ -383,10 +395,14 @@ mod tests {
     }
 
     #[test]
-    fn key_generation_produces_distinct_keys() {
-        let a = generate_xor_key();
-        let b = generate_xor_key();
-        assert_ne!(a, b, "two random keys should differ");
+    fn different_entropy_seeds_produce_distinct_keys() {
+        let a = StringsConfig::from_yaml_with_entropy(None, &BuildEntropy::from_seed(1))
+            .expect("seed 1")
+            .key;
+        let b = StringsConfig::from_yaml_with_entropy(None, &BuildEntropy::from_seed(2))
+            .expect("seed 2")
+            .key;
+        assert_ne!(a, b, "two build seeds should derive different keys");
     }
 
     #[test]

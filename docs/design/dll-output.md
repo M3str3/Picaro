@@ -321,24 +321,24 @@ Advisories (build succeeds, the line is printed):
 
 ## 6. Code touchpoints
 
-- `src/plan/schema.rs` — `OutputPlan.kind`, `OutputPlan.entry`,
+- `src/plan/schema/mod.rs` — `OutputPlan.kind`, `OutputPlan.entry`,
   `OutputPlan.console`, `OutputKind`, `DllEntry`, `ConsoleMode`.
-- `src/plan/validate.rs` — `validate_dll` (§5) and the advisories.
+- `src/plan/validate/mod.rs` — `validate_dll` (§5) and the advisories.
 - `src/engine/templates/main.rs.tpl` — `$ENTRY_BLOCK$` replaces the inline `fn main`.
 - `src/engine/entry.rs` (new) — renders the entry block; unit tests assert the
   exe variant is byte-identical to today's literal, that the DLL variants carry
   the expected exports, that no `process::exit` appears in a DLL block, and
   that `dll_attach_console` emits `AttachConsole` for `console: parent` (and
   not for `console: none`).
-- `src/engine/steps.rs` — `StepsParams` gains `kind`/`entry`/`console`;
+- `src/engine/steps/mod.rs` — `StepsParams` gains `kind`/`entry`/`console`;
   `render_common` substitutes `$ENTRY_BLOCK$`.
 - `src/engine/debug.rs` — the DLL path passes `windows_subsystem = false`
   (§4.4); no new prelude variant.
-- `src/engine/compiler.rs` — `--crate-type=cdylib`, `--crate-name` from the
+- `src/engine/compiler/mod.rs` — `--crate-type=cdylib`, `--crate-name` from the
   output stem, `panic=unwind` for DLL builds, and `verify_output_kind`
   (`IMAGE_FILE_DLL` set for `dll`, clear for `exe`) on top of
   `verify_pe_magic`; `pe::is_dll` already exists.
-- `src/main.rs` — skip `apply_subsystem` for DLL builds, name the intermediate
+- `src/cli/` — skip `apply_subsystem` for DLL builds, name the intermediate
   after the output stem (§7), pass the kind into `CompileOptions`, and show the
   kind in the build log. `--dry-run` and `inspect_payload` are unaffected.
 - `src/engine/stub.rs` — the custom-stub contract (Phase E).
@@ -384,7 +384,7 @@ Steps 1–4 of the build are unchanged; what changes is compile and after:
   current output (golden test); the validation table has one test per row; the
   crate builds and `cargo clippy --all-targets` is clean.
   *Verified 2026-09-30: `cargo clippy --all-targets` clean; one `#[ignore]` test
-  per §5 row in `src/plan/validate.rs` (`rejects_a_windows_subsystem_with_a_dll`,
+  per §5 row in `src/plan/validate/mod.rs` (`rejects_a_windows_subsystem_with_a_dll`,
   … `advises_on_a_dll_path_without_the_extension`); `src/engine/entry.rs` asserts
   the exe block is the previous literal.*
 - [x] **Phase B — compile as a DLL.** `--crate-type`, `--crate-name`,

@@ -11,7 +11,7 @@ use std::io::{self, IsTerminal, Write};
 use std::ops::Range;
 
 use crossterm::cursor::{Hide, MoveTo, Show};
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::style::Print;
 use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{execute, queue};
@@ -82,7 +82,9 @@ fn run(out: &mut impl Write, lines: &[&str], ui: &Palette, mut height: usize) ->
     loop {
         draw(out, lines, ui, offset, height)?;
         match event::read()? {
-            Event::Key(key) => match key.code {
+            // Windows reports release and repeat events too; only a press is a
+            // scroll command, or every line would move twice.
+            Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     return Ok(());

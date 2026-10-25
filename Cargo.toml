@@ -39,9 +39,9 @@ thiserror = "2"
 # `anstyle` defines the styles; both are already in the tree via `clap`.
 anstream = "1"
 anstyle = "1"
-# Interactive prompts (arrow-key menus, checkbox multi-select, confirmations)
-# for `picaro build interactive`. Used only when stdin/stdout is a terminal;
-# scripted/redirected input falls back to a plain line reader.
+# Interactive form for `picaro build interactive`: arrow-key menus,
+# checkboxes and editable defaults. `inquire` owns the terminal rendering, so the
+# wizard flow stays backend-agnostic and the line reader is the fallback.
 inquire = "0.7"
 # Terminal control for the built-in pager used by `techniques show`. Reuses the
 # version already in the tree via `inquire`'s crossterm dependency instead of

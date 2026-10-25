@@ -2,6 +2,8 @@
 
 Every block of a schema-6 document, plus the interactive wizard that writes one.
 For a guided walk-through, start with [Getting started](getting-started.md).
+To skip the YAML for a single-payload build, use `picaro pack` (see
+[CLI pack design](design/cli-pack.md)).
 To compose a plan in the browser — several payloads, technique knobs filled from
 the registry — use the [Plan builder](/plan-builder/).
 
@@ -21,7 +23,7 @@ build:
   payloads:               # named payloads, loaded by an execution step
     mimikatz:
       source: ./payload.exe # a local path, or an http(s):// URL (fetched in memory)
-      format: pe            # pe | shellcode | dll | dotnet
+      format: auto          # auto | pe (exe) | shellcode | dll | dotnet | powershell | plain
       export: null          # format: dll only: the exported function to call
       args: []              # fixed args for the payload, before the runtime ones
       args_mode: join       # join | override
@@ -49,7 +51,9 @@ build:
       key: random         # random | literal:<64 hex chars>
     debug: false          # compile a debuggable, non-evasive stub for the lab
   output:
-    path: ./dist/mimikatz_packed.exe
+    path: ./dist/mimikatz_packed.exe   # artifact name; the build creates dist/<plan>/ and
+                                        # puts the sources, payload blobs, artifact and
+                                        # manifest there (default root: packed/)
     kind: exe             # exe | dll | shellcode | psmodule (see below)
     entry: auto           # DLL only: auto | jni_on_load | export:<name>
     arch: x64             # x64 | x86 (default x64; the stub and the payload must match)
@@ -80,7 +84,7 @@ runtime:                  # ordered technique steps
 | --- | --- |
 | `build.crypto` | Default payload encryption (XChaCha20-Poly1305, 24-byte nonce, fresh random key per build). A payload may override it with its own `crypto` block; with neither, encryption defaults to XChaCha20-Poly1305 with a random key. |
 | `build.payloads.<name>.source` | The input to pack: a local path, or an `http(s)://` or `file://` URL (`http(s)` is fetched in memory, never written to disk). |
-| `build.payloads.<name>.format` | `pe` (default), `dll`, `shellcode` or `dotnet` (a managed assembly). Decides how the input is validated and how the Execution technique runs it. |
+| `build.payloads.<name>.format` | `auto` (default): the packer reads a local source and sets `pe` for a PE image (or `dll` if it is a library), `dotnet` for a managed assembly and `shellcode` otherwise. `powershell` is detected from a `.ps1`/`.psm1`. A remote source must state the format. Decides how the input is validated and how the Execution technique runs it. |
 | `build.payloads.<name>.export` | For `format: dll`, the exported function to call (e.g. `Run`). Without it only `DllMain(DLL_PROCESS_ATTACH)` runs. |
 | `build.payloads.<name>.args` / `args_mode` | Fixed arguments handed to the payload (`join` = YAML args then the packed binary's own; `override` = runtime args replace the YAML ones). |
 | `build.payloads.<name>.sha256` | Optional SHA-256 of the input. A mismatch aborts before anything is encrypted, so a URL (or a swapped file) cannot silently change what gets packed. |

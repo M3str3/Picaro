@@ -79,6 +79,13 @@ orthogonal to the `runtime:` chain order. `mode: indirect` is x64-only (see
   export ordering; a hook that is not a simple prologue replacement can make
   the arithmetic point at the wrong neighbour, so the fallback is observable as
   a disk read.
+- **A canonical prologue whose immediate was rewritten.** The resolver trusts
+  the live `mov eax, <SSN>` bytes; a hook that keeps the prologue canonical and
+  changes only the immediate is not detected. Measured on the lab host: forcing
+  the immediate to `0x2000` made the stub call SSN 8192 and abort
+  (`0xc0000409`) instead of resolving the real SSN 24. Validating the immediate
+  against the neighbour-derived SSN and falling back to the clean copy on a
+  mismatch is a deferred hardening, not implemented.
 - **The on-disk read** on the fallback path, the same signal Tartarus Gate
   carries.
 - **Stack inspection**: the call stack does not show the expected `ntdll`
@@ -96,8 +103,21 @@ orthogonal to the `runtime:` chain order. `mode: indirect` is x64-only (see
   instead of guessing.
 - `resolve_ssn_from_file` and `$FILE_PE_HELPERS$` are shared with Tartarus Gate
   and the Hell's Gate fallback, so the on-disk semantics stay identical.
-- Stability is `Experimental` until the generated stub's neighbour walk is
-  measured on the lab host.
+- Stability stays `Experimental`: the generated stub's neighbour walk and the
+  clean-copy fallback were measured on the lab host on 2026-10-24 (see
+  `docs/measurements.md`), but the SSN-rewrite blind spot above remains.
+
+## Measurements
+
+With a transparent trampoline hook on `NtAllocateVirtualMemory` (RVA
+`0x162040`, ntdll SSN 24), the stub logged `SSN 24 (neighbour)` and ran the
+payload (exit `0`); the anchors were SSN 23 and 25, one 32-byte stub away in
+each direction. A breakpoint on `read_clean_ntdll` did not fire, while the same
+hook on Hell's Gate did. With all `489` canonical `Nt*`/`Zw*` exports hooked,
+the resolver logged `no live neighbour yields an SSN, falling back to the clean
+copy` for both required functions and still ran the payload. The full run,
+including the stack-spoofing control and Moneta scan, is in
+`docs/measurements.md`.
 
 ## References
 

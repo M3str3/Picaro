@@ -1,0 +1,1 @@
+--8<-- "src/techniques/killswitch/README.md"

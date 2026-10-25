@@ -15,7 +15,7 @@ off. This page is the whole feature: how to use it (section 2), what it does
 ## 1. The problem
 
 `rustc` is deterministic for a given source and flag set. Without this feature,
-`compile_stub` (`src/engine/compiler.rs`) pins every flag, and the generated stub
+`compile_stub` (`src/engine/compiler/mod.rs`) pins every flag, and the generated stub
 varies across builds only in its **data** (encrypted payload, fresh key/nonce,
 re-rolled string obfuscation) — all of which lands in `.rdata`. The code stayed
 identical. Measured on the `dist/` artifacts (SHA-256 truncated to 16 hex chars):
@@ -33,9 +33,12 @@ AV was never the concern; **code signatures and clustering** are.
 
 ## 2. How to use it
 
-Nothing to do. A build applies the default — `mode: full`, a random seed — so two
-runs of `picaro build plan.yaml` already produce different code. The block exists
-only to reproduce a build or to change the pools.
+Nothing to do. A build applies the default — `mode: full`, a seed derived from
+  the build's entropy — so two runs of `picaro build plan.yaml` already produce
+  different code. The block exists only to reproduce a build or to change the
+  pools. Reproducing the artifact also needs the rest of the recorded inputs
+  (payload key and nonce, strings key, icon seed, identity, scrub filler); the
+  manifest records them under `reproduce`.
 
 ```yaml
 build:
@@ -66,8 +69,13 @@ build:
   | `source` | `codegen` + the per-build source immediates |
   | **`full`** *(default)* | `source` + the future premium layers (section 8) |
 
-- `seed` accepts `random`, `literal:<decimal>` or `literal:0x<hex>`. Reuse the
-  recorded seed to reproduce an artifact byte-for-byte.
+- `seed` accepts `random`, `literal:<decimal>` or `literal:0x<hex>`. The
+  resolved seed is recorded in the manifest, but reusing it alone does **not**
+  reproduce an artifact byte for byte: the record must carry the whole entropy
+  set, which is why the manifest now stores one master seed
+  (`reproduce.entropy.seed`) from which the polymorphism seed, the strings key,
+  the payload key and nonce, the icon seed, the identity values and the scrub
+  filler all derive. See [Reproduction](reproduction.md).
 - Pools are validated before the build: `codegen_units >= 1`, `inline_threshold
   >= 0`, `mir_opt_level` in `0..=4`, and `opt_level`/`lto` non-empty.
   `codegen_units` may be omitted (falls back to `1`).
@@ -197,7 +205,7 @@ differ. `randomize_layout` is a no-op for this stub (section 7) and is off by
 default.
 
 The regression guard is the `#[ignore]` test
-`two_polymorphism_seeds_differ_in_the_text_section` (`src/engine/steps.rs`); it
+`two_polymorphism_seeds_differ_in_the_text_section` (`src/engine/steps/mod.rs`); it
 compiles the same stub with two seeds and asserts the `.text` sections differ. Run
 it with `cargo test --features live-tests -- --ignored`.
 
@@ -324,9 +332,9 @@ times, is a maintenance trap.
 ## 10. References
 
 - Code: `src/engine/polymorphism.rs` (`PolymorphismConfig`, `CodegenProfile`,
-  `PolymorphismRecord`), `src/engine/compiler.rs` (flags),
-  `src/engine/steps.rs` (`poly_helpers`, `render_runner_body`),
-  `src/engine/manifest.rs` (record), `src/plan/schema.rs`, `src/plan/validate.rs`.
+  `PolymorphismRecord`), `src/engine/compiler/mod.rs` (flags),
+  `src/engine/steps/mod.rs` (`poly_helpers`, `render_runner_body`),
+  `src/engine/manifest.rs` (record), `src/plan/schema/mod.rs`, `src/plan/validate/mod.rs`.
 - Sibling loader configs: [Syscall layer design](syscalls.md),
   [API resolution design](api-resolution.md).
 - `rustc` codegen options:

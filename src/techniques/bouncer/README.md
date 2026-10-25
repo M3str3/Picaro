@@ -226,7 +226,7 @@ away are not in the file:
 
 - **Preparation contract.** Preparations return `Result<bool, E>`:
   `Ok(true)` continues the pipeline, `Ok(false)` aborts it before the payload
-  runs. See `src/techniques/README.md`. The `bouncer` and `guardrail` gates
+  runs. See `src/techniques/README.md`. The `bouncer` and `killswitch` gates
   return `Ok(false)`; every other Preparation returns `Ok(true)`.
 - **One requirement, one vote.** `require` and `any_of` are lists of the same
   `Requirement` enum, so a new check is one variant and one render arm, and the

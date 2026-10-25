@@ -41,6 +41,9 @@ nav:
     - DLL output design: design/dll-output.md
     - Shellcode output design: design/shellcode-output.md
     - Polymorphism: design/polymorphism.md
+    - Reproduction design: design/reproduction.md
+    - CLI pack design: design/cli-pack.md
+    - Wizard design: design/wizard.md
     - Network stager design: design/network-stager.md
     - x86 support: x86.md
   - Reference:

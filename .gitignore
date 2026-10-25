@@ -1,5 +1,18 @@
 hidden/
 
+# `picaro pack` output: every run writes its plan, manifest and artifact here.
+/packed/
+
+# Local agent sessions and scratch, never part of the project.
+/.agent-xenon/
+/base64.txt
+/metrics.json
+/x.ps1
+/xenon-tls-handoff.md
+
+# The experimental workspace is published to its own repository.
+/experimental/
+
 # Local scratch: reference material kept out of the project.
 code_examples/
 # Local session memory: a rolling developer note, not part of the repo.

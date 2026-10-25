@@ -9,6 +9,7 @@
 #   docker compose build                          # build both images (once)
 #   docker compose run --rm dev                   # shell in the repo (toolchain)
 #   docker compose run --rm dev bash -lc 'cargo test'
+#   docker compose run --rm dev-run build plan.yaml  # `cargo run -- build plan.yaml`
 #   docker compose run --rm run build plan.yaml   # pack, no toolchain
 #
 # Both services share exactly one host folder: `exchange/` (created and
@@ -44,6 +45,9 @@ services:
     stdin_open: true
     tty: true
     working_dir: /work
+    # One-time setup (cross-compiled stub deps), then the requested command.
+    # Source edits are bind-mounted, so no image rebuild is involved.
+    entrypoint: ["/bin/bash", "/work/scripts/dev-entrypoint.sh"]
     environment:
       # Keep the packer's scratch files off the repo and off the host.
       PICARO_BUILD_DIR: /tmp/picaro-build
@@ -55,6 +59,21 @@ services:
       # across runs. Reset with `docker compose down -v`.
       - picaro-target:/work/target
     command: ["bash"]
+
+  # `cargo run` inside the dev container, without a shell:
+  #
+  #   docker compose run --rm dev-run build examples/plans/process-hollowing.yaml
+  #   docker compose run --rm dev-run --help
+  #
+  # Extends `dev`, so it shares the bind mount, the target volume and the
+  # one-time dependency setup.
+  dev-run:
+    extends:
+      service: dev
+    entrypoint: ["/bin/bash", "/work/scripts/dev-entrypoint.sh", "cargo", "run", "--"]
+    command: ["--help"]
+    stdin_open: false
+    tty: false
 
   # Run container: the production image. Nothing from the host is mounted except
   # `exchange/`, which appears as /work: plans and payloads in, artifacts out.

@@ -16,6 +16,11 @@ use regex::Regex;
 use super::{BuildError, Result};
 
 /// Generates a per-build unique marker: `STUB_MARKER_<16 hex>`.
+/// A random marker used by tests and out-of-tree callers.
+///
+/// A real build derives its marker from the master entropy (see the packer's
+/// `stub_marker`), so the generated source is reproducible.
+#[allow(dead_code)]
 pub fn generate_stub_marker() -> String {
     let mut bytes = [0u8; 8];
     rand::thread_rng().fill_bytes(&mut bytes);

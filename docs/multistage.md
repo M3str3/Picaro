@@ -115,11 +115,11 @@ Each step is `technique:` + optional `params:` + the orchestration fields:
 
 Techniques fall into three categories:
 
-- **Preparation** (`bouncer`, `guardrail`, `anti_debug`, `patch_amsi`,
+- **Preparation** (`bouncer`, `killswitch`, `anti_debug`, `patch_amsi`,
   `patch_etw`, `unhook_ntdll`, `sleep_obfuscation`,
   `timestomping`, `self_deletion`): modify the process state. A preparation
   returns `Result<bool, _>`; `Ok(false)` aborts the chain before the payload
-  runs (the `bouncer` and `guardrail` gates do this).
+  runs (the `bouncer` and `killswitch` gates do this).
 - **Execution** (`reflective_loading`, `process_hollowing`, `pe_injection`,
   `early_bird`, `thread_hijacking`, `dll_hollowing`, `process_ghosting`,
   `dotnet_hosting`, `execution_callbacks`, `module_stomping`, `fibers`): run an

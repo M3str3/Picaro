@@ -94,13 +94,14 @@ DLL is the artifact; see `docs/design/dll-output.md`, D-15).
 
 ## Code touchpoints
 
-- `src/plan/schema.rs` — `OutputKind::Shellcode`, `OutputPlan.entry` doc.
-- `src/plan/validate.rs` — `validate_dll_like` (shared with `dll`),
+- `src/plan/schema/mod.rs` — `OutputKind::Shellcode`, `OutputPlan.entry` doc.
+- `src/plan/validate/mod.rs` — `validate_dll_like` (shared with `dll`),
   `validate_shellcode`, `shellcode_advisories`.
 - `src/engine/entry.rs` — `render` maps `Shellcode` to the DLL entry block.
-- `src/engine/compiler.rs` — `compiles_as_dll`, `panic_flag`, `verify_output_kind`.
+- `src/engine/compiler/mod.rs` — `compiles_as_dll`, `panic_flag`, `verify_output_kind`.
 - `src/engine/shellcode.rs` — sRDI location and the `convert` subprocess.
-- `src/main.rs` — `intermediate_path`, the post-scrub conversion, and the tail.
+- `src/cli/helpers.rs` — `intermediate_path`; `src/cli/build.rs` — the post-scrub
+  conversion and the tail.
 - `Dockerfile` — builds the sRDI blob from `vendor/srdi/` (`ENV PICARO_SRDI`).
 - `vendor/srdi/` — the vendored loader source, converter and blob builder.
 

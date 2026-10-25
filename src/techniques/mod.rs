@@ -15,12 +15,12 @@ pub mod early_bird;
 pub mod erase_pe_header;
 pub mod execution_callbacks;
 pub mod fibers;
-pub mod guardrail;
 pub mod hardware_breakpoints;
 pub mod hide_module;
 pub mod hide_thread_from_debugger;
 pub mod image_path_spoofing;
 pub mod import_powermodule;
+pub mod killswitch;
 pub mod living_off_the_land;
 pub mod module_stomping;
 pub mod network_stager;
@@ -40,6 +40,14 @@ pub mod thread_hijacking;
 pub mod timestomping;
 pub mod unhook_ntdll;
 pub mod veh_execution;
+
+mod presentation;
+
+pub(crate) use presentation::{
+    capabilities, column_width, pad, params_markdown, readme_title, short_description,
+    stability_label, stability_tone, strip_header, truncate,
+};
+pub use presentation::{list, readme, show, summary, validate};
 
 use std::path::Path;
 
@@ -308,11 +316,15 @@ pub enum TechniqueKind {
         #[serde(default)]
         params: network_stager::Params,
     },
-    /// Guardrail: abort the chain past a deadline or run count (preparation).
-    Guardrail {
+    /// Killswitch: abort the chain past a deadline or run count (preparation).
+    ///
+    /// The YAML key is `killswitch` rather than the `snake_case` form of the
+    /// variant name, which is the spelling the operator-facing vocabulary uses.
+    #[serde(rename = "killswitch")]
+    KillSwitch {
         /// Technique parameters (`expire_on`, `max_runs`, `run_key`).
         #[serde(default)]
-        params: guardrail::Params,
+        params: killswitch::Params,
     },
     /// Timestomping: copy a reference file's timestamps onto a target (preparation).
     Timestomping {
@@ -397,7 +409,7 @@ impl TechniqueKind {
             TechniqueKind::LivingOffTheLand { params } => params.render_fragment(strings),
             TechniqueKind::Sleep { params } => params.render_fragment(strings),
             TechniqueKind::NetworkStager { params } => params.render_fragment(strings),
-            TechniqueKind::Guardrail { params } => params.render_fragment(strings),
+            TechniqueKind::KillSwitch { params } => params.render_fragment(strings),
             TechniqueKind::Timestomping { params } => params.render_fragment(strings),
             TechniqueKind::DllHollowing { params } => {
                 params.render_fragment_for(strings, format, export)
@@ -443,7 +455,7 @@ impl TechniqueKind {
             TechniqueKind::LivingOffTheLand { .. } => living_off_the_land::DEF.name,
             TechniqueKind::Sleep { .. } => sleep::DEF.name,
             TechniqueKind::NetworkStager { .. } => network_stager::DEF.name,
-            TechniqueKind::Guardrail { .. } => guardrail::DEF.name,
+            TechniqueKind::KillSwitch { .. } => killswitch::DEF.name,
             TechniqueKind::Timestomping { .. } => timestomping::DEF.name,
             TechniqueKind::DllHollowing { .. } => dll_hollowing::DEF.name,
             TechniqueKind::ProcessGhosting { .. } => process_ghosting::DEF.name,
@@ -521,7 +533,7 @@ impl TechniqueKind {
             TechniqueKind::LivingOffTheLand { .. } => living_off_the_land::DEF.category,
             TechniqueKind::Sleep { .. } => sleep::DEF.category,
             TechniqueKind::NetworkStager { .. } => network_stager::DEF.category,
-            TechniqueKind::Guardrail { .. } => guardrail::DEF.category,
+            TechniqueKind::KillSwitch { .. } => killswitch::DEF.category,
             TechniqueKind::Timestomping { .. } => timestomping::DEF.category,
             TechniqueKind::DllHollowing { .. } => dll_hollowing::DEF.category,
             TechniqueKind::ProcessGhosting { .. } => process_ghosting::DEF.category,
@@ -733,7 +745,7 @@ pub fn all() -> &'static [TechniqueDef] {
         living_off_the_land::DEF,
         sleep::DEF,
         network_stager::DEF,
-        guardrail::DEF,
+        killswitch::DEF,
         timestomping::DEF,
         image_path_spoofing::DEF,
         erase_pe_header::DEF,
@@ -776,664 +788,5 @@ fn normalize_key(name: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// Section headings every technique README must contain (see
-/// `_template/README.md`).
-///
-/// The README is the prose explanation only: the technique's metadata
-/// (category, stability, ATT&CK, platforms, syscalls, params, example) lives in
-/// its `TechniqueDef` and is rendered from the registry by `picaro techniques
-/// show` and the docs site, so a README never repeats it.
-const REQUIRED_SECTIONS: &[&str] = &[
-    "## What it does",
-    "## How it works",
-    "## Integration",
-    "## What it evades",
-    "## What detects it",
-    "## Measurements",
-    "## Implementation notes",
-    "## References",
-];
-
-/// Headings that must NOT appear in a README: the same data lives in
-/// [`TechniqueDef`] and is rendered from it (the docs page and `techniques
-/// show`), so duplicating it in the README is the drift this split avoids.
-const FORBIDDEN_SECTIONS: &[&str] = &["## Metadata", "## YAML parameters", "## YAML example"];
-
-/// The widest cell of a listing column, header included.
-///
-/// The table is measured instead of fixed: a technique name or an ATT&CK list
-/// longer than the rest must not push the remaining columns of its own row out
-/// of line.
-pub(crate) fn column_width(header: &str, values: impl Iterator<Item = String>) -> usize {
-    values
-        .map(|value| value.chars().count())
-        .chain(std::iter::once(header.chars().count()))
-        .max()
-        .unwrap_or(0)
-}
-
-/// Pads a cell to `width`.
-///
-/// The padding happens before the cell is styled: padding an already-colored
-/// string would count the escape codes and misalign the row (see
-/// [`stability_label`], which pads for the same reason).
-pub(crate) fn pad(text: &str, width: usize) -> String {
-    format!("{text:<width$}")
-}
-
-/// Renders the `picaro techniques list` output.
-pub fn list(ui: &Palette) -> String {
-    let mut out = String::new();
-
-    // Grouped by category, then maturity, then name: the listing reads as a
-    // pipeline (Preparation before Execution) with the most reliable entries
-    // first inside each group.
-    let mut defs: Vec<&TechniqueDef> = all().iter().collect();
-    defs.sort_by_key(|def| (def.category, def.stability, def.name));
-
-    let name_w = column_width("TECHNIQUE", defs.iter().map(|def| def.name.to_string()));
-    let category_w = column_width(
-        "CATEGORY",
-        defs.iter().map(|def| def.category.label().to_string()),
-    );
-    let stability_w = column_width(
-        "STABILITY",
-        defs.iter().map(|def| def.stability.label().to_string()),
-    );
-    let attck_w = column_width("ATT&CK", defs.iter().map(|def| def.attck.join(", ")));
-
-    out.push_str(&format!(
-        "{} {} {} {} {}\n",
-        ui.dim(pad("TECHNIQUE", name_w)),
-        ui.dim(pad("CATEGORY", category_w)),
-        ui.dim(pad("STABILITY", stability_w)),
-        ui.dim(pad("ATT&CK", attck_w)),
-        ui.dim("SUMMARY"),
-    ));
-    for def in defs {
-        let name = ui.bold(pad(def.name, name_w));
-        let category = pad(def.category.label(), category_w);
-        let stability = stability_label(def.stability, ui, stability_w);
-        let attck = pad(&def.attck.join(", "), attck_w);
-        out.push_str(&format!(
-            "{name} {category} {stability} {attck} {}\n",
-            truncate(summary(def), 70)
-        ));
-    }
-
-    let count = |category: Category| all().iter().filter(|d| d.category == category).count();
-    out.push_str(&format!(
-        "\n{} {}\n",
-        glyph::DOT,
-        ui.dim(format!(
-            "{} techniques ({} preparation, {} execution, {} control)",
-            all().len(),
-            count(Category::Preparation),
-            count(Category::Execution),
-            count(Category::Control),
-        ))
-    ));
-
-    // Legend: two dim lines. Their first token is never a technique name, so
-    // the table-shape tests keep matching only real rows.
-    out.push_str(&format!(
-        "  {} {}  {}  {}  {}\n",
-        ui.dim("stability:"),
-        ui.ok(Stability::Stable.label()),
-        ui.warn(Stability::Experimental.label()),
-        ui.error(Stability::Unimplemented.label()),
-        ui.error(Stability::Deprecated.label()),
-    ));
-    out.push_str(&format!(
-        "  {} {}\n",
-        ui.dim("show:"),
-        ui.dim("picaro techniques show <name> for the full README"),
-    ));
-
-    // Loader features (`syscalls`, `api_resolution`, `strings`, `args`) are not
-    // runtime steps; they are listed in their own table so the registry view is
-    // complete.
-    out.push('\n');
-    out.push_str(&crate::features::list(ui));
-    out.push('\n');
-    out.push_str(&crate::engine::syscalls::resolvers::list(ui));
-    out
-}
-
-/// A stability label padded to `width` and colored by maturity.
-///
-/// Shared by the technique and loader-feature listings.
-pub(crate) fn stability_label(stability: Stability, ui: &Palette, width: usize) -> String {
-    let label = format!("{name:<width$}", name = stability.label(), width = width);
-    match stability {
-        Stability::Stable => ui.ok(label),
-        Stability::Experimental => ui.warn(label),
-        Stability::Unimplemented => ui.error(label),
-        Stability::Deprecated => ui.error(label),
-    }
-}
-
-/// The technique's README as embedded Markdown, verbatim.
-pub fn readme(name: &str) -> Result<&'static str> {
-    if let Some(def) = find(name) {
-        return Ok(def.readme);
-    }
-    // Not a technique: it may be a loader feature or an SSN resolver.
-    crate::features::readme(name).or_else(|_| crate::engine::syscalls::resolvers::readme(name))
-}
-
-/// Renders `picaro techniques show <name>`: a styled header built from the
-/// technique's metadata, followed by its README rendered as Markdown.
-pub fn show(name: &str, ui: &Palette) -> Result<String> {
-    let Some(def) = find(name) else {
-        // Not a technique: it may be a loader feature (`syscalls`, `strings`, …)
-        // or an SSN resolver (`hells_gate`, …).
-        return crate::features::show(name, ui)
-            .or_else(|_| crate::engine::syscalls::resolvers::show(name, ui));
-    };
-    let width = crate::ui::term_width();
-
-    let mut out = String::new();
-    out.push_str(&ui.heading(readme_title(def.readme).unwrap_or(def.name)));
-    out.push_str("\n\n");
-
-    out.push_str(&ui.meta_bar(&[
-        Meta {
-            key: "CATEGORY",
-            value: def.category.label().to_string(),
-            tone: Tone::Value,
-        },
-        Meta {
-            key: "STABILITY",
-            value: def.stability.label().to_string(),
-            tone: stability_tone(def.stability),
-        },
-        Meta {
-            key: "ATT&CK",
-            value: def.attck.join(", "),
-            tone: Tone::Value,
-        },
-    ]));
-    out.push('\n');
-
-    out.push_str(&ui.field("yaml key", def.name));
-    out.push('\n');
-    out.push_str(&ui.field_wrapped("requires", capabilities(def.requires), width));
-    out.push('\n');
-    if !def.conflicts.is_empty() {
-        out.push_str(&ui.field_wrapped("conflicts", def.conflicts.join(", "), width));
-        out.push('\n');
-    }
-    if !def.syscalls.is_empty() {
-        out.push_str(&ui.field_wrapped("syscalls", def.syscalls.join(", "), width));
-        out.push('\n');
-    }
-    if def.resolves_imports {
-        out.push_str(&ui.field("imports", "shared resolver"));
-        out.push('\n');
-    }
-
-    out.push('\n');
-    out.push_str(&ui.rule(width));
-    out.push_str("\n\n");
-
-    // The styled header replaces the README's title; the README is prose-only,
-    // so the registry's parameter table and example are always prepended.
-    let body = format!(
-        "{}{}",
-        params_markdown(&[], def.params_example),
-        strip_header(def.readme)
-    );
-    out.push_str(&markdown::render(&body, ui, width));
-
-    out.push('\n');
-    out.push_str(&ui.dim(format!("{} {}", glyph::DOT, def.doc_path)));
-    out.push('\n');
-    Ok(out)
-}
-
-/// The Markdown preamble `techniques show`/`features show` prepends: a parameter
-/// table (when the registry declares one) followed by the copy-paste example.
-///
-/// Shared by both registries, so a technique and a loader feature render their
-/// parameters the same way.
-pub(crate) fn params_markdown(params: &[ParamDef], example: &str) -> String {
-    let mut out = String::new();
-    if !params.is_empty() {
-        out.push_str("## Parameters\n\n");
-        out.push_str("| Parameter | Type | Required | Default | Description |\n");
-        out.push_str("| --- | --- | --- | --- | --- |\n");
-        for param in params {
-            let required = if param.required { "yes" } else { "no" };
-            let default = match param.default {
-                Some(value) => format!("`{value}`"),
-                None => "—".to_string(),
-            };
-            out.push_str(&format!(
-                "| `{}` | {} | {} | {} | {} |\n",
-                param.key,
-                param.kind.label(),
-                required,
-                default,
-                param.description,
-            ));
-        }
-        out.push('\n');
-    }
-    if !example.trim().is_empty() {
-        out.push_str("## Example\n\n```yaml\n");
-        out.push_str(example.trim());
-        out.push_str("\n```\n\n");
-    }
-    out
-}
-
-/// The README's `# ` title, when it has one.
-pub(crate) fn readme_title(readme: &str) -> Option<&str> {
-    readme
-        .lines()
-        .next()
-        .and_then(|line| line.strip_prefix("# "))
-}
-
-/// The color role of a maturity (shared with [`stability_label`]).
-pub(crate) fn stability_tone(stability: Stability) -> Tone {
-    match stability {
-        Stability::Stable => Tone::Ok,
-        Stability::Experimental => Tone::Warn,
-        Stability::Unimplemented | Stability::Deprecated => Tone::Bad,
-    }
-}
-
-/// Comma-joined capability labels for the `requires` field.
-pub(crate) fn capabilities(requires: &[Capability]) -> String {
-    requires
-        .iter()
-        .map(|capability| capability.label())
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// Drops the README's leading `# ` title and its `## Metadata` section, which
-/// the styled header supersedes.
-pub(crate) fn strip_header(readme: &str) -> String {
-    let mut out = String::new();
-    let mut in_metadata = false;
-    for line in readme.lines() {
-        if in_metadata {
-            if line.starts_with("## ") {
-                in_metadata = false;
-            } else {
-                continue;
-            }
-        }
-        if out.is_empty() && line.starts_with("# ") {
-            continue;
-        }
-        if line.trim() == "## Metadata" {
-            in_metadata = true;
-            continue;
-        }
-        out.push_str(line);
-        out.push('\n');
-    }
-    out
-}
-
-/// Validates the registry. Returns a list of problems; empty means all good.
-///
-/// This is a CI helper: it reports failures as warnings without failing.
-pub fn validate() -> Vec<String> {
-    let mut problems = Vec::new();
-    for def in all() {
-        // Registered in `all()` ⇒ its `mod.rs` exists and defines a `DEF`.
-        if def.name.trim().is_empty() {
-            problems.push("technique with an empty name".to_string());
-        }
-
-        if def.attck.is_empty() {
-            problems.push(format!("{}: 'attck' must not be empty", def.name));
-        }
-
-        if def.requires.is_empty() {
-            problems.push(format!("{}: 'requires' must not be empty", def.name));
-        }
-
-        if def.conflicts.contains(&def.name) {
-            problems.push(format!("{}: conflicts with itself", def.name));
-        }
-
-        // `doc_path` must point to an existing file.
-        let readme_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(def.doc_path);
-        if !readme_path.is_file() {
-            problems.push(format!(
-                "{}: doc_path does not exist: {}",
-                def.name, def.doc_path
-            ));
-        }
-
-        // `params_example` must parse as a runtime step.
-        if serde_yml::from_str::<RuntimeStep>(def.params_example).is_err() {
-            problems.push(format!("{}: params_example does not parse", def.name));
-        }
-
-        if def.stub_fragment.trim().is_empty() {
-            problems.push(format!("{}: stub_fragment.rs is empty", def.name));
-        }
-
-        let mut title_seen = false;
-        if let Some(first) = def.readme.lines().next() {
-            title_seen = first.starts_with("# ");
-        }
-        if !title_seen {
-            problems.push(format!("{}: README.md has no '#' title", def.name));
-        }
-        for section in REQUIRED_SECTIONS {
-            if !def.readme.contains(section) {
-                problems.push(format!(
-                    "{}: README.md missing section '{section}'",
-                    def.name
-                ));
-            }
-        }
-        for section in FORBIDDEN_SECTIONS {
-            if def.readme.contains(section) {
-                problems.push(format!(
-                    "{}: README.md must not contain '{section}' — that data is rendered from the \
-                     registry (TechniqueDef); keep the README prose-only",
-                    def.name
-                ));
-            }
-        }
-        if !def.readme.contains("```mermaid") {
-            problems.push(format!(
-                "{}: README.md has no ```mermaid diagram (the 'How it works' section should open \
-                 with one)",
-                def.name
-            ));
-        }
-
-        let tests_path = tests_path(def);
-        match std::fs::read_to_string(&tests_path) {
-            Ok(content) if content.contains("#[test]") => {}
-            Ok(_) => problems.push(format!("{}: tests.rs has no #[test]", def.name)),
-            Err(_) => problems.push(format!(
-                "{}: tests.rs not found at '{}'",
-                def.name,
-                tests_path.display()
-            )),
-        }
-    }
-    // Loader features and SSN resolvers live in parallel registries; validate
-    // them too.
-    problems.extend(crate::features::validate());
-    problems.extend(crate::engine::syscalls::resolvers::validate());
-    problems
-}
-
-/// The `tests.rs` path of a technique (used by `validate`).
-fn tests_path(def: &TechniqueDef) -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("techniques")
-        .join(def.name)
-        .join("tests.rs")
-}
-
-/// The technique's one-line summary, taken from its README.
-///
-/// Shared by `techniques list` and the interactive `build` wizard so both show
-/// the same wording.
-pub fn summary(def: &TechniqueDef) -> &str {
-    short_description(def.readme)
-}
-
-/// Extracts the one-line summary of a technique README (the first non-empty
-/// line under `## What it does`).
-pub(crate) fn short_description(readme: &str) -> &str {
-    let marker = "## What it does";
-    let start = readme.find(marker).map(|i| i + marker.len()).unwrap_or(0);
-    for line in readme[start..].lines() {
-        let trimmed = line.trim();
-        if !trimmed.is_empty() && !trimmed.starts_with('#') {
-            return trimmed;
-        }
-    }
-    ""
-}
-
-/// Shortens a summary to at most `max` characters, appending an ellipsis.
-pub(crate) fn truncate(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
-    out.push('…');
-    out
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn registry_is_non_empty_and_well_formed() {
-        assert!(
-            !all().is_empty(),
-            "at least one technique must be registered"
-        );
-        for def in all() {
-            assert!(!def.name.is_empty(), "technique name must not be empty");
-            assert!(!def.doc_path.is_empty(), "doc_path must not be empty");
-
-            // The README referenced by doc_path must exist on disk.
-            let readme_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(def.doc_path);
-            assert!(
-                readme_path.is_file(),
-                "doc_path does not exist: {}",
-                readme_path.display()
-            );
-        }
-    }
-
-    /// Every registered technique must have a docs page. The site sidebar and the
-    /// `docs/techniques/index.md` overview table are generated from this registry
-    /// at assemble time (see `docs/site/scripts/assemble-docs.mjs`), so they
-    /// cannot drift and need no per-technique nav or overview entry.
-    #[test]
-    fn every_technique_is_documented() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        for def in all() {
-            let docs_page = format!("docs/techniques/ref/{}.md", def.name);
-            assert!(
-                root.join(&docs_page).is_file(),
-                "{}: missing docs page '{docs_page}'",
-                def.name
-            );
-        }
-    }
-
-    #[test]
-    fn every_technique_has_a_parseable_yaml_example() {
-        for def in all() {
-            let step: RuntimeStep = serde_yml::from_str(def.params_example)
-                .unwrap_or_else(|e| panic!("{} params_example does not parse: {e}", def.name));
-            let round_tripped = serde_yml::to_string(&step).expect("serialize RuntimeStep");
-            assert!(
-                !round_tripped.trim().is_empty(),
-                "{} params_example must serialize",
-                def.name
-            );
-        }
-    }
-
-    #[test]
-    fn find_returns_registered_technique() {
-        assert!(find("process_hollowing").is_some());
-        assert!(find("does_not_exist").is_none());
-    }
-
-    #[test]
-    fn list_includes_process_hollowing() {
-        let output = list(&Palette::plain());
-        assert!(
-            output.contains("process_hollowing"),
-            "list output: {output}"
-        );
-        assert!(output.contains("execution"), "list output: {output}");
-        assert!(output.contains("preparation"), "list output: {output}");
-    }
-
-    /// Rows are ordered by category, then stability, then technique name.
-    #[test]
-    fn list_is_ordered_by_category_stability_then_name() {
-        let output = list(&Palette::plain());
-        let names: Vec<&str> = output
-            .lines()
-            .filter_map(|line| line.split_whitespace().next())
-            .filter(|token| find(token).is_some())
-            .collect();
-
-        let mut expected: Vec<&TechniqueDef> = all().iter().collect();
-        expected.sort_by_key(|def| (def.category, def.stability, def.name));
-        let expected: Vec<&str> = expected.iter().map(|def| def.name).collect();
-
-        assert_eq!(names, expected, "list output: {output}");
-    }
-
-    /// The plain palette must not leak escape codes into the listing.
-    #[test]
-    fn plain_list_has_no_escape_codes() {
-        let output = list(&Palette::plain());
-        assert!(!output.contains('\u{1b}'), "escapes leaked: {output:?}");
-    }
-
-    /// A long technique name or ATT&CK list must not push the rest of its row.
-    ///
-    /// Regression: the name column was a fixed 18 characters, so the 19-char
-    /// `living_off_the_land` and `execution_callbacks` shifted the columns that
-    /// follow them by one.
-    #[test]
-    fn list_columns_align_across_rows() {
-        let output = list(&Palette::plain());
-        let starts: Vec<usize> = all()
-            .iter()
-            .map(|def| {
-                let line = output
-                    .lines()
-                    .find(|line| line.split_whitespace().next() == Some(def.name))
-                    .unwrap_or_else(|| panic!("no row for {}: {output}", def.name));
-                let last = truncate(summary(def), 70);
-                line.rfind(&last)
-                    .unwrap_or_else(|| panic!("no summary column in {line:?}"))
-            })
-            .collect();
-
-        assert!(
-            starts.windows(2).all(|pair| pair[0] == pair[1]),
-            "the summary column is ragged: {starts:?}\n{output}"
-        );
-    }
-
-    /// Long summaries are truncated so the listing stays readable.
-    #[test]
-    fn truncates_long_summaries() {
-        assert_eq!(truncate("short", 10), "short");
-        let cut = truncate("0123456789abcdef", 8);
-        assert_eq!(cut.chars().count(), 8);
-        assert!(cut.ends_with("…"), "no ellipsis: {cut:?}");
-    }
-
-    #[test]
-    fn show_renders_metadata_and_readme() {
-        let page = show("process_hollowing", &Palette::plain()).expect("known technique");
-        assert!(page.contains("Process hollowing"), "page: {page}");
-        assert!(page.contains("T1055"), "page: {page}");
-        // The README body is rendered, not dumped raw.
-        assert!(page.contains("What it does"), "page: {page}");
-        assert!(!page.contains("## Metadata"), "page: {page}");
-        assert!(!page.contains('\u{1b}'), "escapes leaked: {page:?}");
-    }
-
-    #[test]
-    fn readme_is_verbatim() {
-        let raw = readme("process_hollowing").expect("known technique");
-        assert!(raw.contains("# Process hollowing"));
-        assert!(raw.contains("## What it does"));
-    }
-
-    #[test]
-    fn unknown_technique_is_an_error() {
-        assert!(show("does_not_exist", &Palette::plain()).is_err());
-        assert!(readme("does_not_exist").is_err());
-    }
-
-    /// Smoke test: the renderer survives every real README and keeps its
-    /// required section.
-    #[test]
-    fn show_pages_every_technique() {
-        for def in all() {
-            let page = show(def.name, &Palette::plain())
-                .unwrap_or_else(|error| panic!("{}: {error}", def.name));
-            assert!(!page.is_empty(), "{}: empty page", def.name);
-            assert!(
-                page.contains("What it does"),
-                "{}: missing section: {page}",
-                def.name
-            );
-        }
-    }
-
-    /// Technique keys are matched ignoring case and underscores, so a plan is
-    /// free to name a step `ReflectiveLoading`, `reflectiveloading` or
-    /// `REFLECTIVE_loading` while the registry keeps one canonical spelling.
-    #[test]
-    fn technique_names_ignore_case_and_underscores() {
-        let canonical = canonical_name("reflective_loading").expect("canonical name");
-        assert_eq!(canonical, "reflective_loading");
-        for alias in [
-            "reflectiveloading",
-            "REFLECTIVEloading",
-            "ReflectiveLoading",
-            "Reflective_Loading",
-            "REFLECTIVE_LOADING",
-        ] {
-            assert_eq!(
-                canonical_name(alias),
-                Some("reflective_loading"),
-                "{alias} must resolve to reflective_loading"
-            );
-            assert_eq!(find(alias).map(|def| def.name), Some("reflective_loading"));
-        }
-        assert_eq!(canonical_name("no_such_technique"), None);
-    }
-
-    /// A technique fragment must not declare a `thiserror` diagnostic: its
-    /// `#[error("...")]` literals reach the generated stub in cleartext.
-    ///
-    /// Every diagnostic must be rebuilt at runtime through `StringsConfig` (the
-    /// `MESSAGES` pattern in `process_hollowing`/`fibers`/...). This is the
-    /// source-level counterpart of the compiled-stub guardrail
-    /// (`no_sensitive_literals_in_generated_stubs`), and it runs without rustc.
-    #[test]
-    fn no_fragment_declares_a_cleartext_diagnostic() {
-        let fragments =
-            all()
-                .iter()
-                .map(|def| (def.name, def.stub_fragment))
-                .chain(std::iter::once((
-                    "reflective_loading (shellcode)",
-                    reflective_loading::SHELLCODE_FRAGMENT,
-                )));
-        for (name, fragment) in fragments {
-            assert!(
-                !fragment.contains("thiserror::Error"),
-                "technique '{name}' derives a thiserror diagnostic"
-            );
-            assert!(
-                !fragment.contains("#[error("),
-                "technique '{name}' declares a cleartext `#[error(...)]` diagnostic"
-            );
-        }
-    }
-}
+mod tests;

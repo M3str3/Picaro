@@ -42,7 +42,7 @@ Each technique is Preparation, Execution or Control (`src/techniques/mod.rs`):
   (`living_off_the_land`, `sleep`).
 
 The plan is a flat `runtime:` list of steps; `src/plan/steps.rs` resolves it and
-`src/plan/validate.rs` checks the per-step rules (the terminal-step rule above
+`src/plan/validate/mod.rs` checks the per-step rules (the terminal-step rule above
 all, plus format/arch/capability checks).
 
 The stub renders the steps into three placeholders:
@@ -90,7 +90,7 @@ the payload's imports*. With `mode: proxy`, `patch_imports` rewrites the
 payload's IAT so the selected calls land on proxies generated in the loader, and
 the intercepted names never enter the loader's own import table
 (`verify_no_intercepted_imports` fails the build if one does). The catalogue
-(`src/engine/api_resolution.rs`) has two layers:
+(`src/engine/api_resolution/mod.rs`) has two layers:
 
 - **Direct `ntdll!Nt*` routes** — a proxy is generated for every syscall-layer
   function, and `apis: ntdll:*` selects them all (all 24). The proxy is an
@@ -142,13 +142,30 @@ pools, plus an opt-in `randomize-layout`) and a **per-build source entropy**
 function whose immediates land inside instructions. The knobs change the emitted
 instructions (inlining, MIR lowering) but not the control flow, so this is build
 code diversity, not control-flow obfuscation. The resolved profile is recorded in
-the manifest, so a build is reproduced by reusing its `seed`. Measurements,
+the manifest, and the seed is derived from the build's master entropy, so a
+replay reproduces it together with the payload key and nonce, the strings key,
+the icon seed, the identity values and the scrub filler. Measurements,
 limitations and the planned premium layers (PE cosmetics, a self-encrypting
-loader, LLVM obfuscation): [Polymorphism](design/polymorphism.md).
+loader, LLVM obfuscation): [Polymorphism](design/polymorphism.md); the replay
+contract: [Reproduction](design/reproduction.md).
 
 ## Payload formats (`build.payloads.<name>.format`)
 
-`format` describes the input: `pe` (default), `shellcode`, `dll` or `dotnet`.
+`format` describes the input and defaults to `auto`: before validation, the
+packer reads the source and sets the concrete format, so a plan does not need to
+repeat what the file already says.
+
+| Detected from | Format |
+|---|---|
+| a PE image with a CLR header | `dotnet` |
+| a PE image whose file header sets `IMAGE_FILE_DLL` (or named `.dll`) | `dll` |
+| any other PE image | `pe` |
+| a `.ps1` / `.psm1` | `powershell` |
+| anything else | `shellcode` |
+
+`auto` needs a local source: a remote (`http(s)://`) payload cannot be sniffed
+at plan-load time, so it must state its `format`. Writing the format explicitly
+(`format: exe`, which is an alias for `pe`, and so on) skips detection.
 
 - `pe` — a PE32/PE32+ executable. Validated as such; run by either native
   execution technique.
@@ -164,6 +181,10 @@ loader, LLVM obfuscation): [Polymorphism](design/polymorphism.md).
   declared as `pe`/`dll` is rejected at build time (mapping it would fail inside
   the CLR), and the assembly's bitness must match `output.arch` (a
   `32BITREQUIRED` assembly needs `arch: x86`).
+- `powershell` — a `.ps1`/`.psm1` text script, compiled into a managed launcher
+  at build time and hosted like a `dotnet` payload (`powershell_hosting`).
+- `plain` — opaque data with no execution semantics (a `bouncer` decoy or a
+  `drop` asset); no Execution technique accepts it.
 
 `process_hollowing` replaces a suspended process's image, so it only runs
 `format: pe` today and `plan::validate` rejects the other formats with a
@@ -178,7 +199,7 @@ as a binary through `rustc` and the builtin template ends in `fn main()`.
 
 A host-loaded **DLL** output (`kind: dll`, for hosts that application
 whitelisting already allows — a JVM, CPython, .NET, `rundll32`) is implemented
-in `src/engine/entry.rs` (the entry block) and `src/engine/compiler.rs`
+in `src/engine/entry.rs` (the entry block) and `src/engine/compiler/mod.rs`
 (`cdylib`); its phases, couplings and limitations are in
 [DLL output design](design/dll-output.md). The lab verification of the host
 matrix (the design's Phase D) is still pending.
@@ -297,20 +318,26 @@ second, compilation fails with `can't find crate for windows_implement`.
 
 ```text
 src/
-  plan/     YAML parsing and validation
+  lib.rs      library crate: exposes the modules to the binary and the tests
+  main.rs     thin binary entry point (`picaro::cli::main_entry`)
+  cli/        clap tree, dispatch, build/dry-run orchestration and helpers
+  plan/       YAML schema, format resolution and validation
   engine/     crypto, pe parsing, stub generation, compilation, polymorphism,
               syscall layer, imports, api_resolution, args, resources (icon/
               VERSIONINFO/manifest), identity, signing, manifest, hash, builtin
-              stub template
+              stub template, splitmix64 mixer
   audit/      static measurement (pe_info, strings, yara, defender, report)
+  features/   loader-feature registry (metadata for the CLI and docs)
   techniques/ one directory per technique + the registry (mod.rs)
+  paths.rs    shared PATH and file-URL helpers
   error.rs    top-level error types
-  ui.rs       terminal output: banner, palette, formatting primitives
+  ui/         terminal output: palette, banner, Markdown renderer, pager
 examples/
   plans/    example YAMLs
   payloads/   test payloads
 docs/         this file + the rest of the book; the navigation is docs/nav.yml
 docs/site/    the Starlight site project (assembler, config, Dockerfile)
 build/        (gitignored) intermediate artifacts
-dist/         (gitignored) final packed binaries
+dist/         (gitignored) final packed binaries; a build writes dist/<plan>/
+packed/       (gitignored) `picaro pack` packages: plan, sources, blobs, artifact, manifest
 ```

@@ -19,6 +19,7 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
+use super::entropy::{BuildEntropy, Domain};
 use super::{BuildError, Result};
 
 /// `build.polymorphism`: the per-build diversity block.
@@ -375,12 +376,27 @@ impl Default for PolymorphismConfig {
 }
 
 impl PolymorphismConfig {
+    /// Resolves the block for a build with a fresh random entropy seed.
+    ///
+    /// Kept for tests and callers that only need a validated profile. A real
+    /// build uses [`Self::from_yaml_with_entropy`] so the value is recorded.
+    #[allow(dead_code)]
+    pub fn from_yaml(yaml: Option<&YamlPolymorphismPlan>, debug: bool) -> Result<Self> {
+        Self::from_yaml_with_entropy(yaml, debug, &BuildEntropy::random())
+    }
+
     /// Resolves the block for a build.
     ///
     /// `debug` forces `mode: none` (a debug build keeps the toolchain's debug
     /// flags and must stay reproducible), regardless of the plan's `mode`. A
-    /// missing block means the defaults — `mode: full`, a random seed.
-    pub fn from_yaml(yaml: Option<&YamlPolymorphismPlan>, debug: bool) -> Result<Self> {
+    /// missing block means the defaults — `mode: full`, a seed derived from the
+    /// build's single entropy source. A literal plan seed still wins, so the
+    /// historical `seed: literal:<u64>` keeps its exact profile.
+    pub fn from_yaml_with_entropy(
+        yaml: Option<&YamlPolymorphismPlan>,
+        debug: bool,
+        entropy: &BuildEntropy,
+    ) -> Result<Self> {
         let plan = yaml.cloned().unwrap_or_default();
         plan.validate().map_err(BuildError::InvalidPolymorphism)?;
 
@@ -391,7 +407,7 @@ impl PolymorphismConfig {
         };
         let seed = match plan.seed {
             Some(SeedSource::Literal(value)) => value,
-            _ => rand::random::<u64>(),
+            _ => entropy.derive(Domain::Polymorphism),
         };
         let codegen = if mode.uses_codegen() {
             resolve_codegen(&plan.codegen, seed)
@@ -431,7 +447,7 @@ impl PolymorphismConfig {
 /// The seed reproduces the artifact: `resolve_codegen(pools, seed)` is
 /// deterministic, so the same seed (with the same pools) yields the same
 /// profile.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolymorphismRecord {
     /// Active level.
     pub mode: PolymorphismMode,

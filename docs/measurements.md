@@ -1100,7 +1100,7 @@ WER's LocalDumps.
 - **Verified live.** The release artifact's mapped stub reads `_tls_index` = 4
   (the runner process's `max+1`) while the payload blocks in its 24 h export;
   five 30 s and two 150 s runs stay alive where the unprovisioned control
-  aborts in seconds. `panic=abort` for shellcode (`src/engine/compiler.rs`)
+  aborts in seconds. `panic=abort` for shellcode (`src/engine/compiler/mod.rs`)
   coexists as hardening — on this toolchain the stub still carries a TLS
   directory, so it does not replace the handoff.
 - **Debug builds keep the historical aliasing.** With the handoff gated to
@@ -1134,7 +1134,114 @@ debug build logged `handler registered`, `trigger returned: ran=1, result=42`
 - **`halos_gate`** (syscall resolver, `Experimental`): the live CLI matrix
   (`indirect_syscall_resolvers_run_the_payload`) now compiles and runs one stub
   per resolver, `halos_gate` included, so the normal path is exercised. The
-  hooked-`ntdll` neighbour path is still unmeasured: the lab host's ntdll is
-  clean, so only the direct-prologue branch ran. The arithmetic itself is
-  pinned by the packer-side `neighbour_ssn` mirror and its unit tests; a
-  deliberate hook or an EDR in the lab is the next measurement.
+  hooked-`ntdll` neighbour path was not exercised in this round (the lab host's
+  ntdll is clean), so only the direct-prologue branch ran; the next section
+  measures it under a deliberate hook. The arithmetic itself is pinned by the
+  packer-side `neighbour_ssn` mirror and its unit tests.
+
+## Halo's Gate and stack spoofing under a hooked ntdll (2026-10-24)
+
+Host: Windows 11 x64, Defender real-time protection off (checked before the
+round). Four debug stubs (`build.stub.debug: true`) were built from
+`examples/payloads/test_payload.exe` with `reflective_loading`, so the payload
+marker and the exit code prove the chain end to end: `halos_gate`, `hells_gate`,
+`tartarus_gate + stack_spoofing: {decoy_bytes: 4096}` and the `tartarus_gate`
+control.
+
+The hook harness creates the target under the debugger, stops at the stub's
+`resolve_ssns` (after the Rust allocator is warm, before any SSN is read), then
+writes a transparent detour into the mapped `ntdll`: a 14-byte absolute jump
+(`ff 25 00 00 00 00 <qword>`) at the export's first byte, with the original
+32-byte stub copied into an RWX trampoline. A bare `ret` byte is not usable as
+the hook: the first attempt aborted inside the allocator before `resolve_ssns`
+(`memory allocation of 4096 bytes failed`). The trampoline isolates the SSN
+question because every non-loader caller still reaches the kernel.
+
+### Halo's Gate
+
+- **Neighbour path (the previously unmeasured branch).** With
+  `NtAllocateVirtualMemory` (RVA `0x162040`, SSN `0x18`) hooked, the stub logged
+  `NtAllocateVirtualMemory -> SSN 24 (neighbour)`. The anchors were
+  `NtQueryValueKey` (SSN 23, RVA `0x162020`) and `NtQueryInformationProcess`
+  (SSN 25, RVA `0x162060`), one 32-byte stub away in each direction. The payload
+  printed `PAYLOAD_MARKER_7f3a9c2e` and the artifact exited `0`, so the derived
+  SSN is the canonical value and the arithmetic holds on this ntdll.
+- **No disk read on that path.** A breakpoint on `read_clean_ntdll` did not fire
+  for Halo's Gate. The same hook on Hell's Gate stopped there: the trace showed
+  `export prologue is not in the expected form` and the resolver read the clean
+  copy. Both resolvers survive a single hook; only Hell's Gate opens `ntdll.dll`.
+- **Aggressive hook (no anchor left).** Hooking all `489` canonical `Nt*`/`Zw*`
+  exports with transparent trampolines leaves `neighbour_ssn` without an anchor.
+  The stub logged `no live neighbour yields an SSN, falling back to the clean
+  copy` for both required functions, ran the payload and exited `0`. Halo's Gate
+  degrades to Tartarus Gate's file walk instead of failing.
+- **Blind spot: a canonical prologue with a rewritten SSN.** Patching only the
+  immediate (`mov eax, 0x2000`) keeps the prologue canonical, so the resolver
+  trusts it: it logged `SSN 8192`, the kernel rejected the call and the stub
+  aborted (`memory allocation of 125968 bytes failed`, `0xc0000409`). Halo's
+  Gate defeats a redirecting hook; it does not validate the immediate against
+  the export layout. Always deriving the neighbour SSN and falling back to the
+  clean copy on a mismatch is a sensible hardening, not implemented here.
+
+### Stack spoofing
+
+Configuration: `resolver: tartarus_gate`, `stack_spoofing: {decoy_bytes:
+4096}`. The stub resolved the gadget at ntdll RVA `0x1618c2` (address
+`0x7ffa681218c2`) and the first `NtAllocateVirtualMemory` stopped there with
+`RAX = 0x18` and `RSP = 0xbfaf0fdbd0`.
+
+- **The top of the stack is ntdll.** The five slots at `[RSP]` were
+  `0x7ffa67fc1159`, `0x7ffa67fc1307`, `0x7ffa67fc137e` and `0x7ffa67fc1459`
+  (ntdll `ret` sites) and `0x7ffa680fd849` (the hop). `[RSP+0x28..0x70)` held
+  the copied arguments (`0x3000`, `4`, ...) and the decoy started at
+  `[RSP+0x70)`. lldb's backtrace showed only `ntdll` frames; no `out.exe` frame
+  appeared.
+- **The loader is buried, not removed.** The real return address of the
+  `nt_invoke` call sits at `RSP + decoy_bytes - 8`: measured `0xbfaf0febc8`
+  (`0x7ff7d3cafbf6`, inside `out.exe`), exactly `0xff8` bytes above `RSP`. A
+  full-stack scan from `RSP` finds the loader after `0xff0` bytes of decoy. The
+  claim "the top of the stack looks like ntdll" holds; "the thread stack looks
+  like ntdll" does not.
+- **Control without spoofing.** At the same gadget stop in the `tartarus_gate`
+  build, `RSP = 0x73aaf1ea48` and `[RSP] = 0x7ff64a83e946`
+  (`main::syscalls::nt_alloc_vm`). The backtrace ran through
+  `allocate_image`, `run_reflective`, `execute_payload`, `payload`, `run` and
+  `main`. The contrast is the measurement.
+- **Debugger caveat.** A software breakpoint at the gadget set before
+  `init_syscalls` replaces the first `0f` with `cc`; `find_gadget` then picks the
+  next `0f 05 c3` (`ntdll+0x1618e2`) and the breakpoint never fires. Set it after
+  `init_syscalls` or use a hardware breakpoint. The same applies to x64dbg; its
+  headless `-cf` script did not load here, so the x64dbg run is a manual recipe
+  and lldb supplied the numbers.
+
+### Moneta
+
+A payload that sleeps 30 s was packed with `halos_gate` and
+`stack_spoofing: {decoy_bytes: 4096}`, then scanned with
+`Moneta64.exe -m ioc -v detail` while it dwelled:
+
+```
+0x0000000140000000:0x00022000 | Private
+  0x0000000140001000:0x00016000 | RX | Abnormal private executable memory
+```
+
+The mapped payload (90,112 bytes of private RX at `0x140001000`) and the
+unsigned loader image are fully visible. Neither technique is a memory-scanner
+countermeasure: Halo's Gate changes where the SSN comes from and stack spoofing
+changes the stack *during a syscall*. Moneta did not flag the `SPOOF_FRAMES`
+table (16 ntdll addresses in the stub's `.data`) or the decoy, which is
+consistent with a transient, syscall-time artifact.
+
+### Verdict
+
+Both techniques are functionally real, and both are narrow:
+
+- **Halo's Gate** defeats a userland prologue hook without touching the disk and
+  degrades to the clean copy when every stub is hooked. It does not validate a
+  canonical-looking immediate, so an SSN-rewriting hook defeats it (measured).
+- **Stack spoofing** defeats the top-of-stack return-address check, the cheap
+  frame scan and naive unwinding. It does not defeat a full-stack walk (loader
+  at `RSP + 0xff8`), `RSP`-depth heuristics, CET/shadow stacks or
+  memory-integrity monitoring.
+- **Neither** hides the mapped payload; that is orthogonal work
+  (`sleep_obfuscation`, `hide_module`, `unhook_ntdll`).

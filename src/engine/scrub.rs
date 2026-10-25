@@ -16,7 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rand::Rng;
+use crate::engine::entropy::{BuildEntropy, Domain};
 
 /// A per-position random fill: [`scrub_with`] calls it once per byte, so a
 /// scrubbed region is varied text rather than a run of one repeated byte — a run
@@ -26,10 +26,10 @@ use rand::Rng;
 /// high-entropy patch in `.rdata` that looks like a second encrypted blob and
 /// shifts the local entropy; printable path characters keep the region in the
 /// same "text" entropy band as the strings around it.
-pub fn random_fill() -> impl FnMut() -> u8 {
+pub fn random_fill(entropy: &BuildEntropy) -> impl FnMut() -> u8 {
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/\\";
-    let mut rng = rand::thread_rng();
-    move || ALPHABET[rng.gen_range(0..ALPHABET.len())]
+    let mut stream = entropy.stream(Domain::Scrub, "");
+    move || ALPHABET[stream.next_u8() as usize % ALPHABET.len()]
 }
 
 /// Calls `fill` once per byte, so the scrubbed region can be random (see
@@ -232,7 +232,7 @@ mod tests {
 
     #[test]
     fn random_fill_varies_and_stays_printable() {
-        let mut fill = random_fill();
+        let mut fill = random_fill(&BuildEntropy::from_seed(1));
         let sample: Vec<u8> = (0..128).map(|_| fill()).collect();
 
         assert!(

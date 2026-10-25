@@ -250,12 +250,18 @@ fn build_interactive_quit_writes_nothing() {
         .spawn()
         .expect("spawn picaro build interactive");
 
-    // Eleven blank answers walk the first pass with their defaults (name, args,
-    // arch, output kind, execution, preparation, strings, syscalls, output path,
-    // strip, trim paths); `3` quits the review screen, so the wizard stops
-    // before writing (or compiling) anything.
+    // Four blanks for the payload (name, args, arch, output kind) and two for
+    // the stub (strings, syscalls); add one reflective step; three blanks for
+    // the output (path, strip, trim paths). `3` quits the review screen, so the
+    // wizard stops before writing (or compiling) anything.
     let mut stdin = child.stdin.take().expect("stdin is piped");
-    stdin.write_all(&b"\n".repeat(11)).expect("write answers");
+    stdin.write_all(&b"\n".repeat(6)).expect("write answers");
+    stdin
+        .write_all(b"add a step\nreflective_loading\ndone\n")
+        .expect("write the runtime chain");
+    stdin
+        .write_all(&b"\n".repeat(3))
+        .expect("write output answers");
     stdin.write_all(b"3\n").expect("write the quit choice");
     drop(stdin);
 

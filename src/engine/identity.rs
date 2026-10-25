@@ -5,9 +5,11 @@
 //! ("test", "admin", empty strings). `randomize` in `output.resources.version_info`
 //! turns it on; explicit fields in the plan always win.
 
-use rand::Rng;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use serde::Serialize;
 
+use crate::engine::entropy::{BuildEntropy, Domain};
 use crate::plan::schema::VersionInfoPlan;
 
 /// Company-name parts: `"<adjective> <noun> <suffix>"`, e.g. `Blue Ridge Systems`.
@@ -57,12 +59,13 @@ pub struct Identity {
     pub product_version: String,
 }
 
-/// Generates a fresh identity.
+/// Generates a fresh identity from the build's entropy.
 ///
 /// `original_filename` is not generated: it must match the real artifact name,
-/// so it is passed in by the caller.
-pub fn generate() -> Identity {
-    let mut rng = rand::thread_rng();
+/// so it is passed in by the caller. The derivation is seeded, so replaying a
+/// recorded master seed yields the same metadata.
+pub fn generate(entropy: &BuildEntropy) -> Identity {
+    let mut rng = StdRng::seed_from_u64(entropy.derive(Domain::Identity));
     let mut pick = |list: &[&'static str]| list[rng.gen_range(0..list.len())].to_string();
 
     let adjective = pick(ADJECTIVES);
@@ -98,11 +101,11 @@ pub fn generate() -> Identity {
 ///
 /// The returned plan has `randomize` cleared, so it can be used as a plain,
 /// fully-resolved `VERSIONINFO` spec.
-pub fn apply(plan: &VersionInfoPlan) -> VersionInfoPlan {
+pub fn apply(plan: &VersionInfoPlan, entropy: &BuildEntropy) -> VersionInfoPlan {
     if !plan.randomize {
         return plan.clone();
     }
-    let identity = generate();
+    let identity = generate(entropy);
     VersionInfoPlan {
         company: plan.company.clone().or(Some(identity.company)),
         product: plan.product.clone().or(Some(identity.product)),
@@ -148,7 +151,7 @@ mod tests {
 
     #[test]
     fn generates_non_empty_coherent_values() {
-        let identity = generate();
+        let identity = generate(&BuildEntropy::from_seed(1));
         assert!(identity.company.split(' ').count() >= 3, "{identity:?}");
         assert!(!identity.product.is_empty());
         assert!(identity.description.starts_with(&identity.product));
@@ -167,7 +170,7 @@ mod tests {
             randomize: true,
             ..VersionInfoPlan::default()
         };
-        let resolved = apply(&plan);
+        let resolved = apply(&plan, &BuildEntropy::from_seed(1));
         assert!(!resolved.randomize);
         assert!(resolved.company.is_some());
         assert!(resolved.file_version.is_some());
@@ -180,7 +183,7 @@ mod tests {
             company: Some("Explicit Ltd".to_string()),
             ..VersionInfoPlan::default()
         };
-        let resolved = apply(&plan);
+        let resolved = apply(&plan, &BuildEntropy::from_seed(1));
         assert_eq!(resolved.company.as_deref(), Some("Explicit Ltd"));
         assert!(
             resolved.product.is_some(),
@@ -194,6 +197,6 @@ mod tests {
             company: Some("Only This".to_string()),
             ..VersionInfoPlan::default()
         };
-        assert_eq!(apply(&plan), plan);
+        assert_eq!(apply(&plan, &BuildEntropy::from_seed(1)), plan);
     }
 }

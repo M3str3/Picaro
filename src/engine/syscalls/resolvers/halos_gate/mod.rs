@@ -11,8 +11,10 @@ pub const DEF: ResolverDef = ResolverDef {
     name: "halos_gate",
     phase: "6d",
     attck: &["T1106"],
-    // The packer-side logic is unit-tested; the generated stub's neighbour walk
-    // has not been measured on the lab host yet.
+    // Both generated-stub branches are measured on the lab host: the neighbour
+    // walk under a trampoline hook and the clean-copy fallback under an
+    // all-stubs hook (docs/measurements.md). The SSN-rewrite blind spot keeps
+    // this Experimental.
     stability: Stability::Experimental,
     doc_path: "src/engine/syscalls/resolvers/halos_gate/README.md",
     readme: include_str!("README.md"),

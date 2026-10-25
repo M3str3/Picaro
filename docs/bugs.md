@@ -38,7 +38,7 @@ These were reported by the bug-bounty round and are no longer open:
   `stack` with an explicit key are rejected.
 - `DuplicateTokenEx` no longer passes the impersonation level as
   `EffectiveOnly` (the filtered-token bug); see the remaining level gap below.
-- `guardrail` validates `expire_on` and `run_key`; `self_deletion` validates its
+- `killswitch` validates `expire_on` and `run_key`; `self_deletion` validates its
   stream; DLL/shellcode builds reject `erase_pe_header` and a targetless
   `timestomping`.
 - Export names reject Rust keywords; the custom-stub `$SYSCALLS_BLOCK$` warning
@@ -54,7 +54,7 @@ These were reported by the bug-bounty round and are no longer open:
 
 ### 1. Unknown `params` keys are silently dropped (medium)
 
-`src/techniques/mod.rs:72-81`, every technique `Params`, `src/plan/schema.rs`.
+`src/techniques/mod.rs:72-81`, every technique `Params`, `src/plan/schema/mod.rs`.
 
 `RuntimeStep` flattens the technique enum and `StepControl`, and only the
 `bouncer` and `drop` parameter structs carry `deny_unknown_fields`. A typo such
@@ -62,7 +62,7 @@ as `params: { targte: ... }` deserializes to `Params::default()` and silently
 hollows the default target; an `on_fial` typo becomes `on_fail: stop`. This
 contradicts `docs/getting-started.md:60` and `docs/plan.md:10` ("unknown keys are
 an error"). The existing
-`src/plan/schema.rs::a_flat_param_is_dropped_and_the_default_applies` locks in
+`src/plan/schema/mod.rs::a_flat_param_is_dropped_and_the_default_applies` locks in
 the *flat-key* migration hazard, not the `params` typo.
 
 Why deferred: serde does not allow `deny_unknown_fields` on a struct that is
@@ -73,7 +73,7 @@ test over the registry.
 
 ### 2. `conflicts` metadata is display-only and internally inconsistent (medium-low)
 
-`src/techniques/mod.rs`, `src/features/mod.rs`, `src/plan/validate.rs`.
+`src/techniques/mod.rs`, `src/features/mod.rs`, `src/plan/validate/mod.rs`.
 
 `TechniqueDef::conflicts` / `FeatureDef::conflicts` are rendered by
 `techniques show` and checked for self-conflict, but never enforced. Some pairs
@@ -81,7 +81,7 @@ are rejected by bespoke validators (`api_resolution` + `process_hollowing`),
 some only get an order advisory (`erase_pe_header` + `sleep_obfuscation`,
 `image_path_spoofing` + `self_deletion`), and one declared pair is explicitly
 accepted by a test (`reflective_loading` + `process_hollowing` as two steps,
-`src/plan/validate.rs::accepts_two_execution_techniques_as_separate_steps`).
+`src/plan/validate/mod.rs::accepts_two_execution_techniques_as_separate_steps`).
 
 Why deferred: a blanket enforcement would break valid flat multi-step plans.
 The design question is whether a conflict is per-payload, per-step or
@@ -89,7 +89,7 @@ per-build; answer it before touching the registry or the validator.
 
 ### 3. `DuplicateTokenEx` does not apply the requested impersonation level (medium)
 
-`src/engine/api_resolution.rs:1276-1309`, `src/engine/syscalls/mod.rs`.
+`src/engine/api_resolution/templates.rs`, `src/engine/syscalls/helpers.rs`.
 
 The wrapper now passes `EffectiveOnly = 0`, so the duplicate is not filtered,
 but the requested `ImpersonationLevel` is still ignored: `NtDuplicateToken`
@@ -140,7 +140,7 @@ copy that only contains the template).
 
 ### 7. `retf` gadget fallback (low, latent)
 
-`src/engine/syscalls/prelude.rs:206-244` (mirror in `src/engine/syscalls/mod.rs`).
+`src/engine/syscalls/prelude.rs:206-244` (mirror in `src/engine/syscalls/helpers.rs`).
 
 `scan_gadget` returns a `0F 05 CB` (`syscall; retf`) fallback when `.text` has
 no `0F 05 C3`. `find_gadget` then returns it without scanning the rest of the

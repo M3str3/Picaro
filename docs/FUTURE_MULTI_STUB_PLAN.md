@@ -562,14 +562,14 @@ noise.
 | File | Change |
 |---|---|
 | `src/engine/cc.rs` | **new** — C compiler discovery, version, lib dirs |
-| `src/engine/compiler.rs` | `compile_runtime_lib`, `link_c_stub`; `compile_stub` unchanged for Rust |
+| `src/engine/compiler/mod.rs` | `compile_runtime_lib`, `link_c_stub`; `compile_stub` unchanged for Rust |
 | `src/engine/stub.rs` | block catalog renderers; `$NAME(args)$` tokenizer; `exports:` scan; C warnings; FFI wrapper + header renderers |
 | `src/engine/mod.rs` | export `cc`; new `BuildError` variants |
 | `src/engine/manifest.rs` | `stub.language`, C compiler provenance |
 | `src/engine/obfuscation.rs` | render obfuscated literals as C arrays (Phase 5) |
 | `src/config/schema.rs` | `build.stub.language`, `build.stub.toolchain`, `build.stub.header_out`, top-level `exports:` |
 | `src/config/validate.rs` | language/arch/toolchain validation; `exports:` vs `runtime:` mutual exclusion; block-catalog rules (§5) |
-| `src/main.rs` | dispatch on language in `build()` and `dry_run()`; subsystem for C |
+| `src/cli/` | dispatch on language in `build()` and `dry_run()`; subsystem for C |
 | `src/engine/templates/runtime/lib.rs.tpl` | **new** — generated runtime library template |
 | `src/engine/templates/main.c.tpl` | **new** — builtin C stub (`$PICARO.RUNTIME$`) |
 | `src/engine/templates/main.rs.tpl` | unchanged |

@@ -69,7 +69,7 @@ unsupported. Full description and pipeline: `README.md`,
 - Public functions get doc comments explaining *why*, not *what*.
 - Test names describe behavior, not implementation.
 - Prefer explicit over clever.
-- **User-facing output goes through `src/ui.rs`.** Use `Palette` (`banner`,
+- **User-facing output goes through `src/ui/mod.rs`.** Use `Palette` (`banner`,
   headings, `field`/`step`/`done`) instead of hand-written ANSI escapes or
   ad-hoc formatting; color degrades to plain text when redirected.
 - When adding a technique, grep the fragment for `"` before committing. If the

@@ -1,9 +1,10 @@
-//! Guardrail (T1480): a killswitch / gate.
+//! Killswitch (T1480): a deadline / run-count gate.
 //!
 //! Aborts the runtime before the payload runs when a deadline has passed or a
 //! run-count has been exceeded. A Preparation technique: it never runs the
-//! payload, it only decides whether the chain continues. See `README.md` for
-//! the full write-up.
+//! payload, it only decides whether the chain continues. ATT&CK files this
+//! under "Execution Guardrails"; the technique name states the effect. See
+//! `README.md` for the full write-up.
 
 use serde::{Deserialize, Serialize};
 
@@ -11,7 +12,7 @@ use crate::engine::obfuscation::StringsConfig;
 
 use super::{Capability, Category, Stability, TechniqueDef};
 
-/// Parameters for the guardrail technique.
+/// Parameters for the killswitch technique.
 ///
 /// Both gates are optional; a plan that sets neither is a no-op (the gate
 /// always lets the payload run), which `plan::validate::advisories` surfaces.
@@ -47,20 +48,20 @@ impl Default for Params {
     }
 }
 
-/// Static metadata for the guardrail technique.
+/// Static metadata for the killswitch technique.
 pub const DEF: TechniqueDef = TechniqueDef {
-    name: "guardrail",
+    name: "killswitch",
     attck: &["T1480"],
     stability: Stability::Stable,
     requires: &[Capability::WindowsX64, Capability::WindowsX86],
     conflicts: &[],
     category: Category::Preparation,
-    doc_path: "src/techniques/guardrail/README.md",
+    doc_path: "src/techniques/killswitch/README.md",
     readme: include_str!("README.md"),
     stub_fragment: include_str!("stub_fragment.rs"),
     formats: &[],
     requires_indirect_syscalls: false,
-    params_example: "technique: guardrail\nparams:\n  expire_on: \"2027-01-01\"\n  max_runs: 3\n",
+    params_example: "technique: killswitch\nparams:\n  expire_on: \"2027-01-01\"\n  max_runs: 3\n",
     // The fragment uses only the standard library (clock, environment, file
     // I/O); no syscall and no payload import resolution are involved.
     syscalls: &[],
@@ -88,7 +89,7 @@ const MESSAGES: &[(&str, &str)] = &[
 ];
 
 impl Params {
-    /// Renders the guardrail stub fragment for these parameters.
+    /// Renders the killswitch stub fragment for these parameters.
     ///
     /// The per-build deadline, the counter file name and every diagnostic are
     /// emitted as code that rebuilds the value at runtime through `strings`, so
@@ -99,7 +100,7 @@ impl Params {
                 "Some({})",
                 strings
                     .obfuscate(date)
-                    .render_stub_expr("guardrail_expire_on")
+                    .render_stub_expr("killswitch_expire_on")
             ),
             None => "None".to_string(),
         };
@@ -109,7 +110,7 @@ impl Params {
         };
         let run_key = strings
             .obfuscate(&self.run_key)
-            .render_stub_expr("guardrail_run_key");
+            .render_stub_expr("killswitch_run_key");
 
         let mut rendered = DEF
             .stub_fragment
@@ -121,7 +122,7 @@ impl Params {
                 placeholder,
                 &strings
                     .obfuscate(text)
-                    .render_stub_expr(&format!("guardrail_msg_{index}")),
+                    .render_stub_expr(&format!("killswitch_msg_{index}")),
             );
         }
         rendered

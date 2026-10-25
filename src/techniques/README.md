@@ -23,7 +23,7 @@ step*: a step that hands the whole process to the payload never returns, so it
 must be last. `reflective_loading` of a PE executable, `dotnet_hosting` and
 `process_ghosting` are terminal; `living_off_the_land`, `process_hollowing` and
 `reflective_loading` of a DLL or shellcode all return control, so the steps
-after them still run. `src/plan/validate.rs` rejects a terminal step that is not
+after them still run. `src/plan/validate/mod.rs` rejects a terminal step that is not
 last.
 
 ## 1. Copy the template
@@ -116,7 +116,7 @@ block per step. For a Preparation it matches on `step_<index>::run()`:
   runner takes the step's `on_fail` action.
 
 Most preparations always return `Ok(true)` (e.g. `patch_amsi`, `patch_etw`).
-The `bouncer` and `guardrail` gates return `Ok(false)`; `bouncer` configured
+The `bouncer` and `killswitch` gates return `Ok(false)`; `bouncer` configured
 with an exiting `on_reject` action exits the process with that code itself.
 
 ## 4. Register the technique

@@ -13,6 +13,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::paths::find_in_path;
+
 /// Canonical `MpCmdRun.exe` location, present on every Windows install.
 const DEFENDER_CLI: &str = r"C:\Program Files\Windows Defender\MpCmdRun.exe";
 /// Versioned engine directory; the binary here is the one Windows actually uses.
@@ -124,15 +126,6 @@ fn version_key(name: &str) -> Vec<u64> {
         .filter(|s| !s.is_empty())
         .filter_map(|s| s.parse().ok())
         .collect()
-}
-
-/// Searches `PATH` for `name`; the last-resort lookup for a non-standard
-/// install, so a system where the tool is not on `PATH` still works.
-fn find_in_path(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(name))
-        .find(|p| p.is_file())
 }
 
 #[cfg(test)]

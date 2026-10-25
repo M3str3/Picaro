@@ -1,4 +1,4 @@
-// --- Guardrail (technique fragment) ---
+// --- Killswitch (technique fragment) ---
 
 // A Preparation gate. It returns `Ok(false)` to abort the chain before the
 // payload runs, `Ok(true)` to let it continue, or an `Err` carrying a
@@ -19,7 +19,7 @@
 ///
 /// A check that cannot be evaluated (the clock is before the epoch, or the
 /// counter cannot be read or written) is an error rather than a silent pass.
-pub fn guardrail() -> Result<bool, String> {
+pub fn killswitch() -> Result<bool, String> {
     let expire_on: Option<String> = $EXPIRE_ON_DEF$;
     let max_runs: Option<u32> = $MAX_RUNS_DEF$;
     let run_key: String = $RUN_KEY_DEF$;
@@ -28,7 +28,7 @@ pub fn guardrail() -> Result<bool, String> {
         let today = current_date()?;
         if today > deadline {
             crate::tech_dbg!(
-                "guardrail",
+                "killswitch",
                 "today {today} is past the deadline {deadline}; aborting the chain"
             );
             return Ok(false);
@@ -40,12 +40,12 @@ pub fn guardrail() -> Result<bool, String> {
         let runs = bump_counter(&path)?;
         if runs > limit {
             crate::tech_dbg!(
-                "guardrail",
+                "killswitch",
                 "run {runs} exceeds the limit {limit}; aborting the chain"
             );
             return Ok(false);
         }
-        crate::tech_dbg!("guardrail", "run {runs}/{limit} allowed");
+        crate::tech_dbg!("killswitch", "run {runs}/{limit} allowed");
     }
 
     Ok(true)

@@ -6,11 +6,9 @@
 //! measurements in a single place.
 //!
 //! The block is emitted only when a caller needs it. [`render_block`] bakes in a
-//! fresh per-build RC4 key and rebuilds every diagnostic string through
-//! [`StringsConfig`], so no resolved name or message reaches the stub in
-//! cleartext.
-
-use rand::RngCore;
+//! per-build RC4 key (derived from the strings key) and rebuilds every
+//! diagnostic string through [`StringsConfig`], so no resolved name or message
+//! reaches the stub in cleartext.
 
 use crate::engine::api_resolution::ApiResolutionConfig;
 use crate::engine::obfuscation::StringsConfig;
@@ -59,6 +57,21 @@ const MESSAGES: &[(&str, &str)] = &[
     ),
 ];
 
+/// The RC4 key for the sleep region.
+///
+/// The first 16 bytes of the strings key are already per-build (and reproduced
+/// from the master entropy). The stack strategy carries no key, so it uses a
+/// fixed constant: its literals are rebuilt on the stack and this key never
+/// reaches the artifact in cleartext either way.
+fn sleep_key(strings: &StringsConfig) -> [u8; 16] {
+    const FALLBACK: [u8; 16] = *b"picaro-sleep-key";
+    let mut key = FALLBACK;
+    if let Some(source) = strings.key {
+        key.copy_from_slice(&source[..16]);
+    }
+    key
+}
+
 /// Whether the build needs the shared runtime: the preparation step or the
 /// `Sleep` API hook.
 pub fn needed(steps: &[RuntimeStep], api_resolution: &ApiResolutionConfig) -> bool {
@@ -68,13 +81,13 @@ pub fn needed(steps: &[RuntimeStep], api_resolution: &ApiResolutionConfig) -> bo
             .any(|step| matches!(step.technique, TechniqueKind::SleepObfuscation { .. }))
 }
 
-/// Renders the shared block with a fresh RC4 key and obfuscated diagnostics.
+/// Renders the shared block with a per-build RC4 key and obfuscated diagnostics.
 pub fn render_block(strings: &StringsConfig) -> String {
-    // The sleeping region is RC4-encrypted with a fresh per-build key; its hex
-    // form is rebuilt at runtime through `strings`, so it never lands in
-    // cleartext in the generated stub.
-    let mut key = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut key);
+    // The sleeping region is RC4-encrypted with a per-build key; its hex form is
+    // rebuilt at runtime through `strings`, so it never lands in cleartext in
+    // the generated stub. The key derives from the strings key (itself derived
+    // from the build entropy) so a replay reproduces the block.
+    let key = sleep_key(strings);
     let key_def = strings
         .obfuscate(&hex::encode(key))
         .render_stub_expr("sleep_key");

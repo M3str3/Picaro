@@ -148,6 +148,9 @@ const GREEN_DIM: Color = Color::Rgb(RgbColor(95, 158, 119));
 const YELLOW: Color = Color::Rgb(RgbColor(224, 192, 96));
 /// Danger.
 const RED: Color = Color::Rgb(RgbColor(229, 118, 118));
+/// Warning bar: orange-yellow behind black text.
+const WARN_BAR_BG: Color = Color::Rgb(RgbColor(235, 166, 52));
+const WARN_BAR_FG: Color = Color::Rgb(RgbColor(18, 14, 6));
 /// Targets (binary paths, filenames): steel blue.
 const BLUE: Color = Color::Rgb(RgbColor(122, 167, 224));
 /// Secondary text (labels, function lists). Bright enough to read on a dark
@@ -207,6 +210,14 @@ pub enum Tone {
     Code,
     /// A hyperlink's label.
     Link,
+}
+
+/// The style of a warning bar: black text on the warning background.
+fn warn_bar_style() -> Style {
+    Style::new()
+        .fg_color(Some(WARN_BAR_FG))
+        .bg_color(Some(WARN_BAR_BG))
+        .bold()
 }
 
 /// The style backing each [`Tone`].
@@ -337,6 +348,33 @@ impl Palette {
     /// Error text.
     pub fn error(self, text: impl Display) -> String {
         self.tone(Tone::Bad, text)
+    }
+
+    /// A warning as black text on the warning background, wrapped to `width`.
+    ///
+    /// The first line carries the `!`; continuations are indented so the block
+    /// stays aligned. Without color it degrades to `! message`, which keeps
+    /// redirected output readable.
+    pub fn warn_lines(self, message: impl Display, width: usize) -> Vec<String> {
+        let message = message.to_string();
+        let available = width.saturating_sub(4).max(20);
+        let mut wrapped = wrap_text(&message, available).into_iter();
+        let mut out = Vec::new();
+        if let Some(first) = wrapped.next() {
+            out.push(self.warn_line(format!("! {first}")));
+        }
+        for line in wrapped {
+            out.push(self.warn_line(format!("  {line}")));
+        }
+        out
+    }
+
+    fn warn_line(self, text: String) -> String {
+        let text = text.trim_end();
+        if !self.color {
+            return text.to_string();
+        }
+        format!("{} {text} {Reset}", warn_bar_style())
     }
 
     /// A target: binary paths and filenames.
@@ -529,6 +567,7 @@ impl Palette {
     /// never dims it, because SGR faint persists until reset and would wash out
     /// a path or value nested inside.
     pub fn done(self, label: &str, detail: impl Display) -> String {
+        let label = capitalize(label);
         format!(
             "  {} {} {}",
             self.check(),
@@ -551,12 +590,22 @@ impl Palette {
     /// Distinct from [`Palette::done`] so the final artifact stands out from the
     /// per-step lines around it.
     pub fn result(self, label: &str, detail: impl Display) -> String {
+        let label = capitalize(label);
         format!(
             "  {} {} {}",
             self.check(),
             self.ok(self.bold(format!("{label:<width$}", width = STEP_WIDTH))),
             detail
         )
+    }
+}
+
+/// Uppercases the first letter of a label, leaving the rest untouched.
+fn capitalize(label: &str) -> String {
+    let mut chars = label.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
     }
 }
 
@@ -864,7 +913,7 @@ mod tests {
         let ui = Palette::plain();
         assert_eq!(
             ui.done("read", "a.exe"),
-            format!("  {} {:<8} {}", glyph::OK, "read", "a.exe")
+            format!("  {} {:<8} {}", glyph::OK, "Read", "a.exe")
         );
         // Same column even though the labels differ in length.
         let short = ui.done("read", "v");
@@ -873,8 +922,22 @@ mod tests {
         // The closing result line shares the same column layout.
         assert_eq!(
             ui.result("packed", "out.exe"),
-            format!("  {} {:<8} {}", glyph::OK, "packed", "out.exe")
+            format!("  {} {:<8} {}", glyph::OK, "Packed", "out.exe")
         );
+    }
+
+    /// Warning bars wrap and degrade to `! message` without color.
+    #[test]
+    fn warnings_use_a_black_on_amber_bar() {
+        let plain = Palette::plain();
+        assert_eq!(plain.warn_lines("short", 40), vec!["! short"]);
+
+        let colored = Palette { color: true };
+        let lines = colored.warn_lines("a warning that wraps onto a second line", 24);
+        assert!(lines.len() > 1);
+        assert!(lines.iter().all(|line| line.contains("48;2;235;166;52")));
+        assert!(lines[0].starts_with('\x1b'));
+        assert!(lines[0].contains("!"));
     }
 
     /// Detail lines align their labels under a deeper indent.
