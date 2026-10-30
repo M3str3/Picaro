@@ -13,6 +13,7 @@ use super::{Capability, Category, Stability, TechniqueDef};
 
 /// Parameters for the ETW patch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Params {
     /// Also patch `EtwEventWriteFull`, the variant that most script and .NET
     /// telemetry actually calls. Best effort: if the export cannot be patched,

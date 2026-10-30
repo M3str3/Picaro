@@ -179,7 +179,7 @@ time). The key/nonce are declared on the step as hex strings.
 - With `fallback: embedded` the payload is embedded like any stageless payload,
   so its `source` is read, validated and hash-pinned at build time.
 - The existing terminal-step rule still applies (a staged `reflective_loading`
-  of a PE executable remains terminal).
+  of a PE executable remains terminal unless it sets `params.patch_exit: true`).
 
 ## 10. Open design decisions
 

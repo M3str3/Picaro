@@ -37,7 +37,8 @@ These were reported by the bug-bounty round and are no longer open:
 - Non-ASCII strings survive both obfuscation strategies; an all-zero XOR key and
   `stack` with an explicit key are rejected.
 - `DuplicateTokenEx` no longer passes the impersonation level as
-  `EffectiveOnly` (the filtered-token bug); see the remaining level gap below.
+  `EffectiveOnly` (the filtered-token bug); the level is applied too since
+  2026-10-30.
 - `killswitch` validates `expire_on` and `run_key`; `self_deletion` validates its
   stream; DLL/shellcode builds reject `erase_pe_header` and a targetless
   `timestomping`.
@@ -50,26 +51,32 @@ These were reported by the bug-bounty round and are no longer open:
   `unhook_ntdll` restores the protection before propagating a relocation error;
   `dotnet_hosting` retries only on `DISP_E_BADPARAMCOUNT`.
 
+## Fixed in the 2026-10-30 session
+
+- (bug #1) Unknown `runtime` keys are now strict: every technique `Params` carries
+  `deny_unknown_fields`, and a raw-value pass rejects any step key outside
+  `technique`, `params`, `on_success`, `on_fail` and `delay_ms`. A typo such as
+  `params: { targte: ... }` or `on_fial` fails the build instead of silently
+  using a default. A flat schema-3 parameter is rejected too, matching
+  `docs/plan.md` ("unknown keys are an error").
+- (bug #3) `DuplicateTokenEx` applies the requested `TokenImpersonationLevel`
+  the way Windows does: it builds the `OBJECT_ATTRIBUTES` +
+  `SECURITY_QUALITY_OF_SERVICE` pair (with `lpSecurityDescriptor` and
+  `bInheritHandle` from `lpTokenAttributes`) and passes it to
+  `NtDuplicateToken`. No `NtSetInformationToken` helper is needed. The live
+  test `tests/token_proxy.rs` passes on the lab host (2026-10-30).
+- (bug #4) The shared ekko runtime owns its completion event and timer queue through a
+  drop guard, deletes the queue with `INVALID_HANDLE_VALUE` so a partially
+  queued chain cannot outlive the call, and closes the event on every path.
+  The residual cancellation window is documented in the `ekko_sleep` docs.
+  The `sleep_obfuscation` and `Sleep` hook live tests pass on the lab host; the
+  handle-count re-measurement is still pending.
+- (bug #5) Both network-stager transports cap a staged body at 64 MiB, and the
+  child-process transport removes its temp file on every path through a drop
+  guard and reads with a hard bound. All five live stager tests and the i686
+  stub-compile test pass on the lab host (2026-10-30).
+
 ## Open
-
-### 1. Unknown `params` keys are silently dropped (medium)
-
-`src/techniques/mod.rs:72-81`, every technique `Params`, `src/plan/schema/mod.rs`.
-
-`RuntimeStep` flattens the technique enum and `StepControl`, and only the
-`bouncer` and `drop` parameter structs carry `deny_unknown_fields`. A typo such
-as `params: { targte: ... }` deserializes to `Params::default()` and silently
-hollows the default target; an `on_fial` typo becomes `on_fail: stop`. This
-contradicts `docs/getting-started.md:60` and `docs/plan.md:10` ("unknown keys are
-an error"). The existing
-`src/plan/schema/mod.rs::a_flat_param_is_dropped_and_the_default_applies` locks in
-the *flat-key* migration hazard, not the `params` typo.
-
-Why deferred: serde does not allow `deny_unknown_fields` on a struct that is
-flattened. The fix needs a pre-deserialization pass over the raw
-`serde_yml::Value` (compare every `params` key against the technique's known
-keys) or a custom deserializer. Add a test per technique or one table-driven
-test over the registry.
 
 ### 2. `conflicts` metadata is display-only and internally inconsistent (medium-low)
 
@@ -86,47 +93,6 @@ accepted by a test (`reflective_loading` + `process_hollowing` as two steps,
 Why deferred: a blanket enforcement would break valid flat multi-step plans.
 The design question is whether a conflict is per-payload, per-step or
 per-build; answer it before touching the registry or the validator.
-
-### 3. `DuplicateTokenEx` does not apply the requested impersonation level (medium)
-
-`src/engine/api_resolution/templates.rs`, `src/engine/syscalls/helpers.rs`.
-
-The wrapper now passes `EffectiveOnly = 0`, so the duplicate is not filtered,
-but the requested `ImpersonationLevel` is still ignored: `NtDuplicateToken`
-keeps the source token's level. A correct implementation mirrors Win32:
-duplicate with `EffectiveOnly = FALSE`, then call
-`NtSetInformationToken(TokenImpersonationLevel, ...)` on the new token. The
-syscall layer has no `NtSetInformationToken` helper yet; add it with the usual
-`none`/`indirect` pair, `SSNS` field and proxy metadata, then add a live test
-that duplicates a token at `SecurityImpersonation` and checks
-`TokenImpersonationLevel`.
-
-### 4. Ekko runtime leaks handles and has a partial-queue failure window (medium-low)
-
-`src/engine/templates/sleep_runtime.rs.tpl:341-347, 537-547`.
-
-`h_event` is created per call and never closed; the queue is deleted only when
-`DeleteTimerQueueEx` resolved. Every `queue_timer(...)?` also returns without
-closing the event or deleting the queue, and because some timers are already
-queued at that point the caller can resume while the timer thread still
-encrypts the image. The same block backs the `Sleep` hook, so a payload that
-sleeps in a loop leaks one kernel event handle per call.
-
-Why deferred: cleanup on every path needs a drop guard (or an explicit error
-path) and a live re-measurement of the hook. Do it as one change, not an
-ad-hoc `CloseHandle` on the success path only.
-
-### 5. Network-stager transport hygiene (low)
-
-`src/techniques/network_stager/transport_subprocess.rs:123-133`,
-`src/techniques/network_stager/transport_winhttp.rs:257-281`.
-
-If the child downloader succeeds but `std::fs::read` fails, the decrypted
-temp file is left on disk (`?` skips the `remove_file`). Neither transport caps
-the body size, while the packer-side fetch caps at 64 MiB
-(`src/engine/fetch.rs:15`), so a hostile or misconfigured server can grow the
-stub's memory without bound. Add a size limit shared by both transports and a
-cleanup guard around the read.
 
 ### 6. Launcher template re-scans user text with later placeholders (low)
 

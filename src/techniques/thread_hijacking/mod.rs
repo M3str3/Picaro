@@ -18,6 +18,7 @@ use super::{Capability, Category, Stability, TechniqueDef};
 /// and export live in the payload's `build.payloads` entry) and which thread to
 /// take over.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Params {
     /// Name of the payload in `build.payloads` to run. Optional when the plan
     /// declares exactly one payload.

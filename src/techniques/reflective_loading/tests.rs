@@ -53,6 +53,38 @@ fn parses_erase_header_from_params() {
     );
 }
 
+/// The exit patch is opt-in: a plan that does not mention it keeps the
+/// payload's `ExitProcess` ending the process.
+#[test]
+fn patch_exit_defaults_to_off() {
+    assert!(!Params::default().patch_exit);
+
+    let step: TechniqueKind = serde_yml::from_str("technique: reflective_loading\nparams: {}\n")
+        .expect("an empty params mapping should parse");
+    assert_eq!(
+        step,
+        TechniqueKind::ReflectiveLoading {
+            params: Params::default()
+        }
+    );
+}
+
+#[test]
+fn parses_patch_exit_from_params() {
+    let step: TechniqueKind =
+        serde_yml::from_str("technique: reflective_loading\nparams:\n  patch_exit: true\n")
+            .expect("reflective_loading should parse");
+    assert_eq!(
+        step,
+        TechniqueKind::ReflectiveLoading {
+            params: Params {
+                patch_exit: true,
+                ..Params::default()
+            }
+        }
+    );
+}
+
 #[test]
 fn def_is_well_formed() {
     assert_eq!(DEF.name, "reflective_loading");
@@ -119,6 +151,103 @@ fn the_rendered_fragment_carries_the_erase_header_flag() {
     assert!(on.contains("const ERASE_HEADER: bool = true;"));
 }
 
+/// The exit patch reaches the fragment as a constant and brings the import
+/// interception and the fiber hand-off with it.
+#[test]
+fn the_rendered_fragment_carries_the_patch_exit_flag() {
+    let strings = StringsConfig::from_yaml(None).expect("default strings");
+
+    let off = Params::default().render_fragment(&strings);
+    assert!(off.contains("const PATCH_EXIT: bool = false;"));
+
+    let on = Params {
+        patch_exit: true,
+        ..Params::default()
+    }
+    .render_fragment(&strings);
+    assert!(on.contains("const PATCH_EXIT: bool = true;"));
+}
+
+/// `patch_exit` has to reach three places: the import policy (so the payload's
+/// exit calls land on the shim), the fiber runner, and the entry-point/export
+/// call sites. The shim must switch to the loader's fiber on the loader thread,
+/// end only the calling thread on a payload-created one, and keep ending the
+/// process when the loader cannot resume.
+#[test]
+fn patch_exit_wires_the_shim_and_the_fiber_hand_off() {
+    let strings = StringsConfig::from_yaml(None).expect("default strings");
+    let fragment = Params {
+        patch_exit: true,
+        ..Params::default()
+    }
+    .render_fragment(&strings);
+
+    // The IAT slot is served by the matching shim through the import policy:
+    // the Win32 exits, the CRT exits, and a self `TerminateProcess`.
+    assert!(fragment.contains("Some(exit_shim as usize as u64)"));
+    assert!(fragment.contains("Some(crt_exit_shim as usize as u64)"));
+    assert!(fragment.contains("Some(terminate_shim as usize as u64)"));
+    // Only the payload's exit calls are redirected; everything else keeps the
+    // build's policy.
+    assert!(fragment.contains("crate::resolution_policy(dll, func)"));
+    // The shim hands the thread back on the loader's thread only.
+    assert!(fragment.contains("thread == LOADER_THREAD.load(Ordering::SeqCst)"));
+    assert!(fragment.contains("SwitchToFiber(loader as *const c_void)"));
+    // A payload-created thread is not a fiber: it exits alone.
+    assert!(fragment.contains("ExitThread(code)"));
+    // A CRT exit is cdecl: its shim must not use the Win32 calling convention.
+    assert!(fragment.contains("unsafe extern \"C\" fn crt_exit_shim(code: i32) -> !"));
+    // `TerminateProcess` of another process is forwarded, not swallowed.
+    assert!(fragment.contains("terminates_self(process)"));
+    assert!(fragment.contains("TerminateProcess(process, code)"));
+    // The payload runs on a fiber created on the loader's own thread.
+    assert!(fragment.contains("let loader = ConvertThreadToFiber(None);"));
+    assert!(fragment.contains("Some(payload_fiber)"));
+    assert!(fragment.contains("SwitchToFiber(fiber as *const c_void)"));
+    assert!(fragment.contains("DeleteFiber(fiber as *const c_void)"));
+    // Both payload entry paths go through it.
+    assert!(fragment.contains("run_on_fiber(entry_point, false)"));
+    assert!(fragment.contains("run_on_fiber(address, true)"));
+}
+
+/// The intercepted names must be rebuilt at runtime: a cleartext
+/// `ExitProcess`/`ExitThread`/`exit`/`_exit`/`TerminateProcess` in the stub's
+/// `.rdata` is a static signal.
+#[test]
+fn patch_exit_obfuscates_the_intercepted_names() {
+    use crate::engine::obfuscation::StringStrategy;
+
+    for strings in [
+        StringsConfig::from_yaml(None).expect("default strings"),
+        StringsConfig {
+            strategy: StringStrategy::Stack,
+            key: None,
+        },
+    ] {
+        let fragment = Params {
+            patch_exit: true,
+            ..Params::default()
+        }
+        .render_fragment_for(&strings, PayloadFormat::Pe, None);
+        for name in [
+            "ExitProcess",
+            "ExitThread",
+            "exit",
+            "_exit",
+            "TerminateProcess",
+        ] {
+            assert!(
+                !fragment.contains(&format!("\"{name}\"")),
+                "the name '{name}' leaked"
+            );
+        }
+        assert!(
+            !fragment.contains('$'),
+            "an unsubstituted placeholder would break the stub"
+        );
+    }
+}
+
 /// The zeroing writes `SizeOfHeaders` zero bytes at the mapped base, after the
 /// loader's fixups and before the payload's entry point runs.
 #[test]
@@ -180,6 +309,20 @@ fn the_export_path_zeroes_the_decrypted_payload_after_the_lookup() {
             .contains("payload: &mut [u8],"),
         "run_reflective must take the buffer mutably so it can be zeroed"
     );
+}
+
+/// A shellcode payload has no import table, so enabling the exit patch changes
+/// nothing in its fragment.
+#[test]
+fn patch_exit_does_not_change_the_shellcode_fragment() {
+    let strings = StringsConfig::from_yaml(None).expect("default strings");
+    let plain = Params::default().render_fragment_for(&strings, PayloadFormat::Shellcode, None);
+    let enabled = Params {
+        patch_exit: true,
+        ..Params::default()
+    }
+    .render_fragment_for(&strings, PayloadFormat::Shellcode, None);
+    assert_eq!(plain, enabled);
 }
 
 /// A shellcode payload has no mapped image, so enabling the option changes
@@ -536,25 +679,28 @@ fn rendered_fragments_have_no_placeholders_or_sensitive_literals() {
 
     for strings in strategies {
         for erase_header in [false, true] {
-            for format in [
-                PayloadFormat::Pe,
-                PayloadFormat::Dll,
-                PayloadFormat::Shellcode,
-            ] {
-                let params = Params {
-                    erase_header,
-                    ..Params::default()
-                };
-                let fragment = params.render_fragment_for(&strings, format, None);
-                assert!(
-                    !fragment.contains('$'),
-                    "an unsubstituted placeholder would break the stub ({format:?})"
-                );
-                let leaked = find_sensitive_literals_in_source(&fragment);
-                assert!(
-                    leaked.is_empty(),
-                    "the rendered fragment leaks sensitive literals ({format:?}): {leaked:?}"
-                );
+            for patch_exit in [false, true] {
+                for format in [
+                    PayloadFormat::Pe,
+                    PayloadFormat::Dll,
+                    PayloadFormat::Shellcode,
+                ] {
+                    let params = Params {
+                        erase_header,
+                        patch_exit,
+                        ..Params::default()
+                    };
+                    let fragment = params.render_fragment_for(&strings, format, None);
+                    assert!(
+                        !fragment.contains('$'),
+                        "an unsubstituted placeholder would break the stub ({format:?})"
+                    );
+                    let leaked = find_sensitive_literals_in_source(&fragment);
+                    assert!(
+                        leaked.is_empty(),
+                        "the rendered fragment leaks sensitive literals ({format:?}): {leaked:?}"
+                    );
+                }
             }
         }
     }
@@ -706,7 +852,197 @@ fn compiles_reflective_loading_stub_to_pe() {
     let _ = std::fs::remove_dir_all(&build_dir);
 }
 
-/// Builds the `api_resolution` probe payload, packs it with an indirect-syscall
+/// Two reflectively loaded executables in one chain. A Rust `main` ends with
+/// `ExitProcess`, so without `patch_exit` the first payload would end the
+/// process with code 7 and the second would never run. The exit patch hands the
+/// thread back, both payloads run in order, and the chain's code is the second
+/// payload's 9.
+#[test]
+#[cfg(feature = "live-tests")]
+#[ignore = "requires rustc and the compiled dependencies"]
+fn patch_exit_chains_two_executable_payloads() {
+    use std::path::Path;
+    use std::process::Command;
+
+    use crate::engine::steps::{PayloadCipher, PayloadSource, StepPayload, StepsParams};
+    use crate::plan::schema::{ConsoleMode, DllEntry, OutputKind, StepControl};
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let build_dir = std::env::temp_dir().join(format!("picaro_patch_exit_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&build_dir);
+    std::fs::create_dir_all(&build_dir).unwrap();
+
+    let rustc = crate::engine::compiler::find_rustc().unwrap();
+    let mut ciphers = Vec::new();
+    for (index, (marker, code)) in [("PATCH_EXIT_FIRST", 7u32), ("PATCH_EXIT_SECOND", 9)]
+        .into_iter()
+        .enumerate()
+    {
+        let source = build_dir.join(format!("payload_{index}.rs"));
+        // A `no_std` payload with no static TLS: the mapper cannot provision the
+        // payload's own TLS index, so a `std` payload's thread-locals would alias
+        // (and corrupt) the stub's. `patch_exit` is what this test exercises.
+        std::fs::write(
+            &source,
+            format!(
+                r#"#![no_std]
+#![no_main]
+
+use core::ffi::c_void;
+
+#[panic_handler]
+fn panic(_: &core::panic::PanicInfo) -> ! {{
+    unsafe {{ ExitProcess(0xE0) }}
+}}
+
+#[link(name = "kernel32")]
+extern "system" {{
+    fn GetStdHandle(kind: u32) -> *mut c_void;
+    fn WriteFile(h: *mut c_void, buf: *const u8, len: u32, written: *mut u32, overlapped: *mut c_void) -> i32;
+    fn ExitProcess(code: u32) -> !;
+}}
+
+#[no_mangle]
+pub extern "system" fn mainCRTStartup() -> ! {{
+    let msg = b"{marker}\n";
+    unsafe {{
+        let mut written = 0u32;
+        WriteFile(
+            GetStdHandle(0xFFFF_FFF5),
+            msg.as_ptr(),
+            msg.len() as u32,
+            &mut written,
+            core::ptr::null_mut(),
+        );
+        ExitProcess({code})
+    }}
+}}
+"#
+            ),
+        )
+        .unwrap();
+        let exe = build_dir.join(format!("payload_{index}.exe"));
+        // Distinct preferred bases: the loader leaks the first mapped image, and
+        // these minimal payloads need no relocations, so the second one must not
+        // share the first one's base.
+        let base = [0x1_4000_0000u64, 0x1_5000_0000][index];
+        let status = Command::new(&rustc)
+            .arg(&source)
+            .args([
+                "--edition",
+                "2021",
+                "-O",
+                "-C",
+                "panic=abort",
+                "-C",
+                "strip=symbols",
+                "-C",
+                "link-arg=-ENTRY:mainCRTStartup",
+                "-C",
+                "link-arg=-NODEFAULTLIB",
+                "-C",
+                "link-arg=-SUBSYSTEM:CONSOLE",
+            ])
+            .arg("-C")
+            .arg(format!("link-arg=-BASE:0x{base:x}"))
+            .arg("-o")
+            .arg(&exe)
+            .status()
+            .unwrap();
+        assert!(status.success(), "payload {index} did not compile");
+
+        let plaintext = std::fs::read(&exe).unwrap();
+        let key = crate::engine::crypto::generate_key();
+        let encrypted = crate::engine::crypto::encrypt_payload(&plaintext, &key).unwrap();
+        let name = format!("payload_{index}.bin");
+        std::fs::write(build_dir.join(&name), &encrypted.ciphertext).unwrap();
+        ciphers.push(PayloadCipher {
+            nonce: encrypted.nonce,
+            key: encrypted.key,
+            plaintext_len: encrypted.plaintext_len,
+            path: name,
+            format: PayloadFormat::Pe,
+            export: None,
+            args: Vec::new(),
+            args_override: false,
+            marker: String::new(),
+            source: PayloadSource::Embedded,
+        });
+    }
+
+    let steps = ciphers
+        .into_iter()
+        .enumerate()
+        .map(|(index, payload)| StepPayload {
+            index,
+            label: "reflective_loading".to_string(),
+            technique: TechniqueKind::ReflectiveLoading {
+                params: Params {
+                    patch_exit: true,
+                    ..Params::default()
+                },
+            },
+            control: StepControl::default(),
+            payload: Some(payload),
+        })
+        .collect();
+    let params = StepsParams {
+        steps,
+        build_args: std::collections::BTreeMap::new(),
+        debug: false,
+        windows_subsystem: false,
+        kind: OutputKind::Exe,
+        entry: DllEntry::Auto,
+        console: ConsoleMode::Parent,
+        poly_seed: None,
+    };
+
+    let template = std::fs::read_to_string(
+        root.join("src")
+            .join("engine")
+            .join("templates")
+            .join("main.rs.tpl"),
+    )
+    .unwrap();
+    let strings = StringsConfig::from_yaml(None).unwrap();
+    let stub_src = crate::engine::steps::render_builtin(
+        &template,
+        &params,
+        &strings,
+        &crate::engine::syscalls::SyscallsConfig::default(),
+        &crate::engine::api_resolution::ApiResolutionConfig::default(),
+    )
+    .unwrap();
+    let stub_path = build_dir.join("main.rs");
+    std::fs::write(&stub_path, stub_src).unwrap();
+
+    let deps = crate::engine::compiler::locate_stub_deps(crate::plan::schema::Arch::X64).unwrap();
+    let out = build_dir.join("out.exe");
+    crate::engine::compiler::compile_stub(
+        &stub_path,
+        &out,
+        &deps,
+        crate::engine::compiler::CompileOptions::default(),
+    )
+    .unwrap();
+
+    let output = Command::new(&out).output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    assert!(
+        output.status.code() == Some(9),
+        "the second payload's code must be the process code: {stdout}\n{stderr}"
+    );
+    let first = stdout
+        .find("PATCH_EXIT_FIRST")
+        .expect("the first payload did not run");
+    let second = stdout
+        .find("PATCH_EXIT_SECOND")
+        .expect("the chain stopped at the first payload's ExitProcess");
+    assert!(first < second, "the steps ran out of order: {stdout}");
+    let _ = std::fs::remove_dir_all(&build_dir);
+}
 /// `reflective_loading` stub and the given `apis:` selection and `unmatched`
 /// policy (debug build, so the proxies emit `tech_dbg!` traces), runs it and
 /// returns `(exit status, stdout, stderr)`.

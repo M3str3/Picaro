@@ -3,10 +3,10 @@
 #
 #   cargo run -- build examples/plans/lab-signed.yaml
 #
-# The CA's public certificate is written next to the artifact as
-# `dist/lab_signed.ca.cer`; install it in a lab machine's *Trusted Root
-# Certification Authorities* to make the signature verify there. Nothing is
-# added to this machine's trust stores.
+# The CA's public certificate is written into the bundle's provenance folder,
+# `packed/lab-signed-<run>/artifacts/lab_signed.ca.cer`; install it in a lab
+# machine's *Trusted Root Certification Authorities* to make the signature
+# verify there. Nothing is added to this machine's trust stores.
 #
 # Signing works with `signtool` (Windows) and `osslsigncode` (Linux, including
 # the Docker image), so the same plan signs on either platform.

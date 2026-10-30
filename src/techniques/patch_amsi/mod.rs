@@ -13,6 +13,7 @@ use super::{Capability, Category, Stability, TechniqueDef};
 
 /// Parameters for the AMSI patch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Params {
     /// Also patch `AmsiScanString`, the scan entry some hosts use for string
     /// content instead of a buffer. Best effort.

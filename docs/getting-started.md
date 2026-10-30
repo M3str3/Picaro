@@ -65,10 +65,10 @@ cargo run -- pack payload.exe --hollow
 
 It detects the format (PE/shellcode → `reflective_loading`, .NET →
 `dotnet_hosting`, `.ps1` → `powershell_hosting`), defaults to indirect syscalls
-with `hells_gate`, and writes `packed/<payload>/` with the artifact, the build
-manifest and `plan.yaml`. Change the defaults in `picaro.config.yaml` (an
-example lives in `examples/picaro.config.yaml`); `--print-plan` emits the YAML
-when you want to continue with `picaro build`.
+with `hells_gate`, and writes a bundle under `packed/<payload>-<run>/` with the
+artifact, the sources and the build manifest. Change the defaults in
+`picaro.config.yaml` (an example lives in `examples/picaro.config.yaml`);
+`--print-plan` emits the YAML when you want to continue with `picaro build`.
 
 The rest of this page is the plan-first path, which is still the right one for
 multi-payload builds and structured technique parameters. The full reference for
@@ -204,8 +204,9 @@ This is the Docker wrapper from above; for a local build, use
 `cargo run -- build …` instead.
 
 `-v`/`--verbose` prints the resolved plan and per-step detail; the manifest
-(`dist/demo.manifest.json`) records the artifact, payload and plan hashes.
-Picaro prints a banner before every subcommand; `-q`/`--quiet` skips it.
+(`packed/<plan>-<run>/artifacts/<artifact>.manifest.json`) records the artifact,
+payload and plan hashes. Picaro prints a banner before every subcommand;
+`-q`/`--quiet` skips it.
 
 ```powershell
 .\dist\demo.exe                       # run it
@@ -228,7 +229,8 @@ offline Defender scan.
 - Only Execution techniques take a `params.payload`; with two or more payloads it
   is required.
 - A terminal step (`reflective_loading`/`process_ghosting` of a PE executable,
-  `dotnet_hosting`) must be last.
+  `dotnet_hosting`) must be last — unless the `reflective_loading` step sets
+  `params.patch_exit: true`, which makes it return control to the loader.
 - `build.output.arch` is `x64` or `x86`, and the payload must match it: the stub
   and the payload share one address space. Both execution techniques and the
   preparations support `x86` (see [x86 support](x86.md)); `sleep_obfuscation`

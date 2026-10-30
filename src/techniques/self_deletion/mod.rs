@@ -39,6 +39,7 @@ pub enum Mode {
 
 /// Parameters for self-deletion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Params {
     /// Which removal mechanism to use (see [`Mode`]).
     #[serde(default = "default_mode")]

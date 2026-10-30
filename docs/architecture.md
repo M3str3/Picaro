@@ -30,6 +30,24 @@ compilation or output).
 The generated stub decrypts the payload in memory and runs it. No cleartext
 payload touches disk.
 
+## Build bundle
+
+Every build writes one self-contained bundle (`src/paths.rs::BundleLayout`):
+
+```text
+packed/<plan>-<run>/
+├── plan.yaml      the resolved plan (skipped with --no-save-plan)
+├── build/         main.rs + payload_N.bin (include_bytes! inputs), out.exe, out.pdb
+├── dist/          the canonical artifact: signed and hashed here
+└── artifacts/     manifest, exported lab CA, .picaro/lab identity
+```
+
+`<run>` is `--build-name` or `<pid>-<nanos>`, so two runs never share a folder.
+`output.path` only decides where the delivered copy goes; the bundle is always
+complete, which makes it the archive as well as the working directory. A
+reused `--build-name` bundle has `build/`, `dist/` and `artifacts/` recreated;
+the `plan.yaml` a previous run wrote is left alone.
+
 ## Technique pipeline model
 
 Each technique is Preparation, Execution or Control (`src/techniques/mod.rs`):
@@ -56,7 +74,8 @@ The stub renders the steps into three placeholders:
 - `$STUB_HELPERS$` — the shared `dec_xor` / `decrypt_step` helpers.
 
 `run()` calls `init_syscalls()?`, then the runner. A terminal step
-(`reflective_loading` of a PE executable, `dotnet_hosting`) must be last.
+(`reflective_loading` of a PE executable *without* `patch_exit`,
+`dotnet_hosting`, `process_ghosting` of a PE executable) must be last.
 
 ## Syscall layer (`build.stub.syscalls`)
 
@@ -337,7 +356,9 @@ examples/
   payloads/   test payloads
 docs/         this file + the rest of the book; the navigation is docs/nav.yml
 docs/site/    the Starlight site project (assembler, config, Dockerfile)
-build/        (gitignored) intermediate artifacts
-dist/         (gitignored) final packed binaries; a build writes dist/<plan>/
-packed/       (gitignored) `picaro pack` packages: plan, sources, blobs, artifact, manifest
+build/        (gitignored) intermediate artifacts from ad-hoc builds
+dist/         (gitignored) artifacts delivered outside a bundle
+packed/       (gitignored) build bundles: `packed/<plan>-<run>/` with `plan.yaml`,
+              `build/` (sources + compiler output), `dist/` (artifact) and
+              `artifacts/` (manifest, CA, lab state)
 ```

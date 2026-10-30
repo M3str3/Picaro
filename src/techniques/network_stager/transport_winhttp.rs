@@ -263,13 +263,21 @@ fn fetch() -> Result<Vec<u8>, String> {
         if available == 0 {
             break;
         }
-        let mut chunk = vec![0u8; available as usize];
+        // The server picks `available`, so it never sizes the allocation
+        // blindly: a chunk that does not fit the remaining budget fails the
+        // fetch, and the buffer is capped to that budget.
+        let remaining = MAX_STAGED_BYTES.saturating_sub(bytes.len());
+        if available as usize > remaining {
+            return Err($MSG_TOO_LARGE$);
+        }
+        let chunk_len = (available as usize).min(remaining);
+        let mut chunk = vec![0u8; chunk_len];
         let mut read: u32 = 0;
         if unsafe {
             (api.read)(
                 request,
                 chunk.as_mut_ptr() as *mut c_void,
-                available,
+                chunk_len as u32,
                 &mut read,
             )
         } == 0

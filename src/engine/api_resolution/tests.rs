@@ -600,14 +600,29 @@ fn open_process_token_rebuild_calls_the_three_argument_native() {
 }
 
 #[test]
-fn duplicate_token_ex_does_not_pass_the_level_as_effective_only() {
+fn duplicate_token_ex_carries_the_level_in_the_object_attributes() {
     let config = proxy_config(&["advapi32!DuplicateTokenEx"]);
+    assert_eq!(config.required_syscalls(), vec!["NtDuplicateToken"]);
     let block = render_block(&config, &xor_strings());
-    assert!(block.contains("_impersonation_level: i32"), "{block}");
+    // Win32 does not call NtSetInformationToken: the level is an input to
+    // NtDuplicateToken through the OBJECT_ATTRIBUTES/SQOS pair.
+    assert!(block.contains("SECURITY_QUALITY_OF_SERVICE"), "{block}");
     assert!(
-        block.contains("core::ptr::null(),\n            0,\n            token_type,"),
+        block.contains("SECURITY_IMPERSONATION_LEVEL(impersonation_level)"),
         "{block}"
     );
+    assert!(block.contains("security_quality_of_service:"), "{block}");
+    assert!(
+        block.contains("EffectiveOnly: windows::Win32::Foundation::BOOLEAN(0)"),
+        "{block}"
+    );
+    assert!(block.contains("crate::nt_duplicate_token("), "{block}");
+    assert!(
+        block.contains("&mut object as *mut ObjectAttributes"),
+        "{block}"
+    );
+    assert!(!block.contains("nt_set_info_token"), "{block}");
+    assert!(!block.contains('$'), "leftover placeholder: {block}");
 }
 
 #[test]

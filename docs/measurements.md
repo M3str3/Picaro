@@ -23,6 +23,7 @@ the time and have since been consolidated into `examples/plans/` and
 | DLL | host-loaded DLL (`kind: dll`) | 366 KB; loaded by CPython, .NET and `rundll32`; the chain's `42` comes back from the two blocking hosts |
 | Shellcode | shellcode output (`kind: shellcode`, sRDI) | `.bin` builds and runs; a PE payload mapped reflectively prints its marker (bootstrap arg swap + TLS provisioning fixed in the vendored loader) |
 | EDR | CrowdStrike Falcon | hollowing blocked at runtime (partial) |
+| Moneta (2026-10-30) | `patch_etw` + `hide_module` + `reflective_loading` (`erase_header`) | 3 IOCs: private RX 90 KB, unsigned loader missing from PEB, modified `ntdll` `.text` |
 
 ## Phase 5 — static baseline (process hollowing)
 
@@ -1056,6 +1057,64 @@ load list, a product decision rather than a fragment patch. The fragment stays
 with the callbacks only, pinned by
 `the_mapper_does_not_provision_static_tls`.
 
+## Reflective loading — `patch_exit` chains two executables (2026-10-27, x64)
+
+Host: Windows x64, Defender real-time protection off (checked at the start of
+the round). Method: `patch_exit_chains_two_executable_payloads`
+(`cargo test --features live-tests -- --ignored`) builds a two-step runtime,
+both steps `reflective_loading` of a minimal `no_std` PE whose entry point writes
+a marker with `WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), ...)` and calls
+`ExitProcess` — first `7`, second `9` — then compiles the stub and runs it.
+
+- **The first payload's `ExitProcess` is intercepted.** The payload runs on a
+  fiber created on the loader's thread; the `ExitProcess` IAT slot is served by
+the shim, which records `7` and switches back to the loader's fiber. The step
+  returns `7` while the process keeps running.
+- **The chain continues.** The second step's payload runs too, both markers
+  appear on stdout in order (`PATCH_EXIT_FIRST`, then `PATCH_EXIT_SECOND`), and
+  the process exit code is the second payload's `9` — the value the runner
+  carries in `last`.
+- **The payloads are `no_std` on purpose.** A `std` payload compiled for the
+  same test printed its marker, but its static TLS aliased the stub's
+  `thread_local` state (the documented 2026-10-18 limitation): the second step's
+  `set_stage_args` then panicked with `RefCell already borrowed`, because the
+  payload's TLS writes had corrupted the stub's borrow flag. `patch_exit`
+  returns control, not TLS; prefer a payload without a TLS template for a
+  chained step.
+- **Both preferred bases are distinct.** The minimal payloads need no base
+  relocations, so the second is linked at `0x150000000`; the first mapped image
+  stays allocated (the loader does not free it) and would otherwise occupy the
+  first payload's `0x140000000`.
+- **The C-runtime `exit` path is covered too (2026-10-27, same host).** A mingw
+  C payload (`printf` + `return 7`) imports `exit` from `msvcrt.dll`; with
+  `patch_exit: true`, a `reflective_loading` step of that PE in a `kind:
+  shellcode` stub run through `examples/hosts/runner.exe` printed
+  `C_PAYLOAD_RAN` and the host's `[+] Shellcode execution completed` (process
+  exit `0`). With `patch_exit: false` the same artifact printed the marker and
+  the process ended with `7`; the host's completion line never ran. The
+  `exit`/`_exit`/self-`TerminateProcess` shims are what close that gap.
+- **A payload whose exit happens inside another DLL escapes the patch
+  (2026-10-27, same host).** `nxc.exe` is a 348 KiB Nuitka build that imports
+  `python314.dll`; its import table has `TerminateProcess` but **no**
+  `ExitProcess`/`ExitThread`. Run as a `kind: shellcode` artifact through
+  `runner.exe`, its argparse error exits the process with `2` and the host's
+  completion line does not print: CPython's `Py_Exit` calls `exit` from
+  *python314.dll's* IAT, which the mapper does not own, and any child process the
+  runtime spawns is outside this process. This is the same class as the
+  PyInstaller onefile finding above: an arbitrary runtime that exits from its own
+  module or a child is not a `patch_exit` payload.
+- **The host's own argument reaches the payload.** `patch_command_line` builds
+  `<exe> <yaml args> <runtime args>` from the *host's* `argv`; running
+  `runner.exe nxc.bin` therefore gives the payload `nxc.bin` as `argv[1]`
+  (observed: nxc's argparse reported
+  `invalid choice: './dist/nxc_probe2/nxc_probe2.bin'`). A host whose own
+  argument is not meant for the payload must not pass it as a runtime argument
+  (environment variable, config file, or a host that clears its command line).
+
+Not measured: an `ExitProcess` resolved dynamically (`GetProcAddress`), by
+ordinal, `RtlExitUserProcess`, or a call made inside another loaded DLL — none
+is intercepted, by design.
+
 ## Shellcode TLS — the stub-side handoff (2026-10-21)
 
 Host: Windows x64, Defender real-time protection off (checked at the start of
@@ -1245,3 +1304,25 @@ Both techniques are functionally real, and both are narrow:
   memory-integrity monitoring.
 - **Neither** hides the mapped payload; that is orthogonal work
   (`sleep_obfuscation`, `hide_module`, `unhook_ntdll`).
+
+## Moneta — reflective-loading chain after the 2026-10-30 fixes (2026-10-30)
+
+- Artifact: `patch_etw` → `hide_module` → `reflective_loading` with
+  `erase_header: true`, indirect `hells_gate` and XOR strings; a benign payload
+  that sleeps 180 s (built from `build/moneta_target.rs`, scratch).
+- Host: Windows 11 26100, Defender real-time protection off; Moneta v1.0,
+  `Moneta64.exe -m ioc -p <pid> -v detail` (SeDebug was not granted, so the
+  scan is of its own user's process).
+- Findings (exit 1):
+  - `0x140001000` + 90,112 bytes of private RX: "Abnormal private executable
+    memory" — the reflectively mapped payload. `erase_header` removes the
+    mapped PE header, not the private RX allocation.
+  - The loader image `out.exe`: "Unsigned module | Missing PEB module" —
+    `hide_module` unlinked the loader from the PEB.
+  - `ntdll.dll` `.text`: "Modified code" — `patch_etw` patched the ETW
+    exports.
+- Conclusion: Moneta still detects the chain through the private RX mapping;
+  `erase_header`/`hide_module` change what it reports (no `MZ`/`PE` at the
+  mapped base, loader missing from the PEB) but do not hide the allocation.
+  This matches the earlier Moneta result and shows no regression from the
+  2026-10-30 changes.

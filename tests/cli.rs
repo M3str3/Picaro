@@ -251,13 +251,14 @@ fn build_interactive_quit_writes_nothing() {
         .expect("spawn picaro build interactive");
 
     // Four blanks for the payload (name, args, arch, output kind) and two for
-    // the stub (strings, syscalls); add one reflective step; three blanks for
-    // the output (path, strip, trim paths). `3` quits the review screen, so the
-    // wizard stops before writing (or compiling) anything.
+    // the stub (strings, syscalls); add one reflective step and take the default
+    // `patch_exit`; three blanks for the output (path, strip, trim paths). `3`
+    // quits the review screen, so the wizard stops before writing (or compiling)
+    // anything.
     let mut stdin = child.stdin.take().expect("stdin is piped");
     stdin.write_all(&b"\n".repeat(6)).expect("write answers");
     stdin
-        .write_all(b"add a step\nreflective_loading\ndone\n")
+        .write_all(b"add a step\nreflective_loading\n\ndone\n")
         .expect("write the runtime chain");
     stdin
         .write_all(&b"\n".repeat(3))
@@ -561,15 +562,19 @@ fn write_temp_plan(name: &str, body: &str) -> PathBuf {
 }
 
 /// `build --dry-run` validates the plan and payload but writes nothing — and
-/// therefore needs no `rustc`, so it runs in the fast suite.
+/// therefore needs no `rustc`, so it runs in the fast suite. Nothing means
+/// nothing: neither the delivered artifact nor a bundle.
 #[test]
 fn build_dry_run_validates_without_writing() {
     let out = std::env::temp_dir().join("picaro_dry_run_out.exe");
-    let manifest = std::env::temp_dir().join("picaro_dry_run_out.manifest.json");
     let _ = std::fs::remove_file(&out);
-    let _ = std::fs::remove_file(&manifest);
+    // This test owns the `cli-dry-run-only` plan name, so no other test can add
+    // a bundle under it while the before/after sweep runs.
+    let yaml =
+        minimal_build_plan(&out, None).replace("name: cli-dry-run", "name: cli-dry-run-only");
+    let before = bundles_for("cli-dry-run-only-");
 
-    let plan = write_temp_plan("picaro_dry_run.yaml", &minimal_build_plan(&out, None));
+    let plan = write_temp_plan("picaro_dry_run.yaml", &yaml);
     let output = picaro(&[
         "--quiet".as_ref(),
         "build".as_ref(),
@@ -584,7 +589,30 @@ fn build_dry_run_validates_without_writing() {
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("dry run"));
     assert!(!out.exists(), "a dry run must not write the artifact");
-    assert!(!manifest.exists(), "a dry run must not write a manifest");
+    assert_eq!(
+        bundles_for("cli-dry-run-only-"),
+        before,
+        "a dry run must not create a bundle"
+    );
+}
+
+/// The build bundles under `packed/` whose name starts with `prefix`.
+fn bundles_for(prefix: &str) -> Vec<std::path::PathBuf> {
+    let mut found: Vec<_> = std::fs::read_dir("packed")
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with(prefix))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    found.sort();
+    found
 }
 
 /// A `kind: dll` build whose export name is a Rust keyword is rejected by the

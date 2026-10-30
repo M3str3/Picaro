@@ -20,6 +20,7 @@ use super::{Capability, Category, Stability, TechniqueDef};
 /// per-user temporary directory instead), so `run_key` is repurposed as the
 /// file name while keeping its original "value name" wording.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Params {
     /// ISO date (YYYY-MM-DD) after which the payload must not run. None = no date gate.
     #[serde(default, skip_serializing_if = "Option::is_none")]

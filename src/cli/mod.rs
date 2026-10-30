@@ -2,15 +2,19 @@
 //!
 //! Four subcommands:
 //! - `pack`: payload + flags → generated YAML → encrypt payloads → render Rust
-//!   stub → compile → out.exe. No hand-written plan required.
-//! - `build`: YAML → encrypt payloads → render Rust stub → compile → out.exe.
+//!   stub → compile → artifact. No hand-written plan required.
+//! - `build`: YAML → encrypt payloads → render Rust stub → compile → artifact.
 //!   `build interactive <payload>` generates that YAML from a few questions.
+//!
+//! Both write one self-contained bundle under `packed/` (see
+//! `docs/design/cli-pack.md`); `output.path` only decides where the delivered
+//! artifact is copied.
 //! - `audit`: static analysis of a PE (measurement infrastructure).
 //! - `techniques`: inspect the technique registry.
 //!
 //! Running with no subcommand prints the banner plus the generated help.
 
-use crate::paths::{file_url_to_path, package_paths};
+use crate::paths::{file_url_to_path, run_nonce, BundleLayout};
 use crate::{audit, engine, error, features, pack, plan, techniques, ui, wizard};
 
 mod build;
@@ -118,10 +122,10 @@ enum Commands {
         #[arg(long)]
         debug: bool,
 
-        /// Name the scratch directory `build/<NAME>` instead of a unique
-        /// `build/run-<pid>-<nanos>`, so a run lands on a stable path. The
-        /// generated `main.rs`, `out.exe` and `out.pdb` live there, together,
-        /// which is exactly what a debugger needs (see `--debug`).
+        /// Name the bundle `packed/<plan>-<NAME>` instead of a unique
+        /// `packed/<plan>-<pid>-<nanos>`, so a run lands on a stable path. The
+        /// generated `build/main.rs`, `build/out.exe` and `build/out.pdb` live
+        /// there, together, which is exactly what a debugger needs (see `--debug`).
         #[arg(long, value_name = "NAME", visible_alias = "build-debug-name")]
         build_name: Option<String>,
 
@@ -145,8 +149,9 @@ enum Commands {
         #[arg(long)]
         verify: bool,
 
-        /// Artifact path; its directory is the package root (the plan folder is
-        /// created inside it).
+        /// Where to deliver the artifact; the bundle under `packed/` is always
+        /// written. A file is delivered verbatim; a directory receives
+        /// `<plan>.<ext>`.
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
 
@@ -162,8 +167,8 @@ enum Commands {
 
     /// Pack a payload with safe defaults; no hand-written plan needed.
     ///
-    /// The flags are compiled into a schema-6 plan, saved in
-    /// `packed/<payload>/plan.yaml` and built through the same path as
+    /// The flags are compiled into a schema-6 plan, saved in the run's bundle
+    /// (`packed/<payload>-<run>/plan.yaml`) and built through the same path as
     /// `picaro build`. Change the defaults in `picaro.config.yaml` (or pass
     /// `--config`); CLI flags always win.
     Pack {
@@ -210,16 +215,23 @@ enum Commands {
         #[arg(long, value_name = "xor|stack")]
         strings: Option<String>,
 
-        /// Output root (default: packed); each payload gets its own folder.
+        /// Output root for the bundles (default: packed). Each run gets
+        /// `<root>/<plan>-<run>/`.
         #[arg(long, value_name = "DIR")]
         dir: Option<PathBuf>,
 
-        /// Artifact name, or an existing directory; the plan folder is created
-        /// inside the selected directory.
+        /// Name the bundle `<plan>-<NAME>` instead of a unique `<plan>-<pid>-<nanos>`,
+        /// so repeated runs land on a stable path (debugging).
+        #[arg(long, value_name = "NAME")]
+        build_name: Option<String>,
+
+        /// Where to deliver the artifact (default: the bundle's `dist/`). A file
+        /// is delivered verbatim; a directory receives `<plan>.<ext>`.
         #[arg(short = 'o', long, value_name = "PATH")]
         out: Option<PathBuf>,
 
-        /// Where to write the generated plan (default: inside the package).
+        /// Write an extra copy of the generated plan outside the bundle
+        /// (the bundled copy is written unless --no-save-plan).
         #[arg(long, value_name = "PATH")]
         plan_out: Option<PathBuf>,
 
@@ -227,7 +239,7 @@ enum Commands {
         #[arg(long)]
         print_plan: bool,
 
-        /// Do not write the generated plan next to the artifact.
+        /// Do not write the generated plan into the bundle.
         #[arg(long)]
         no_save_plan: bool,
 
@@ -429,11 +441,32 @@ struct BuildOptions {
     verbose: bool,
     debug: bool,
     build_name: Option<String>,
+    /// The bundle `pack` already resolved. `None` lets `build` create a unique
+    /// bundle from the plan and `--build-name`.
+    bundle: Option<BundleLayout>,
+    /// Write the resolved plan into the bundle (`false` for `pack --no-save-plan`).
+    save_plan: bool,
+    /// An extra copy of the resolved plan (`pack --plan-out`).
+    plan_out: Option<PathBuf>,
     heading: Option<BuildHeading>,
     prelude: Vec<BuildField>,
     /// Warnings produced before the build starts (for example by `pack`), shown
     /// together with the ones collected during it at the very end.
     warnings: Vec<String>,
+}
+
+/// The bundle a `--dry-run` would write into.
+///
+/// Resolved exactly like [`build`] does, so the tree it prints is the tree a
+/// real run creates.
+fn dry_run_bundle(plan: &plan::Plan, options: &BuildOptions) -> Result<BundleLayout> {
+    let output = effective_output_path(plan, options.out.as_deref());
+    resolve_bundle(
+        plan,
+        output.as_deref(),
+        options.build_name.as_deref(),
+        options.bundle.as_ref(),
+    )
 }
 
 /// Parses the `--seed` value (decimal or `0x` hex).
@@ -588,6 +621,9 @@ fn run() -> Result<()> {
                 verbose: cli.verbose,
                 debug: debug_flag,
                 build_name,
+                bundle: None,
+                save_plan: true,
+                plan_out: None,
                 heading: None,
                 prelude: Vec::new(),
                 warnings: Vec::new(),
@@ -610,7 +646,17 @@ fn run() -> Result<()> {
                                 command: "build".to_string(),
                                 target: path.display().to_string(),
                             };
-                            dry_run(&plan, &path, &ui, &entropy, &heading, None, &[])?;
+                            let bundle = dry_run_bundle(&plan, &options)?;
+                            dry_run(
+                                &plan,
+                                &path,
+                                &bundle,
+                                &ui,
+                                &entropy,
+                                &heading,
+                                Some(bundle.plan.as_path()),
+                                &[],
+                            )?;
                         } else {
                             build(&plan, &build_args, &path, &ui, &options)?;
                         }
@@ -633,7 +679,17 @@ fn run() -> Result<()> {
                             command: "build".to_string(),
                             target: plan_path.display().to_string(),
                         };
-                        dry_run(&plan, &plan_path, &ui, &entropy, &heading, None, &[])?;
+                        let bundle = dry_run_bundle(&plan, &options)?;
+                        dry_run(
+                            &plan,
+                            &plan_path,
+                            &bundle,
+                            &ui,
+                            &entropy,
+                            &heading,
+                            Some(bundle.plan.as_path()),
+                            &[],
+                        )?;
                     } else {
                         build(&plan, &build_args, &plan_path, &ui, &options)?;
                     }
@@ -651,6 +707,7 @@ fn run() -> Result<()> {
             no_stack_spoofing,
             strings,
             dir,
+            build_name,
             out,
             plan_out,
             print_plan,
@@ -703,6 +760,7 @@ fn run() -> Result<()> {
                 strings,
                 out,
                 dir,
+                build_name,
                 plan_out,
                 no_save_plan,
                 arch,
@@ -745,9 +803,6 @@ fn run() -> Result<()> {
             let defaults = pack::load_config(config.as_deref())?;
             let outcome = pack::compose(&args, &defaults)?;
 
-            if outcome.save_plan {
-                pack::write_plan(&outcome)?;
-            }
             if print_plan {
                 anstream::print!("{}", outcome.plan_yaml);
                 if !outcome.plan_yaml.ends_with('\n') {
@@ -768,10 +823,11 @@ fn run() -> Result<()> {
             };
             if is_dry_run {
                 let entropy = BuildEntropy::from_plan(&outcome.plan, seed);
-                let written_plan = outcome.save_plan.then_some(outcome.plan_path.as_path());
+                let written_plan = outcome.save_plan.then_some(outcome.bundle.plan.as_path());
                 dry_run(
                     &outcome.plan,
-                    &outcome.plan_path,
+                    &outcome.bundle.plan,
+                    &outcome.bundle,
                     &ui,
                     &entropy,
                     &heading,
@@ -781,7 +837,9 @@ fn run() -> Result<()> {
                 return Ok(());
             }
 
-            let mut prelude = vec![BuildField {
+            // The bundle, plan and artifact paths are printed by `build` itself;
+            // the prelude only adds what `pack` knows before the build starts.
+            let prelude = vec![BuildField {
                 label: "payload".to_string(),
                 value: format!(
                     "{} → {}",
@@ -789,16 +847,6 @@ fn run() -> Result<()> {
                     outcome.executions.join(", ")
                 ),
             }];
-            if outcome.save_plan {
-                prelude.push(BuildField {
-                    label: "plan".to_string(),
-                    value: outcome.plan_path.display().to_string(),
-                });
-            }
-            prelude.push(BuildField {
-                label: "artifact".to_string(),
-                value: outcome.artifact_path.display().to_string(),
-            });
 
             let options = BuildOptions {
                 seed,
@@ -811,6 +859,9 @@ fn run() -> Result<()> {
                 verbose: cli.verbose,
                 debug: debug_flag,
                 build_name: None,
+                bundle: Some(outcome.bundle.clone()),
+                save_plan: outcome.save_plan,
+                plan_out: outcome.plan_out.clone(),
                 heading: Some(heading),
                 prelude,
                 warnings: outcome.warnings.clone(),
@@ -819,7 +870,7 @@ fn run() -> Result<()> {
             build(
                 &outcome.plan,
                 &build_args,
-                &outcome.plan_path,
+                &outcome.bundle.plan,
                 &ui,
                 &options,
             )?;

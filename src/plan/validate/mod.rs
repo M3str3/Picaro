@@ -7,6 +7,8 @@
 //! runs against concrete steps, with the payload each Execution step loads
 //! pinned down.
 
+use std::path::Path;
+
 use crate::engine::api_resolution::{ApiResolutionConfig, ApiResolutionMode, Unmatched};
 use crate::engine::obfuscation::StringsConfig;
 use crate::engine::polymorphism::PolymorphismMode;
@@ -29,9 +31,15 @@ pub fn validate(plan: &Plan) -> Result<()> {
         ));
     }
 
-    if plan.build.output.path.as_os_str().is_empty() {
+    if plan
+        .build
+        .output
+        .path
+        .as_ref()
+        .is_some_and(|path| path.as_os_str().is_empty())
+    {
         return Err(PackerError::Validation(
-            "'build.output.path' must not be empty".to_string(),
+            "'build.output.path' must not be empty when set".to_string(),
         ));
     }
 
@@ -258,12 +266,21 @@ fn validate_self_deletion(step: &ResolvedStep) -> Result<()> {
 /// payload with no `export` maps the image and silently never starts the chain.
 /// That is always a mistake: require the export the DLL exposes.
 fn validate_reflective_payload(step: &ResolvedStep) -> Result<()> {
-    if !matches!(&step.technique, TechniqueKind::ReflectiveLoading { .. }) {
-        return Ok(());
-    }
+    let params = match &step.technique {
+        TechniqueKind::ReflectiveLoading { params } => params,
+        _ => return Ok(()),
+    };
     let Some(payload) = &step.payload else {
         return Ok(());
     };
+    if params.patch_exit && payload.plan.format == PayloadFormat::Shellcode {
+        return Err(PackerError::Validation(format!(
+            "step {} ('{}') sets 'patch_exit' for a 'format: shellcode' payload ('{}'), but raw \
+             shellcode has no import table to patch; use 'format: pe' or 'format: dll', or remove \
+             'patch_exit'",
+            step.index, step.label, payload.name
+        )));
+    }
     if payload.plan.format == PayloadFormat::Dll && payload.plan.export.is_none() {
         return Err(PackerError::Validation(format!(
             "step {} ('{}') is 'reflective_loading' with a 'format: dll' payload ('{}') but the \
@@ -313,13 +330,16 @@ fn validate_terminal(steps: &[ResolvedStep]) -> Result<()> {
 
 /// The execution technique that makes a step terminal, if any.
 ///
-/// `reflective_loading` is terminal only for a PE *executable* (`format: pe`): a
-/// reflectively loaded DLL returns (its entry point is `DllMain`), and raw
-/// shellcode returns if it is cooperative. `dotnet_hosting` hosts the CLR in the
-/// stub's process, so a managed `Main` that exits ends the process.
+/// `reflective_loading` is terminal only for a PE *executable* (`format: pe`) and
+/// only without `patch_exit`: a `patch_exit` step intercepts the payload's exit
+/// calls and returns to the loader. A reflectively loaded DLL returns (its entry
+/// point is `DllMain`), and raw shellcode returns if it is cooperative.
+/// `dotnet_hosting` hosts the CLR in the stub's process, so a managed `Main`
+/// that exits ends the process.
 fn terminal_technique(step: &ResolvedStep) -> Option<&'static str> {
     match &step.technique {
         TechniqueKind::DotnetHosting { .. } => Some("dotnet_hosting"),
+        TechniqueKind::ReflectiveLoading { params } if params.patch_exit => None,
         TechniqueKind::ReflectiveLoading { .. } | TechniqueKind::ProcessGhosting { .. } => {
             let format = step
                 .payload
@@ -1006,8 +1026,12 @@ fn dll_advisories(plan: &Plan, steps: &[ResolvedStep]) -> Vec<String> {
         );
     }
 
-    let extension = output.path.extension().and_then(|ext| ext.to_str());
-    if !extension.is_some_and(|ext| ext.eq_ignore_ascii_case("dll")) {
+    let extension = output
+        .path
+        .as_deref()
+        .and_then(Path::extension)
+        .and_then(|ext| ext.to_str());
+    if output.path.is_some() && !extension.is_some_and(|ext| ext.eq_ignore_ascii_case("dll")) {
         warnings.push(
             "build.output.kind is 'dll' but the output path does not end in `.dll`: the OS loader \
              and most hosts expect the extension (a different one is a deliberate choice)"
@@ -1069,8 +1093,12 @@ fn shellcode_advisories(plan: &Plan, steps: &[ResolvedStep]) -> Vec<String> {
     let mut warnings = Vec::new();
     let output = &plan.build.output;
 
-    let extension = output.path.extension().and_then(|ext| ext.to_str());
-    if !extension.is_some_and(|ext| ext.eq_ignore_ascii_case("bin")) {
+    let extension = output
+        .path
+        .as_deref()
+        .and_then(Path::extension)
+        .and_then(|ext| ext.to_str());
+    if output.path.is_some() && !extension.is_some_and(|ext| ext.eq_ignore_ascii_case("bin")) {
         warnings.push(
             "build.output.kind is 'shellcode' but the output path does not end in `.bin`: the \
              artifact is raw shellcode, not a PE (a different extension is a deliberate choice)"

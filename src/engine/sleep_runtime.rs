@@ -215,6 +215,66 @@ mod tests {
     }
 
     #[test]
+    fn rendered_block_owns_the_event_and_queue_through_a_guard() {
+        let block = render_block(&xor_strings());
+        let code = code_only(&block);
+        assert!(code.contains("struct EkkoCleanup"), "{code}");
+        assert!(code.contains("impl Drop for EkkoCleanup"), "{code}");
+        // The queue is deleted first (waiting for in-flight callbacks) and the
+        // event is closed afterwards, on every path.
+        assert!(code.contains("CloseHandle(self.event)"), "{code}");
+        assert!(code.contains("(self.delete)(queue, -1)"), "{code}");
+        // `DeleteTimerQueueEx` is required, not best-effort: a queue that
+        // cannot be cancelled must never be created.
+        assert!(
+            code.contains("let delete_timer_queue_ex: FnDeleteTimerQueueEx = resolve_as("),
+            "{code}"
+        );
+        // Both teardown steps are idempotent, so the explicit success path and
+        // `Drop` cannot delete the queue or close the event twice.
+        assert!(code.contains("if self.queue_deleted"), "{code}");
+        assert!(code.contains("if self.event_closed"), "{code}");
+        // The proxy runs this block on payload threads: no panicking paths.
+        assert!(!code.contains(".unwrap("), "{code}");
+        assert!(!code.contains(".expect("), "{code}");
+    }
+
+    #[test]
+    fn cleanup_guard_is_armed_before_the_chain_and_finished_on_success() {
+        let block = render_block(&xor_strings());
+
+        // The guard exists before the queue handle can fail and before the
+        // first timer is queued, so every `?` between them closes the event.
+        let armed = block
+            .find("let mut cleanup = EkkoCleanup::new(h_event")
+            .expect("guard construction");
+        let queue_error = block.find("if h_queue == 0").expect("queue error path");
+        let first_timer = armed
+            + block[armed..]
+                .find("queue_timer(")
+                .expect("first queued timer");
+        assert!(
+            armed < queue_error,
+            "the queue error path must close the event"
+        );
+        assert!(queue_error < first_timer, "{block}");
+
+        // Success: wait for completion, delete the queue (waits), close the
+        // event, then return.
+        let wait = block
+            .rfind("wait_for_single_object(h_event.0 as isize, u32::MAX)")
+            .expect("completion wait");
+        let delete = block
+            .rfind("cleanup.delete_queue()")
+            .expect("queue teardown");
+        let close = block
+            .rfind("cleanup.close_event()")
+            .expect("event teardown");
+        let done = block.rfind("Ok(())").expect("success return");
+        assert!(wait < delete && delete < close && close < done, "{block}");
+    }
+
+    #[test]
     fn no_resolved_name_or_message_leaks_in_cleartext() {
         let block = render_block(&xor_strings());
         for name in [

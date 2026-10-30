@@ -1,12 +1,13 @@
 //! Post-compile scrubbing of build-path literals from the artifact.
 //!
 //! `build.output.trim_paths` remaps the paths the *stub* is compiled from, but
-//! it cannot reach (a) the scratch directory when it sits outside the manifest
-//! dir (`PICARO_BUILD_DIR`) or (b) path literals already baked into precompiled
-//! dependency rlibs — `--remap-path-prefix` only rewrites the crate being
-//! compiled. Those leak absolute build paths, and they are identical in every
-//! artifact built with the same toolchain, so they are a *constant* fingerprint
-//! (the project's scratch dir name, and the exact crypto stack, e.g.
+//! it cannot reach (a) the build bundle's `build/` when it sits outside the
+//! manifest dir (`--dir` or a `PICARO_BUNDLE_ROOT` elsewhere) or (b) path
+//! literals already baked into precompiled dependency rlibs —
+//! `--remap-path-prefix` only rewrites the crate being compiled. Those leak
+//! absolute build paths, and they are identical in every artifact built with the
+//! same toolchain, so they are a *constant* fingerprint (the build directory
+//! name, and the exact crypto stack, e.g.
 //! `.../chacha20poly1305-0.10.1/src/xchacha.rs`).
 //!
 //! This module overwrites those literals in place, keeping the length, so no

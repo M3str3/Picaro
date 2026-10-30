@@ -56,6 +56,7 @@ pub enum EncryptRegion {
 
 /// Parameters for the sleep-obfuscation preparation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Params {
     /// Which variant to run (only `ekko` is implemented).
     #[serde(default = "default_variant")]

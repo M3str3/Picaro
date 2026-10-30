@@ -17,12 +17,14 @@
 #
 # Usage (see README.md, "Docker"):
 #   docker build -t picaro .
-#   docker run --rm -it --user "$(id -u):$(id -g)" -e PICARO_BUILD_DIR=/tmp/picaro-build \
+#   docker run --rm -it --user "$(id -u):$(id -g)" \
 #     -v "$PWD:/work" -w /work picaro build plan.yaml
 #
 # `--user` keeps the artifacts you write through the mount yours instead of
-# root-owned; `PICARO_BUILD_DIR` moves the packer's scratch files off the
-# read-only source tree. scripts/picaro.py sets both for you.
+# root-owned. Each build writes its bundle to `packed/` inside the mounted
+# directory (the bundle is the archive: plan, sources, artifact, manifest), and
+# the plan's `output.path` decides where the delivered copy goes. scripts/picaro.py
+# mounts the current directory and sets the user for you.
 
 # Pinned by digest, not by the floating `1-bookworm` tag. That tag is re-pushed
 # with every Rust release (roughly every six weeks) and every Debian bookworm
@@ -272,11 +274,10 @@ RUN ln -s /usr/src/picaro/target/release/picaro /usr/local/bin/picaro
 RUN printf '%s\n' 'export PATH="/usr/local/cargo/bin:${PATH}"' \
     > /etc/profile.d/rust.sh
 
-# `HOME` must be writable for msfvenom's cache; the packer's scratch directory
-# is redirected off the baked-in (read-only) source tree, exactly as the
-# one-shot `docker run` in the README does.
-ENV HOME=/home/dev \
-    PICARO_BUILD_DIR=/tmp/picaro-build
+# `HOME` must be writable for msfvenom's cache. Build bundles are written under
+# the mounted working directory (`/work/packed`), so they land on the host; no
+# scratch directory needs redirecting.
+ENV HOME=/home/dev
 
 # Seed `/work/target` for the `picaro-target` named volume docker-compose.yml
 # mounts there: Docker initialises a fresh volume from this image path, and

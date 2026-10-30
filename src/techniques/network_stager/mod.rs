@@ -81,6 +81,7 @@ pub const DEFAULT_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)";
 
 /// Parameters for the network-stager technique.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Params {
     /// Name of the payload this step fetches (in `build.payloads`). The payload's
     /// `format`/`export`/`args` still describe how the Execution step runs the
@@ -192,6 +193,10 @@ const MESSAGES: &[(&str, &str)] = &[
     ("$MSG_DOWNLOAD_FAILED$", "the downloader failed"),
     ("$MSG_TIMEOUT$", "the downloader timed out"),
     ("$MSG_READ_FAILED$", "could not read the fetched payload"),
+    (
+        "$MSG_TOO_LARGE$",
+        "the fetched payload exceeds the size limit",
+    ),
     ("$MSG_FETCH_FAILED$", "could not fetch the payload"),
     ("$MSG_BAD_LIBRARY_NAME$", "invalid library name"),
     ("$MSG_BAD_ENTRY_NAME$", "invalid entry point name"),

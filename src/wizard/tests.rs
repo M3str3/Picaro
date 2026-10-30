@@ -22,14 +22,19 @@ fn temp_dir(test: &str) -> PathBuf {
 /// Runs a scripted session and returns its written plan path and output.
 fn session(payload: &str, answers: &[&str], plan_out: Option<&Path>) -> (Option<PathBuf>, String) {
     let mut out = Vec::new();
-    let result = run_with(
+    let result = match run_with(
         Path::new(payload),
         plan_out,
         &Palette::plain(),
         Cursor::new(script(answers)),
         &mut out,
-    )
-    .expect("the scripted session should succeed");
+    ) {
+        Ok(result) => result,
+        Err(error) => panic!(
+            "the scripted session failed: {error}\n--- transcript ---\n{}",
+            String::from_utf8_lossy(&out)
+        ),
+    };
     (
         result,
         String::from_utf8(out).expect("the transcript is utf-8"),
@@ -135,7 +140,7 @@ fn shellcode_output_is_selectable_and_uses_the_bin_extension() {
     assert_eq!(plan.build.output.kind, OutputKind::Shellcode);
     assert_eq!(
         plan.build.output.path,
-        PathBuf::from("./dist/demo_packed.bin")
+        Some(PathBuf::from("./dist/demo_packed.bin"))
     );
 }
 
@@ -183,7 +188,7 @@ fn defaults_produce_a_valid_reflective_plan() {
     assert!(plan.build.crypto.is_some(), "build.crypto is the default");
     assert_eq!(
         plan.build.output.path,
-        PathBuf::from("./dist/payload_packed.exe")
+        Some(PathBuf::from("./dist/payload_packed.exe"))
     );
     assert!(plan.build.output.strip);
     assert_eq!(plan.runtime.len(), 1);
@@ -302,6 +307,73 @@ fn prompts_the_execution_technique_params() {
     }
     let payload = plan.build.payloads.get("payload").expect("the payload");
     assert_eq!(payload.format, PayloadFormat::Shellcode);
+}
+
+/// `reflective_loading` asks for `patch_exit` when the payload has an import
+/// table (PE/DLL), and skips the question for raw shellcode, which `plan::
+/// validate` would reject.
+#[test]
+fn prompts_the_reflective_patch_exit_only_for_a_pe_image() {
+    let dir = temp_dir("patch_exit_pe");
+    let plan_path = dir.join("out.yaml");
+    let answers = [
+        "demo",
+        "",
+        "", // arch
+        "", // output kind
+        "", // strings
+        "", // syscalls
+        "add a step",
+        "reflective_loading",
+        "y", // patch exit
+        "done",
+        "", // output path
+        "", // strip
+        "", // trim paths
+        "", // review -> build now
+    ];
+    let (written, _) = session(
+        "examples/payloads/hello_world.exe",
+        &answers,
+        Some(&plan_path),
+    );
+    assert_eq!(written.as_deref(), Some(plan_path.as_path()));
+    let plan = load_plan(&plan_path, &BTreeMap::new()).expect("valid plan");
+    match &plan.runtime[0].technique {
+        TechniqueKind::ReflectiveLoading { params } => {
+            assert!(params.patch_exit, "the answer must reach the plan");
+            assert_eq!(params.payload, None);
+        }
+        other => panic!("expected reflective_loading, got {other:?}"),
+    }
+
+    // A shellcode payload is not asked: the script has no answer for it.
+    let dir = temp_dir("patch_exit_shellcode");
+    let plan_path = dir.join("out.yaml");
+    let answers = [
+        "demo",
+        "",
+        "", // arch
+        "", // output kind
+        "", // strings
+        "", // syscalls
+        "add a step",
+        "reflective_loading",
+        "done",
+        "", // output path
+        "", // strip
+        "", // trim paths
+        "", // review -> build now
+    ];
+    let (written, _) = session("payload.bin", &answers, Some(&plan_path));
+    assert_eq!(written.as_deref(), Some(plan_path.as_path()));
+    let plan = load_plan(&plan_path, &BTreeMap::new()).expect("valid plan");
+    match &plan.runtime[0].technique {
+        TechniqueKind::ReflectiveLoading { params } => {
+            assert!(!params.patch_exit);
+        }
+        other => panic!("expected reflective_loading, got {other:?}"),
+    }
 }
 
 /// Every Execution technique must assemble a plan the packer accepts.
@@ -593,7 +665,7 @@ fn a_dll_build_asks_for_the_entry_and_hides_image_scoped_preparations() {
     assert_eq!(output.entry, DllEntry::Export("Start".to_string()));
     assert_eq!(
         output.path,
-        PathBuf::from("./dist/demo_packed.dll"),
+        Some(PathBuf::from("./dist/demo_packed.dll")),
         "a DLL build defaults to the `.dll` extension"
     );
 

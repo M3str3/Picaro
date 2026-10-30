@@ -46,8 +46,19 @@ fn rejects_an_empty_name() {
 
 #[test]
 fn rejects_an_empty_output_path() {
-    let yaml = with_runtime("  - technique: reflective_loading\n").replace("./dist/o.exe", "");
+    let yaml = with_runtime("  - technique: reflective_loading\n").replace("./dist/o.exe", "''");
     assert!(validate(&parse(&yaml)).is_err());
+}
+
+#[test]
+fn accepts_a_plan_without_an_output_path() {
+    // Without `path` the build delivers into its bundle's `dist/`, so an
+    // omitted value is not an error (only an empty one is).
+    let yaml =
+        with_runtime("  - technique: reflective_loading\n").replace("    path: ./dist/o.exe\n", "");
+    let plan = parse(&yaml);
+    assert_eq!(plan.build.output.path, None);
+    validate(&plan).expect("valid");
 }
 
 #[test]
@@ -136,6 +147,28 @@ fn accepts_a_terminal_step_at_the_end() {
             "schema: 6\nname: t\nbuild:\n  crypto: { algo: xchacha20poly1305, key: random }\n  payloads:\n    a: { source: ./a.bin, format: shellcode }\n    b: { source: ./b.exe, format: pe }\n  output: { path: ./dist/o.exe, arch: x64, strip: true, trim_paths: all }\nruntime:\n  - technique: reflective_loading\n    params: { payload: a }\n  - technique: reflective_loading\n    params: { payload: b }\n",
         );
     validate(&plan).expect("valid");
+}
+
+/// `patch_exit` intercepts the payload's `ExitProcess`, so a reflective PE step
+/// returns control and may precede another step.
+#[test]
+fn accepts_a_reflective_pe_step_before_another_with_patch_exit() {
+    let plan = parse(
+            "schema: 6\nname: t\nbuild:\n  crypto: { algo: xchacha20poly1305, key: random }\n  payloads:\n    a: { source: ./a.exe, format: pe }\n    b: { source: ./b.bin, format: shellcode }\n  output: { path: ./dist/o.exe, arch: x64, strip: true, trim_paths: all }\nruntime:\n  - technique: reflective_loading\n    params: { payload: a, patch_exit: true }\n  - technique: reflective_loading\n    params: { payload: b }\n",
+        );
+    validate(&plan).expect("patch_exit makes the step return control");
+}
+
+/// Raw shellcode has no import table, so `patch_exit` cannot do anything for it
+/// and is rejected instead of silently ignored.
+#[test]
+fn rejects_patch_exit_with_a_shellcode_payload() {
+    let plan = parse(
+            "schema: 6\nname: t\nbuild:\n  crypto: { algo: xchacha20poly1305, key: random }\n  payloads:\n    a: { source: ./a.bin, format: shellcode }\n  output: { path: ./dist/o.exe, arch: x64, strip: true, trim_paths: all }\nruntime:\n  - technique: reflective_loading\n    params: { payload: a, patch_exit: true }\n",
+        );
+    let err = validate(&plan).expect_err("shellcode has no IAT");
+    assert!(err.to_string().contains("patch_exit"), "unclear: {err}");
+    assert!(err.to_string().contains("shellcode"), "unclear: {err}");
 }
 
 #[test]

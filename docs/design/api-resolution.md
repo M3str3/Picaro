@@ -184,16 +184,19 @@ it is an LSA/ALPC interaction with no single `Nt*` equivalent.
 | `kernel32!GetThreadContext` | wrapper | `NtGetContextThread` | — |
 | `kernel32!SetThreadContext` | wrapper | `NtSetContextThread` | — |
 | `advapi32!OpenProcessToken` | rebuild | `NtOpenProcessToken` | **new helper** |
-| `advapi32!DuplicateTokenEx` | rebuild | `NtDuplicateToken` | **new helper**; `lpTokenAttributes` ignored; impersonation level not applied (deferred) |
+| `advapi32!DuplicateTokenEx` | rebuild | `NtDuplicateToken` | **new helper**; the level rides in `OBJECT_ATTRIBUTES`/`SECURITY_QUALITY_OF_SERVICE`; `lpTokenAttributes` supplies the security descriptor and inherit flag |
 | `advapi32!ImpersonateLoggedOnUser` | rebuild | `NtSetInformationThread` | `ThreadImpersonationToken` |
 
-The two new syscall helpers (`NtOpenProcessToken`, `NtDuplicateToken`) live in
+The two syscall helpers (`NtOpenProcessToken`, `NtDuplicateToken`) live in
 `src/engine/syscalls/mod.rs` with `none` + `indirect` bodies and direct
-`ntdll!Nt*` proxy metadata, so `ntdll:*` and `apis: all` now include them.
+`ntdll!Nt*` proxy metadata, so `ntdll:*` and `apis: all` include them.
 `NtOpenProcessToken` takes three arguments (there is no object-attributes
 parameter; `NtOpenProcessTokenEx` is the four-argument variant), and
 `NtDuplicateToken`'s fourth argument is `EffectiveOnly`, not an impersonation
-level.
+level. `DuplicateTokenEx` supplies the requested level through the Win32
+`OBJECT_ATTRIBUTES` + `SECURITY_QUALITY_OF_SERVICE` pair, exactly as
+`KernelBase!DuplicateTokenEx` does; no `NtSetInformationToken` call is
+involved.
 
 ### Expanded catalogue: memory, handles, threads and tokens
 
@@ -396,11 +399,17 @@ both execution techniques resolve imports, so the resolver is always emitted.
   catalogue (`src/engine/api_resolution/mod.rs`); `NtOpenProcessToken` and
   `NtDuplicateToken` join the syscall layer (`src/engine/syscalls/mod.rs`, 18 → 20
   functions). `CreateRemoteThread` is rebuilt on the native-signature helper
-  (`lpThreadAttributes`/`lpThreadId` not honored); `DuplicateTokenEx` ignores
-  `lpTokenAttributes` and does not apply the requested impersonation level
-  (deferred: needs `NtSetInformationToken`); `ImpersonateLoggedOnUser` routes to
+  (`lpThreadAttributes`/`lpThreadId` not honored); `DuplicateTokenEx` honors
+  `lpSecurityDescriptor`/`bInheritHandle` and applies the requested
+  impersonation level (Phase I); `ImpersonateLoggedOnUser` routes to
   `NtSetInformationThread(ThreadImpersonationToken)`. `LogonUser`, WinINet/
   WinHTTP/ws2_32 and a Toolhelp snapshot rebuild remain out of scope.
+- [x] **Phase I — token impersonation level.** *Implemented 2026-10-30:*
+  `DuplicateTokenEx` builds the `OBJECT_ATTRIBUTES` +
+  `SECURITY_QUALITY_OF_SERVICE` pair and passes it to `NtDuplicateToken`, which
+  is how `KernelBase!DuplicateTokenEx` carries the level. No
+  `NtSetInformationToken` helper is needed (the kernel rejects
+  `TokenImpersonationLevel` as a set class with `STATUS_INVALID_INFO_CLASS`).
 
 ---
 
@@ -467,12 +476,13 @@ Declared, not hidden:
   not special-cased, matching the shipped `ReadProcessMemory` proxy).
   `CreateRemoteThread` does not honor `lpThreadAttributes` or fill `lpThreadId`
   (the native call takes no security attributes and returns no thread id);
-  `DuplicateTokenEx` ignores a non-null `lpTokenAttributes` and does not apply
-  the requested `SECURITY_IMPERSONATION_LEVEL` (the rebuild passes
-  `EffectiveOnly = 0`, so the duplicate is unfiltered; applying the level needs
-  `NtSetInformationToken(TokenImpersonationLevel, ...)`); `GetThreadContext`/
-  `SetThreadContext` pass the `CONTEXT` pointer through unchanged, so the x64
-  `ContextFlags`/alignment contract stays the caller's responsibility.
+  `DuplicateTokenEx` honors `lpTokenAttributes->lpSecurityDescriptor` and
+  `bInheritHandle` (its `nLength` is ignored) and carries the requested
+  `SECURITY_IMPERSONATION_LEVEL` in the `OBJECT_ATTRIBUTES` +
+  `SECURITY_QUALITY_OF_SERVICE` pair passed to `NtDuplicateToken`;
+  `GetThreadContext`/`SetThreadContext` pass the `CONTEXT` pointer through
+  unchanged, so the x64 `ContextFlags`/alignment contract stays the caller's
+  responsibility.
 - **`audit` is static** and cannot see the payload's in-memory IAT (the payload is
   encrypted on disk); the check targets the **stub** and exempts the
   `GetProcAddress` handler (D-22) and exports an active technique's own fragment

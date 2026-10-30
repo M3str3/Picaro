@@ -14,6 +14,7 @@ use super::{Capability, Category, Stability, TechniqueDef};
 
 /// Parameters for .NET hosting.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Params {
     /// Name of the payload in `build.payloads` to load. Optional when the plan
     /// declares exactly one payload.

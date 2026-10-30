@@ -5,6 +5,12 @@
 // define `fetch() -> Result<Vec<u8>, String>`; everything here is
 // transport-independent — the retries, the optional staged decryption and the
 // hand-off to the slot the next Execution step reads.
+
+/// Maximum body a transport will stage, in bytes (64 MiB): the same cap the
+/// packer applies to a fetched input, so a hostile or misconfigured server
+/// cannot grow the loader's memory without bound.
+const MAX_STAGED_BYTES: usize = 64 * 1024 * 1024;
+
 $TRANSPORT_CODE$
 
 /// Reduces the retry loop to one outcome.

@@ -8,6 +8,7 @@ use super::{Capability, Stability, TechniqueDef};
 
 /// Parameters for <technique name>.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Params {
     // TODO: add the technique's YAML parameters here, e.g.
     // #[serde(default = "default_target")]

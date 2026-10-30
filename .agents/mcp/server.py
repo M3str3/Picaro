@@ -77,8 +77,9 @@ INSTRUCTIONS = (
     "every debugger stop and every line the target prints goes to the server's "
     "activity log (console + a session log file); read it back with "
     "activity_log. Debug loop: build_plan with "
-    "debug=true and name=<dir> for a stable build/<dir>/main.rs (omit name for a "
-    "unique build/run-*/), debug_launch the stub_exe, bp_set on a crate-qualified "
+    "debug=true and name=<dir> for a stable packed/<plan>-<dir>/build/main.rs (omit "
+    "name for a unique packed/<plan>-<pid>-<nanos>/), debug_launch the stub_exe, bp_set "
+    "on a crate-qualified "
     "Rust symbol (main::step_0::payload) or file:line, run_until_event, then registers / "
     "read_memory / stack. System-DLL APIs have no offline symbols: "
     "export_lookup then bp_set(@address). Static assembly of a file: "
@@ -887,19 +888,32 @@ def tool_techniques_validate(args: dict):
     return cap((proc.stdout or "") + (proc.stderr or ""))
 
 
-def named_stage_dir(output: str, name: str) -> Path | None:
-    """The `build/<name>` directory a named build reported on its `scratch` line.
+def named_stage_dir(output: str, name: str | None) -> Path | None:
+    """The `build/` directory of the bundle a build reported on its `bundle` line.
 
-    The CLI prints the resolved path, so a `PICARO_BUILD_DIR` override is honored;
-    fall back to `<repo>/build/<name>` when the line is missing.
+    The CLI prints the resolved bundle, so a `--dir` or `PICARO_BUNDLE_ROOT`
+    override is honored. When the line is missing (an older CLI, or a log that
+    only kept the tail), fall back to the newest `packed/<plan>-<name>/build` —
+    or the newest bundle of all when no name was passed.
     """
-    match = re.search(r"^\s*scratch\s+(\S.*?)\s*$", output, re.MULTILINE)
+    match = re.search(r"^\s*bundle\s+(\S.*?)\s*$", output, re.MULTILINE)
     if match:
-        candidate = Path(match.group(1))
-        if candidate.is_dir():
-            return candidate
-    candidate = ROOT / "build" / name
-    return candidate if candidate.is_dir() else None
+        stage = Path(match.group(1)) / "build"
+        if stage.is_dir():
+            return stage
+    root = ROOT / "packed"
+    if not root.is_dir():
+        return None
+    candidates = [
+        bundle / "build"
+        for bundle in root.iterdir()
+        if bundle.is_dir()
+        and (name is None or bundle.name.endswith(f"-{name}"))
+        and (bundle / "build").is_dir()
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
 def tool_build_plan(args: dict):
@@ -928,15 +942,12 @@ def tool_build_plan(args: dict):
         raise ToolError(f"build failed (exit {proc.returncode}):\n" + cap(text.strip()))
     result: dict = {"exit_code": 0, "output": cap(text)}
     if not args.get("dry_run"):
-        # The engine stages each build under build/<name>/ (a `name` was given)
-        # or build/run-<pid>-<timestamp>/ (default), keeping out.exe + out.pdb +
-        # main.rs together. Debug that intermediate, not the dist/ copy: the PDB
-        # is referenced by bare name (out.pdb) and lldb only resolves it next to
-        # the executable.
-        stage = named_stage_dir(text, name) if name else None
-        if stage is None:
-            runs = [path for path in (ROOT / "build").glob("run-*") if path.is_dir()]
-            stage = max(runs, key=lambda path: path.stat().st_mtime) if runs else None
+        # Each build writes one bundle, `packed/<plan>-<name>/` (or
+        # `packed/<plan>-<pid>-<nanos>/` by default), with the rendered source
+        # and the compiler output together under `build/`. Debug that
+        # intermediate, not the `dist/` copy: the PDB is referenced by bare name
+        # (out.pdb) and lldb only resolves it next to the executable.
+        stage = named_stage_dir(text, name)
         if stage is not None:
             if name:
                 result["build_name"] = name
@@ -1340,9 +1351,10 @@ TOOLS_INERT = [
         "name": "build_plan",
         "description": (
             "Run `picaro build <plan.yaml>`. Use debug=true for a debug stub: techniques "
-            "log, symbols/source paths are kept, and the generated source is under "
-            "build/<name>/main.rs (a `name`, stable across runs) or build/run-*/main.rs "
-            "(default, unique). Returns stub_exe/stub_source for debug_launch."
+            "log, symbols/source paths are kept, and the generated source is in the "
+            "build bundle: packed/<plan>-<name>/build/main.rs (a `name`, stable across "
+            "runs) or packed/<plan>-<pid>-<nanos>/build/main.rs (default, unique). "
+            "Returns stub_exe/stub_source for debug_launch."
         ),
         "inputSchema": {
             "type": "object",
@@ -1350,7 +1362,7 @@ TOOLS_INERT = [
                 "plan": {"type": "string"},
                 "args": {"type": "array", "items": {"type": "string"}, "description": "Positional $arg.N$ values."},
                 "debug": {"type": "boolean"},
-                "name": {"type": "string", "description": "Stage the build under build/<name> (stable path for debugging); the CLI flag is --build-name."},
+                "name": {"type": "string", "description": "Name the build bundle packed/<plan>-<name> (stable path for debugging); the CLI flag is --build-name."},
                 "dry_run": {"type": "boolean"},
                 "timeout": {"type": "integer", "description": "Seconds; default 600."},
             },
@@ -1460,7 +1472,7 @@ TOOLS_DEBUG = [
         "description": (
             "Set a breakpoint. Spec forms: `module!symbol` (ntdll!NtAllocateVirtualMemory), "
             "`symbol` (step_0::run; a name with no match falls back to a regex), "
-            "`re:<regex>`, `file.rs:123` (generated source under build/run-*/), "
+            "`re:<regex>`, `file.rs:123` (generated source under the bundle's build/), "
             "`+0x<rva>` (main-module RVA), `@0x<addr>`, or plain `0x<addr>`. Pending "
             "(0 locations) is fine: lldb resolves when the module loads."
         ),
@@ -1887,14 +1899,14 @@ class Handler(BaseHTTPRequestHandler):
 def open_log_file(override: str | None) -> Path:
     """The transcript file the console log is mirrored to.
 
-    Default `build/mcp-session-<timestamp>.log`: gitignored, next to the staged
-    builds it talks about, and easy to hand to someone else as evidence.
+    Default `packed/mcp-session-<timestamp>.log`: gitignored, next to the build
+    bundles it talks about, and easy to hand to someone else as evidence.
     """
     if override:
         path = resolve_path(override)
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
-    directory = ROOT / "build"
+    directory = ROOT / "packed"
     try:
         directory.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -1910,7 +1922,7 @@ def main() -> int:
     parser.add_argument(
         "--log-file",
         default=os.environ.get("PICARO_MCP_LOG"),
-        help="mirror the console log here (default build/mcp-session-<timestamp>.log)",
+        help="mirror the console log here (default packed/mcp-session-<timestamp>.log)",
     )
     parser.add_argument("--no-log", action="store_true", help="write no log file")
     options = parser.parse_args()

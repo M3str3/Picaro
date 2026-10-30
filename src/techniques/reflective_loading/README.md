@@ -28,9 +28,12 @@ flowchart TD
     F --> G
     G --> H[Set section protections]
     H --> I[Run TLS callbacks]
-    I --> J{erase_header?}
+    I --> I2{patch_exit?}
+    I2 -- yes --> I3[Redirect the payload's exit imports]
+    I2 -- no --> J{erase_header?}
+    I3 --> J
     J -- yes --> K[Zero the mapped PE header]
-    J -- no --> L[Run the entry point on the calling thread]
+    J -- no --> L[Run the entry point]
     K --> L
 ```
 
@@ -60,7 +63,9 @@ flowchart TD
 7. Run TLS callbacks, if present. The mapper does not provision per-thread TLS
    (see “TLS and per-thread state”).
 9. Run the entry point (`DllMain` for a DLL, `mainCRTStartup`-style for an EXE)
-   on the calling thread and return its exit code.
+   on the calling thread and return its exit code. With `params.patch_exit` the
+   call runs on a fiber instead, so the payload's own exit hands the thread back
+   (see “Exit patching”).
 
 With `build.payloads.<name>.export` (DLLs only), step 9 changes: the entry point is
 called once with `DLL_PROCESS_ATTACH` — the loader step a mapped DLL needs so
@@ -108,6 +113,41 @@ the export lookup and before the export runs; on the entry-point path it stays
 until the step returns. A whole-address-space scan can find the file copy only
 on that latter path.
 
+### 5. Exit patching (opt-in)
+
+A normal PE executable's `mainCRTStartup` ends with `ExitProcess`, which would
+end the whole stub and every step after this one. With `params.patch_exit: true`
+the loader:
+
+1. runs the payload's entry point (or the named DLL export) on a **fiber**
+   created on the loader's own thread, and
+2. serves the payload's `ExitProcess`, `ExitThread`, C-runtime `exit`/`_exit`
+   and self-targeted `TerminateProcess` **imports** from a shim instead of the
+   real exports.
+
+On the loader's thread the shim records the code and switches back to the
+loader's fiber, so the step returns that code and the chain continues. On a
+thread the payload created itself (which is not a fiber) it calls `ExitThread`:
+that thread ends and the process survives. Outside the payload fiber (a TLS
+callback or `DllMain` that exits) the loader cannot resume its flow, so the real
+`ExitProcess` runs as before.
+
+The C-runtime pair matters for a normal C/C++ executable: `mainCRTStartup` calls
+`exit`, and ucrtbase would otherwise call `ExitProcess` through *its own* IAT.
+`TerminateProcess` is only intercepted when the handle names the current process;
+a payload that terminates another process gets the real export.
+
+Only the imports the payload's **own image** declares are patched. A call
+resolved dynamically through `GetProcAddress`, `RtlExitUserProcess`, an import by
+ordinal, an exit performed inside another loaded DLL (the Python runtime, a
+runtime's own CRT) or a child process the payload spawns is not intercepted.
+Because the shim skips the real exit, the payload's CRT exit handlers that would
+run after that call do not run either.
+
+`patch_exit` makes a reflective `pe` step **non-terminal**: `plan::validate`
+allows it before another step, which is how two in-process executables chain.
+It is rejected for `format: shellcode` (no import table to patch).
+
 ## Payload formats
 
 The technique renders a different fragment per `build.payloads.<name>.format`:
@@ -147,7 +187,9 @@ at `argv[1]`.
 
 An **Execution** step: it runs a `pe`, `dll` or `shellcode` payload in-process. It is
 **terminal** when the payload is a PE executable (that takes over the entry point), so
-it must be the last step; for a DLL or shellcode it returns, and another step may follow.
+it must be the last step — unless `params.patch_exit: true`, which intercepts the
+payload's exit and makes the step return. For a DLL or shellcode it returns, and
+another step may follow.
 
 ## What it evades
 
@@ -264,6 +306,18 @@ patch to this fragment. Until then:
   with no provisioning exits `42`. Restoring the loader's array just before the
   thread returns survives, which pins the free on the loader's own teardown and
   rules the array replacement out as a fix.
+- **Exit patching — measured (2026-10-27, x64, lab host):**
+  `patch_exit_chains_two_executable_payloads` builds a two-step chain, both
+  steps `reflective_loading` of a minimal `no_std` PE whose entry point writes a
+  marker and calls `ExitProcess` (first `7`, second `9`). Both markers reached
+  stdout, in order, and the process exited `9`: the first payload's
+  `ExitProcess` was intercepted and the chain continued. Without the patch the
+  process would have ended `7` inside the first step (the pre-existing
+  behavior). The payloads are `no_std` on purpose: a `std` payload has static
+  TLS, which the mapper cannot provision, so its `thread_local` writes alias the
+  stub's TLS (the known limitation above) — that is orthogonal to this feature
+  and would make the second step's own `set_stage_args` observe a corrupted
+  borrow flag.
 - **Compile-verified only:** the header/section/entry-point guards, the
   no-relocations refusal and the forwarded-export refusal have no live run yet —
   they are covered by `compiles_reflective_loading_stub_for_every_format` (x64,
@@ -291,8 +345,17 @@ patch to this fragment. Until then:
   difference; registering the tables is a separate feature.
 - The mapped PE's entry point runs on the calling thread and its return value
   is captured directly; the `shellcode` runner is the one that needs a thread.
-  If the payload calls `ExitProcess`, it terminates the whole stub process (and
-  its thread).
+  Without `patch_exit` a payload that calls `ExitProcess` terminates the whole
+  stub process (and its thread). With it, the payload runs on a fiber of the same
+  thread and the intercepted exit returns to the loader; the fiber is then
+  deleted, which abandons whatever the payload left on its stack.
+- **Chaining after a payload with static TLS is still unsafe.** `patch_exit`
+  makes the *control flow* return, not the payload's TLS. The mapper cannot
+  provision the payload's `_tls_index`, so a payload with a TLS template keeps
+  writing into another module's block — including the stub's own thread-local
+  state — after it started. The packer warns about a non-empty TLS template; for
+  a chained `patch_exit` step prefer a payload without one (the live test uses a
+  `no_std` PE).
 - Payload arguments are rewritten into the PEB and `kernelbase`'s cached
   command-line pointer before the payload runs, so the payload's `argv` is what
   the operator configured (`build.payloads.<name>.args` + runtime args).

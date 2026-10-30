@@ -155,15 +155,16 @@ property of the technique and the payload, not a flag:
 | `process_hollowing` | **Always** | A separate process; the loader waits and reads its exit status. |
 | `reflective_loading` + `dll` | **Always** | A mapped DLL's entry point is `DllMain`, which returns. |
 | `reflective_loading` + `shellcode` | **If the shellcode returns** | It runs on its own thread; a beacon that never returns blocks the chain. |
-| `reflective_loading` + `pe` (an EXE) | **No** | The entry point runs on the stub's thread and a normal `mainCRTStartup` calls `ExitProcess`, killing the whole process. |
+| `reflective_loading` + `pe` (an EXE) | **No, unless `patch_exit: true`** | Without the option the entry point runs on the stub's thread and a normal `mainCRTStartup` calls `ExitProcess`, killing the whole process. With it, the payload runs on a fiber and its `ExitProcess`/`ExitThread` imports hand the thread back. |
 | `dotnet_hosting` | **No** | The CLR is hosted in the stub's process; a managed `Main` that exits ends it. |
 | `execution_callbacks` | **If the shellcode returns** | The payload runs as the callback of an enumeration API on the loader's thread; the fragment stops the enumeration and returns once it finishes. |
 | `module_stomping` | **If the shellcode returns** | The payload is called from the loader's thread after its code section is overwritten. |
 | `fibers` | **If the shellcode returns** | The payload runs on a fiber; control comes back to the loader's fiber when it returns. |
 
-So a **terminal** step (`reflective_loading` or `process_ghosting` of a PE
-executable, or `dotnet_hosting`) can only be the **last** one; `plan::validate`
-rejects it otherwise. Everything else chains. Two Execution techniques can coexist as
+So a **terminal** step (`reflective_loading` of a PE executable *without*
+`patch_exit`, `process_ghosting` of a PE executable, or `dotnet_hosting`) can
+only be the **last** one; `plan::validate` rejects it otherwise. Everything else
+chains. Two Execution techniques can coexist as
 separate steps (each with its own payload); the registry's `conflicts` metadata
 is no longer enforced against them.
 
@@ -198,8 +199,9 @@ reference the same blocks; see [Custom stubs](custom-stubs.md).
 
 ## Limitations
 
-- **A terminal step must be last.** `reflective_loading`/`process_ghosting` of a
-  PE executable and `dotnet_hosting` hand the process over.
+- **A terminal step must be last.** `reflective_loading` of a PE executable
+  *without* `patch_exit`, `process_ghosting` of a PE executable and
+  `dotnet_hosting` hand the process over.
 - **In-process chaining leaves the process dirty** (an unfreed mapped image, a
   leaked `TlsAlloc` index, a repatched PEB command line). Prefer process-based
   steps (`living_off_the_land`, `process_hollowing`) when chaining more than one
@@ -207,8 +209,14 @@ reference the same blocks; see [Custom stubs](custom-stubs.md).
 - **A shellcode step only chains if the shellcode returns.** Running two
   non-returning shellcodes needs a process-per-step injection technique (not
   implemented yet).
-- **Two reflectively loaded EXEs cannot be chained** without intercepting
-  `ExitProcess`/`TerminateProcess` (future work).
+- **`patch_exit` covers the imports the payload declares.** `ExitProcess`,
+  `ExitThread`, the C-runtime `exit`/`_exit` and a self-targeted
+  `TerminateProcess` are intercepted. An `ExitProcess` resolved dynamically
+  (`GetProcAddress`), an import by ordinal, `RtlExitUserProcess`, an exit made
+  inside another loaded DLL (the Python runtime, a runtime's own CRT) or a child
+  process the payload spawns still ends the process. A payload with static TLS is
+  still unsafe to chain: the mapper cannot provision its TLS index, so its
+  thread-local writes alias the stub's own (see the technique README).
 - **`living_off_the_land` spawns a visible child** (PPID = the stub, command line
   observable); `window: hidden` hides the window only.
 - **Per-step payload args and a steps-aware manifest** are recorded per step, but
@@ -216,7 +224,6 @@ reference the same blocks; see [Custom stubs](custom-stubs.md).
 
 ## Roadmap
 
-- Returning techniques (cooperative payloads, an `ExitProcess` interceptor) so
-  more steps can chain in-process.
+- Returning techniques (cooperative payloads) so more steps can chain in-process.
 - A run-time network stager (`payload.source: http(s)://` resolved in the stub).
 - A wizard flow for building multi-step runtimes interactively.

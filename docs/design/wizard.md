@@ -100,7 +100,8 @@ the packer's own message.
 - Preparation → its tailored questions (bouncer, AMSI/ETW variants, process
   mitigations, …) or its `params_example`;
 - Execution → its tailored questions (hollowing target, stomping module, early
-  bird wait, injection timeout) or `params_example`;
+  bird wait, injection timeout, `reflective_loading`'s `patch_exit` for a
+  PE/DLL payload) or `params_example`;
 - Control → `sleep` (ms), `living_off_the_land` (binary/args), `ppid_spoofing`
   (binary/args/parent/wait), `network_stager` (url; the payload is the wizard's).
 

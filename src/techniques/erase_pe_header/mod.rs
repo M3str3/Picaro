@@ -19,6 +19,7 @@ use super::{Capability, Category, Stability, TechniqueDef};
 /// another process needs write access the loader does not have by default, so
 /// that would be a different technique.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Params {}
 
 /// Static metadata for PE-header erasure.

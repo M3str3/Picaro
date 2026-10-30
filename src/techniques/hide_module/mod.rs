@@ -13,6 +13,7 @@ use super::{Capability, Category, Stability, TechniqueDef};
 
 /// Parameters for hide module.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Params {
     /// Base names of modules to unlink from the PEB lists (case-insensitive),
     /// e.g. `["payload.dll"]`.

@@ -19,28 +19,23 @@ pub(super) fn build(
     let entropy = BuildEntropy::from_plan(plan, options.seed);
     let mut effective_plan = plan.clone();
     apply_payload_overrides(&mut effective_plan, &options.payloads)?;
-    if let Some(out) = &options.out {
-        effective_plan.build.output.path = if out.is_dir() {
-            let name = effective_plan
-                .build
-                .output
-                .path
-                .file_name()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("artifact"));
-            out.join(name)
-        } else {
-            out.clone()
-        };
+    // `--out` overrides the plan's own `output.path`; the resolved plan keeps
+    // the delivered path so the manifest records what the operator asked for.
+    let output = effective_output_path(&effective_plan, options.out.as_deref());
+    if options.out.is_some() {
+        effective_plan.build.output.path = output.clone();
     }
-    // Every run is a package: one folder named after the plan, holding the
-    // sources, the payload blobs, the artifact and its provenance.
-    let (package_dir, artifact_path) =
-        package_paths(&effective_plan.name, &effective_plan.build.output.path);
-    effective_plan.build.output.path = artifact_path;
+    // One bundle per build: source, blobs, compiler output, artifact and
+    // provenance live together. `output.path` (or `--out`) only decides where
+    // the delivered copy goes; it never changes the bundle.
+    let bundle = resolve_bundle(
+        &effective_plan,
+        output.as_deref(),
+        options.build_name.as_deref(),
+        options.bundle.as_ref(),
+    )?;
     let plan = &effective_plan;
     let debug = plan.build.stub.debug || options.debug;
-    let build_name = options.build_name.as_deref();
 
     match &options.heading {
         Some(heading) => {
@@ -51,7 +46,14 @@ pub(super) fn build(
     for field in &options.prelude {
         anstream::println!("{}", ui.field(&field.label, &field.value));
     }
-    anstream::println!("{}", ui.field("package", ui.target(package_dir.display())));
+    anstream::println!("{}", ui.field("bundle", ui.target(bundle.root.display())));
+    if options.save_plan {
+        anstream::println!("{}", ui.field("plan", ui.target(bundle.plan.display())));
+    }
+    anstream::println!(
+        "{}",
+        ui.field("artifact", ui.target(bundle.artifact.display()))
+    );
     anstream::println!();
 
     if replay {
@@ -145,13 +147,40 @@ pub(super) fn build(
     // Plan-level advisories from semantic validation (e.g. a no-op bouncer).
     deferred_warnings.extend(plan::validate::advisories(plan));
 
+    // The bundle is the working directory and the archive at the same time:
+    // `build/` holds the rendered source and the compiler outputs, `dist/` the
+    // delivered artifact, and `artifacts/` its provenance and CA.
+    bundle.prepare()?;
+    if options.save_plan {
+        let yaml = serde_yml::to_string(plan).map_err(|source| {
+            error::PackerError::Validation(format!(
+                "could not serialize the resolved plan: {source}"
+            ))
+        })?;
+        std::fs::write(&bundle.plan, yaml)?;
+    }
+    if let Some(plan_out) = &options.plan_out {
+        if let Some(parent) = plan_out
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        let yaml = serde_yml::to_string(plan).map_err(|source| {
+            error::PackerError::Validation(format!(
+                "could not serialize the resolved plan: {source}"
+            ))
+        })?;
+        std::fs::write(plan_out, yaml)?;
+    }
+
     // A `kind: psmodule` build is a managed PowerShell module, not a Rust stub:
     // it compiles generated C# instead of the stub template.
     if plan.build.output.kind == OutputKind::PsModule {
         return build_psmodule(
             plan,
             &steps,
-            plan_path,
+            &bundle,
             ui,
             &entropy,
             options,
@@ -160,13 +189,7 @@ pub(super) fn build(
     }
 
     // 3. Encrypt every Execution step's payload and collect the renderer input.
-    let build_dir = scratch_dir(build_name)?;
-    prepare_build_dir(&build_dir)?;
-    if build_name.is_some() {
-        // A named build has a stable path by construction; surfacing it is what
-        // lets an operator (or the debugger) find `main.rs`/`out.exe` again.
-        anstream::println!("{}", ui.field("scratch", build_dir.display()));
-    }
+    let build_dir = bundle.build.as_path();
 
     let mut step_payloads = Vec::new();
     let mut total_plaintext: usize = 0;
@@ -258,7 +281,7 @@ pub(super) fn build(
                                 == crate::techniques::powershell_hosting::CommandMode::Join,
                             params.mode == crate::techniques::powershell_hosting::Mode::Interactive,
                             patch_amsi,
-                            &build_dir,
+                            build_dir,
                             &format!("launcher_{}", step.index),
                         )?
                     }
@@ -513,7 +536,7 @@ pub(super) fn build(
     let timer = Instant::now();
     let arch = plan.build.output.arch;
     let deps = compiler::locate_stub_deps(arch)?;
-    let out = intermediate_path(&build_dir, &plan.build.output);
+    let out = intermediate_path(build_dir, plan.build.output.kind, &bundle.artifact_name);
     let compile_options = compiler::CompileOptions {
         strip: plan.build.output.strip,
         trim_paths: match plan.build.output.trim_paths {
@@ -537,7 +560,7 @@ pub(super) fn build(
     //     Overwritten in place with a per-build filler, so the region also
     //     differs build to build. Before resources and signing.
     if !debug && !matches!(plan.build.output.trim_paths, TrimPaths::None) {
-        let patterns = engine::scrub::default_patterns(&build_dir);
+        let patterns = engine::scrub::default_patterns(build_dir);
         let mut bytes = std::fs::read(&out)?;
         let replaced =
             engine::scrub::scrub_with(&mut bytes, &patterns, engine::scrub::random_fill(&entropy));
@@ -615,25 +638,28 @@ pub(super) fn build(
         std::fs::write(&out, &bytes)?;
     }
 
-    // 6. Lock the shared output, then copy the compiled stub to the output path
-    //    from the YAML, sign it and write the manifest. The lock is keyed on the
-    //    output path so two concurrent `picaro build` runs cannot interleave
-    //    their copy/sign/manifest writes into the same artifact.
-    std::fs::create_dir_all(&package_dir)?;
-    let _output_lock = build_lock::OutputLock::acquire(&plan.build.output.path)?;
-    std::fs::copy(&out, &plan.build.output.path)?;
-    copy_package_sources(&build_dir, &package_dir)?;
-    let out_size = std::fs::metadata(&plan.build.output.path)?.len() as usize;
+    // 6. Produce the canonical artifact in the bundle, sign it there, then
+    //    copy it to the delivered path. The lock is keyed on the delivered
+    //    path so two builds that target the same `output.path` cannot
+    //    interleave their copy/sign/manifest writes.
+    let _output_lock = build_lock::OutputLock::acquire(&bundle.artifact)?;
+    std::fs::copy(&out, &bundle.bundled_artifact)?;
+    let out_size = std::fs::metadata(&bundle.bundled_artifact)?.len() as usize;
 
     // The reproducibility target is the artifact *before* signing: an
     // Authenticode signature (and especially an RFC 3161 timestamp) is not
     // reproducible by nature.
-    let unsigned_sha256 = engine::hash::sha256_hex(&std::fs::read(&plan.build.output.path)?);
+    let unsigned_sha256 = engine::hash::sha256_hex(&std::fs::read(&bundle.bundled_artifact)?);
 
-    // 6b. Sign the artifact (Authenticode), if configured. Signing must be the
-    //     last modification, so the manifest below hashes the signed file.
+    // 6b. Sign the canonical artifact (Authenticode), if configured. Signing
+    //     must be the last modification, so the manifest below hashes the
+    //     signed file. The CA and the lab state go to `artifacts/`.
     let sign_plan = resolve_sign(plan, resources.as_ref());
-    let signature = engine::signing::sign(&plan.build.output.path, sign_plan.as_ref())?;
+    let signature = engine::signing::sign(
+        &bundle.bundled_artifact,
+        sign_plan.as_ref(),
+        Some(&bundle.artifacts),
+    )?;
     if let Some(sig) = &signature {
         let mut parts = vec![ui.brand(sig.mode.clone())];
         if let Some(thumbprint) = &sig.thumbprint {
@@ -657,17 +683,31 @@ pub(super) fn build(
         verify_predecessor(plan, &unsigned_sha256, ui, &mut deferred_warnings)?;
     }
 
+    // A signed artifact is the one delivered; the bundle copy is canonical.
+    if bundle.artifact != bundle.bundled_artifact {
+        if let Some(parent) = bundle
+            .artifact
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(&bundle.bundled_artifact, &bundle.artifact)?;
+    }
+
     // 6c. Reproduction record: the manifest *is* the resolved plan plus a
     //     `reproduce` block, so feeding it back rebuilds the artifact. It stores
     //     the payload key under `secrets: exact`, which makes it as sensitive as
     //     the payload; the warning below says so once.
-    let artifact_sha256 = engine::hash::sha256_hex(&std::fs::read(&plan.build.output.path)?);
-    let artifact_path = plan.build.output.path.clone();
+    let artifact_sha256 = engine::hash::sha256_hex(&std::fs::read(&bundle.bundled_artifact)?);
+    // The manifest is the reproducibility contract (feed it back to `build`), so
+    // its path is reported with the result rather than hidden behind --verbose.
+    let mut manifest_written: Option<PathBuf> = None;
     if plan.build.output.manifest || replay || options.redact.is_some() {
         let manifest_path = if replay {
-            engine::manifest::replay_manifest_path(&artifact_path, plan_path)
+            bundle.replay_manifest_path()
         } else {
-            engine::manifest::manifest_path(&artifact_path)
+            bundle.manifest_path()
         };
         let manifest = engine::manifest::compose(
             plan,
@@ -681,7 +721,7 @@ pub(super) fn build(
                 payloads: payload_records,
                 predecessor: Some(Predecessor {
                     built_at: engine::manifest::built_at_now(),
-                    artifact: artifact_path.display().to_string(),
+                    artifact: bundle.artifact.display().to_string(),
                     artifact_sha256: artifact_sha256.clone(),
                     unsigned_sha256: unsigned_sha256.clone(),
                 }),
@@ -692,12 +732,7 @@ pub(super) fn build(
         if let Some(redact_path) = &options.redact {
             engine::manifest::redact(&manifest, redact_path)?;
         }
-        if verbose {
-            anstream::println!(
-                "{}",
-                ui.detail("manifest", ui.dim(manifest_path.display().to_string()))
-            );
-        }
+        manifest_written = Some(manifest_path);
     }
 
     let total = started.elapsed();
@@ -711,13 +746,19 @@ pub(super) fn build(
             dotted(
                 ui,
                 &[
-                    ui.target(plan.build.output.path.display().to_string()),
+                    ui.target(bundle.artifact.display().to_string()),
                     human_size(out_size),
                     ui.dim(format_elapsed(total)),
                 ]
             )
         )
     );
+    if let Some(manifest) = &manifest_written {
+        anstream::println!(
+            "{}",
+            ui.field("manifest", ui.target(manifest.display().to_string()))
+        );
+    }
     if verbose {
         let delta = out_size.saturating_sub(total_plaintext);
         anstream::println!(
@@ -769,28 +810,15 @@ pub(super) fn build(
 pub(super) fn build_psmodule(
     plan: &plan::Plan,
     steps: &[ResolvedStep],
-    plan_path: &Path,
+    bundle: &BundleLayout,
     ui: &Palette,
     entropy: &BuildEntropy,
     options: &BuildOptions,
     deferred_warnings: &mut Vec<String>,
 ) -> Result<()> {
-    // `build` rewrites `output.path` into the package folder before dispatching
-    // here, so the package is always the artifact's parent.
-    let package_dir = plan
-        .build
-        .output
-        .path
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
     let started = Instant::now();
     let replay = plan.reproduce.is_some();
-    let build_name = options.build_name.as_deref();
-    let build_dir = scratch_dir(build_name)?;
-    prepare_build_dir(&build_dir)?;
-    if build_name.is_some() {
-        anstream::println!("{}", ui.field("scratch", build_dir.display()));
-    }
+    let build_dir = bundle.build.as_path();
 
     let patch_amsi = steps
         .iter()
@@ -888,9 +916,9 @@ pub(super) fn build_psmodule(
     // Render and compile the managed module.
     let timer = Instant::now();
     let module_bytes =
-        engine::managed::build_module(&scripts, patch_amsi, &build_dir, "picaro_module")?;
+        engine::managed::build_module(&scripts, patch_amsi, build_dir, "picaro_module")?;
     let compile_time = timer.elapsed();
-    let module_path = build_dir.join("picaro_module.dll");
+    let module_path = bundle.build.join("picaro_module.dll");
     std::fs::write(&module_path, &module_bytes)?;
     anstream::println!(
         "{}",
@@ -907,21 +935,23 @@ pub(super) fn build_psmodule(
         )
     );
 
-    // Copy to the output path under the build lock, sign, write the manifest —
-    // the same tail as the Rust-stub build.
-    let _output_lock = build_lock::OutputLock::acquire(&plan.build.output.path)?;
-    std::fs::create_dir_all(package_dir)?;
-    std::fs::copy(&module_path, &plan.build.output.path)?;
-    copy_psmodule_sources(&build_dir, package_dir)?;
-    let out_size = std::fs::metadata(&plan.build.output.path)?.len() as usize;
-    let unsigned_sha256 = engine::hash::sha256_hex(&std::fs::read(&plan.build.output.path)?);
+    // Produce the canonical artifact in the bundle, sign it there, then copy
+    // it to the delivered path — the same tail as the Rust-stub build.
+    let _output_lock = build_lock::OutputLock::acquire(&bundle.artifact)?;
+    std::fs::copy(&module_path, &bundle.bundled_artifact)?;
+    let out_size = std::fs::metadata(&bundle.bundled_artifact)?.len() as usize;
+    let unsigned_sha256 = engine::hash::sha256_hex(&std::fs::read(&bundle.bundled_artifact)?);
 
     if options.verify {
         verify_predecessor(plan, &unsigned_sha256, ui, deferred_warnings)?;
     }
 
     let sign_plan = resolve_sign(plan, None);
-    let signature = engine::signing::sign(&plan.build.output.path, sign_plan.as_ref())?;
+    let signature = engine::signing::sign(
+        &bundle.bundled_artifact,
+        sign_plan.as_ref(),
+        Some(&bundle.artifacts),
+    )?;
     if let Some(sig) = &signature {
         let mut parts = vec![ui.brand(sig.mode.clone())];
         if let Some(thumbprint) = &sig.thumbprint {
@@ -933,13 +963,24 @@ pub(super) fn build_psmodule(
         anstream::println!("{}", ui.done("sign", dotted(ui, &parts)));
     }
 
-    let artifact_sha256 = engine::hash::sha256_hex(&std::fs::read(&plan.build.output.path)?);
-    let artifact_path = plan.build.output.path.clone();
+    if bundle.artifact != bundle.bundled_artifact {
+        if let Some(parent) = bundle
+            .artifact
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(&bundle.bundled_artifact, &bundle.artifact)?;
+    }
+
+    let artifact_sha256 = engine::hash::sha256_hex(&std::fs::read(&bundle.bundled_artifact)?);
+    let mut manifest_written: Option<PathBuf> = None;
     if plan.build.output.manifest || replay || options.redact.is_some() {
         let manifest_path = if replay {
-            engine::manifest::replay_manifest_path(&artifact_path, plan_path)
+            bundle.replay_manifest_path()
         } else {
-            engine::manifest::manifest_path(&artifact_path)
+            bundle.manifest_path()
         };
         let manifest = engine::manifest::compose(
             plan,
@@ -953,7 +994,7 @@ pub(super) fn build_psmodule(
                 payloads: payload_records,
                 predecessor: Some(Predecessor {
                     built_at: engine::manifest::built_at_now(),
-                    artifact: artifact_path.display().to_string(),
+                    artifact: bundle.artifact.display().to_string(),
                     artifact_sha256,
                     unsigned_sha256: unsigned_sha256.clone(),
                 }),
@@ -964,6 +1005,7 @@ pub(super) fn build_psmodule(
         if let Some(redact_path) = &options.redact {
             engine::manifest::redact(&manifest, redact_path)?;
         }
+        manifest_written = Some(manifest_path);
     }
 
     anstream::println!();
@@ -974,13 +1016,19 @@ pub(super) fn build_psmodule(
             dotted(
                 ui,
                 &[
-                    ui.target(plan.build.output.path.display().to_string()),
+                    ui.target(bundle.artifact.display().to_string()),
                     human_size(out_size),
                     ui.dim(format_elapsed(started.elapsed())),
                 ]
             )
         )
     );
+    if let Some(manifest) = &manifest_written {
+        anstream::println!(
+            "{}",
+            ui.field("manifest", ui.target(manifest.display().to_string()))
+        );
+    }
 
     anstream::println!();
     for (index, nonce, key) in &nonces {

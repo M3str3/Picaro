@@ -15,6 +15,7 @@ use super::{Capability, Category, Stability, TechniqueDef};
 
 /// Parameters for the hardware-breakpoint bypass.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Params {
     /// Watch `AmsiScanBuffer`, the buffer scan every AMSI consumer calls.
     #[serde(default = "default_true")]

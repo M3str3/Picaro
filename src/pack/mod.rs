@@ -6,8 +6,9 @@
 //! commands cannot disagree about defaults, validation or reproducibility.
 //!
 //! The generated plan is always inspectable (`--print-plan`) and, by default,
-//! saved (`<output dir>/<payload>/plan.yaml`). A user who outgrows the flags
-//! edits that document and continues with `picaro build`.
+//! saved inside the build's bundle (`packed/<plan>-<run>/plan.yaml`). A user
+//! who outgrows the flags edits that document and continues with
+//! `picaro build`.
 //!
 //! Defaults can be changed in `picaro.config.yaml` (or `--config`), a small file
 //! with a single `pack:` block; CLI flags always win over it.
@@ -22,6 +23,7 @@ use crate::engine::args::ArgsMode;
 use crate::engine::obfuscation::YamlStringsPlan;
 use crate::engine::syscalls::{YamlStackSpoofing, YamlSyscallsPlan};
 use crate::error::{PackerError, Result};
+use crate::paths::{bare_dir_component, run_nonce, BundleLayout};
 use crate::plan::schema::{
     Arch, BuildPlan, ConsoleMode, CryptoAlgorithm, CryptoPlan, DllEntry, IconPlan, KeySource,
     OutputKind, OutputPlan, PayloadFormat, PayloadPlan, Plan, ResourcesPlan, SignPlan, StubPlan,
@@ -33,12 +35,6 @@ use crate::techniques::{self, Category, RuntimeStep, Stability, TechniqueKind};
 /// Configuration file looked up in the current directory when `--config` is
 /// not passed.
 pub const CONFIG_FILE: &str = "picaro.config.yaml";
-
-/// Default root of the per-payload output folders.
-pub const DEFAULT_OUTPUT_DIR: &str = "packed";
-
-/// Name of the generated plan inside a pack folder.
-pub const PLAN_FILE: &str = "plan.yaml";
 
 /// The optional `picaro.config.yaml` document.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -111,6 +107,8 @@ pub struct PackArgs {
     pub strings: Option<String>,
     pub out: Option<PathBuf>,
     pub dir: Option<PathBuf>,
+    /// A stable bundle suffix (`<plan>-<name>`) instead of the unique run label.
+    pub build_name: Option<String>,
     pub plan_out: Option<PathBuf>,
     pub no_save_plan: bool,
     pub arch: Option<String>,
@@ -149,10 +147,10 @@ pub struct PackOutcome {
     pub plan: Plan,
     /// Canonical YAML of [`Self::plan`], what `--print-plan` emits.
     pub plan_yaml: String,
-    /// Where the plan is (or would be) written.
-    pub plan_path: PathBuf,
-    /// Final artifact path (`<dir>/<payload>/<payload>.exe` by default).
-    pub artifact_path: PathBuf,
+    /// The bundle this run writes into (`<dir>/<plan>-<run>/`).
+    pub bundle: BundleLayout,
+    /// An extra copy of the plan (`--plan-out`), outside the bundle.
+    pub plan_out: Option<PathBuf>,
     /// Concrete payload format detected from the input.
     pub format: PayloadFormat,
     /// Execution techniques in the composed chain.
@@ -207,8 +205,8 @@ fn read_config(path: &Path) -> Result<Defaults> {
 ///   `dotnet_hosting` for `.NET`, `powershell_hosting` for `.ps1`;
 /// - syscalls: `indirect` with `hells_gate` (x64 only);
 /// - strings: `xor` + a random key;
-/// - output: `packed/<payload>/<payload>.exe`, `strip: true`, `trim_paths: all`;
-/// - the plan is saved as `<folder>/plan.yaml`.
+/// - output: the bundle's `dist/<payload>.<ext>`, `strip: true`, `trim_paths: all`;
+/// - the plan is saved as `<bundle>/plan.yaml`.
 ///
 /// Non-`Stable` techniques selected explicitly need `--allow-experimental`. A
 /// non-`Stable` technique chosen *by the format default* still builds (otherwise
@@ -251,18 +249,25 @@ pub fn compose(args: &PackArgs, defaults: &Defaults) -> Result<PackOutcome> {
             .unwrap_or("exe"),
     )?;
 
-    let dir = args
-        .dir
-        .clone()
-        .or_else(|| defaults.dir.clone())
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_OUTPUT_DIR));
-    let (artifact_path, plan_path) = output_paths(
-        &args.payload,
-        &dir,
-        kind,
+    let dir = args.dir.clone().or_else(|| defaults.dir.clone());
+    // Every pack run gets its own bundle: the delivered artifact and the
+    // provenance never share a folder with a previous run. `--out` only
+    // redirects the delivered copy, so the bundle is always complete.
+    let suffix = match args.build_name.as_deref() {
+        Some(name) => bare_dir_component(name)?.to_string(),
+        None => run_nonce(),
+    };
+    let bundle = BundleLayout::resolve(
+        &payload_stem(&args.payload),
         args.out.as_deref(),
-        args.plan_out.as_deref(),
+        kind,
+        dir.as_deref(),
+        &suffix,
     );
+    // A plan loaded from the bundle is reproducible as written: `output.path`
+    // records the operator's own `--out` (or stays absent, meaning "the
+    // bundle's `dist/`"), never this run's unique folder.
+    let output_path = args.out.as_ref().map(|_| bundle.artifact.clone());
 
     let mut warnings = Vec::new();
     let runtime = compose_steps(args, defaults, format, allow_experimental, &mut warnings)?;
@@ -274,7 +279,7 @@ pub fn compose(args: &PackArgs, defaults: &Defaults) -> Result<PackOutcome> {
             format,
             arch,
             kind,
-            artifact_path: artifact_path.clone(),
+            output_path,
             export,
         },
         runtime,
@@ -286,7 +291,7 @@ pub fn compose(args: &PackArgs, defaults: &Defaults) -> Result<PackOutcome> {
     // Feed the document back through the real loader: the saved plan is
     // byte-for-byte the one that gets built, and format/validation behave
     // exactly as they do for a hand-written file.
-    let plan = load_plan_str(&yaml, &plan_path, &BTreeMap::new())?;
+    let plan = load_plan_str(&yaml, &bundle.plan, &BTreeMap::new())?;
     let plan_yaml = serde_yml::to_string(&plan).map_err(|source| {
         PackerError::Validation(format!("could not serialize the generated plan: {source}"))
     })?;
@@ -301,29 +306,12 @@ pub fn compose(args: &PackArgs, defaults: &Defaults) -> Result<PackOutcome> {
     Ok(PackOutcome {
         plan,
         plan_yaml,
-        plan_path,
-        artifact_path,
+        bundle,
+        plan_out: args.plan_out.clone(),
         format,
         executions,
         save_plan: save_plan(args, defaults),
         warnings,
-    })
-}
-
-/// Writes the generated plan, creating its parent folder when needed.
-pub fn write_plan(outcome: &PackOutcome) -> Result<()> {
-    if let Some(parent) = outcome
-        .plan_path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&outcome.plan_path, &outcome.plan_yaml).map_err(|source| {
-        PackerError::WritePlan {
-            path: outcome.plan_path.clone(),
-            source,
-        }
     })
 }
 
@@ -752,7 +740,7 @@ struct PlanShape {
     format: PayloadFormat,
     arch: Arch,
     kind: OutputKind,
-    artifact_path: PathBuf,
+    output_path: Option<PathBuf>,
     export: Option<String>,
 }
 
@@ -807,7 +795,7 @@ fn compose_plan(
     };
 
     let output = OutputPlan {
-        path: shape.artifact_path,
+        path: shape.output_path,
         kind: shape.kind,
         entry: parse_entry(args.entry.as_deref())?,
         console: ConsoleMode::Parent,
@@ -1041,30 +1029,7 @@ fn parse_kind(value: &str) -> Result<OutputKind> {
     }
 }
 
-/// The default artifact and plan paths.
-fn output_paths(
-    payload: &Path,
-    dir: &Path,
-    kind: OutputKind,
-    out: Option<&Path>,
-    plan_out: Option<&Path>,
-) -> (PathBuf, PathBuf) {
-    let stem = payload_stem(payload);
-    let artifact = match out {
-        Some(path) if path.is_dir() => path.join(format!("{stem}.{}", kind.extension())),
-        Some(path) => path.to_path_buf(),
-        None => dir.join(&stem).join(format!("{stem}.{}", kind.extension())),
-    };
-    // One folder per plan is the package root: the plan, the sources and the
-    // artifact travel together even when `--out` names a file elsewhere.
-    let (package, artifact) = crate::paths::package_paths(&stem, &artifact);
-    let plan_path = plan_out
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| package.join(PLAN_FILE));
-    (artifact, plan_path)
-}
-
-/// The payload's file stem, used as both its plan key and its output folder.
+/// The payload's file stem, used as both its plan key and its bundle name.
 fn payload_stem(payload: &Path) -> String {
     payload
         .file_stem()

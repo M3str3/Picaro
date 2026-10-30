@@ -80,18 +80,32 @@ fn unsigned_hash(manifest: &Path) -> String {
         .to_string()
 }
 
-/// Runs a build that must succeed and returns its manifest path.
-fn build_ok(args: &[&str], out: &Path) -> PathBuf {
+/// `packed/live-repro-<run>/`: the bundle a test's build wrote.
+fn bundle(run: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("packed")
+        .join(format!("live-repro-{run}"))
+}
+
+/// The manifest a build writes for `artifact`: it lives in the bundle's
+/// `artifacts/`, named after the delivered artifact. A replay writes the
+/// `*.replay.json` variant so it never overwrites the recipe it was fed.
+fn manifest(run: &str, artifact: &Path, replay: bool) -> PathBuf {
+    let stem = artifact.file_stem().expect("stem").to_string_lossy();
+    let suffix = if replay { ".replay" } else { "" };
+    bundle(run)
+        .join("artifacts")
+        .join(format!("{stem}.manifest{suffix}.json"))
+}
+
+/// Runs a build that must succeed.
+fn build_ok(args: &[&str]) {
     let output = build(args);
     assert!(
         output.status.success(),
         "build failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    out.with_file_name(format!(
-        "{}.manifest.json",
-        out.file_stem().expect("stem").to_string_lossy()
-    ))
 }
 
 #[test]
@@ -103,10 +117,28 @@ fn the_same_seed_produces_the_same_unsigned_artifact() {
     let plan_arg = plan.to_string_lossy().into_owned();
     let out_arg = out.to_string_lossy().into_owned();
 
-    let first = build_ok(&[&plan_arg, "--seed", "0x1234", "--out", &out_arg], &out);
-    let first_hash = unsigned_hash(&first);
-    let second = build_ok(&[&plan_arg, "--seed", "0x1234", "--out", &out_arg], &out);
-    let second_hash = unsigned_hash(&second);
+    build_ok(&[
+        &plan_arg,
+        "--seed",
+        "0x1234",
+        "--out",
+        &out_arg,
+        "--build-name",
+        "same-seed-a",
+    ]);
+    let first_hash = unsigned_hash(&manifest("same-seed-a", &out, false));
+    // A *different* bundle path must not reach the artifact: the run label is
+    // remapped away during compilation (see `stub_dir_remap`).
+    build_ok(&[
+        &plan_arg,
+        "--seed",
+        "0x1234",
+        "--out",
+        &out_arg,
+        "--build-name",
+        "same-seed-b",
+    ]);
+    let second_hash = unsigned_hash(&manifest("same-seed-b", &out, false));
 
     assert_eq!(
         first_hash, second_hash,
@@ -123,10 +155,26 @@ fn a_different_seed_changes_the_artifact() {
     let plan_arg = plan.to_string_lossy().into_owned();
     let out_arg = out.to_string_lossy().into_owned();
 
-    let first = build_ok(&[&plan_arg, "--seed", "1", "--out", &out_arg], &out);
-    let first_hash = unsigned_hash(&first);
-    let second = build_ok(&[&plan_arg, "--seed", "2", "--out", &out_arg], &out);
-    let second_hash = unsigned_hash(&second);
+    build_ok(&[
+        &plan_arg,
+        "--seed",
+        "1",
+        "--out",
+        &out_arg,
+        "--build-name",
+        "different-seed",
+    ]);
+    let first_hash = unsigned_hash(&manifest("different-seed", &out, false));
+    build_ok(&[
+        &plan_arg,
+        "--seed",
+        "2",
+        "--out",
+        &out_arg,
+        "--build-name",
+        "different-seed",
+    ]);
+    let second_hash = unsigned_hash(&manifest("different-seed", &out, false));
 
     assert_ne!(
         first_hash, second_hash,
@@ -145,19 +193,27 @@ fn replaying_a_manifest_reproduces_the_unsigned_artifact() {
     let out_arg = out.to_string_lossy().into_owned();
     let replay_out_arg = replay_out.to_string_lossy().into_owned();
 
-    let first = build_ok(&[&plan_arg, "--seed", "0xabcd", "--out", &out_arg], &out);
-    let expected = unsigned_hash(&first);
+    build_ok(&[
+        &plan_arg,
+        "--seed",
+        "0xabcd",
+        "--out",
+        &out_arg,
+        "--build-name",
+        "replay-source",
+    ]);
+    let recipe = manifest("replay-source", &out, false);
+    let expected = unsigned_hash(&recipe);
 
-    let replayed = build_ok(
-        &[
-            &first.to_string_lossy(),
-            "--verify",
-            "--out",
-            &replay_out_arg,
-        ],
-        &replay_out,
-    );
-    let actual = unsigned_hash(&replayed);
+    build_ok(&[
+        &recipe.to_string_lossy(),
+        "--verify",
+        "--out",
+        &replay_out_arg,
+        "--build-name",
+        "replay-copy",
+    ]);
+    let actual = unsigned_hash(&manifest("replay-copy", &replay_out, true));
 
     assert_eq!(
         expected, actual,
@@ -174,7 +230,16 @@ fn a_corrupted_payload_fails_on_the_pin() {
     let plan_arg = plan.to_string_lossy().into_owned();
     let out_arg = out.to_string_lossy().into_owned();
 
-    let manifest = build_ok(&[&plan_arg, "--seed", "7", "--out", &out_arg], &out);
+    build_ok(&[
+        &plan_arg,
+        "--seed",
+        "7",
+        "--out",
+        &out_arg,
+        "--build-name",
+        "corrupt",
+    ]);
+    let manifest = manifest("corrupt", &out, false);
 
     let mut bytes = std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join(PAYLOAD))
         .expect("read fixture payload");
@@ -208,7 +273,16 @@ fn strict_with_a_doctored_toolchain_exits_five() {
     let plan_arg = plan.to_string_lossy().into_owned();
     let out_arg = out.to_string_lossy().into_owned();
 
-    let manifest = build_ok(&[&plan_arg, "--seed", "7", "--out", &out_arg], &out);
+    build_ok(&[
+        &plan_arg,
+        "--seed",
+        "7",
+        "--out",
+        &out_arg,
+        "--build-name",
+        "strict",
+    ]);
+    let manifest = manifest("strict", &out, false);
     let text = std::fs::read_to_string(&manifest).expect("read manifest");
     let mut value: serde_json::Value = serde_json::from_str(&text).expect("manifest JSON");
     value["reproduce"]["toolchain"]["rustc"] =

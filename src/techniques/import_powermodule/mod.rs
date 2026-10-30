@@ -14,6 +14,7 @@ use super::{Capability, Category, PayloadFormat, Stability, TechniqueDef};
 
 /// Parameters for importing a PowerShell module.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Params {
     /// Name of the payload in `build.payloads` to inject. Optional when the plan
     /// declares exactly one payload.

@@ -250,9 +250,10 @@ CLI overrides  >  reproduce block  >  plan defaults  >  random
 | `--payload <name>=<path>` | relocate a payload whose `source` moved |
 | `--redact <path>` | write a copy of the manifest with `secrets: audit` (keys stripped) |
 
-`--out` defaults to `build.output.path`; the manifest written for the new
-artifact is `<out>.manifest.json`, so replaying `hello.manifest.json` never
-overwrites the recipe itself.
+Without `--out`, the delivered path is the plan's `output.path` when set and
+the bundle's `dist/` otherwise; the manifest written for the new artifact is
+`<bundle>/artifacts/<stem>.manifest.json`, so replaying `hello.manifest.json`
+never overwrites the recipe itself.
 
 ### Errors
 
@@ -311,7 +312,7 @@ resolved values are the honest record.)
   and `secrets` defaults to `audit` (v3 never stored keys). A v3 manifest can be
   replayed with `--key-file`, never byte-identically without it.
 - New manifests are schema `4` and are valid plans. `output.manifest` keeps its
-  meaning: write the recipe/manifest next to the artifact.
+  meaning: write the recipe/manifest into the bundle's `artifacts/`.
 - `plan_sha256` is replaced by **`effective_sha256`**: the hash of the canonical
   `(resolved plan, entropy, payload sha256s)`, excluding `predecessor`. The old
   hash did not cover the seeds, so two builds could share it while differing;
@@ -330,9 +331,9 @@ plaintext as soon as they hold the artifact and the key.
   writes a shareable copy without the key.
 - `secrets: audit` is opt-in, for a copy that leaves the lab.
 - `--redact` produces a shareable copy (keys stripped, hashes kept).
-- Manifests live in `dist/` (gitignored) and must never be committed. Add
-  `*.manifest.json` to the existing root-hygiene rules; it is already covered by
-  the artifact side-output rule, and the docs must say why.
+- Manifests live in `packed/<plan>-<run>/artifacts/` (gitignored) and must never
+  be committed. Add `*.manifest.json` to the existing root-hygiene rules; it is
+  already covered by the artifact side-output rule, and the docs must say why.
 - The seed is a secret under `exact` for the same reason as the key: it derives
   it. Document it next to the key, not as a "harmless number".
 

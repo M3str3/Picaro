@@ -14,9 +14,10 @@
 #
 # Both services share exactly one host folder: `exchange/` (created and
 # gitignored). It is the *only* thing they write to the host — payloads and
-# plans in, packed artifacts out. Everything else stays in the container: the
-# packer's scratch in /tmp (PICARO_BUILD_DIR) and Cargo's target/ in the
-# `picaro-target` volume, so compiling the packer never touches your disk.
+# plans in, packed artifacts out — plus Cargo's target/ in the `picaro-target`
+# volume, so compiling the packer never touches your disk. Build bundles land in
+# `packed/` inside the mount (`exchange/packed/` for `run`, the repo's `packed/`
+# for `dev`), so the plan, sources, artifact and manifest survive the container.
 #
 # Note: the containers are Linux, so they *build* the Windows PE but cannot run
 # it; execute the artifact on a Windows host.
@@ -48,9 +49,6 @@ services:
     # One-time setup (cross-compiled stub deps), then the requested command.
     # Source edits are bind-mounted, so no image rebuild is involved.
     entrypoint: ["/bin/bash", "/work/scripts/dev-entrypoint.sh"]
-    environment:
-      # Keep the packer's scratch files off the repo and off the host.
-      PICARO_BUILD_DIR: /tmp/picaro-build
     volumes:
       # The repo (writable: you are developing it).
       - .:/work
@@ -86,8 +84,6 @@ services:
     # Same uid/gid as the dev image (see the note in README.md). The production
     # image runs as root; this keeps files written to exchange/ owned by you.
     user: "${PICARO_UID:-1000}:${PICARO_GID:-1000}"
-    environment:
-      PICARO_BUILD_DIR: /tmp/picaro-build
     volumes:
       - ./exchange:/work
 

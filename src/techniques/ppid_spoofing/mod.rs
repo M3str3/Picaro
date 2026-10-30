@@ -12,6 +12,7 @@ use super::{Capability, Category, Stability, TechniqueDef};
 
 /// Parameters for parent-process spoofing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Params {
     /// Executable to launch.
     #[serde(default)]

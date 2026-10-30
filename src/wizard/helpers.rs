@@ -101,7 +101,10 @@ pub(super) fn is_dll_incompatible(name: &str) -> bool {
 pub(super) fn execution_is_terminal(technique: &TechniqueKind, format: PayloadFormat) -> bool {
     match technique {
         TechniqueKind::DotnetHosting { .. } => true,
-        TechniqueKind::ReflectiveLoading { .. } => format == PayloadFormat::Pe,
+        // `patch_exit` intercepts the payload's exit, so the step returns control.
+        TechniqueKind::ReflectiveLoading { params } => {
+            format == PayloadFormat::Pe && !params.patch_exit
+        }
         _ => false,
     }
 }
@@ -279,7 +282,7 @@ pub(super) fn assemble(payload: &Path, answers: &Answers) -> Plan {
             // generated YAML stays minimal.
             polymorphism: None,
             output: OutputPlan {
-                path: PathBuf::from(&answers.output_path),
+                path: Some(PathBuf::from(&answers.output_path)),
                 kind: answers.output_kind,
                 entry: answers.dll_entry.clone(),
                 console: ConsoleMode::Parent,

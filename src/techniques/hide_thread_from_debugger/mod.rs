@@ -17,6 +17,7 @@ use super::{Capability, Category, Stability, TechniqueDef};
 /// loader's main thread — the one a debugger attaches to. Covering the loader's
 /// other threads would need `OpenThread` on each, which is a different technique.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Params {}
 
 /// Static metadata for the thread-hiding preparation.

@@ -582,8 +582,11 @@ impl TryFrom<String> for KeySource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutputPlan {
-    /// Output path of the packed artifact (`.exe`, `.dll` or `.bin`; see `kind`).
-    pub path: PathBuf,
+    /// Where the delivered artifact goes (`.exe`, `.dll` or `.bin`; see
+    /// `kind`). Optional: when omitted, the artifact is delivered inside the
+    /// build bundle at `<bundle>/dist/<plan>.<ext>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
 
     /// What the artifact is: an executable (default), a DLL a host process
     /// loads, or position-independent shellcode (`docs/design/dll-output.md`,
@@ -755,7 +758,7 @@ impl OutputKind {
             OutputKind::Exe => "exe",
             OutputKind::Dll => "dll",
             OutputKind::Shellcode => "bin",
-            OutputKind::PsModule => "ps1",
+            OutputKind::PsModule => "dll",
         }
     }
 }

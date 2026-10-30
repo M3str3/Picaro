@@ -17,6 +17,7 @@ use super::{Capability, Category, Stability, TechniqueDef};
 /// `StringsConfig`); the target path is optional and falls back to the running
 /// artifact's own image path at run time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Params {
     /// Target file to stomp. `None` = the running artifact's own image path.
     #[serde(default, skip_serializing_if = "Option::is_none")]

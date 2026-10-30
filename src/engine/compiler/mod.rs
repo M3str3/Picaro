@@ -657,9 +657,9 @@ fn hardening_flags(
 ///
 /// [`hardening_flags`] remaps the manifest dir and the cargo home, but the stub
 /// is compiled from a scratch directory that can sit outside the manifest dir
-/// (`PICARO_BUILD_DIR`), in which case the absolute path of its `main.rs` would
-/// leak into the artifact. Returns an empty list for a debug build or
-/// `trim_paths: none` (both keep paths on purpose).
+/// (a `PICARO_BUNDLE_ROOT` elsewhere), in which case the absolute path of its
+/// `main.rs` would leak into the artifact. Returns an empty list for a debug
+/// build or `trim_paths: none` (both keep paths on purpose).
 fn stub_dir_remap(options: CompileOptions, stub_dir: Option<&Path>) -> Vec<String> {
     let mut flags = Vec::new();
     if options.debug || options.trim_paths == PathTrim::None {
@@ -707,10 +707,11 @@ pub fn compile_stub(
     let home = cargo_home().ok();
 
     // `--remap-path-prefix` is last-match-wins, so the stub dir remap must come
-    // after the manifest-dir remap to win when the scratch directory is a
-    // subdirectory of the manifest dir. Otherwise the run nonce survives into
-    // the artifact as `.\build\run-<pid>-<nanos>\main.rs` and also feeds the
-    // linker's `/Brepro` hash, so two builds of the same inputs differ.
+    // after the manifest-dir remap to win when the bundle sits inside the
+    // manifest dir (the default `packed/<plan>-<run>/build` is). Otherwise the
+    // run label survives into the artifact as
+    // `packed\<plan>-<pid>-<nanos>\build\main.rs` and also feeds the linker's
+    // `/Brepro` hash, so two builds of the same inputs differ.
     let mut hardening = hardening_flags(options, manifest_dir, home.as_deref());
     hardening.extend(stub_dir_remap(options, stub_rs.parent()));
     // A deterministic linker timestamp is part of the reproduction contract:

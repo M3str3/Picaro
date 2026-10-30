@@ -51,9 +51,10 @@ build:
       key: random         # random | literal:<64 hex chars>
     debug: false          # compile a debuggable, non-evasive stub for the lab
   output:
-    path: ./dist/mimikatz_packed.exe   # artifact name; the build creates dist/<plan>/ and
-                                        # puts the sources, payload blobs, artifact and
-                                        # manifest there (default root: packed/)
+    path: ./dist/mimikatz_packed.exe   # optional: where the artifact is *delivered*.
+                                        # Omit it to deliver into the build bundle's
+                                        # dist/ (root: packed/<plan>-<run>/). A directory
+                                        # gets `<plan>.<ext>`.
     kind: exe             # exe | dll | shellcode | psmodule (see below)
     entry: auto           # DLL only: auto | jni_on_load | export:<name>
     arch: x64             # x64 | x86 (default x64; the stub and the payload must match)

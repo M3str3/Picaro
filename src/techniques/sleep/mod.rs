@@ -12,6 +12,7 @@ use super::{Capability, Category, Stability, TechniqueDef};
 
 /// Parameters for the sleep technique.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Params {
     /// Milliseconds to wait.
     #[serde(default = "default_ms")]

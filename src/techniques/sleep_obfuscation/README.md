@@ -199,6 +199,14 @@ technique and not the sampler.
 - **The sleep is real**: the delay step is `WaitForSingleObject` on a timer
   thread; `std::thread::sleep` cannot be used (it would block the calling
   thread, which must stay parked in the event wait).
+- **Cleanup guard**: the completion event and the timer queue are owned by
+  `EkkoCleanup`. Every early return cancels the pending chain, waits for an
+  in-flight callback with `DeleteTimerQueueEx(..., INVALID_HANDLE_VALUE)` and
+  closes both handles exactly once; the success path does the same explicitly.
+  A `CreateTimerQueueTimer` failure after the first step has already fired can
+  still cancel the decrypt/restore steps and leave the image encrypted (rare:
+  the first step is due 20 ms after the capture while the chain is queued in
+  microseconds).
 
 ## References
 

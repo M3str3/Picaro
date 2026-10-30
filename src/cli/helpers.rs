@@ -6,25 +6,34 @@ use super::*;
 /// payload (fetching a URL as a real build would), verifies each `sha256` when
 /// pinned, validates the PEs and prints the resolved plan. Nothing is written, so
 /// it is safe to run before committing to a build.
+///
+/// `plan_target` is where a real build would save the plan (`None` with
+/// `--no-save-plan`).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn dry_run(
     plan: &plan::Plan,
     plan_path: &Path,
+    bundle: &BundleLayout,
     ui: &Palette,
     entropy: &BuildEntropy,
     heading: &BuildHeading,
-    written_plan: Option<&Path>,
+    plan_target: Option<&Path>,
     extra_warnings: &[String],
 ) -> Result<()> {
     let mut deferred_warnings = extra_warnings.to_vec();
-    // Show the package the build would produce, not the raw plan path.
-    let mut effective_plan = plan.clone();
-    let (package_dir, artifact_path) = package_paths(&plan.name, &plan.build.output.path);
-    effective_plan.build.output.path = artifact_path;
-    let plan = &effective_plan;
+    // The caller resolved the bundle the build would use, so the tree printed
+    // here is the tree a real run writes.
     anstream::println!("{}", ui.command_line(&heading.command, &heading.target));
     anstream::println!();
     print_plan(plan, plan_path, ui);
-    anstream::println!("{}", ui.field("package", ui.target(package_dir.display())));
+    anstream::println!("{}", ui.field("bundle", ui.target(bundle.root.display())));
+    if let Some(plan) = plan_target {
+        anstream::println!("{}", ui.field("plan", ui.target(plan.display())));
+    }
+    anstream::println!(
+        "{}",
+        ui.field("artifact", ui.target(bundle.artifact.display()))
+    );
     anstream::println!();
 
     // Resource building is cheap and validates the icon/versions, so a dry run
@@ -130,11 +139,11 @@ pub(super) fn dry_run(
     }
 
     anstream::println!();
-    match written_plan {
+    match plan_target {
         Some(path) => anstream::println!(
             "{}",
             ui.warn(format!(
-                "dry run: nothing was encrypted or compiled; the plan is at {}",
+                "dry run: nothing was encrypted, compiled or written; a build saves the plan at {}",
                 path.display()
             ))
         ),
@@ -358,6 +367,15 @@ pub(super) fn payload_advisories(step: &ResolvedStep, summary: &PayloadSummary) 
                          TLS block instead of the payload's own",
                         step.index, step.label, summary.label, template,
                     ));
+                    if params.patch_exit {
+                        warnings.push(format!(
+                            "step {} ('{}'): params.patch_exit returns control to the loader, but \
+                             the payload's static TLS still aliases the loader's TLS block: a later \
+                             step in the same chain may read corrupted thread-local state. Prefer a \
+                             payload without a TLS template for a chained patch_exit step",
+                            step.index, step.label,
+                        ));
+                    }
                 }
             }
         }
@@ -562,10 +580,14 @@ pub(super) fn print_plan(plan: &plan::Plan, plan_path: &Path, ui: &Palette) {
             ui.field(&format!("  {name} args"), payload_args_label(payload))
         );
     }
-    anstream::println!(
-        "{}",
-        ui.field("output", ui.target(plan.build.output.path.display()))
-    );
+    let output = plan
+        .build
+        .output
+        .path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "(bundle default)".to_string());
+    anstream::println!("{}", ui.field("output", ui.target(output)));
     anstream::println!("{}", ui.field("arch", plan.build.output.arch.label()));
     anstream::println!(
         "{}",
@@ -778,52 +800,64 @@ pub(super) fn apply_subsystem(source: String, subsystem: Subsystem) -> String {
     }
 }
 
-/// Copies the generated stub source and the encrypted payloads next to the
-/// artifact, so the output folder is a complete package and not just the
-/// compiled file.
-pub(super) fn copy_package_sources(build_dir: &Path, package_dir: &Path) -> Result<()> {
-    std::fs::create_dir_all(package_dir)?;
-
-    // A previous, larger run may have left extra blobs behind; drop the old set
-    // before copying the new one, so the folder describes exactly this build.
-    if let Ok(entries) = std::fs::read_dir(package_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with("payload_") && name.ends_with(".bin") {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
+/// Resolves the delivered artifact path from `--out`.
+///
+/// A directory (existing, or written with a trailing separator) receives the
+/// plan's default file name; anything else is the exact delivered path.
+pub(super) fn resolve_delivered_path(out: &Path, plan_name: &str, kind: OutputKind) -> PathBuf {
+    let dir_like = out.is_dir() || out.to_string_lossy().ends_with(['/', '\\']);
+    if dir_like {
+        out.join(format!(
+            "{}.{}",
+            crate::paths::package_dir_name(plan_name),
+            kind.extension()
+        ))
+    } else {
+        out.to_path_buf()
     }
-
-    let source = build_dir.join("main.rs");
-    if source.is_file() {
-        std::fs::copy(&source, package_dir.join("main.rs"))?;
-    }
-    for entry in std::fs::read_dir(build_dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("payload_") && name.ends_with(".bin") {
-            std::fs::copy(entry.path(), package_dir.join(name.as_ref()))?;
-        }
-    }
-    Ok(())
 }
 
-/// Copies the generated C# sources of a `psmodule` build into its package.
-pub(super) fn copy_psmodule_sources(build_dir: &Path, package_dir: &Path) -> Result<()> {
-    std::fs::create_dir_all(package_dir)?;
-    for name in ["picaro_module.cs", "picaro_module_xchacha.cs"] {
-        let source = build_dir.join(name);
-        if source.is_file() {
-            std::fs::copy(&source, package_dir.join(name))?;
-        }
+/// The delivered path a run would use: `--out` when given, otherwise whatever
+/// the plan's `output.path` says (`None` means "the bundle's `dist/`").
+pub(super) fn effective_output_path(plan: &plan::Plan, out: Option<&Path>) -> Option<PathBuf> {
+    match out {
+        Some(out) => Some(resolve_delivered_path(
+            out,
+            &plan.name,
+            plan.build.output.kind,
+        )),
+        None => plan.build.output.path.clone(),
     }
-    Ok(())
 }
 
-/// Where the compiled stub is written inside the build directory.
+/// The bundle a run writes into.
+///
+/// `preset` is the bundle `pack` already resolved (it must match the plan it
+/// composed); otherwise the root comes from the environment and the run label
+/// from `--build-name` (a validated single component) or a unique nonce.
+pub(super) fn resolve_bundle(
+    plan: &plan::Plan,
+    output: Option<&Path>,
+    build_name: Option<&str>,
+    preset: Option<&BundleLayout>,
+) -> Result<BundleLayout> {
+    if let Some(bundle) = preset {
+        return Ok(bundle.clone());
+    }
+    let suffix = match build_name {
+        Some(name) => bare_dir_component(name)?.to_string(),
+        None => run_nonce(),
+    };
+    Ok(BundleLayout::resolve(
+        &plan.name,
+        output,
+        plan.build.output.kind,
+        None,
+        &suffix,
+    ))
+}
+
+/// Where the compiled stub is written inside the bundle's `build/` directory.
 ///
 /// An executable keeps the fixed `out.exe`, and a shellcode build keeps
 /// `out.dll`: its intermediate is never delivered (sRDI converts it in place),
@@ -832,16 +866,16 @@ pub(super) fn copy_psmodule_sources(build_dir: &Path, package_dir: &Path) -> Res
 /// the link output's name inside the PE (the export directory's `Name` field),
 /// so the file should report the name it will be delivered under rather than
 /// the build's scratch name.
-pub(super) fn intermediate_path(build_dir: &Path, output: &plan::schema::OutputPlan) -> PathBuf {
-    match output.kind {
+pub(super) fn intermediate_path(
+    build_dir: &Path,
+    kind: OutputKind,
+    artifact_name: &str,
+) -> PathBuf {
+    match kind {
         OutputKind::Exe => build_dir.join("out.exe"),
         OutputKind::Shellcode => build_dir.join("out.dll"),
-        // A psmodule build has its own flow (see `build_psmodule`); keeping it
-        // in this arm keeps the match total and names the scratch module after
-        // the artifact.
         OutputKind::Dll | OutputKind::PsModule => {
-            let stem = output
-                .path
+            let stem = Path::new(artifact_name)
                 .file_stem()
                 .and_then(|stem| stem.to_str())
                 .unwrap_or("loader");
@@ -1039,96 +1073,7 @@ pub(super) fn load_source(source: &str) -> Result<Vec<u8>> {
     })
 }
 
-/// Removes `dir` if it exists and recreates it empty.
-pub(super) fn prepare_build_dir(dir: &Path) -> Result<()> {
-    if dir.exists() {
-        std::fs::remove_dir_all(dir)?;
-    }
-    std::fs::create_dir_all(dir)?;
-    Ok(())
-}
-
-/// The scratch directory for intermediate artifacts (the ciphertexts, the
-/// rendered stub, the compiled `out.exe`).
-///
-/// Defaults to a unique `build/run-<pid>-<nanos>` directory next to the
-/// manifest, so concurrent `picaro build` runs never share — and never wipe —
-/// each other's intermediate files. A `--build-name NAME` replaces that unique
-/// run label with `NAME` (`build/NAME`), trading isolation for a stable path a
-/// debugger can rely on. `PICARO_BUILD_DIR`, when set and non-empty, replaces
-/// the `build` base for reproducible single-directory workflows (e.g. the
-/// read-only Docker source tree); a `--build-name` stacks on top of it.
-pub(super) fn scratch_dir(build_name: Option<&str>) -> Result<PathBuf> {
-    let override_dir = std::env::var_os("PICARO_BUILD_DIR").map(PathBuf::from);
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    scratch_dir_for(override_dir, manifest_dir, build_name)
-}
-
-/// Testable core of [`scratch_dir`]: resolves the override/manifest base, then
-/// applies the `--build-name` (or the unique run label) on top.
-pub(super) fn scratch_dir_for(
-    override_dir: Option<PathBuf>,
-    manifest_dir: &Path,
-    build_name: Option<&str>,
-) -> Result<PathBuf> {
-    if let Some(name) = build_name {
-        // A named directory is deliberately *not* unique: the whole point is
-        // that `build/<name>/main.rs` is the same path next run. Two concurrent
-        // builds that pass the same name share it, which is the caller's call.
-        return Ok(scratch_dir_in(override_dir, manifest_dir).join(bare_dir_component(name)?));
-    }
-    if override_dir
-        .as_ref()
-        .is_some_and(|dir| !dir.as_os_str().is_empty())
-    {
-        return Ok(scratch_dir_in(override_dir, manifest_dir));
-    }
-    Ok(unique_scratch_dir_in(manifest_dir, &run_nonce()))
-}
-
 /// Accepts a `--build-name` only when it is a single, ordinary directory name.
 ///
-/// The flag names one folder under the scratch root; it is not a path. Rejecting
-/// separators, a drive prefix and `.`/`..` keeps a mistyped name from writing
-/// anywhere else on disk.
-pub(super) fn bare_dir_component(name: &str) -> Result<&str> {
-    let trimmed = name.trim();
-    let invalid = trimmed.is_empty()
-        || trimmed == "."
-        || trimmed == ".."
-        || trimmed.contains('/')
-        || trimmed.contains('\\')
-        || trimmed.contains(':');
-    if invalid {
-        return Err(error::PackerError::Usage(format!(
-            "--build-name must be a single directory name (got {name:?})"
-        )));
-    }
-    Ok(trimmed)
-}
-
-/// Resolves [`scratch_dir`] from an explicit `PICARO_BUILD_DIR` value (when set
-/// and non-empty) and the manifest directory. Split out so both branches are
-/// testable without touching the process environment.
-pub(super) fn scratch_dir_in(override_dir: Option<PathBuf>, manifest_dir: &Path) -> PathBuf {
-    match override_dir {
-        Some(dir) if !dir.as_os_str().is_empty() => dir,
-        _ => manifest_dir.join("build"),
-    }
-}
-
-/// A unique scratch directory for one build run, derived from `nonce`.
-///
-/// Split from [`scratch_dir`] so tests can inject a deterministic nonce.
-pub(super) fn unique_scratch_dir_in(manifest_dir: &Path, nonce: &str) -> PathBuf {
-    manifest_dir.join("build").join(format!("run-{nonce}"))
-}
-
-/// A process- and time-unique label (`<pid>-<nanos>`) for a build run.
-pub(super) fn run_nonce() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    format!("{}-{nanos}", std::process::id())
-}
+/// Re-exported from [`crate::paths`] so `pack` and the CLI share one rule.
+pub(super) use crate::paths::bare_dir_component;

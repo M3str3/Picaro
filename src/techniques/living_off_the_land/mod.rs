@@ -16,6 +16,7 @@ use super::{Capability, Category, Stability, TechniqueDef};
 /// A Control technique: it never runs the payload, it only launches the
 /// configured process and relays its exit code back to the chain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Params {
     /// Process to launch. A bare name (no path separator) is resolved against
     /// `System32` at run time; a path is used as is.

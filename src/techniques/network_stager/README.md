@@ -165,6 +165,15 @@ names: `docs/measurements.md`.
   `build.payloads.<name>.sha256` is not enforced here. With
   `fallback: embedded` the *embedded* copy is validated (and hash-pinned) as
   usual.
+- **Both transports cap the staged body at 64 MiB** (`MAX_STAGED_BYTES`), the
+  same limit the packer applies to a fetched input: a hostile or misconfigured
+  server cannot grow the loader's memory without bound. The in-process
+  transport rejects a chunk that would exceed the cap before allocating it; the
+  child-process transport checks the temp file's metadata and then reads at
+  most one byte past the cap.
+- **The child-process transport deletes its temp file on every path** —
+  success, a failed read, an oversized body — through a drop guard, so an error
+  never leaves the downloaded payload on disk.
 - Both transports define `fetch() -> Result<Vec<u8>, String>`; the shared runner
   in `stub_fragment.rs` owns the retries, the staged decryption and the slot.
 

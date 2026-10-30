@@ -155,8 +155,17 @@ pub struct Signer {
 
 /// Signs `exe` according to `plan`.
 ///
+/// `artifacts` is the bundle's provenance directory: the lab CA export and the
+/// reusable lab identity live there, so a signed build keeps its signing
+/// material next to the artifact instead of wherever the file is delivered.
+/// `None` falls back to the artifact's own directory.
+///
 /// `None` or `mode: none` is a no-op and returns `Ok(None)`.
-pub fn sign(exe: &Path, plan: Option<&SignPlan>) -> Result<Option<Signature>, SigningError> {
+pub fn sign(
+    exe: &Path,
+    plan: Option<&SignPlan>,
+    artifacts: Option<&Path>,
+) -> Result<Option<Signature>, SigningError> {
     let Some(plan) = plan else {
         return Ok(None);
     };
@@ -174,8 +183,8 @@ pub fn sign(exe: &Path, plan: Option<&SignPlan>) -> Result<Option<Signature>, Si
 
     let signer = locate_signer(plan)?;
     let signature = match signer.backend {
-        Backend::Signtool => sign_with_signtool(exe, plan, &signer.path)?,
-        Backend::Osslsigncode => sign_with_osslsigncode(exe, plan, &signer.path)?,
+        Backend::Signtool => sign_with_signtool(exe, plan, &signer.path, artifacts)?,
+        Backend::Osslsigncode => sign_with_osslsigncode(exe, plan, &signer.path, artifacts)?,
     };
     Ok(Some(signature))
 }
@@ -286,7 +295,12 @@ fn find_in_windows_kits() -> Option<PathBuf> {
 }
 
 /// Signs with `signtool.exe` (the Windows-native backend).
-fn sign_with_signtool(exe: &Path, plan: &SignPlan, tool: &Path) -> Result<Signature, SigningError> {
+fn sign_with_signtool(
+    exe: &Path,
+    plan: &SignPlan,
+    tool: &Path,
+    artifacts: Option<&Path>,
+) -> Result<Signature, SigningError> {
     let mut args: Vec<String> = vec!["sign".to_string()];
     let mut signature = Signature {
         mode: plan.mode.clone(),
@@ -309,7 +323,8 @@ fn sign_with_signtool(exe: &Path, plan: &SignPlan, tool: &Path) -> Result<Signat
             let leaf = ensure_leaf(&leaf_subject, &ca_subject)?;
             // Export the CA (public) next to the artifact so the lab can trust
             // it; nothing is added to this machine's stores.
-            let ca_file = ca_export_path(exe);
+            let ca_file = ca_export_path(exe, artifacts);
+            ensure_parent(&ca_file)?;
             export_certificate(&ca_subject, &ca_file)?;
             signature.issuer = Some(ca_subject);
             signature.subject = Some(subject);
@@ -369,6 +384,7 @@ fn sign_with_osslsigncode(
     exe: &Path,
     plan: &SignPlan,
     tool: &Path,
+    artifacts: Option<&Path>,
 ) -> Result<Signature, SigningError> {
     let mut signature = Signature {
         mode: plan.mode.clone(),
@@ -385,10 +401,11 @@ fn sign_with_osslsigncode(
                 .subject
                 .clone()
                 .unwrap_or_else(|| DEFAULT_LAB_SUBJECT.to_string());
-            let identity = ensure_lab_identity(exe, &subject)?;
+            let identity = ensure_lab_identity(exe, &subject, artifacts)?;
             // Export the CA (public, DER) next to the artifact so the lab can
             // trust it; the private key never leaves the state directory.
-            let ca_file = ca_export_path(exe);
+            let ca_file = ca_export_path(exe, artifacts);
+            ensure_parent(&ca_file)?;
             std::fs::copy(&identity.ca_cert, &ca_file)?;
             signature.subject = Some(subject);
             signature.issuer = Some(identity.ca_subject.clone());
@@ -493,8 +510,12 @@ struct LabIdentity {
 /// reuse the same CA (the lab only installs `<stem>.ca.cer` once). In the Docker
 /// image that directory lives under the mounted work directory, so it survives
 /// across runs.
-fn ensure_lab_identity(exe: &Path, subject: &str) -> Result<LabIdentity, SigningError> {
-    let dir = lab_state_dir(exe, subject);
+fn ensure_lab_identity(
+    exe: &Path,
+    subject: &str,
+    artifacts: Option<&Path>,
+) -> Result<LabIdentity, SigningError> {
+    let dir = lab_state_dir(exe, subject, artifacts);
     let ca_key = dir.join("ca.key");
     let ca_pem = dir.join("ca.pem");
     let ca_der = dir.join("ca.der");
@@ -683,12 +704,17 @@ fn cert_sha1_fingerprint(cert: &Path) -> Result<String, SigningError> {
 /// The persistent lab identity directory for `subject`.
 ///
 /// `PICARO_SIGN_DIR` overrides the default, which is
-/// `<artifact dir>/.picaro/lab/<slug>` — under the mounted work directory in the
-/// container, so the CA is reused across runs.
-fn lab_state_dir(exe: &Path, subject: &str) -> PathBuf {
+/// `<artifacts>/.picaro/lab/<slug>` when the caller passes the bundle's
+/// provenance directory, or `<artifact dir>/.picaro/lab/<slug>` otherwise —
+/// under the mounted work directory in the container, so the CA is reused.
+fn lab_state_dir(exe: &Path, subject: &str, artifacts: Option<&Path>) -> PathBuf {
     let base = match std::env::var_os("PICARO_SIGN_DIR") {
         Some(dir) => PathBuf::from(dir),
-        None => artifact_dir(exe).join(".picaro").join("lab"),
+        None => artifacts
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| artifact_dir(exe))
+            .join(".picaro")
+            .join("lab"),
     };
     base.join(identity_slug(subject))
 }
@@ -719,17 +745,29 @@ fn artifact_dir(exe: &Path) -> PathBuf {
     }
 }
 
-/// `<stem>.ca.cer` next to the artifact.
-fn ca_export_path(exe: &Path) -> PathBuf {
+/// `<stem>.ca.cer` in the bundle's `artifacts/` directory (or next to the
+/// artifact when the caller does not name one).
+fn ca_export_path(exe: &Path, artifacts: Option<&Path>) -> PathBuf {
     let stem = exe
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("artifact");
     let name = format!("{stem}.ca.cer");
-    match exe.parent().filter(|p| !p.as_os_str().is_empty()) {
+    match artifacts {
         Some(dir) => dir.join(name),
-        None => PathBuf::from(name),
+        None => match exe.parent().filter(|p| !p.as_os_str().is_empty()) {
+            Some(dir) => dir.join(name),
+            None => PathBuf::from(name),
+        },
     }
+}
+
+/// Creates the parent directory of `path` when it is missing.
+fn ensure_parent(path: &Path) -> Result<(), SigningError> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    Ok(())
 }
 
 /// The temporary file `osslsigncode` writes before it is swapped in.
@@ -754,15 +792,95 @@ fn strings<const N: usize>(items: [&str; N]) -> Vec<String> {
 
 /// Converts an RFC 4514 subject (`CN=Acme, O=Acme Inc`) into the
 /// slash-separated form `openssl -subj` expects (`/CN=Acme/O=Acme Inc`).
+///
+/// A comma only separates RDNs when what follows it starts a new `type=value`
+/// pair. An unquoted company name is the common counter-example: appending
+/// ` Root CA` to `CN=Citrix Systems, Inc.` must not turn `Inc. Root CA` into an
+/// RDN, which openssl rejects with "Missing '='".
 fn openssl_subject(dn: &str) -> String {
     let mut out = String::new();
-    for rdn in dn.split(',') {
+    for rdn in split_rdns(dn) {
         let rdn = rdn.trim();
         if rdn.is_empty() {
             continue;
         }
         out.push('/');
-        out.push_str(&rdn.replace('/', "\\/"));
+        match rdn.split_once('=') {
+            Some((attr, value)) => {
+                out.push_str(attr.trim());
+                out.push('=');
+                // `/` separates RDNs for openssl; a literal one is escaped.
+                out.push_str(&unescape_dn_value(value.trim()).replace('/', "\\/"));
+            }
+            None => out.push_str(&rdn.replace('/', "\\/")),
+        }
+    }
+    out
+}
+
+/// Splits a DN on the commas that separate RDNs, honoring quoting and
+/// backslash escapes.
+fn split_rdns(dn: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, ch) in dn.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '"' => quoted = !quoted,
+            ',' if !quoted && starts_a_rdn(&dn[index + ch.len_utf8()..]) => {
+                parts.push(&dn[start..index]);
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(&dn[start..]);
+    parts
+}
+
+/// Whether `rest` (the text after a comma) begins a new `type=value` RDN.
+///
+/// Only the attribute name is inspected: it must be an alphanumeric/`-`/`.`
+/// token immediately followed by `=`, so ` Inc. Root CA` does not qualify.
+fn starts_a_rdn(rest: &str) -> bool {
+    let Some((attr, _)) = rest.trim_start().split_once('=') else {
+        return false;
+    };
+    let attr = attr.trim_end();
+    !attr.is_empty()
+        && attr
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '.')
+        && attr
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphanumeric())
+}
+
+/// Removes the quoting and RFC 4514 escapes from one RDN value, so openssl gets
+/// the literal text (`"Acme, Inc."` and `Acme\\, Inc.` both become
+/// `Acme, Inc.`).
+fn unescape_dn_value(value: &str) -> String {
+    let value = value
+        .strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+        .unwrap_or(value);
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                out.push(next);
+            }
+        } else {
+            out.push(ch);
+        }
     }
     out
 }
@@ -1042,6 +1160,42 @@ mod tests {
     }
 
     #[test]
+    fn a_comma_inside_a_company_name_stays_in_the_value() {
+        // The reported failure: the suffix added for the CA must not become an
+        // RDN, or openssl says "Missing '='".
+        assert_eq!(
+            openssl_subject("CN=Citrix Systems, Inc."),
+            "/CN=Citrix Systems, Inc."
+        );
+        assert_eq!(
+            openssl_subject("CN=Citrix Systems, Inc. Root CA"),
+            "/CN=Citrix Systems, Inc. Root CA"
+        );
+        // A later, real RDN is still recognized after the embedded comma.
+        assert_eq!(
+            openssl_subject("CN=Smith, Inc., O=Acme"),
+            "/CN=Smith, Inc./O=Acme"
+        );
+    }
+
+    #[test]
+    fn quoted_and_escaped_commas_are_unquoted() {
+        assert_eq!(
+            openssl_subject("CN=\"Acme, Inc.\", O=Acme"),
+            "/CN=Acme, Inc./O=Acme"
+        );
+        assert_eq!(
+            openssl_subject("CN=Smith\\, Inc., O=Acme"),
+            "/CN=Smith, Inc./O=Acme"
+        );
+    }
+
+    #[test]
+    fn a_slash_in_a_value_is_escaped_for_openssl() {
+        assert_eq!(openssl_subject("CN=A/B"), "/CN=A\\/B");
+    }
+
+    #[test]
     fn the_identity_slug_is_filesystem_safe() {
         assert_eq!(
             identity_slug("CN=picaro lab code signing"),
@@ -1055,20 +1209,43 @@ mod tests {
     #[test]
     fn the_ca_certificate_is_exported_next_to_the_artifact() {
         assert_eq!(
-            ca_export_path(Path::new("dist/widget.exe")),
+            ca_export_path(Path::new("dist/widget.exe"), None),
             PathBuf::from("dist/widget.ca.cer")
         );
         assert_eq!(
-            ca_export_path(Path::new("widget.exe")),
+            ca_export_path(Path::new("widget.exe"), None),
             PathBuf::from("widget.ca.cer")
+        );
+    }
+
+    #[test]
+    fn the_ca_certificate_goes_to_the_bundle_artifacts_dir() {
+        assert_eq!(
+            ca_export_path(
+                Path::new("/bundle/dist/widget.exe"),
+                Some(Path::new("/bundle/artifacts"))
+            ),
+            PathBuf::from("/bundle/artifacts/widget.ca.cer")
         );
     }
 
     #[test]
     fn the_lab_state_lives_beside_the_artifact() {
         assert_eq!(
-            lab_state_dir(Path::new("dist/widget.exe"), "CN=Acme"),
+            lab_state_dir(Path::new("dist/widget.exe"), "CN=Acme", None),
             PathBuf::from("dist/.picaro/lab/cn-acme")
+        );
+    }
+
+    #[test]
+    fn the_lab_state_lives_in_the_bundle_artifacts_dir() {
+        assert_eq!(
+            lab_state_dir(
+                Path::new("/bundle/dist/widget.exe"),
+                "CN=Acme",
+                Some(Path::new("/bundle/artifacts")),
+            ),
+            PathBuf::from("/bundle/artifacts/.picaro/lab/cn-acme")
         );
     }
 
@@ -1147,7 +1324,7 @@ mod tests {
     #[test]
     fn mode_none_is_a_no_op() {
         let exe = std::env::temp_dir().join("picaro_none.exe");
-        let signature = sign(&exe, Some(&plan("none"))).expect("no-op");
+        let signature = sign(&exe, Some(&plan("none")), None).expect("no-op");
         assert!(signature.is_none());
     }
 }

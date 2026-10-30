@@ -22,6 +22,7 @@ pub enum Action {
 
 /// Parameters for the anti-debug preparation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Params {
     /// Behaviour on detection.
     #[serde(default = "default_action")]

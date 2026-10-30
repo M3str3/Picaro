@@ -17,6 +17,7 @@ fn default_args(payload: &str) -> PackArgs {
         strings: None,
         out: None,
         dir: None,
+        build_name: None,
         plan_out: None,
         no_save_plan: false,
         arch: None,
@@ -133,15 +134,30 @@ fn shellcode_defaults_to_reflective_loading() {
 }
 
 #[test]
-fn the_default_layout_is_a_folder_named_after_the_payload() {
+fn the_default_layout_is_a_bundle_under_packed() {
     let outcome = compose(&default_args(PE), &Defaults::default()).expect("compose");
-    assert_eq!(
-        outcome.artifact_path,
-        PathBuf::from("packed/minimal_x64/minimal_x64.exe")
+    let root = &outcome.bundle.root;
+    assert_eq!(root.parent(), Some(Path::new("packed")));
+    let name = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("a bundle name");
+    assert!(
+        name.starts_with("minimal_x64-") && name.len() > "minimal_x64-".len(),
+        "the bundle is named after the plan plus a run label: {name}"
     );
+    assert_eq!(outcome.bundle.plan, root.join("plan.yaml"));
+    assert_eq!(outcome.bundle.build, root.join("build"));
+    assert_eq!(outcome.bundle.artifacts, root.join("artifacts"));
     assert_eq!(
-        outcome.plan_path,
-        PathBuf::from("packed/minimal_x64/plan.yaml")
+        outcome.bundle.bundled_artifact,
+        root.join("dist/minimal_x64.exe")
+    );
+    // No `--out`: the artifact travels with the bundle.
+    assert_eq!(outcome.bundle.artifact, outcome.bundle.bundled_artifact);
+    assert_eq!(
+        outcome.plan.build.output.path, None,
+        "the plan stays portable"
     );
     assert!(outcome.save_plan, "the plan is saved by default");
 }
@@ -153,10 +169,7 @@ fn the_configured_directory_replaces_the_default_root() {
         ..Defaults::default()
     };
     let outcome = compose(&default_args(PE), &defaults).expect("compose");
-    assert_eq!(
-        outcome.artifact_path,
-        PathBuf::from("out/minimal_x64/minimal_x64.exe")
-    );
+    assert_eq!(outcome.bundle.root.parent(), Some(Path::new("out")));
 }
 
 #[test]
@@ -168,24 +181,37 @@ fn a_cli_directory_wins_over_the_config() {
     let mut args = default_args(PE);
     args.dir = Some(PathBuf::from("cli"));
     let outcome = compose(&args, &defaults).expect("compose");
+    assert_eq!(outcome.bundle.root.parent(), Some(Path::new("cli")));
+}
+
+#[test]
+fn an_explicit_output_file_is_delivered_verbatim_and_still_gets_a_bundle() {
+    let mut args = default_args(PE);
+    args.out = Some(PathBuf::from("custom/artifact.exe"));
+    let outcome = compose(&args, &Defaults::default()).expect("compose");
+    assert_eq!(outcome.bundle.root.parent(), Some(Path::new("packed")));
     assert_eq!(
-        outcome.artifact_path,
-        PathBuf::from("cli/minimal_x64/minimal_x64.exe")
+        outcome.bundle.artifact,
+        PathBuf::from("custom/artifact.exe")
+    );
+    assert_eq!(
+        outcome.bundle.artifact_name, "artifact.exe",
+        "the delivered name drives the manifest and CA names"
+    );
+    assert_eq!(
+        outcome.plan.build.output.path,
+        Some(PathBuf::from("custom/artifact.exe")),
+        "a saved plan keeps the operator's deliverable"
     );
 }
 
 #[test]
-fn an_explicit_output_file_still_gets_a_plan_package() {
-    let mut args = default_args(PE);
-    args.out = Some(PathBuf::from("custom/artifact.exe"));
-    let outcome = compose(&args, &Defaults::default()).expect("compose");
-    assert_eq!(
-        outcome.artifact_path,
-        PathBuf::from("custom/minimal_x64/artifact.exe")
-    );
-    assert_eq!(
-        outcome.plan_path,
-        PathBuf::from("custom/minimal_x64/plan.yaml")
+fn each_run_gets_its_own_bundle() {
+    let first = compose(&default_args(PE), &Defaults::default()).expect("compose");
+    let second = compose(&default_args(PE), &Defaults::default()).expect("compose");
+    assert_ne!(
+        first.bundle.root, second.bundle.root,
+        "two runs must not overwrite each other's bundle"
     );
 }
 
@@ -207,7 +233,16 @@ fn plan_out_implies_saving() {
     args.plan_out = Some(PathBuf::from("plans/one.yaml"));
     let outcome = compose(&args, &defaults).expect("compose");
     assert!(outcome.save_plan);
-    assert_eq!(outcome.plan_path, PathBuf::from("plans/one.yaml"));
+    assert_eq!(outcome.plan_out, Some(PathBuf::from("plans/one.yaml")));
+    // The extra copy is outside the bundle; the bundled plan is unaffected.
+    assert_eq!(
+        outcome
+            .bundle
+            .plan
+            .file_name()
+            .and_then(|name| name.to_str()),
+        Some("plan.yaml")
+    );
 }
 
 #[test]
@@ -484,7 +519,11 @@ fn a_dll_output_accepts_an_entry() {
         outcome.plan.build.output.entry,
         DllEntry::Export("Run".to_string())
     );
-    assert!(outcome.artifact_path.ends_with("minimal_x64.dll"));
+    assert!(
+        outcome.bundle.bundled_artifact.ends_with("minimal_x64.dll"),
+        "a DLL build delivers a .dll: {:?}",
+        outcome.bundle.bundled_artifact
+    );
 }
 
 #[test]
@@ -614,7 +653,7 @@ fn a_missing_explicit_config_is_an_error() {
 fn the_generated_plan_round_trips_through_the_loader() {
     let outcome = compose(&default_args(PE), &Defaults::default()).expect("compose");
     let reloaded =
-        load_plan_str(&outcome.plan_yaml, &outcome.plan_path, &BTreeMap::new()).expect("reload");
+        load_plan_str(&outcome.plan_yaml, &outcome.bundle.plan, &BTreeMap::new()).expect("reload");
     assert_eq!(reloaded, outcome.plan);
     assert!(outcome.plan_yaml.contains("schema: 6"));
 }

@@ -13,6 +13,7 @@ use super::{Capability, Category, Stability, TechniqueDef};
 
 /// Parameters for process hollowing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Params {
     /// Name of the payload in `build.payloads` to run. Optional when the plan
     /// declares exactly one payload.

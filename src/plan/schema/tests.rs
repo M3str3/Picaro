@@ -1,5 +1,6 @@
 use super::*;
 
+use crate::error::PackerError;
 use crate::techniques::process_hollowing::{default_target, Params};
 use crate::techniques::TechniqueKind;
 
@@ -27,6 +28,16 @@ runtime:
     params:
       target: "C:\\Windows\\System32\\svchost.exe"
 "#;
+
+/// Parses `yaml` through the loader's pre-deserialization pass, which is where
+/// unknown `runtime` step keys are rejected.
+fn parse_through_the_loader(yaml: &str) -> crate::error::Result<Plan> {
+    crate::plan::parse_and_substitute(
+        yaml,
+        &std::collections::BTreeMap::new(),
+        std::path::Path::new("plan.yaml"),
+    )
+}
 
 #[test]
 fn parses_valid_plan() {
@@ -57,7 +68,7 @@ fn parses_valid_plan() {
     );
     assert_eq!(
         plan.build.output.path,
-        PathBuf::from("./dist/mimikatz_packed.exe")
+        Some(PathBuf::from("./dist/mimikatz_packed.exe"))
     );
     assert_eq!(plan.build.output.arch, Arch::X64);
     assert!(plan.build.output.strip);
@@ -282,26 +293,129 @@ fn payload_args_default_to_join() {
     assert_eq!(payload.args_mode, ArgsMode::Join);
 }
 
-/// Locks in the documented migration hazard: unknown keys inside a runtime
-/// entry are dropped, so a plan migrated from schema 3 that leaves its
-/// parameters flat parses and silently falls back to the defaults.
+/// A schema-3-style plan leaves its parameters flat instead of under `params`.
+/// `target` is not one of the step's allowed keys, so the loader rejects it
+/// instead of silently falling back to the default target.
 #[test]
-fn a_flat_param_is_dropped_and_the_default_applies() {
+fn a_flat_schema_3_param_is_rejected_as_an_unknown_step_key() {
     let yaml = VALID_YAML.replace(
         "    params:\n      target: \"C:\\\\Windows\\\\System32\\\\svchost.exe\"\n",
         "    target: \"C:\\\\Windows\\\\System32\\\\notepad.exe\"\n",
     );
-    let plan: Plan = serde_yml::from_str(&yaml).expect("a flat param still parses");
+    let err = parse_through_the_loader(&yaml).expect_err("a flat param must be rejected");
+    assert!(
+        matches!(err, PackerError::Validation(_)),
+        "expected a validation error, got {err}"
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains("unknown key 'target'"),
+        "the error must name the key: {message}"
+    );
+    assert!(
+        message.contains("step 1"),
+        "the error must name the 1-based step index: {message}"
+    );
+}
+
+#[test]
+fn an_unknown_params_key_is_rejected_by_name() {
+    let yaml = VALID_YAML.replace(
+        "      target: \"C:\\\\Windows\\\\System32\\\\svchost.exe\"\n",
+        "      target: \"C:\\\\Windows\\\\System32\\\\svchost.exe\"\n      targte: x\n",
+    );
+    let err = parse_through_the_loader(&yaml).expect_err("a params typo must be rejected");
+    let message = err.to_string();
+    assert!(
+        message.contains("targte") && message.contains("unknown field"),
+        "the error must name the unknown params key: {message}"
+    );
+}
+
+#[test]
+fn an_unknown_step_key_is_rejected() {
+    let yaml = VALID_YAML.replace(
+        "  - technique: process_hollowing\n",
+        "  - technique: process_hollowing\n    on_fial: continue\n",
+    );
+    let err = parse_through_the_loader(&yaml).expect_err("an on_fial typo must be rejected");
+    assert!(
+        matches!(err, PackerError::Validation(_)),
+        "expected a validation error, got {err}"
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains("on_fial"),
+        "the error must name the typo: {message}"
+    );
+    assert!(
+        message.contains("on_fail"),
+        "the error must list the allowed keys: {message}"
+    );
+}
+
+#[test]
+fn the_orchestration_keys_are_allowed() {
+    let yaml = VALID_YAML.replace(
+        "  - technique: process_hollowing\n",
+        "  - technique: process_hollowing\n    on_success: stop\n    on_fail: continue\n    delay_ms: 250\n",
+    );
+    let plan = parse_through_the_loader(&yaml).expect("the orchestration keys are allowed");
+    let control = plan.runtime[0].control;
+    assert_eq!(control.on_success, StepOutcome::Stop);
+    assert_eq!(control.on_fail, StepFailure::Continue);
+    assert_eq!(control.delay_ms, 250);
+}
+
+#[test]
+fn a_valid_plan_survives_the_unknown_key_pass() {
+    let plan = parse_through_the_loader(VALID_YAML).expect("a valid plan still parses");
+    assert_eq!(plan.runtime.len(), 1);
     assert_eq!(
         plan.runtime[0].technique,
         TechniqueKind::ProcessHollowing {
             params: Params {
                 payload: None,
-                target: default_target(),
+                target: r"C:\Windows\System32\svchost.exe".to_string(),
             }
-        },
-        "the flat target must be dropped in favour of the default"
+        }
     );
+}
+
+/// Every technique's `Params` denies unknown fields, so a typo inside `params`
+/// fails instead of silently deserializing to the defaults.
+#[test]
+fn every_registered_technique_rejects_an_unknown_params_key() {
+    for def in crate::techniques::all() {
+        // The documented example must parse before the injection, so a failure
+        // below can only come from the extra key.
+        serde_yml::from_str::<TechniqueKind>(def.params_example)
+            .unwrap_or_else(|err| panic!("{}: params_example does not parse: {err}", def.name));
+
+        let mut step: serde_yml::Value =
+            serde_yml::from_str(def.params_example).expect("the params example is YAML");
+        let params = step
+            .as_mapping_mut()
+            .expect("the params example is a mapping")
+            .entry(serde_yml::Value::String("params".to_string()))
+            .or_insert_with(|| serde_yml::Value::Mapping(serde_yml::Mapping::new()));
+        params
+            .as_mapping_mut()
+            .expect("the params block is a mapping")
+            .insert(
+                serde_yml::Value::String("targte".to_string()),
+                serde_yml::Value::String("typo".to_string()),
+            );
+
+        let err = serde_yml::from_value::<TechniqueKind>(step)
+            .expect_err("an unknown params key must be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("unknown field") && message.contains("targte"),
+            "{}: unclear error: {message}",
+            def.name
+        );
+    }
 }
 
 #[test]

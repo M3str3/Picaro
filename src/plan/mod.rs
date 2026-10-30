@@ -86,6 +86,7 @@ fn parse_and_substitute(
 
     build_args::substitute(&mut value, build_args)?;
     normalize_technique_names(&mut value);
+    reject_unknown_step_keys(&value)?;
 
     serde_yml::from_value(value).map_err(|source| PackerError::ParsePlan {
         path: path.to_path_buf(),
@@ -302,6 +303,51 @@ fn normalize_technique_names(value: &mut serde_yml::Value) {
             *name = serde_yml::Value::String(canonical);
         }
     }
+}
+
+/// The keys a `runtime` entry may carry: the technique tag, its nested
+/// `params`, and the loader's orchestration fields.
+const STEP_KEYS: &[&str] = &["technique", "params", "on_success", "on_fail", "delay_ms"];
+
+/// Rejects any key in a `runtime` entry that is not one of [`STEP_KEYS`].
+///
+/// [`crate::techniques::RuntimeStep`] flattens the technique enum and
+/// [`crate::plan::schema::StepControl`], and `serde` cannot deny unknown fields
+/// on a flattened struct, so without this pass a typo such as `on_fial` (or a
+/// schema-3-style flat `target:`) is silently dropped and the default applies.
+/// The nested `params` are left to the technique: every technique `Params`
+/// denies unknown fields on its own.
+fn reject_unknown_step_keys(value: &Value) -> Result<()> {
+    let Some(steps) = value
+        .as_mapping()
+        .and_then(|plan| get(plan, "runtime"))
+        .and_then(Value::as_sequence)
+    else {
+        // A missing or ill-typed `runtime` is reported by the typed parse.
+        return Ok(());
+    };
+
+    for (index, step) in steps.iter().enumerate() {
+        let Some(step) = step.as_mapping() else {
+            // A non-mapping entry is reported by the typed parse.
+            continue;
+        };
+        let unknown = step
+            .keys()
+            .find(|key| !key.as_str().is_some_and(|key| STEP_KEYS.contains(&key)));
+        if let Some(unknown) = unknown {
+            let unknown = unknown
+                .as_str()
+                .map_or_else(|| format!("{unknown:?}"), str::to_string);
+            return Err(PackerError::Validation(format!(
+                "runtime step {} has unknown key '{unknown}': allowed keys are {}",
+                index + 1,
+                STEP_KEYS.join(", ")
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

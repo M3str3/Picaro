@@ -18,6 +18,7 @@ use super::{Capability, Category, Stability, TechniqueDef};
 /// a different build than the one whose SSNs `init_syscalls()` resolved, which
 /// is the failure mode the README's implementation notes describe.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Params {}
 
 /// Static metadata for ntdll unhooking.

@@ -32,7 +32,7 @@ measured lldb quirks are in `.agents/mcp/README.md`. For inert static work
 ## The loop
 
 ```
-build_plan(plan="examples/plans/<plan>.yaml", debug=true, name="dbg")  # → stub_exe + stub_source (build/<name>/; omit name → unique run-*/)
+build_plan(plan="examples/plans/<plan>.yaml", debug=true, name="dbg")  # → stub_exe + stub_source (packed/<plan>-dbg/build/; omit name → unique packed/<plan>-<pid>-<nanos>/)
 debug_launch(path=stub_exe)                                # stops at entry; every stop carries stdout/stderr tails
 bp_set(spec="main::step_0::payload")                       # crate-qualified; Execution=payload(), Preparation=run()
 bp_set(spec="<stub_source>:<line>")                        # or a source line of the generated stub

@@ -44,11 +44,6 @@ WINDOWS_ABSOLUTE = re.compile(r"(?i)^[a-z]:/|^//")
 # anywhere, since picaro itself has no such option.
 REBUILD_FLAGS = frozenset({"--build", "--rebuild"})
 
-# The container's scratch directory for intermediate artifacts. The image bakes
-# its source in at /usr/src/picaro, and the packer writes `build/` next to it,
-# which the invoking user cannot touch; point it at a writable path instead.
-SCRATCH_DIR = "/tmp/picaro-build"
-
 
 def is_tty(stream: object) -> bool:
     """Whether `stream` is a real terminal (and not `None`, e.g. closed stdio)."""
@@ -125,11 +120,11 @@ def build_command(args: list[str], workdir: Path, interactive: bool) -> list[str
     """Assemble the `docker run` argv.
 
     The current directory is mounted at /work: it is the exchange folder — plans
-    and payloads are read from it and outputs (dist/...) are written back through
-    the same mount. Run the wrapper from a dedicated folder (not the repo root)
+    and payloads are read from it and outputs are written back through the same
+    mount (`dist/...` for the delivered artifact, `packed/<plan>-<run>/` for the
+    build bundle). Run the wrapper from a dedicated folder (not the repo root)
     to keep the packed artifacts off the source tree. The container runs as the
-    invoking user where that matters (see [`container_user`]) and keeps its
-    scratch files out of the read-only source tree (`PICARO_BUILD_DIR`).
+    invoking user where that matters (see [`container_user`]).
     """
     command = ["docker", "run", "--rm"]
     if interactive:
@@ -138,8 +133,6 @@ def build_command(args: list[str], workdir: Path, interactive: bool) -> list[str
     if user is not None:
         command += ["--user", user]
     command += [
-        "-e",
-        f"PICARO_BUILD_DIR={SCRATCH_DIR}",
         "-v",
         f"{workdir.as_posix()}:/work",
         "-w",

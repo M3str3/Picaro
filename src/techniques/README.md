@@ -20,11 +20,11 @@ The runtime is a flat `runtime:` list of `0..N` steps, run in YAML order; each
 step is one technique. There is no fixed Preparation-before-Execution shape and
 several Execution steps may appear. The one ordering rule is the *terminal
 step*: a step that hands the whole process to the payload never returns, so it
-must be last. `reflective_loading` of a PE executable, `dotnet_hosting` and
-`process_ghosting` are terminal; `living_off_the_land`, `process_hollowing` and
-`reflective_loading` of a DLL or shellcode all return control, so the steps
-after them still run. `src/plan/validate/mod.rs` rejects a terminal step that is not
-last.
+must be last. `reflective_loading` of a PE executable (without `patch_exit`),
+`dotnet_hosting` and `process_ghosting` are terminal; `living_off_the_land`,
+`process_hollowing` and `reflective_loading` of a DLL, shellcode or a
+`patch_exit` PE all return control, so the steps after them still run.
+`src/plan/validate/mod.rs` rejects a terminal step that is not last.
 
 ## 1. Copy the template
 

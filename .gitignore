@@ -1,7 +1,11 @@
 hidden/
 
-# `picaro pack` output: every run writes its plan, manifest and artifact here.
+# `picaro pack` / `picaro build` output: every run writes its plan, sources,
+# artifact and manifest as one bundle here.
 /packed/
+
+# Local delivery directories named by `--out` in ad-hoc runs.
+/delivered/
 
 # Local agent sessions and scratch, never part of the project.
 /.agent-xenon/

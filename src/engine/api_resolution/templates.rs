@@ -396,23 +396,66 @@ pub(super) const WRAPPER_OPEN_PROCESS_TOKEN: &str = r#"    /// $COMMENT$: rebuil
     }
 "#;
 
-pub(super) const WRAPPER_DUPLICATE_TOKEN_EX: &str = r#"    /// $COMMENT$: rebuilt on NtDuplicateToken. `lpTokenAttributes` is ignored
-    /// (the native call takes `OBJECT_ATTRIBUTES`, not `SECURITY_ATTRIBUTES`),
-    /// and so is the requested impersonation level: the native fourth argument
-    /// is `EffectiveOnly`, which is passed as 0 so the duplicate is not filtered.
-    /// The token type passes through unchanged (same enum values).
+pub(super) const WRAPPER_DUPLICATE_TOKEN_EX: &str = r#"    /// $COMMENT$: rebuilt on NtDuplicateToken. Win32 carries the requested
+    /// impersonation level in an `OBJECT_ATTRIBUTES`/`SECURITY_QUALITY_OF_SERVICE`
+    /// pair passed to the native call; `NtDuplicateToken`'s fourth argument is
+    /// `EffectiveOnly`, passed as 0 so the duplicate is not filtered. The token
+    /// type passes through unchanged (same enum values). `lpTokenAttributes`
+    /// supplies `lpSecurityDescriptor`/`bInheritHandle`; its `nLength` is
+    /// ignored, as Win32 does.
     extern "system" fn $ID$(
         existing: windows::Win32::Foundation::HANDLE,
         desired_access: u32,
-        _attributes: *const core::ffi::c_void,
-        _impersonation_level: i32,
+        token_attributes: *const windows::Win32::Security::SECURITY_ATTRIBUTES,
+        impersonation_level: i32,
         token_type: i32,
         new_token: *mut core::ffi::c_void,
     ) -> i32 {
+        // Same prefix as the native OBJECT_ATTRIBUTES; the pointer fields stay
+        // pointer-sized on x86, so `size_of` yields the right Length there too.
+        #[repr(C)]
+        struct ObjectAttributes {
+            length: u32,
+            root_directory: *mut core::ffi::c_void,
+            object_name: *mut core::ffi::c_void,
+            attributes: u32,
+            security_descriptor: *mut core::ffi::c_void,
+            security_quality_of_service: *mut core::ffi::c_void,
+        }
+
+        let mut quality = windows::Win32::Security::SECURITY_QUALITY_OF_SERVICE {
+            Length: core::mem::size_of::<windows::Win32::Security::SECURITY_QUALITY_OF_SERVICE>()
+                as u32,
+            ImpersonationLevel:
+                windows::Win32::Security::SECURITY_IMPERSONATION_LEVEL(impersonation_level),
+            ContextTrackingMode: windows::Win32::Security::SECURITY_DYNAMIC_TRACKING.0,
+            EffectiveOnly: windows::Win32::Foundation::BOOLEAN(0),
+        };
+        let (attributes, security_descriptor) = if token_attributes.is_null() {
+            (0u32, core::ptr::null_mut())
+        } else {
+            let inherit = unsafe { (*token_attributes).bInheritHandle.0 != 0 };
+            (
+                if inherit {
+                    windows::Win32::System::Kernel::OBJ_INHERIT as u32
+                } else {
+                    0
+                },
+                unsafe { (*token_attributes).lpSecurityDescriptor },
+            )
+        };
+        let mut object = ObjectAttributes {
+            length: core::mem::size_of::<ObjectAttributes>() as u32,
+            root_directory: core::ptr::null_mut(),
+            object_name: core::ptr::null_mut(),
+            attributes,
+            security_descriptor,
+            security_quality_of_service: &mut quality as *mut _ as *mut core::ffi::c_void,
+        };
         let status = crate::nt_duplicate_token(
             existing,
             desired_access,
-            core::ptr::null(),
+            &mut object as *mut ObjectAttributes as *const core::ffi::c_void,
             0,
             token_type,
             new_token,
@@ -420,13 +463,7 @@ pub(super) const WRAPPER_DUPLICATE_TOKEN_EX: &str = r#"    /// $COMMENT$: rebuil
         if status >= 0 {
             return 1;
         }
-        unsafe {
-            windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::WIN32_ERROR(
-                windows::Win32::Foundation::RtlNtStatusToDosError(
-                    windows::Win32::Foundation::NTSTATUS(status),
-                ),
-            ));
-        }
+        set_last_error(status);
         0
     }
 "#;

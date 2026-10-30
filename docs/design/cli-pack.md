@@ -2,8 +2,8 @@
 
 `picaro pack` builds a payload without a hand-written YAML plan. It is a
 **frontend**, not a second build path: it composes a schema-6 plan in memory,
-writes it next to the artifact and feeds it through the same loader, validator
-and build engine as `picaro build`.
+writes it into the build's bundle and feeds it through the same loader,
+validator and build engine as `picaro build`.
 
 ## Why
 
@@ -98,34 +98,71 @@ it".
 
 ## Output layout
 
-The default root is `packed/` (configurable with `dir` or `--dir`). Each payload
-gets a folder named after its file stem, and the folder is the complete package —
-the generated stub, the encrypted payloads and the artifact's provenance live
-together:
+Every build writes **one self-contained bundle** under `packed/`. The bundle is
+both the build's working directory and its archive: source, encrypted payloads,
+compiler output, the delivered artifact and the provenance travel together, and
+two builds never share a folder.
+
+The root is `packed/` by default (`dir:` in the config, `--dir`, or
+`PICARO_BUNDLE_ROOT`). The folder is `<plan>-<run>`, where `<run>` is
+`--build-name <name>` when given, otherwise `<pid>-<nanos>`:
 
 ```text
 packed/
-└── mimikatz/
-    ├── main.rs                 # the rendered Rust stub
-    ├── payload_0.bin           # encrypted payload(s), one per Execution step
-    ├── mimikatz.exe            # the packed artifact
-    ├── mimikatz.manifest.json  # provenance (the build manifest)
-    ├── plan.yaml               # the generated plan, saved by default
-    ├── mimikatz.ca.cer         # only with --sign lab
-    └── .picaro/lab/            # only with --sign lab: CA + leaf identity
+└── mimikatz-12345-1764000000000000000/
+    ├── plan.yaml                   # the generated plan, saved by default
+    ├── build/                      # the compiler workspace
+    │   ├── main.rs                 # the rendered Rust stub
+    │   ├── payload_0.bin           # encrypted payload(s), one per Execution step
+    │   ├── out.exe                 # the compiled stub
+    │   └── out.pdb                 # with --debug
+    ├── dist/
+    │   └── mimikatz.exe            # the canonical artifact (signed, hashed)
+    └── artifacts/
+        ├── mimikatz.manifest.json  # provenance (the build manifest)
+        ├── mimikatz.ca.cer         # only with --sign lab
+        └── .picaro/lab/            # only with --sign lab: CA + leaf identity
 ```
 
-The same layout is used by `picaro build`: the package folder is named after the
-plan and is created inside the directory of `build.output.path` (or under
-`packed/` when the plan declares a bare filename). A hand-written plan with
-`path: ./dist/loader.exe` and `name: loader` produces
-`dist/loader/loader.exe` plus its sources and provenance.
+`build/` keeps `main.rs` next to the `payload_N.bin` files it includes with
+`include_bytes!`, so the rendered source stays compilable on its own. `dist/`
+holds the canonical artifact: it is the file that gets signed and hashed, and
+the delivered copy is byte-identical. `artifacts/` holds everything a replay or
+an audit needs. `prepare()` recreates only those three subdirectories, so a
+bundle reused with the same `--build-name` keeps its `plan.yaml`.
 
-`--out` selects the artifact name and its directory: the artifact name is kept
-and the plan folder is created under the selected directory. The plan is written
-beside it unless `--no-save-plan`; `--plan-out` overrides the path.
-`--print-plan` writes the canonical YAML to stdout and exits without building
-(the banner is suppressed so the output stays redirectable).
+`output.path` (or `--out`) only decides where the delivered artifact goes; it
+never changes the bundle:
+
+| `output.path` | Delivered artifact |
+| --- | --- |
+| omitted | `<bundle>/dist/<plan>.<ext>` (inside the bundle) |
+| a file | exactly that path |
+| a directory (existing, or with a trailing separator) | `<dir>/<plan>.<ext>` |
+
+The same layout is used by `picaro build`. The plan's own `output.path` is
+never rewritten, so a saved plan stays portable: a plan without a `path`
+delivers into whichever bundle builds it. A hand-written plan with
+`path: ./dist/loader.exe` and `name: loader` still creates
+`packed/loader-<run>/` and delivers to `./dist/loader.exe`.
+
+`--build-name <name>` pins the bundle to `packed/<plan>-<name>/`, so
+`packed/<plan>-debug/build/main.rs` is a stable path for a debugger (see
+`--debug`). `--plan-out <path>` writes an extra copy of the plan outside the
+bundle; `--no-save-plan` skips the bundled one (a reused bundle keeps the
+`plan.yaml` a previous run wrote, since `prepare()` only touches `build/`,
+`dist/` and `artifacts/`). `--print-plan` writes the canonical YAML to stdout
+and exits without building (the banner is suppressed so the output stays
+redirectable).
+
+`picaro build` resolves the same layout: `--build-name` names the bundle,
+`--out` overrides the delivered path, and `PICARO_BUNDLE_ROOT` moves the root.
+The legacy `PICARO_BUILD_DIR` is deliberately ignored: it named the old
+temporary scratch directory, and honoring it now would move the bundle — the
+archive — out of a mounted directory (a container wrapper that still sets it
+would lose every build with the container). A bundle that fails before the
+artifact is written (a payload hash mismatch, say) may exist with only `build/`
+populated — the tree is created before the payloads are read.
 
 Saving the plan by default is part of the reproducibility contract: the manifest
 records the plan hash, and the plan must exist somewhere to rebuild it.
@@ -148,7 +185,7 @@ pack:
   sign: none
   strip: true
   gui: false
-  plan: true            # save <dir>/<payload>/plan.yaml
+  plan: true            # save <dir>/<plan>-<run>/plan.yaml
   allow_experimental: false
 ```
 
@@ -158,14 +195,16 @@ defaults"; a missing `--config` path is an error.
 
 ## Implementation
 
-`src/pack/mod.rs` composes a `Plan` and serializes it. `compose` then calls
-`plan::load_plan_str`, the in-memory twin of `load_plan`, so the generated
-document gets the same `$arg` substitution, format resolution and validation as
-a file. The validated plan is serialized again and that is what gets written and,
-for `--print-plan`, printed.
+`src/pack/mod.rs` composes a `Plan`, resolves the run's `BundleLayout` and
+serializes the plan. `compose` then calls `plan::load_plan_str`, the in-memory
+twin of `load_plan`, so the generated document gets the same `$arg`
+substitution, format resolution and validation as a file. The validated plan is
+serialized again and that is what gets written and, for `--print-plan`,
+printed.
 
 `cli/mod.rs` only maps clap fields to `PackArgs` and calls the existing `build` /
-`dry_run` paths. `BuildOptions` gained a heading and a short prelude so both
+`dry_run` paths. `BuildOptions` carries the bundle `pack` already resolved (so
+`build` does not re-derive it) plus a heading and a short prelude, so both
 commands report the invocation the operator actually ran.
 
 ## Limits

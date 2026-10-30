@@ -16,6 +16,7 @@ use super::{Capability, Category, Stability, TechniqueDef};
 
 /// Parameters for image-path spoofing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Params {
     /// The decoy image path the PEB will report — usually a signed system binary
     /// (`C:\Windows\System32\svchost.exe`). Rebuilt at runtime from `strings`.

@@ -40,8 +40,8 @@ mod prompt;
 
 use crate::techniques::{
     self, anti_debug, bouncer, early_bird, living_off_the_land, module_stomping, patch_amsi,
-    patch_etw, pe_injection, ppid_spoofing, process_hollowing, sleep, sleep_obfuscation,
-    Capability, Category, RuntimeStep, TechniqueDef, TechniqueKind,
+    patch_etw, pe_injection, ppid_spoofing, process_hollowing, reflective_loading, sleep,
+    sleep_obfuscation, Capability, Category, RuntimeStep, TechniqueDef, TechniqueKind,
 };
 use crate::ui::Palette;
 use helpers::*;
@@ -608,6 +608,7 @@ impl Wizard<'_> {
                             def,
                             None,
                             state.output_kind.unwrap_or(OutputKind::Exe),
+                            state.payload_format.unwrap_or(PayloadFormat::Pe),
                         ) {
                             Ok(step) => step,
                             // Esc in the params re-opens the runtime menu; Esc at
@@ -637,6 +638,7 @@ impl Wizard<'_> {
                             def,
                             Some(&previous),
                             state.output_kind.unwrap_or(OutputKind::Exe),
+                            state.payload_format.unwrap_or(PayloadFormat::Pe),
                         ) {
                             Ok(step) => steps[index] = step,
                             Err(PackerError::Back) => continue,
@@ -748,11 +750,12 @@ impl Wizard<'_> {
         def: &TechniqueDef,
         previous: Option<&TechniqueKind>,
         kind: OutputKind,
+        format: PayloadFormat,
     ) -> Result<TechniqueKind> {
         self.announce(def)?;
         match def.category {
             Category::Preparation => self.ask_preparation(def, previous, kind),
-            Category::Execution => self.ask_execution_params(def, previous),
+            Category::Execution => self.ask_execution_params(def, previous, format),
             Category::Control => self.ask_control_params(def, previous),
         }
     }
@@ -918,8 +921,34 @@ impl Wizard<'_> {
         &mut self,
         def: &TechniqueDef,
         previous: Option<&TechniqueKind>,
+        format: PayloadFormat,
     ) -> Result<TechniqueKind> {
         match def.name {
+            "reflective_loading" => {
+                let (erase_header, default_patch_exit) = match previous {
+                    Some(TechniqueKind::ReflectiveLoading { params }) => {
+                        (params.erase_header, params.patch_exit)
+                    }
+                    _ => (false, false),
+                };
+                // Raw shellcode has no import table, so `patch_exit` does not
+                // apply and `plan::validate` rejects it.
+                let patch_exit = if format.is_pe_image() {
+                    self.prompts.confirm(
+                        "patch exit calls (keep the chain running)",
+                        default_patch_exit,
+                    )?
+                } else {
+                    false
+                };
+                Ok(TechniqueKind::ReflectiveLoading {
+                    params: reflective_loading::Params {
+                        payload: None,
+                        erase_header,
+                        patch_exit,
+                    },
+                })
+            }
             "process_hollowing" => {
                 let default_target = match previous {
                     Some(TechniqueKind::ProcessHollowing { params }) => params.target.clone(),

