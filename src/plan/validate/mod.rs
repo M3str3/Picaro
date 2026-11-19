@@ -1510,12 +1510,28 @@ fn wow64_resolve(target: &str, arch: Arch) -> Option<std::path::PathBuf> {
 
 /// The path as a `PathBuf`, or `None` when it cannot be a local file.
 fn local_path(target: &str) -> Option<std::path::PathBuf> {
-    let path = std::path::PathBuf::from(target);
-    if path.is_absolute() {
-        Some(path)
-    } else {
-        None
+    if is_windows_absolute(target) {
+        return Some(std::path::PathBuf::from(target));
     }
+    let path = std::path::PathBuf::from(target);
+    path.is_absolute().then_some(path)
+}
+
+/// Whether `target` is absolute in Windows terms, whichever host runs the
+/// packer.
+///
+/// `Path::is_absolute` answers for the host: on Linux `C:\Windows\...` is a
+/// relative path, so a plan validated off-Windows would reject every target it
+/// is meant to carry. A drive root (`C:\`, `C:/`) or a UNC share (`\\host\`)
+/// is absolute for the artifact regardless of where it is built.
+fn is_windows_absolute(target: &str) -> bool {
+    let bytes = target.as_bytes();
+    let drive_root = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/');
+    let unc = target.len() > 2 && target.starts_with(r"\\");
+    drive_root || unc
 }
 
 /// Human list of a technique's capabilities (`x64 + administrator rights`).

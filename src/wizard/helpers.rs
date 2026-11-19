@@ -338,8 +338,13 @@ pub(super) fn default_step(def: &TechniqueDef) -> Result<TechniqueKind> {
 }
 
 /// Derives the default build name from the payload filename.
+///
+/// Splits on both separators first: a plan written on Linux still carries
+/// `C:\tmp\mimikatz.exe`, and `Path::file_stem` would keep the whole string.
 pub(super) fn default_name(payload: &Path) -> String {
-    payload
+    let raw = payload.to_string_lossy();
+    let base = raw.rsplit(['/', '\\']).next().unwrap_or(&raw);
+    Path::new(base)
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or("payload")

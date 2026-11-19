@@ -96,7 +96,7 @@ fn default_name_uses_the_file_stem() {
 fn payload_format_is_detected_from_content_and_extension() {
     let detect = crate::plan::format::detect;
     assert_eq!(
-        detect(Path::new("examples/payloads/hello_world.exe")),
+        detect(Path::new("tests/fixtures/minimal_x64.exe")),
         PayloadFormat::Pe
     );
     assert_eq!(
@@ -332,11 +332,7 @@ fn prompts_the_reflective_patch_exit_only_for_a_pe_image() {
         "", // trim paths
         "", // review -> build now
     ];
-    let (written, _) = session(
-        "examples/payloads/hello_world.exe",
-        &answers,
-        Some(&plan_path),
-    );
+    let (written, _) = session("tests/fixtures/minimal_x64.exe", &answers, Some(&plan_path));
     assert_eq!(written.as_deref(), Some(plan_path.as_path()));
     let plan = load_plan(&plan_path, &BTreeMap::new()).expect("valid plan");
     match &plan.runtime[0].technique {

@@ -124,7 +124,7 @@ mod tests {
     #[test]
     fn detects_a_pe_executable() {
         assert_eq!(
-            detect(Path::new("examples/payloads/hello_world.exe")),
+            detect(Path::new("tests/fixtures/minimal_x64.exe")),
             PayloadFormat::Pe
         );
     }
@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn a_pe_named_dll_is_a_dll_even_without_the_file_header_flag() {
-        let source = Path::new("examples/payloads/hello_world.exe");
+        let source = Path::new("tests/fixtures/minimal_x64.exe");
         let bytes = std::fs::read(source).expect("fixture");
         let path =
             std::env::temp_dir().join(format!("picaro-format-{}-library.dll", std::process::id()));
@@ -173,7 +173,7 @@ name: auto-test
 build:
   payloads:
     implant:
-      source: examples/payloads/hello_world.exe
+      source: tests/fixtures/minimal_x64.exe
   output:
     path: ./dist/auto.exe
 runtime:
