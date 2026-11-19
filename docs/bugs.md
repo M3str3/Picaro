@@ -76,6 +76,17 @@ These were reported by the bug-bounty round and are no longer open:
   guard and reads with a hard bound. All five live stager tests and the i686
   stub-compile test pass on the lab host (2026-10-30).
 
+## Fixed in the 2026-11-19 session
+
+- (bug #7) The ntdll gadget scanner no longer settles for a `syscall; retf`
+  (`0F 05 CB`) because `.text` happens to hold one: it scans every candidate
+  range for a near `syscall; ret` (`0F 05 C3`) before accepting a `retf` as a
+  last resort. `scan_gadget` now takes the terminator and `find_gadget` tries
+  the ordered list `.text`, whole image × `C3`, then × `CB`; the packer mirror
+  (`find_gadget_offset`) applies the same preference. Unit tests cover a `retf`
+  that precedes a `ret` in the same buffer and the ordered terminator list in
+  the generated prelude.
+
 ## Open
 
 ### 2. `conflicts` metadata is display-only and internally inconsistent (medium-low)
@@ -103,17 +114,6 @@ contains `$JOIN$`, `$INTERACTIVE$`, `$COMMAND$` or `$AMSI_UTILS_HELPER$` is
 inserted first and rescanned by the later replacements, so the C# literal can
 differ from the file on disk. Render the template in one pass (or replace on a
 copy that only contains the template).
-
-### 7. `retf` gadget fallback (low, latent)
-
-`src/engine/syscalls/prelude.rs:206-244` (mirror in `src/engine/syscalls/helpers.rs`).
-
-`scan_gadget` returns a `0F 05 CB` (`syscall; retf`) fallback when `.text` has
-no `0F 05 C3`. `find_gadget` then returns it without scanning the rest of the
-image for a proper `syscall; ret`. A `retf` pops a far return address and
-corrupts the caller's stack. ntdll ships `0F 05 C3` in every supported build,
-so this is latent; add a synthetic-module test and either scan the whole image
-for a near return before accepting `retf`, or reject `retf` outright.
 
 ### 8. `reflective_loading` discards `DllMain`'s FALSE (low, needs a decision)
 

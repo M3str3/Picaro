@@ -439,6 +439,28 @@ fn find_gadget_accepts_a_retf_terminator() {
 }
 
 #[test]
+fn find_gadget_skips_a_retf_when_the_image_has_a_ret() {
+    // `.text` ends with a `retf` gadget while a later section carries a
+    // proper `syscall; ret`. The near return must win: a `retf` far-returns
+    // and would unbalance the caller's stack.
+    let mut image = vec![0x90, 0x0F, 0x05, 0xCB, 0xCC, 0xCC, 0xCC];
+    image.extend_from_slice(&[0xCC, 0x0F, 0x05, 0xC3, 0xCC]);
+    assert_eq!(find_gadget_offset(&image), Some(8));
+}
+
+#[test]
+fn gadget_scanner_tries_a_near_return_before_a_far_one() {
+    // The stub scanner receives one range at a time, so the preference has to
+    // live in the ordered terminator list: every range is scanned for `C3`
+    // before any range is scanned for `CB`.
+    let prelude = crate::engine::syscalls::prelude::INDIRECT_PRELUDE;
+    assert!(
+        prelude.contains("[0xC3u8, 0xCBu8]"),
+        "gadget scanner must try ret before retf"
+    );
+}
+
+#[test]
 fn syscall_diagnostics_are_keyword_free() {
     // The always-compiled `SyscallError` messages live in the prelude and
     // reach the binary; none may name a resolver or a hook. (The `tech_dbg!`

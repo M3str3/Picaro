@@ -197,10 +197,13 @@ $SPOOFING_INIT$
         Some(u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]))
     }
 
-    /// Scans ntdll for the first `0F 05` followed by a return (`C3` ret or
-    /// `CB` retf). The trailing return is mandatory: the trampoline jumps to
-    /// the gadget and relies on it to return to the Rust caller, so a bare
-    /// `syscall` with anything else after it is not usable.
+    /// Scans ntdll for the best `0F 05` followed by a return. A near
+    /// `ret` (`C3`) is always preferred: every range is scanned for one
+    /// before a `retf` (`CB`) is considered at all, even when `.text` already
+    /// holds a `retf`. A `retf` far-returns and would unbalance the caller's
+    /// stack, so it is only a last resort. The trailing return is mandatory:
+    /// the trampoline jumps to the gadget and relies on it to return to the
+    /// Rust caller.
     /// Mirrors `engine::syscalls::find_gadget_offset` (unit-tested in the
     /// packer).
     fn find_gadget(module: HMODULE) -> Result<usize, SyscallError> {
@@ -208,39 +211,25 @@ $SPOOFING_INIT$
         // Prefer `.text` (the canonical location); fall back to the whole
         // mapped image, in case a build keeps the stub outside the first
         // section.
-        if let Some((start, len)) = text_range(base) {
-            if let Some(at) = scan_gadget(start, len) {
-                return Ok(at);
-            }
-        }
-        if let Some((start, len)) = image_range(base) {
-            if let Some(at) = scan_gadget(start, len) {
-                return Ok(at);
+        let ranges = [text_range(base), image_range(base)];
+        for terminator in [0xC3u8, 0xCBu8] {
+            for range in ranges.iter().flatten() {
+                if let Some(at) = scan_gadget(*range, terminator) {
+                    return Ok(at);
+                }
             }
         }
         Err(SyscallError::GadgetNotFound)
     }
 
-    /// Returns the address of the first `0F 05` followed by a return in
+    /// Returns the address of the first `0F 05 <terminator>` sequence in
     /// `[start, start + len)`.
-    ///
-    /// `syscall; ret` (`0F 05 C3`) is preferred; `syscall; retf` (`0F 05 CB`)
-    /// is only used as a fallback, because a `retf` gadget far-returns and is
-    /// only correct if that is what the stub expects.
-    fn scan_gadget(start: usize, len: usize) -> Option<usize> {
+    fn scan_gadget((start, len): (usize, usize), terminator: u8) -> Option<usize> {
         let bytes = unsafe { std::slice::from_raw_parts(start as *const u8, len) };
-        let mut fallback = None;
-        for (i, window) in bytes.windows(3).enumerate() {
-            if window[0] == 0x0F && window[1] == 0x05 {
-                if window[2] == 0xC3 {
-                    return Some(start + i);
-                }
-                if window[2] == 0xCB && fallback.is_none() {
-                    fallback = Some(start + i);
-                }
-            }
-        }
-        fallback
+        bytes
+            .windows(3)
+            .position(|w| w[0] == 0x0F && w[1] == 0x05 && w[2] == terminator)
+            .map(|i| start + i)
     }
 
     /// Returns the in-memory `[start, size)` of ntdll's `.text` section.
