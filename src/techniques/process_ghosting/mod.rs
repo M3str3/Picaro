@@ -35,14 +35,11 @@ impl Default for Params {
 pub const DEF: TechniqueDef = TechniqueDef {
     name: "process_ghosting",
     attck: &["T1055.012"],
-    // Measured on the Windows 11 lab host (2026-10-14): the technique does not
-    // run. Two Windows rules block the design: a delete-pending file cannot be
-    // mapped writable (`ERROR_ACCESS_DENIED`), and a data mapping of the file
-    // keeps file offsets rather than virtual addresses, so the mapped image's
-    // RVAs do not line up. A working implementation needs an image section
-    // (`NtCreateSection(SEC_IMAGE)` + `NtMapViewOfSection`), which the syscall
-    // layer does not have yet; see `docs/measurements.md`.
-    stability: Stability::Unimplemented,
+    // The image-section design runs the payload end to end (marker file + exit
+    // code, x64). `Experimental` rather than `Stable`: only the x64 path has
+    // been measured, and the payload's TLS callbacks and exception directories
+    // are not exercised (README).
+    stability: Stability::Experimental,
     requires: &[Capability::WindowsX64, Capability::WindowsX86],
     conflicts: &[],
     category: Category::Execution,
@@ -52,13 +49,16 @@ pub const DEF: TechniqueDef = TechniqueDef {
     requires_indirect_syscalls: false,
     params_example: "technique: process_ghosting\n",
     readme: include_str!("README.md"),
-    // The file -> section -> map flow is Win32 (`CreateFileW`,
-    // `SetFileInformationByHandle`, `CreateFileMappingW`, `MapViewOfFile`,
-    // `CloseHandle`) and the entry point is called directly, so no Nt* helper
-    // is issued and nothing is added to the syscall layer.
+    // The file -> section -> map flow is `CreateFileW`,
+    // `SetFileInformationByHandle`, `NtCreateSection(SEC_IMAGE)` and
+    // `NtMapViewOfSection`: two ntdll exports called directly (through the
+    // windows-rs WDK bindings), not helpers of the indirect syscall layer, so
+    // nothing is added there and `mode: none`/`indirect` render the same
+    // fragment.
     syscalls: &[],
     // The payload's imports must be resolved and written into its IAT before it
-    // runs, exactly like reflective loading.
+    // runs: an image section maps the image and applies its relocations, but the
+    // kernel does not resolve import names.
     resolves_imports: true,
 };
 
@@ -81,16 +81,28 @@ const MESSAGES: &[(&str, &str)] = &[
     ),
     (
         "$MSG_SECTION_FAILED$",
-        "could not create a section over the temp file",
+        "could not create an image section over the temp file",
     ),
     (
         "$MSG_MAP_FAILED$",
-        "could not map the section into this process",
+        "could not map the image section into this process",
     ),
     ("$MSG_FILE_TOO_SMALL$", "payload too small to be a PE"),
     ("$MSG_BAD_DOS$", "invalid DOS header (missing MZ signature)"),
     ("$MSG_BAD_NT$", "invalid NT header (missing PE signature)"),
     ("$MSG_BAD_ARCH$", "unsupported architecture"),
+    (
+        "$MSG_HEADERS_OUT_OF_BOUNDS$",
+        "the payload's headers do not fit in its image",
+    ),
+    (
+        "$MSG_IMAGE_SIZE_INVALID$",
+        "the payload's SizeOfImage does not match the mapped image",
+    ),
+    (
+        "$MSG_ENTRY_OUT_OF_BOUNDS$",
+        "the payload's entry point is outside its image",
+    ),
     ("$MSG_NO_ENTRY$", "the payload declares no entry point"),
 ];
 

@@ -76,6 +76,16 @@ These were reported by the bug-bounty round and are no longer open:
   guard and reads with a hard bound. All five live stager tests and the i686
   stub-compile test pass on the lab host (2026-10-30).
 
+## Fixed in the 2026-11-20 session
+
+- (bug #9) `process_ghosting` maps the payload from an image section
+  (`NtCreateSection(SEC_IMAGE)` + `NtMapViewOfSection`), so the kernel applies
+  the base relocations and the hand-rolled relocation walk is gone. The header
+  validation that remains works on the mapped view and bounds every offset it
+  derives from the payload (`SizeOfImage` against the view, `e_lfanew` plus the
+  NT headers inside it, the entry point inside the image) before anything
+  indexes into the mapping. The technique is no longer `Unimplemented`.
+
 ## Open
 
 ### 2. `conflicts` metadata is display-only and internally inconsistent (medium-low)
@@ -124,16 +134,6 @@ returns FALSE signalled that initialization failed, but the export path still
 calls the requested export and the entry-point path returns `Ok(0)`. Decide
 whether a FALSE should fail the load (mirroring the OS loader) or is a
 best-effort warning, then document it in the README.
-
-### 9. `process_ghosting` has the same unbounded relocation walk (moot while unimplemented)
-
-`src/techniques/process_ghosting/stub_fragment.rs:240-296`.
-
-`fix_relocations` trusts the relocation directory, the block header and the
-page RVA, exactly like the old `reflective_loading` code. `process_ghosting` is
-`Stability::Unimplemented` and cannot reach this path today, but whoever
-implements the `NtCreateSection(SEC_IMAGE)` path must copy the bounds checks
-from `reflective_loading` (directory/header, per-entry target and width, TLS).
 
 ### 10. Import descriptor with `OriginalFirstThunk != 0` and `FirstThunk == 0` (low)
 
