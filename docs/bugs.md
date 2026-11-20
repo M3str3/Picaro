@@ -93,6 +93,17 @@ These were reported by the bug-bounty round and are no longer open:
   matched the input. `render_template` substitutes every known placeholder while
   scanning the template only, so inserted text is never re-read.
 
+- (bug #11) `dotnet_hosting` no longer leaks the parameter `SAFEARRAY`s. The
+  array that carries the assembly bytes, the argument `string[]`, the
+  `object[]` that wraps it and the empty array the `DISP_E_BADPARAMCOUNT`
+  retry builds are each owned by a guard that calls `SafeArrayDestroy` on drop,
+  so an early return from a failed COM call cannot leak one either. Because
+  `SafeArrayPutElement` deep-copies a `VT_ARRAY` (`VariantCopy` →
+  `SafeArrayCopy`), the element and the argument array are independent
+  descriptors. The `VARIANT` that hands the argument array over is cleared to
+  `VT_NULL` right after the copy, because `windows_core::VARIANT`'s destructor
+  runs `VariantClear`, and that destroys a `VT_ARRAY` a second time.
+
 - (bug #12) `reflective_loading` bounds every section protection before
   `nt_protect_vm`: `VirtualAddress + VirtualSize` uses checked arithmetic and is
   rejected past `SizeOfImage` with the section's name, the same limit and error
@@ -147,15 +158,6 @@ page RVA, exactly like the old `reflective_loading` code. `process_ghosting` is
 `Stability::Unimplemented` and cannot reach this path today, but whoever
 implements the `NtCreateSection(SEC_IMAGE)` path must copy the bounds checks
 from `reflective_loading` (directory/header, per-entry target and width, TLS).
-
-### 11. `dotnet_hosting` leaks the parameter `SAFEARRAY`s (low)
-
-`src/techniques/dotnet_hosting/stub_fragment.rs:225-276`.
-
-The `string[]`/`object[]` arrays created for `Invoke_3` are never destroyed,
-including on the `DISP_E_BADPARAMCOUNT` retry. `SafeArrayDestroy` is not in the
-fragment's current imports; add it and destroy the arrays after `Invoke_3`
-returns (the retry needs its own empty array).
 
 ## How to validate a fix
 
