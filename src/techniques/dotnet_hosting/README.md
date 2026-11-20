@@ -118,6 +118,12 @@ An **Execution** step: it runs a `dotnet` assembly on the CLR it hosts. It is
 - The hosting runs in the stub's process, so `process_hollowing` (which runs the
   payload in *another* process) is not compatible: validation rejects the
   combination.
+- Every `SAFEARRAY` the hosting builds (the assembly bytes, the argument
+  `string[]`, the `object[]` that wraps it and the empty array the retry needs)
+  is owned by a guard that frees it on drop, so the early returns a failed COM
+  call takes cannot leak one. `SafeArrayPutElement` copies the variant into the
+  `object[]` (`VariantCopy` deep-copies a `VT_ARRAY`), so the wrapper and the
+  argument array are separate allocations and both are freed.
 - The CLR version is a build-time constant (`v4.0.30319`, the .NET Framework 4.x
   runtime that ships with Windows 10/11). A machine without a CLR fails with
   "could not create the runtime host".

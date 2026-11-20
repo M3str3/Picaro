@@ -9,7 +9,8 @@ use windows::Win32::System::ClrHosting::{
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED, SAFEARRAY};
 use windows::Win32::System::Ole::{
-    SafeArrayAccessData, SafeArrayCreateVector, SafeArrayPutElement, SafeArrayUnaccessData,
+    SafeArrayAccessData, SafeArrayCreateVector, SafeArrayDestroy, SafeArrayPutElement,
+    SafeArrayUnaccessData,
 };
 use windows::Win32::System::Variant::{VARENUM, VT_ARRAY, VT_BSTR, VT_I4, VT_NULL, VT_UI1, VT_VARIANT};
 
@@ -27,6 +28,40 @@ const SLOT_APPDOMAIN_LOAD_3: usize = 45;
 const SLOT_ASSEMBLY_GET_ENTRY_POINT: usize = 16;
 /// `MethodInfo.Invoke_3(object, object[])`.
 const SLOT_METHODINFO_INVOKE_3: usize = 37;
+
+/// Owns a `SAFEARRAY` for as long as the guard is in scope.
+///
+/// The hosting path builds up to four arrays (the assembly bytes, the argument
+/// `string[]`, the `object[]` that wraps it and the empty array the retry
+/// needs) and each one has to be freed on every way out — including the early
+/// returns that a failed COM call takes. Tying them to a guard means no exit
+/// path can forget one, which is why the helpers hand out the guard instead of
+/// the raw handle.
+struct OwnedArray(*mut SAFEARRAY);
+
+impl OwnedArray {
+    /// The raw handle, for the calls that take the array by pointer.
+    fn as_ptr(&self) -> *mut SAFEARRAY {
+        self.0
+    }
+
+    /// Whether the allocation behind the guard failed.
+    fn is_null(&self) -> bool {
+        self.0.is_null()
+    }
+}
+
+impl Drop for OwnedArray {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // The array is being abandoned in any case; the HRESULT would only
+            // add a diagnostic nobody is left to act on.
+            unsafe {
+                let _ = SafeArrayDestroy(self.0);
+            }
+        }
+    }
+}
 
 /// Formats a failed COM call as `"<label> (0x<hr>)"`.
 ///
@@ -119,36 +154,43 @@ unsafe fn variant_lval(value: &VARIANT) -> i32 {
 }
 
 /// Copies `bytes` into a `SAFEARRAY` of `VT_UI1`, the `byte[]` `Load_3` wants.
-unsafe fn byte_array(bytes: &[u8]) -> Result<*mut SAFEARRAY, String> {
-    let array = SafeArrayCreateVector(VT_UI1, 0, bytes.len() as u32);
+///
+/// The array comes back owned by a guard: if `SafeArrayAccessData` fails after
+/// the allocation, the array is freed on the way out instead of leaked.
+unsafe fn byte_array(bytes: &[u8]) -> Result<OwnedArray, String> {
+    let array = OwnedArray(SafeArrayCreateVector(VT_UI1, 0, bytes.len() as u32));
     if array.is_null() {
         return Err($MSG_ARRAY_FAILED$.to_string());
     }
     let mut data = ptr::null_mut();
-    SafeArrayAccessData(array, &mut data).map_err(|e| format!("{}: {e}", $MSG_ARRAY_FAILED$))?;
+    SafeArrayAccessData(array.as_ptr(), &mut data)
+        .map_err(|e| format!("{}: {e}", $MSG_ARRAY_FAILED$))?;
     ptr::copy_nonoverlapping(bytes.as_ptr(), data as *mut u8, bytes.len());
-    SafeArrayUnaccessData(array).ok();
+    // A still-locked array refuses `SafeArrayDestroy`, so it is unlocked before
+    // the guard gets to free it.
+    SafeArrayUnaccessData(array.as_ptr()).ok();
     Ok(array)
 }
 
 /// Builds the `string[]` the managed entry point receives.
-unsafe fn argument_array(args: &[String]) -> Result<*mut SAFEARRAY, String> {
-    let array = SafeArrayCreateVector(VT_BSTR, 0, args.len() as u32);
+unsafe fn argument_array(args: &[String]) -> Result<OwnedArray, String> {
+    let array = OwnedArray(SafeArrayCreateVector(VT_BSTR, 0, args.len() as u32));
     if array.is_null() {
         return Err($MSG_ARRAY_FAILED$.to_string());
     }
     if !args.is_empty() {
         let mut raw = ptr::null_mut();
-        SafeArrayAccessData(array, &mut raw).map_err(|e| format!("{}: {e}", $MSG_ARRAY_FAILED$))?;
+        SafeArrayAccessData(array.as_ptr(), &mut raw)
+            .map_err(|e| format!("{}: {e}", $MSG_ARRAY_FAILED$))?;
         // The array owns the `BSTR`s, so they are handed over raw: a `BSTR`
         // value that is dropped here would leave the array pointing at freed
-        // memory.
+        // memory. `SafeArrayDestroy` is what frees them.
         let slots = raw as *mut *const u16;
         for (index, arg) in args.iter().enumerate() {
             let bstr = windows::core::BSTR::from(arg.as_str());
             *slots.add(index) = bstr.into_raw();
         }
-        SafeArrayUnaccessData(array).ok();
+        SafeArrayUnaccessData(array.as_ptr()).ok();
     }
     Ok(array)
 }
@@ -208,7 +250,7 @@ fn run_assembly(image: &[u8], args: &[String]) -> Result<i32, String> {
         type Load3 = unsafe extern "system" fn(*mut c_void, *mut SAFEARRAY, *mut *mut c_void) -> i32;
         let load_3: Load3 = vtbl_slot(appdomain, SLOT_APPDOMAIN_LOAD_3);
         let mut assembly = ptr::null_mut();
-        let hr = load_3(appdomain, bytes, &mut assembly);
+        let hr = load_3(appdomain, bytes.as_ptr(), &mut assembly);
         if hr < 0 || assembly.is_null() {
             return Err(nt_error($MSG_ASSEMBLY_LOAD_FAILED$, hr));
         }
@@ -224,17 +266,27 @@ fn run_assembly(image: &[u8], args: &[String]) -> Result<i32, String> {
         }
 
         // `MethodInfo.Invoke_3(null, object[])`: the `object[]` carries the
-        // `string[]` argument array.
+        // `string[]` argument array. `SafeArrayPutElement` copies the variant
+        // into the element (`VariantCopy` deep-copies a `VT_ARRAY`), so the
+        // element owns its own array from that point on; the guard next to it
+        // keeps the original. `argv` must forget the descriptor right after the
+        // call, because its own destructor runs `VariantClear`, and that
+        // destroys a `VT_ARRAY` again — the guard would then free it twice.
         let strings = argument_array(args)?;
-        let mut argv = VARIANT::default();
-        variant_set_array(&mut argv, VARENUM(VT_ARRAY.0 | VT_BSTR.0), strings);
-        let parameters = SafeArrayCreateVector(VT_VARIANT, 0, 1);
+        let parameters = OwnedArray(SafeArrayCreateVector(VT_VARIANT, 0, 1));
         if parameters.is_null() {
             return Err($MSG_ARRAY_FAILED$.to_string());
         }
+        let mut argv = VARIANT::default();
+        variant_set_array(&mut argv, VARENUM(VT_ARRAY.0 | VT_BSTR.0), strings.as_ptr());
         let index = 0i32;
-        SafeArrayPutElement(parameters, &index, &argv as *const VARIANT as *const c_void)
-            .map_err(|e| format!("{}: {e}", $MSG_ARRAY_FAILED$))?;
+        let put = SafeArrayPutElement(
+            parameters.as_ptr(),
+            &index,
+            &argv as *const VARIANT as *const c_void,
+        );
+        variant_set_array(&mut argv, VT_NULL, ptr::null_mut());
+        put.map_err(|e| format!("{}: {e}", $MSG_ARRAY_FAILED$))?;
 
         let mut result = VARIANT::default();
 
@@ -254,9 +306,9 @@ fn run_assembly(image: &[u8], args: &[String]) -> Result<i32, String> {
         let invoke_3: Invoke3 = vtbl_slot(method, SLOT_METHODINFO_INVOKE_3);
 
         #[cfg(target_arch = "x86")]
-        let hr = invoke_3(method, null_variant(), parameters, &mut result);
+        let hr = invoke_3(method, null_variant(), parameters.as_ptr(), &mut result);
         #[cfg(target_arch = "x86_64")]
-        let hr = invoke_3(method, &mut null_variant(), parameters, &mut result);
+        let hr = invoke_3(method, &mut null_variant(), parameters.as_ptr(), &mut result);
 
         if hr < 0 {
             // A managed `Main()` that takes no parameters rejects the array with
@@ -270,11 +322,14 @@ fn run_assembly(image: &[u8], args: &[String]) -> Result<i32, String> {
                 return Err(nt_error($MSG_ENTRY_POINT_FAILED$, hr));
             }
             crate::tech_dbg!("dotnet_hosting", "the entry point rejected its arguments");
-            let empty = SafeArrayCreateVector(VT_VARIANT, 0, 0);
+            let empty = OwnedArray(SafeArrayCreateVector(VT_VARIANT, 0, 0));
+            if empty.is_null() {
+                return Err($MSG_ARRAY_FAILED$.to_string());
+            }
             #[cfg(target_arch = "x86")]
-            let retry = invoke_3(method, null_variant(), empty, &mut result);
+            let retry = invoke_3(method, null_variant(), empty.as_ptr(), &mut result);
             #[cfg(target_arch = "x86_64")]
-            let retry = invoke_3(method, &mut null_variant(), empty, &mut result);
+            let retry = invoke_3(method, &mut null_variant(), empty.as_ptr(), &mut result);
             if retry < 0 {
                 return Err(nt_error($MSG_ENTRY_POINT_FAILED$, retry));
             }

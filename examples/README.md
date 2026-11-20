@@ -1,5 +1,8 @@
 # Manual end-to-end tests
 
+What is committed here and what has to be built first is listed in
+[`payloads/README.md`](payloads/README.md).
+
 The test payload (`test_payload.exe`) **prints** the fixed marker
 `PAYLOAD_MARKER_7f3a9c2e` to stdout and exits `0`. It opens no dialog, so a run
 never blocks and its output can be captured from a terminal (or by an agent).

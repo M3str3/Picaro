@@ -101,14 +101,42 @@ These were reported by the bug-bounty round and are no longer open:
   NT headers inside it, the entry point inside the image) before anything
   indexes into the mapping. The technique is no longer `Unimplemented`.
 
-- `process_ghosting` no longer leaks resources when a step fails. The temp file
-  is removed if it cannot be opened with delete-on-close, and the file handle,
-  the section handle and the mapped view are owned by guards: the mapping is
-  released on every error path and kept only once the payload has run. The
-  header fields the later steps need are copied out of the image before it is
-  mutated through a slice, so no pointer into the mapping aliases the `&mut`,
-  and `SizeOfImage` is only rejected when it claims more than the kernel mapped
-  (the memory manager rounds a section up to a page).
+- `process_ghosting` releases every resource it acquires when a step fails. The
+  temp file is removed if it cannot be opened with delete-on-close, the file and
+  section handles are owned by guards, and the mapped view is unmapped on every
+  error path and kept only once the payload has run. The header fields the later
+  steps need are copied out of the image before it is mutated through a slice, so
+  no pointer into the mapping aliases the `&mut`, and `SizeOfImage` is only
+  rejected when it claims more than the kernel mapped (the memory manager rounds
+  a section up to a page).
+
+- (bug #11) `dotnet_hosting` no longer leaks the parameter `SAFEARRAY`s. The
+  array that carries the assembly bytes, the argument `string[]`, the
+  `object[]` that wraps it and the empty array the `DISP_E_BADPARAMCOUNT`
+  retry builds are each owned by a guard that calls `SafeArrayDestroy` on drop,
+  so an early return from a failed COM call cannot leak one either. Because
+  `SafeArrayPutElement` deep-copies a `VT_ARRAY` (`VariantCopy` →
+  `SafeArrayCopy`), the element and the argument array are independent
+  descriptors. The `VARIANT` that hands the argument array over is cleared to
+  `VT_NULL` right after the copy, because `windows_core::VARIANT`'s destructor
+  runs `VariantClear`, and that destroys a `VT_ARRAY` a second time.
+
+- (bug #12) `reflective_loading` bounds every section protection before
+  `nt_protect_vm`: `VirtualAddress + VirtualSize` uses checked arithmetic and is
+  rejected past `SizeOfImage` with the section's name, the same limit and error
+  the raw-data copy applies. A section with no raw data is never copied but is
+  still covered by this pass, which is why it needed its own guard: the copy
+  path never validated its `VirtualSize`.
+
+- (bug #7) The ntdll gadget scanner no longer settles for a `syscall; retf`
+  (`0F 05 CB`) because `.text` happens to hold one: it walks the terminators in
+  order (`C3` before `CB`) and, for each one, every candidate range (`.text`
+  first, then the whole image), so a near `syscall; ret` anywhere in the module
+  beats a `retf` in `.text`. The packer mirror (`find_gadget_offset`) applies the
+  same preference. A `retf` pops a far return address and would unbalance the
+  caller's stack, so it stays a last resort. Tests cover a `retf` that precedes a
+  `ret` in the same buffer and assert the nesting of the generated prelude's
+  loops, not just the terminator list.
 
 ## Open
 
@@ -118,10 +146,10 @@ These were reported by the bug-bounty round and are no longer open:
 
 A payload with an `IMAGE_DIRECTORY_ENTRY_TLS` callback array starts with its
 callbacks skipped, and the fragment says nothing about it: `run_tls_callbacks`
-exists in `reflective_loading` but was not carried over. An image section
-mapped by hand does not get a TLS index either, so static TLS is unusable
-whatever the callbacks do. Decide whether the fragment rejects such a payload
-with its own diagnostic (and a README section) or runs the callbacks the way
+exists in `reflective_loading` but was not carried over. An image section mapped
+by hand gets no TLS index either, so static TLS is unusable whatever the
+callbacks do. Decide whether the fragment rejects such a payload with its own
+diagnostic (and a README section) or runs the callbacks the way
 `reflective_loading` does, then test the chosen behaviour.
 
 ### 14. `process_ghosting` imports `Nt*` through the stub's IAT
@@ -132,9 +160,9 @@ with its own diagnostic (and a README section) or runs the callbacks the way
 by the loader into the stub's import table, which is the static signature the
 `none`/`indirect` syscall modes exist to avoid; the module comment argues they
 are "plain ntdll exports", but the stub does not go through `NT_FUNCTIONS` the
-way the syscall layer does. The fragment is the same for both modes as a
+way the syscall layer does, and the fragment is the same for both modes as a
 result. Either route them through the syscall block or state the exception in
-the technique's README and in `DEF` so it is a documented choice, not an
+the technique's README and in `DEF`, so it is a documented choice rather than an
 oversight.
 
 ### 2. `conflicts` metadata is display-only and internally inconsistent (medium-low)
@@ -153,17 +181,6 @@ Why deferred: a blanket enforcement would break valid flat multi-step plans.
 The design question is whether a conflict is per-payload, per-step or
 per-build; answer it before touching the registry or the validator.
 
-### 7. `retf` gadget fallback (low, latent)
-
-`src/engine/syscalls/prelude.rs:206-244` (mirror in `src/engine/syscalls/helpers.rs`).
-
-`scan_gadget` returns a `0F 05 CB` (`syscall; retf`) fallback when `.text` has
-no `0F 05 C3`. `find_gadget` then returns it without scanning the rest of the
-image for a proper `syscall; ret`. A `retf` pops a far return address and
-corrupts the caller's stack. ntdll ships `0F 05 C3` in every supported build,
-so this is latent; add a synthetic-module test and either scan the whole image
-for a near return before accepting `retf`, or reject `retf` outright.
-
 ### 8. `reflective_loading` discards `DllMain`'s FALSE (low, needs a decision)
 
 `src/techniques/reflective_loading/stub_fragment.rs:887-900`.
@@ -173,24 +190,6 @@ returns FALSE signalled that initialization failed, but the export path still
 calls the requested export and the entry-point path returns `Ok(0)`. Decide
 whether a FALSE should fail the load (mirroring the OS loader) or is a
 best-effort warning, then document it in the README.
-
-### 11. `dotnet_hosting` leaks the parameter `SAFEARRAY`s (low)
-
-`src/techniques/dotnet_hosting/stub_fragment.rs:225-276`.
-
-The `string[]`/`object[]` arrays created for `Invoke_3` are never destroyed,
-including on the `DISP_E_BADPARAMCOUNT` retry. `SafeArrayDestroy` is not in the
-fragment's current imports; add it and destroy the arrays after `Invoke_3`
-returns (the retry needs its own empty array).
-
-### 12. `reflective_loading` does not clamp section protections (low, hardening)
-
-`src/techniques/reflective_loading/stub_fragment.rs:585-625`.
-
-`fix_memory_protections` computes `VirtualAddress + VirtualSize` without
-checking `SizeOfImage`. `NtProtectVirtualMemory` would fail rather than write,
-so the impact is a failed load, not an out-of-bounds write. Clamp it the same
-way the section write path is clamped.
 
 ## How to validate a fix
 

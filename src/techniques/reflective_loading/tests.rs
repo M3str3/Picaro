@@ -511,6 +511,68 @@ fn a_tls_directory_must_fit_in_the_image() {
     }
 }
 
+/// Packer-side mirror of the range `fix_memory_protections` derives for a
+/// section before it calls `nt_protect_vm`: the same checked arithmetic and the
+/// same `SizeOfImage` limit that `copy_sections` applies to a raw copy.
+///
+/// The stub is built for i686 too, where `usize` is 32 bits, so the mirror does
+/// the sum in `u32` — otherwise the wrapping cases below would not wrap.
+fn protection_range_fits(section_rva: u32, virtual_size: u32, size_of_image: u32) -> bool {
+    section_rva
+        .checked_add(virtual_size)
+        .map(|end| end <= size_of_image)
+        .unwrap_or(false)
+}
+
+#[test]
+fn a_section_protection_must_fit_in_the_image() {
+    // A last section that ends exactly at `SizeOfImage` is the legal boundary.
+    assert!(protection_range_fits(0x1000, 0x1000, 0x2000));
+    assert!(!protection_range_fits(0x1000, 0x1001, 0x2000));
+    // `VirtualSize` is independent of `SizeOfRawData`: a section with no raw
+    // data (skipped by the copy) can still claim a range past the image.
+    assert!(!protection_range_fits(0x2200, 0x100, 0x2000));
+    // A section RVA near the top of the address space must not be added
+    // blindly, nor may the sum wrap around to a small value.
+    assert!(!protection_range_fits(0x7FFF_0000, 0x1000, 0x2000));
+    assert!(!protection_range_fits(u32::MAX, 0x1000, 0x2000));
+}
+
+/// The protection pass reads `VirtualSize`, which the raw-data copy never
+/// validates, so it has to bound its own range before `nt_protect_vm` sees it.
+#[test]
+fn the_mapper_bounds_checks_every_section_protection() {
+    let strings = StringsConfig::from_yaml(None).expect("default strings");
+    let fragment = Params::default().render_fragment(&strings);
+
+    let start = fragment
+        .find("let end = rva")
+        .expect("the protection range must be computed in a checked binding");
+    let statement_end = start
+        + fragment[start..]
+            .find(';')
+            .expect("the protection binding must be a complete statement");
+    let statement = &fragment[start..statement_end];
+    assert!(
+        statement.contains(".checked_add(size)"),
+        "the protection range must use a checked add, not `rva + size`"
+    );
+    assert!(
+        !statement.contains("rva + size"),
+        "an unchecked sum wraps on i686 and points the protection past the image"
+    );
+    let bound = fragment
+        .find("if end > size_of_image {")
+        .expect("the protection range must be bounded by the image size");
+    let protect = fragment
+        .find("crate::nt_protect_vm(")
+        .expect("the mapper must still change the protections");
+    assert!(
+        bound < protect,
+        "the bound must be checked before the protect call"
+    );
+}
+
 /// The relocation walk reads a block header only after it is known to fit in the
 /// directory, and writes a fixup only after its target is known to fit in the
 /// image: a page RVA near `0x7fff_0000` must fail the load, not write outside
