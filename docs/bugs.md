@@ -9,6 +9,13 @@ The lab rule still applies: anything that compiles a stub or runs an artifact is
 a live test and belongs to the dedicated lab host. The inert suite
 (`cargo test`) must stay green for every change here.
 
+## Fixed in the 2026-11-20 session
+
+- The shared import resolver refuses a descriptor with `FirstThunk == 0` as
+  `Malformed` before it resolves a single thunk. The IAT is the write target, so
+  a zero there used to place every slot at RVA 0, 4, 8 … and overwrite the
+  headers under the identity mapping `patch_imports` uses.
+
 ## Fixed in the 2026-10-24 session
 
 These were reported by the bug-bounty round and are no longer open:
@@ -78,6 +85,14 @@ These were reported by the bug-bounty round and are no longer open:
 
 ## Fixed in the 2026-11-20 session
 
+- (bug #6) `render_launcher` fills the launcher template in a single left-to-right
+  pass instead of chaining `.replace()`. The chain re-scanned the text it had
+  already inserted, so a script or command containing `$JOIN$`, `$INTERACTIVE$`,
+  `$COMMAND$`, `$SCRIPT$`, `$AMSI_UTILS_HELPER$` or `$PATCH_AMSI_UTILS$` was
+  rewritten by the later substitutions and the emitted C# literal no longer
+  matched the input. `render_template` substitutes every known placeholder while
+  scanning the template only, so inserted text is never re-read.
+
 - (bug #9) `process_ghosting` maps the payload from an image section
   (`NtCreateSection(SEC_IMAGE)` + `NtMapViewOfSection`), so the kernel applies
   the base relocations and the hand-rolled relocation walk is gone. The header
@@ -86,7 +101,41 @@ These were reported by the bug-bounty round and are no longer open:
   NT headers inside it, the entry point inside the image) before anything
   indexes into the mapping. The technique is no longer `Unimplemented`.
 
+- `process_ghosting` no longer leaks resources when a step fails. The temp file
+  is removed if it cannot be opened with delete-on-close, and the file handle,
+  the section handle and the mapped view are owned by guards: the mapping is
+  released on every error path and kept only once the payload has run. The
+  header fields the later steps need are copied out of the image before it is
+  mutated through a slice, so no pointer into the mapping aliases the `&mut`,
+  and `SizeOfImage` is only rejected when it claims more than the kernel mapped
+  (the memory manager rounds a section up to a page).
+
 ## Open
+
+### 13. `process_ghosting` runs a payload with TLS callbacks without running them
+
+`src/techniques/process_ghosting/stub_fragment.rs` (`get_headers`, `execute_entrypoint`).
+
+A payload with an `IMAGE_DIRECTORY_ENTRY_TLS` callback array starts with its
+callbacks skipped, and the fragment says nothing about it: `run_tls_callbacks`
+exists in `reflective_loading` but was not carried over. An image section
+mapped by hand does not get a TLS index either, so static TLS is unusable
+whatever the callbacks do. Decide whether the fragment rejects such a payload
+with its own diagnostic (and a README section) or runs the callbacks the way
+`reflective_loading` does, then test the chosen behaviour.
+
+### 14. `process_ghosting` imports `Nt*` through the stub's IAT
+
+`src/techniques/process_ghosting/stub_fragment.rs` (the `windows` `Wdk` imports).
+
+`NtCreateSection`, `NtMapViewOfSection` and `NtUnmapViewOfSection` are resolved
+by the loader into the stub's import table, which is the static signature the
+`none`/`indirect` syscall modes exist to avoid; the module comment argues they
+are "plain ntdll exports", but the stub does not go through `NT_FUNCTIONS` the
+way the syscall layer does. The fragment is the same for both modes as a
+result. Either route them through the syscall block or state the exception in
+the technique's README and in `DEF` so it is a documented choice, not an
+oversight.
 
 ### 2. `conflicts` metadata is display-only and internally inconsistent (medium-low)
 
@@ -103,16 +152,6 @@ accepted by a test (`reflective_loading` + `process_hollowing` as two steps,
 Why deferred: a blanket enforcement would break valid flat multi-step plans.
 The design question is whether a conflict is per-payload, per-step or
 per-build; answer it before touching the registry or the validator.
-
-### 6. Launcher template re-scans user text with later placeholders (low)
-
-`src/engine/managed.rs:256-263`.
-
-`render_launcher` applies `.replace()` sequentially. A script or command that
-contains `$JOIN$`, `$INTERACTIVE$`, `$COMMAND$` or `$AMSI_UTILS_HELPER$` is
-inserted first and rescanned by the later replacements, so the C# literal can
-differ from the file on disk. Render the template in one pass (or replace on a
-copy that only contains the template).
 
 ### 7. `retf` gadget fallback (low, latent)
 
@@ -134,16 +173,6 @@ returns FALSE signalled that initialization failed, but the export path still
 calls the requested export and the entry-point path returns `Ok(0)`. Decide
 whether a FALSE should fail the load (mirroring the OS loader) or is a
 best-effort warning, then document it in the README.
-
-### 10. Import descriptor with `OriginalFirstThunk != 0` and `FirstThunk == 0` (low)
-
-`src/engine/imports.rs:164-186` and the IAT write in `patch_imports`.
-
-The ILT fallback is fixed, but the IAT destination is still `FirstThunk`. A
-descriptor that declares an ILT and leaves `FirstThunk` zero yields low IAT
-RVAs; with the identity mapping used by `patch_imports`, that can point at the
-DOS header and overwrite it. Reject such a descriptor as `Malformed` (or apply
-a policy) instead of writing near RVA 0.
 
 ### 11. `dotnet_hosting` leaks the parameter `SAFEARRAY`s (low)
 
