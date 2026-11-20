@@ -83,6 +83,16 @@ These were reported by the bug-bounty round and are no longer open:
   guard and reads with a hard bound. All five live stager tests and the i686
   stub-compile test pass on the lab host (2026-10-30).
 
+## Fixed in the 2026-11-20 session
+
+- (bug #6) `render_launcher` fills the launcher template in a single left-to-right
+  pass instead of chaining `.replace()`. The chain re-scanned the text it had
+  already inserted, so a script or command containing `$JOIN$`, `$INTERACTIVE$`,
+  `$COMMAND$`, `$SCRIPT$`, `$AMSI_UTILS_HELPER$` or `$PATCH_AMSI_UTILS$` was
+  rewritten by the later substitutions and the emitted C# literal no longer
+  matched the input. `render_template` substitutes every known placeholder while
+  scanning the template only, so inserted text is never re-read.
+
 ## Open
 
 ### 2. `conflicts` metadata is display-only and internally inconsistent (medium-low)
@@ -100,16 +110,6 @@ accepted by a test (`reflective_loading` + `process_hollowing` as two steps,
 Why deferred: a blanket enforcement would break valid flat multi-step plans.
 The design question is whether a conflict is per-payload, per-step or
 per-build; answer it before touching the registry or the validator.
-
-### 6. Launcher template re-scans user text with later placeholders (low)
-
-`src/engine/managed.rs:256-263`.
-
-`render_launcher` applies `.replace()` sequentially. A script or command that
-contains `$JOIN$`, `$INTERACTIVE$`, `$COMMAND$` or `$AMSI_UTILS_HELPER$` is
-inserted first and rescanned by the later replacements, so the C# literal can
-differ from the file on disk. Render the template in one pass (or replace on a
-copy that only contains the template).
 
 ### 7. `retf` gadget fallback (low, latent)
 
