@@ -232,6 +232,39 @@ fn csharp_verbatim(text: &str) -> String {
     format!("@\"{}\"", text.replace('"', "\"\""))
 }
 
+/// Fills `template` in a single left-to-right pass, substituting each
+/// `(placeholder, value)` pair.
+///
+/// A chained `str::replace` re-scans the text it has already inserted, so a
+/// user-supplied script that happens to contain a later placeholder (`$JOIN$`,
+/// `$AMSI_UTILS_HELPER$`, ...) would be rewritten as if it were template text.
+/// Scanning the template once keeps inserted values opaque.
+fn render_template(template: &str, values: &[(&str, &str)]) -> String {
+    let mut rendered = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(offset) = rest.find('$') {
+        rendered.push_str(&rest[..offset]);
+        let candidate = &rest[offset..];
+        match values
+            .iter()
+            .find(|(placeholder, _)| candidate.starts_with(placeholder))
+        {
+            Some((placeholder, value)) => {
+                rendered.push_str(value);
+                rest = &candidate[placeholder.len()..];
+            }
+            None => {
+                // A `$` that opens no known placeholder is literal text; skip it
+                // so a later `$` in the same run still gets a chance to match.
+                rendered.push('$');
+                rest = &candidate[1..];
+            }
+        }
+    }
+    rendered.push_str(rest);
+    rendered
+}
+
 /// Renders the C# launcher source for a script and its invocation.
 ///
 /// `join` selects `command_mode: join` (append the operator's arguments to
@@ -253,13 +286,21 @@ pub fn render_launcher(
             "        // AMSI is left as-is: no patch_amsi step.",
         )
     };
-    LAUNCHER_TEMPLATE
-        .replace("$SCRIPT$", &csharp_verbatim(script))
-        .replace("$COMMAND$", &csharp_verbatim(command))
-        .replace("$JOIN$", if join { "true" } else { "false" })
-        .replace("$INTERACTIVE$", if interactive { "true" } else { "false" })
-        .replace("$AMSI_UTILS_HELPER$", &helper)
-        .replace("$PATCH_AMSI_UTILS$", patch)
+    let script = csharp_verbatim(script);
+    let command = csharp_verbatim(command);
+    let join = if join { "true" } else { "false" };
+    let interactive = if interactive { "true" } else { "false" };
+    render_template(
+        LAUNCHER_TEMPLATE,
+        &[
+            ("$SCRIPT$", &script),
+            ("$COMMAND$", &command),
+            ("$JOIN$", join),
+            ("$INTERACTIVE$", interactive),
+            ("$AMSI_UTILS_HELPER$", &helper),
+            ("$PATCH_AMSI_UTILS$", patch),
+        ],
+    )
 }
 
 /// Returns the non-empty value of an environment variable.
@@ -842,6 +883,49 @@ mod tests {
         assert!(source.contains("private const bool JoinMode = true;"));
         assert!(source.contains("private const bool Interactive = true;"));
         assert!(source.contains("private const string Command = @\"\";"));
+    }
+
+    #[test]
+    fn a_placeholder_written_by_the_user_is_not_replaced() {
+        // Every placeholder in the template also appears in the script and the
+        // command; each must survive verbatim, exactly once.
+        let script = "$JOIN$ $INTERACTIVE$ $COMMAND$ $SCRIPT$ $AMSI_UTILS_HELPER$";
+        let source = render_launcher(script, "$PATCH_AMSI_UTILS$", false, false, true);
+        for placeholder in [
+            "$JOIN$",
+            "$INTERACTIVE$",
+            "$COMMAND$",
+            "$SCRIPT$",
+            "$AMSI_UTILS_HELPER$",
+            "$PATCH_AMSI_UTILS$",
+        ] {
+            assert_eq!(
+                source.matches(placeholder).count(),
+                1,
+                "{placeholder} should only appear in the user's text"
+            );
+        }
+        assert!(source.contains(&format!("@\"{script}\"")));
+        assert!(source.contains("private const string Command = @\"$PATCH_AMSI_UTILS$\";"));
+        // The template's own slots are still filled from the arguments.
+        assert!(source.contains("private const bool JoinMode = false;"));
+        assert!(source.contains("private const bool Interactive = false;"));
+        assert!(source.contains("private static void PatchManagedScan()"));
+    }
+
+    #[test]
+    fn a_dollar_sign_that_opens_no_placeholder_survives() {
+        let script = "$env:PATH is $5 and $$ is literal";
+        let source = render_launcher(script, "", false, false, false);
+        assert!(source.contains(&format!("@\"{script}\"")));
+    }
+
+    #[test]
+    fn render_template_substitutes_in_one_pass() {
+        // `$B$` is only known after `$A$` would have been inserted, so a chained
+        // replace would rewrite it; a single pass leaves it alone.
+        let rendered = render_template("[$A$][$B$][$C$]", &[("$A$", "$B$"), ("$B$", "b")]);
+        assert_eq!(rendered, "[$B$][b][$C$]");
     }
 
     #[test]

@@ -147,7 +147,8 @@ $SSN_FIELDS$
     }
 
     static SSNS: OnceLock<SsnTable> = OnceLock::new();
-    /// Address of the first `syscall; ret` gadget in ntdll's `.text`.
+    /// Address of the best `syscall; ret` gadget in ntdll: `.text` first, then
+    /// the whole image, and a `syscall; retf` only when no near return exists.
     static GADGET: OnceLock<usize> = OnceLock::new();
 
     /// Why the syscall layer failed to initialize.

@@ -450,13 +450,28 @@ fn find_gadget_skips_a_retf_when_the_image_has_a_ret() {
 
 #[test]
 fn gadget_scanner_tries_a_near_return_before_a_far_one() {
-    // The stub scanner receives one range at a time, so the preference has to
-    // live in the ordered terminator list: every range is scanned for `C3`
-    // before any range is scanned for `CB`.
+    // The stub scanner receives one range at a time, so the preference can only
+    // live in the loop nesting: the terminator loop is the outer one, and each
+    // terminator walks every range before the next terminator is considered.
+    // Swapping the loops (`for range { for terminator }`) restores bug #7
+    // exactly — a `retf` in `.text` would win over a `ret` in the rest of the
+    // image — so the nesting, and not just the ordered list, is what is
+    // asserted here.
     let prelude = crate::engine::syscalls::prelude::INDIRECT_PRELUDE;
+    let terminators = prelude
+        .find("for terminator in [0xC3u8, 0xCBu8]")
+        .expect("gadget scanner must walk the terminators in order");
+    let ranges = prelude
+        .find("for range in ranges.iter().flatten()")
+        .expect("gadget scanner must walk the candidate ranges");
     assert!(
-        prelude.contains("[0xC3u8, 0xCBu8]"),
-        "gadget scanner must try ret before retf"
+        terminators < ranges,
+        "the terminator loop must be the outer one: every range is scanned for \
+         `ret` before any range is scanned for `retf`"
+    );
+    assert!(
+        prelude.contains("scan_gadget(*range, terminator)"),
+        "each range must be scanned for the current terminator"
     );
 }
 

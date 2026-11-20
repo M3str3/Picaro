@@ -9,6 +9,13 @@ The lab rule still applies: anything that compiles a stub or runs an artifact is
 a live test and belongs to the dedicated lab host. The inert suite
 (`cargo test`) must stay green for every change here.
 
+## Fixed in the 2026-11-20 session
+
+- The shared import resolver refuses a descriptor with `FirstThunk == 0` as
+  `Malformed` before it resolves a single thunk. The IAT is the write target, so
+  a zero there used to place every slot at RVA 0, 4, 8 … and overwrite the
+  headers under the identity mapping `patch_imports` uses.
+
 ## Fixed in the 2026-10-24 session
 
 These were reported by the bug-bounty round and are no longer open:
@@ -76,16 +83,25 @@ These were reported by the bug-bounty round and are no longer open:
   guard and reads with a hard bound. All five live stager tests and the i686
   stub-compile test pass on the lab host (2026-10-30).
 
-## Fixed in the 2026-11-19 session
+## Fixed in the 2026-11-20 session
+
+- (bug #6) `render_launcher` fills the launcher template in a single left-to-right
+  pass instead of chaining `.replace()`. The chain re-scanned the text it had
+  already inserted, so a script or command containing `$JOIN$`, `$INTERACTIVE$`,
+  `$COMMAND$`, `$SCRIPT$`, `$AMSI_UTILS_HELPER$` or `$PATCH_AMSI_UTILS$` was
+  rewritten by the later substitutions and the emitted C# literal no longer
+  matched the input. `render_template` substitutes every known placeholder while
+  scanning the template only, so inserted text is never re-read.
 
 - (bug #7) The ntdll gadget scanner no longer settles for a `syscall; retf`
-  (`0F 05 CB`) because `.text` happens to hold one: it scans every candidate
-  range for a near `syscall; ret` (`0F 05 C3`) before accepting a `retf` as a
-  last resort. `scan_gadget` now takes the terminator and `find_gadget` tries
-  the ordered list `.text`, whole image × `C3`, then × `CB`; the packer mirror
-  (`find_gadget_offset`) applies the same preference. Unit tests cover a `retf`
-  that precedes a `ret` in the same buffer and the ordered terminator list in
-  the generated prelude.
+  (`0F 05 CB`) because `.text` happens to hold one: it walks the terminators in
+  order (`C3` before `CB`) and, for each one, every candidate range (`.text`
+  first, then the whole image), so a near `syscall; ret` anywhere in the module
+  beats a `retf` in `.text`. The packer mirror (`find_gadget_offset`) applies the
+  same preference. A `retf` pops a far return address and would unbalance the
+  caller's stack, so it stays a last resort. Tests cover a `retf` that precedes a
+  `ret` in the same buffer and assert the nesting of the generated prelude's
+  loops, not just the terminator list.
 
 ## Open
 
@@ -104,16 +120,6 @@ accepted by a test (`reflective_loading` + `process_hollowing` as two steps,
 Why deferred: a blanket enforcement would break valid flat multi-step plans.
 The design question is whether a conflict is per-payload, per-step or
 per-build; answer it before touching the registry or the validator.
-
-### 6. Launcher template re-scans user text with later placeholders (low)
-
-`src/engine/managed.rs:256-263`.
-
-`render_launcher` applies `.replace()` sequentially. A script or command that
-contains `$JOIN$`, `$INTERACTIVE$`, `$COMMAND$` or `$AMSI_UTILS_HELPER$` is
-inserted first and rescanned by the later replacements, so the C# literal can
-differ from the file on disk. Render the template in one pass (or replace on a
-copy that only contains the template).
 
 ### 8. `reflective_loading` discards `DllMain`'s FALSE (low, needs a decision)
 
@@ -134,16 +140,6 @@ page RVA, exactly like the old `reflective_loading` code. `process_ghosting` is
 `Stability::Unimplemented` and cannot reach this path today, but whoever
 implements the `NtCreateSection(SEC_IMAGE)` path must copy the bounds checks
 from `reflective_loading` (directory/header, per-entry target and width, TLS).
-
-### 10. Import descriptor with `OriginalFirstThunk != 0` and `FirstThunk == 0` (low)
-
-`src/engine/imports.rs:164-186` and the IAT write in `patch_imports`.
-
-The ILT fallback is fixed, but the IAT destination is still `FirstThunk`. A
-descriptor that declares an ILT and leaves `FirstThunk` zero yields low IAT
-RVAs; with the identity mapping used by `patch_imports`, that can point at the
-DOS header and overwrite it. Reject such a descriptor as `Malformed` (or apply
-a policy) instead of writing near RVA 0.
 
 ### 11. `dotnet_hosting` leaks the parameter `SAFEARRAY`s (low)
 
