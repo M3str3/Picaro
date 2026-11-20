@@ -951,15 +951,24 @@ pub fn parse_ssn_prologue(bytes: &[u8]) -> Option<u32> {
     Some(u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]))
 }
 
-/// Returns the offset of the first `syscall` followed by a return (`0F 05 C3`
-/// or `0F 05 CB`) in `bytes`, if any. Mirrors the generated stub's gadget
-/// scanner (`prelude::INDIRECT_PRELUDE`), so the matching behavior is
-/// unit-tested here instead of on a live ntdll.
+/// Returns the offset of the best `syscall` gadget in `bytes`, if any.
+///
+/// A `syscall; ret` (`0F 05 C3`) is preferred over the whole buffer before a
+/// `syscall; retf` (`0F 05 CB`) is accepted, mirroring the generated stub's
+/// scanner (`prelude::INDIRECT_PRELUDE`): `retf` far-returns and would
+/// unbalance the caller's stack, so it must stay a last resort. Unit-tested
+/// here instead of on a live ntdll.
 #[cfg(test)]
 pub fn find_gadget_offset(bytes: &[u8]) -> Option<usize> {
+    find_terminator(bytes, 0xC3).or_else(|| find_terminator(bytes, 0xCB))
+}
+
+/// Returns the offset of the first `0F 05 <terminator>` in `bytes`.
+#[cfg(test)]
+fn find_terminator(bytes: &[u8], terminator: u8) -> Option<usize> {
     bytes
         .windows(3)
-        .position(|w| w[0] == 0x0F && w[1] == 0x05 && (w[2] == 0xC3 || w[2] == 0xCB))
+        .position(|w| w[0] == 0x0F && w[1] == 0x05 && w[2] == terminator)
 }
 
 #[cfg(test)]
