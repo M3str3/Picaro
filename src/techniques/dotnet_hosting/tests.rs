@@ -165,6 +165,36 @@ fn every_array_is_freed_on_whatever_path_the_call_takes() {
     }
 }
 
+/// The `VARIANT` that carries the argument array is a second owner of the same
+/// `SAFEARRAY`: `windows_core::VARIANT`'s destructor runs `VariantClear`, and
+/// that destroys a `VT_ARRAY`. The fragment therefore has to forget the
+/// descriptor right after `SafeArrayPutElement` has copied it, or the guard and
+/// the `VARIANT` free the same array — a double free on every path, including
+/// the error ones.
+#[test]
+fn the_argument_variant_is_cleared_after_the_put() {
+    let rendered = Params::default()
+        .render_fragment(&StringsConfig::from_yaml(None).expect("default strings"));
+
+    let put = rendered
+        .find("let put = SafeArrayPutElement(")
+        .expect("the argument array must be handed to the managed call");
+    let clear = rendered
+        .find("variant_set_array(&mut argv, VT_NULL, ptr::null_mut())")
+        .expect("the VARIANT must release the array it borrowed");
+    let checked = rendered
+        .find("put.map_err(")
+        .expect("the put result must be checked, not discarded");
+    assert!(
+        put < clear,
+        "the VARIANT may only forget the descriptor after the copy"
+    );
+    assert!(
+        clear < checked,
+        "the handover must happen on both outcomes: clear it before the `?`"
+    );
+}
+
 /// Canary for the raw `VARIANT` layout the fragment writes through. It cannot
 /// be asserted from here — the fragment is a template compiled only inside a
 /// stub, where its own `const` assertion catches a mismatch — so this pins the

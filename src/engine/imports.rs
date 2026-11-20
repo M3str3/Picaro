@@ -167,6 +167,15 @@ const IMPORTS_BLOCK: &str = r##"mod imports {
             if name_rva == 0 && first_thunk == 0 && original_thunk == 0 {
                 break;
             }
+            // The IAT is mandatory: `FirstThunk` is where the caller writes the
+            // resolved addresses, so a zero there makes the slot walk start at
+            // RVA 0 and overwrite the headers. Refuse the descriptor instead of
+            // writing somewhere plausible.
+            if first_thunk == 0 {
+                return Err(ImportError::Malformed(format!(
+                    "import descriptor for the DLL at RVA 0x{name_rva:08x} has no IAT (FirstThunk == 0)"
+                )));
+            }
 
             let name_off = mapped_offset(image, &rva_to_offset, name_rva).ok_or_else(|| {
                 ImportError::Malformed(format!("DLL name RVA 0x{name_rva:08x} is not mapped"))
@@ -563,6 +572,30 @@ mod tests {
             block.contains("indexed_rva(thunk_source, i, thunk_size)"),
             "the walk does not use the selected thunk source: {block}"
         );
+    }
+
+    /// The IAT is the write target, so `FirstThunk` is mandatory: a descriptor
+    /// with an ILT but `FirstThunk == 0` used to resolve the thunks from the ILT
+    /// and then place every slot at RVA 0, 4, 8 … — inside the headers. The
+    /// descriptor must be refused before the module is loaded or any slot RVA is
+    /// computed.
+    #[test]
+    fn a_descriptor_without_an_iat_is_refused() {
+        let block = resolver_block();
+        assert!(
+            block.contains("has no IAT (FirstThunk == 0)"),
+            "the descriptor is not refused when FirstThunk is zero: {block}"
+        );
+        let guard = block
+            .find("if first_thunk == 0 {")
+            .expect("FirstThunk guard");
+        for later in ["load_module(image, name_off", "indexed_rva(first_thunk"] {
+            let position = block.find(later).expect(later);
+            assert!(
+                guard < position,
+                "the FirstThunk guard must precede '{later}': {block}"
+            );
+        }
     }
 
     /// Thunk and IAT RVAs come from untrusted headers: `base + i * stride` has

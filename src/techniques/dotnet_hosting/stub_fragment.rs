@@ -267,23 +267,26 @@ fn run_assembly(image: &[u8], args: &[String]) -> Result<i32, String> {
 
         // `MethodInfo.Invoke_3(null, object[])`: the `object[]` carries the
         // `string[]` argument array. `SafeArrayPutElement` copies the variant
-        // into the array (`VariantCopy` deep-copies a `VT_ARRAY`), so the
-        // wrapper owns its own array and the two guards free independent
-        // descriptors — no double free, and neither array outlives the call.
+        // into the element (`VariantCopy` deep-copies a `VT_ARRAY`), so the
+        // element owns its own array from that point on; the guard next to it
+        // keeps the original. `argv` must forget the descriptor right after the
+        // call, because its own destructor runs `VariantClear`, and that
+        // destroys a `VT_ARRAY` again — the guard would then free it twice.
         let strings = argument_array(args)?;
-        let mut argv = VARIANT::default();
-        variant_set_array(&mut argv, VARENUM(VT_ARRAY.0 | VT_BSTR.0), strings.as_ptr());
         let parameters = OwnedArray(SafeArrayCreateVector(VT_VARIANT, 0, 1));
         if parameters.is_null() {
             return Err($MSG_ARRAY_FAILED$.to_string());
         }
+        let mut argv = VARIANT::default();
+        variant_set_array(&mut argv, VARENUM(VT_ARRAY.0 | VT_BSTR.0), strings.as_ptr());
         let index = 0i32;
-        SafeArrayPutElement(
+        let put = SafeArrayPutElement(
             parameters.as_ptr(),
             &index,
             &argv as *const VARIANT as *const c_void,
-        )
-        .map_err(|e| format!("{}: {e}", $MSG_ARRAY_FAILED$))?;
+        );
+        variant_set_array(&mut argv, VT_NULL, ptr::null_mut());
+        put.map_err(|e| format!("{}: {e}", $MSG_ARRAY_FAILED$))?;
 
         let mut result = VARIANT::default();
 
