@@ -93,6 +93,13 @@ These were reported by the bug-bounty round and are no longer open:
   matched the input. `render_template` substitutes every known placeholder while
   scanning the template only, so inserted text is never re-read.
 
+- (bug #12) `reflective_loading` bounds every section protection before
+  `nt_protect_vm`: `VirtualAddress + VirtualSize` uses checked arithmetic and is
+  rejected past `SizeOfImage` with the section's name, the same limit and error
+  the raw-data copy applies. A section with no raw data is never copied but is
+  still covered by this pass, which is why it needed its own guard: the copy
+  path never validated its `VirtualSize`.
+
 - (bug #7) The ntdll gadget scanner no longer settles for a `syscall; retf`
   (`0F 05 CB`) because `.text` happens to hold one: it walks the terminators in
   order (`C3` before `CB`) and, for each one, every candidate range (`.text`
@@ -149,15 +156,6 @@ The `string[]`/`object[]` arrays created for `Invoke_3` are never destroyed,
 including on the `DISP_E_BADPARAMCOUNT` retry. `SafeArrayDestroy` is not in the
 fragment's current imports; add it and destroy the arrays after `Invoke_3`
 returns (the retry needs its own empty array).
-
-### 12. `reflective_loading` does not clamp section protections (low, hardening)
-
-`src/techniques/reflective_loading/stub_fragment.rs:585-625`.
-
-`fix_memory_protections` computes `VirtualAddress + VirtualSize` without
-checking `SizeOfImage`. `NtProtectVirtualMemory` would fail rather than write,
-so the impact is a failed load, not an out-of-bounds write. Clamp it the same
-way the section write path is clamped.
 
 ## How to validate a fix
 
