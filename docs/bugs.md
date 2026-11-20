@@ -76,6 +76,17 @@ These were reported by the bug-bounty round and are no longer open:
   guard and reads with a hard bound. All five live stager tests and the i686
   stub-compile test pass on the lab host (2026-10-30).
 
+## Fixed in the 2026-11-20 session
+
+- (bug #11) `dotnet_hosting` no longer leaks the parameter `SAFEARRAY`s. The
+  array that carries the assembly bytes, the argument `string[]`, the
+  `object[]` that wraps it and the empty array the `DISP_E_BADPARAMCOUNT`
+  retry builds are each owned by a guard that calls `SafeArrayDestroy` on drop,
+  so an early return from a failed COM call cannot leak one either. Because
+  `SafeArrayPutElement` deep-copies a `VT_ARRAY` (`VariantCopy` →
+  `SafeArrayCopy`), the wrapper and the argument array are independent
+  descriptors and both are freed.
+
 ## Open
 
 ### 2. `conflicts` metadata is display-only and internally inconsistent (medium-low)
@@ -144,15 +155,6 @@ descriptor that declares an ILT and leaves `FirstThunk` zero yields low IAT
 RVAs; with the identity mapping used by `patch_imports`, that can point at the
 DOS header and overwrite it. Reject such a descriptor as `Malformed` (or apply
 a policy) instead of writing near RVA 0.
-
-### 11. `dotnet_hosting` leaks the parameter `SAFEARRAY`s (low)
-
-`src/techniques/dotnet_hosting/stub_fragment.rs:225-276`.
-
-The `string[]`/`object[]` arrays created for `Invoke_3` are never destroyed,
-including on the `DISP_E_BADPARAMCOUNT` retry. `SafeArrayDestroy` is not in the
-fragment's current imports; add it and destroy the arrays after `Invoke_3`
-returns (the retry needs its own empty array).
 
 ### 12. `reflective_loading` does not clamp section protections (low, hardening)
 
