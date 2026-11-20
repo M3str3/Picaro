@@ -56,7 +56,11 @@ flowchart TD
    image with no relocation directory (`/FIXED`) *must* land there: when it does
    not, the load fails with a diagnostic instead of running with stale absolute
    addresses.
-6. Set each section's final memory protection (`nt_protect_vm`).
+6. Set each section's final memory protection (`nt_protect_vm`). The range is
+   `VirtualAddress .. VirtualAddress + VirtualSize` and is bounded by
+   `SizeOfImage` with checked arithmetic first: a section with no raw data (and
+   so never copied) can still claim a range past the image, which
+   `nt_protect_vm` would reject as an opaque NTSTATUS.
 
 ### 3. Run it
 

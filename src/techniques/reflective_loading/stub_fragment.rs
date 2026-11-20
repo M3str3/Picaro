@@ -842,6 +842,15 @@ fn fix_relocations(
     Ok(())
 }
 
+/// Applies each section's final protection inside the mapped image.
+///
+/// The section table is payload-controlled and `VirtualSize` is independent of
+/// `SizeOfRawData`, so a section that `copy_sections` skipped (no raw data, a
+/// `.bss`) can still claim a range past `SizeOfImage`. `nt_protect_vm` only
+/// accepts an address inside the allocation, so such a range fails the load
+/// there; the range is bounded here instead, with the same checked arithmetic
+/// and the same limit `copy_sections` uses, so the failure names the section and
+/// the reason rather than an opaque NTSTATUS.
 fn fix_memory_protections(
     image_base: *mut c_void,
     nt: *const NtHeaders,
@@ -850,6 +859,7 @@ fn fix_memory_protections(
         let section_header = (nt as usize + std::mem::size_of::<NtHeaders>())
             as *const IMAGE_SECTION_HEADER;
         let num = (*nt).FileHeader.NumberOfSections as usize;
+        let size_of_image = (*nt).OptionalHeader.SizeOfImage as usize;
 
         for i in 0..num {
             let section = section_header.add(i);
@@ -867,10 +877,20 @@ fn fix_memory_protections(
                 PAGE_READONLY
             };
 
-            let address =
-                (image_base as usize + (*section).VirtualAddress as usize) as *const c_void;
+            let rva = (*section).VirtualAddress as usize;
             let size = (*section).Misc.VirtualSize as usize;
             if size > 0 {
+                let end = rva
+                    .checked_add(size)
+                    .ok_or_else(|| section_error($MSG_SECTION_OUT_OF_IMAGE$, &section_name(section)))?;
+                if end > size_of_image {
+                    return Err(section_error(
+                        $MSG_SECTION_OUT_OF_IMAGE$,
+                        &section_name(section),
+                    ));
+                }
+
+                let address = (image_base as usize + rva) as *const c_void;
                 let mut old = 0u32;
                 let status = crate::nt_protect_vm(
                     GetCurrentProcess(),

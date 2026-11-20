@@ -85,11 +85,15 @@ examples/hosts/dotnet_host/obj/
 # Lab signing identity (CA + leaf) generated for `output.sign.mode: lab`.
 **/.picaro/
 
-# Keep the checked-in test payloads and PE fixtures (all of them are read by
-# tests or named by an example plan, so a fresh clone must have them).
+# Keep the checked-in payloads and PE fixtures (all of them are read by tests or
+# named by an example plan, so a fresh clone must have them). The inventory —
+# committed versus generated, and how to rebuild each — is
+# `examples/payloads/README.md`; `tests/fixture_policy.rs` checks that every
+# committed payload binary keeps its exception here.
 !examples/payloads/msgbox.exe
 !examples/payloads/test_payload.exe
 !examples/payloads/test_payload_x86.exe
+!examples/payloads/demo_shellcode.bin
 !tests/fixtures/minimal_x64.exe
 !tests/fixtures/minimal_x86.exe
 !tests/fixtures/managed_x86.exe
