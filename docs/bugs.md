@@ -93,6 +93,23 @@ These were reported by the bug-bounty round and are no longer open:
   matched the input. `render_template` substitutes every known placeholder while
   scanning the template only, so inserted text is never re-read.
 
+- (bug #9) `process_ghosting` maps the payload from an image section
+  (`NtCreateSection(SEC_IMAGE)` + `NtMapViewOfSection`), so the kernel applies
+  the base relocations and the hand-rolled relocation walk is gone. The header
+  validation that remains works on the mapped view and bounds every offset it
+  derives from the payload (`SizeOfImage` against the view, `e_lfanew` plus the
+  NT headers inside it, the entry point inside the image) before anything
+  indexes into the mapping. The technique is no longer `Unimplemented`.
+
+- `process_ghosting` releases every resource it acquires when a step fails. The
+  temp file is removed if it cannot be opened with delete-on-close, the file and
+  section handles are owned by guards, and the mapped view is unmapped on every
+  error path and kept only once the payload has run. The header fields the later
+  steps need are copied out of the image before it is mutated through a slice, so
+  no pointer into the mapping aliases the `&mut`, and `SizeOfImage` is only
+  rejected when it claims more than the kernel mapped (the memory manager rounds
+  a section up to a page).
+
 - (bug #11) `dotnet_hosting` no longer leaks the parameter `SAFEARRAY`s. The
   array that carries the assembly bytes, the argument `string[]`, the
   `object[]` that wraps it and the empty array the `DISP_E_BADPARAMCOUNT`
@@ -123,6 +140,31 @@ These were reported by the bug-bounty round and are no longer open:
 
 ## Open
 
+### 13. `process_ghosting` runs a payload with TLS callbacks without running them
+
+`src/techniques/process_ghosting/stub_fragment.rs` (`get_headers`, `execute_entrypoint`).
+
+A payload with an `IMAGE_DIRECTORY_ENTRY_TLS` callback array starts with its
+callbacks skipped, and the fragment says nothing about it: `run_tls_callbacks`
+exists in `reflective_loading` but was not carried over. An image section mapped
+by hand gets no TLS index either, so static TLS is unusable whatever the
+callbacks do. Decide whether the fragment rejects such a payload with its own
+diagnostic (and a README section) or runs the callbacks the way
+`reflective_loading` does, then test the chosen behaviour.
+
+### 14. `process_ghosting` imports `Nt*` through the stub's IAT
+
+`src/techniques/process_ghosting/stub_fragment.rs` (the `windows` `Wdk` imports).
+
+`NtCreateSection`, `NtMapViewOfSection` and `NtUnmapViewOfSection` are resolved
+by the loader into the stub's import table, which is the static signature the
+`none`/`indirect` syscall modes exist to avoid; the module comment argues they
+are "plain ntdll exports", but the stub does not go through `NT_FUNCTIONS` the
+way the syscall layer does, and the fragment is the same for both modes as a
+result. Either route them through the syscall block or state the exception in
+the technique's README and in `DEF`, so it is a documented choice rather than an
+oversight.
+
 ### 2. `conflicts` metadata is display-only and internally inconsistent (medium-low)
 
 `src/techniques/mod.rs`, `src/features/mod.rs`, `src/plan/validate/mod.rs`.
@@ -148,16 +190,6 @@ returns FALSE signalled that initialization failed, but the export path still
 calls the requested export and the entry-point path returns `Ok(0)`. Decide
 whether a FALSE should fail the load (mirroring the OS loader) or is a
 best-effort warning, then document it in the README.
-
-### 9. `process_ghosting` has the same unbounded relocation walk (moot while unimplemented)
-
-`src/techniques/process_ghosting/stub_fragment.rs:240-296`.
-
-`fix_relocations` trusts the relocation directory, the block header and the
-page RVA, exactly like the old `reflective_loading` code. `process_ghosting` is
-`Stability::Unimplemented` and cannot reach this path today, but whoever
-implements the `NtCreateSection(SEC_IMAGE)` path must copy the bounds checks
-from `reflective_loading` (directory/header, per-entry target and width, TLS).
 
 ## How to validate a fix
 

@@ -60,13 +60,12 @@ fn def_is_well_formed() {
     assert_eq!(DEF.name, "process_ghosting");
     assert_eq!(DEF.attck, &["T1055.012"]);
     assert_eq!(DEF.category, Category::Execution);
-    assert_eq!(DEF.stability, Stability::Unimplemented);
+    assert_eq!(DEF.stability, Stability::Experimental);
     assert!(!DEF.requires.is_empty());
     assert!(!DEF.stub_fragment.is_empty());
     assert!(!DEF.readme.is_empty());
-    // The section/map/delete flow is Win32: the technique as written adds no
-    // Nt* helper to the syscall layer. The measured redesign (an image section
-    // via `NtCreateSection`) needs new helpers — see `docs/measurements.md`.
+    // The image section and its mapping are ntdll exports called directly, not
+    // helpers of the indirect syscall layer, so the technique adds nothing there.
     assert!(
         DEF.syscalls.is_empty(),
         "unexpected syscalls: {:?}",
@@ -139,23 +138,109 @@ fn render_fragment_for_substitutes_every_placeholder() {
 }
 
 /// The fragment must keep the guards and shared helpers that make it a PE
-/// mapper: the signature checks, the shared import resolver and the Win32
-/// section/ghosting flow.
+/// mapper *and* the image-section flow that makes ghosting work: a data section
+/// over a delete-pending file cannot be created (writable) nor mapped by RVA.
 #[test]
 fn fragment_carries_the_ghosting_contract() {
     for needed in [
         "IMAGE_DOS_SIGNATURE",
         "IMAGE_NT_SIGNATURE",
-        "CreateFileMappingW",
-        "MapViewOfFile",
         "SetFileInformationByHandle",
         "FileDispositionInfo",
+        "NtCreateSection",
+        "SEC_IMAGE",
+        "NtMapViewOfSection",
         "crate::patch_imports",
         "crate::resolution_policy",
     ] {
         assert!(
             DEF.stub_fragment.contains(needed),
             "the fragment is missing '{needed}'"
+        );
+    }
+}
+
+/// The kernel maps an image section and applies its base relocations, so the
+/// fragment must not carry a relocation walk of its own: a hand-rolled walk over
+/// the payload's relocation directory was the open bug in this path.
+#[test]
+fn the_image_section_leaves_relocations_to_the_kernel() {
+    for gone in [
+        "IMAGE_DIRECTORY_ENTRY_BASERELOC",
+        "IMAGE_BASE_RELOCATION",
+        "fix_relocations",
+        "CreateFileMappingW(",
+        "MapViewOfFile(",
+    ] {
+        assert!(
+            !DEF.stub_fragment.contains(gone),
+            "the fragment still contains '{gone}'"
+        );
+    }
+}
+
+/// A failed step must leave nothing behind: the temp file holds the decrypted
+/// payload, and the file handle, the section handle and the mapped view are the
+/// three kernel resources the sequence acquires. Each of them is either removed
+/// explicitly or owned by a guard, so no early `?` can strand one.
+#[test]
+fn every_resource_is_released_on_the_error_paths() {
+    for needed in [
+        "impl Drop for OwnedHandle",
+        "impl Drop for MappedView",
+        "NtUnmapViewOfSection(",
+        "std::fs::remove_file(text)",
+        "view.keep();",
+    ] {
+        assert!(
+            DEF.stub_fragment.contains(needed),
+            "the fragment is missing the cleanup '{needed}'"
+        );
+    }
+    // The view is kept only after the entry point has run, so a failure in the
+    // header or import pass still unmaps it.
+    let keep = DEF
+        .stub_fragment
+        .find("view.keep();")
+        .expect("a successful run keeps the mapping");
+    let entry = DEF
+        .stub_fragment
+        .find("execute_entrypoint(view.base(), layout.entry_rva)")
+        .expect("the entry point runs before the mapping is kept");
+    assert!(
+        entry < keep,
+        "the mapping must outlive the entry point call"
+    );
+}
+
+/// `SizeOfImage` smaller than the view is normal — the memory manager rounds the
+/// section up — so only a header that claims more than the mapping is invalid.
+#[test]
+fn a_smaller_size_of_image_is_not_a_mismatch() {
+    assert!(
+        DEF.stub_fragment
+            .contains("OptionalHeader.SizeOfImage as usize > view_size"),
+        "the image size must only be rejected when it exceeds the mapping"
+    );
+    assert!(
+        !DEF.stub_fragment
+            .contains("OptionalHeader.SizeOfImage as usize != view_size"),
+        "an exact match rejects legitimate sub-page SectionAlignment images"
+    );
+}
+
+/// The header validation runs on the *mapped* view, so every offset it derives
+/// from the payload has to be checked against the image size before use.
+#[test]
+fn header_validation_bounds_every_offset() {
+    for needed in [
+        "$MSG_HEADERS_OUT_OF_BOUNDS$",
+        "$MSG_IMAGE_SIZE_INVALID$",
+        "$MSG_ENTRY_OUT_OF_BOUNDS$",
+    ] {
+        assert!(
+            DEF.stub_fragment.contains(needed),
+            "the fragment is missing the bound check '{needed}'"
         );
     }
 }

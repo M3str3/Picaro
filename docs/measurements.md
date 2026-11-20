@@ -772,16 +772,19 @@ the register phases and a module-resolved stack scan.
 
 **Red — measured failures, with root causes:**
 
-- `process_ghosting` (T1055.012): never ran on a host. First failure:
-  `CreateFileMappingW(PAGE_EXECUTE_READWRITE)` → `ERROR_ACCESS_DENIED` — a
-  delete-pending file refuses a writable mapping. The measured alternatives:
+- `process_ghosting` (T1055.012): the data-section design never ran. First
+  failure: `CreateFileMappingW(PAGE_EXECUTE_READWRITE)` → `ERROR_ACCESS_DENIED`
+  — a delete-pending file refuses a writable mapping. The measured alternatives:
   mapping it read-only succeeds, but a *data* mapping keeps file offsets, so the
   image's RVAs do not line up and the entry point lands in the wrong bytes;
   creating the writable section before the delete mark makes the mark itself fail
   with `ERROR_ACCESS_DENIED`. A working design needs an image section
   (`NtCreateSection(SEC_IMAGE)` + `NtMapViewOfSection`), which the syscall layer
-  does not have. Registry state moved to `Stability::Unimplemented`, so a build
-  that selects it warns.
+  did not have at the time, so the registry marked it
+  `Stability::Unimplemented`. Resolved 2026-11-20: the fragment now creates an
+  image section through the windows-rs WDK bindings (the kernel maps by RVA and
+  applies the relocations), the payload runs from it after the file's name
+  disappears, and the registry marks it `Experimental`.
 
 **Test-harness bugs found and fixed by the round** (parallel runs, shared scratch
 paths): `engine::compiler`'s `compile_i686` and `tests/cli.rs`'s

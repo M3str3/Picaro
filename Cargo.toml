@@ -90,4 +90,11 @@ windows = { version = "0.58", features = [
     "Win32_Storage_FileSystem",
     # DLL output: AttachConsole (attach the console of the host that loaded us).
     "Win32_System_Console",
+    # process_ghosting: NtCreateSection(SEC_IMAGE) over the ghosted file. Win32
+    # cannot create an image section, so the call comes from the WDK bindings
+    # (which gate it behind `Wdk_Foundation`).
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
+    # process_ghosting: NtMapViewOfSection + SECTION_INHERIT.
+    "Wdk_System_Memory",
 ] }
