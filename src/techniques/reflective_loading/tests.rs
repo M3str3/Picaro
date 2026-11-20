@@ -514,8 +514,11 @@ fn a_tls_directory_must_fit_in_the_image() {
 /// Packer-side mirror of the range `fix_memory_protections` derives for a
 /// section before it calls `nt_protect_vm`: the same checked arithmetic and the
 /// same `SizeOfImage` limit that `copy_sections` applies to a raw copy.
-fn protection_range_fits(section_rva: u32, virtual_size: usize, size_of_image: usize) -> bool {
-    (section_rva as usize)
+///
+/// The stub is built for i686 too, where `usize` is 32 bits, so the mirror does
+/// the sum in `u32` — otherwise the wrapping cases below would not wrap.
+fn protection_range_fits(section_rva: u32, virtual_size: u32, size_of_image: u32) -> bool {
+    section_rva
         .checked_add(virtual_size)
         .map(|end| end <= size_of_image)
         .unwrap_or(false)
@@ -542,9 +545,21 @@ fn the_mapper_bounds_checks_every_section_protection() {
     let strings = StringsConfig::from_yaml(None).expect("default strings");
     let fragment = Params::default().render_fragment(&strings);
 
+    let start = fragment
+        .find("let end = rva")
+        .expect("the protection range must be computed in a checked binding");
+    let statement_end = start
+        + fragment[start..]
+            .find(';')
+            .expect("the protection binding must be a complete statement");
+    let statement = &fragment[start..statement_end];
     assert!(
-        fragment.contains("let end = rva"),
-        "the protection range must be computed in a checked binding"
+        statement.contains(".checked_add(size)"),
+        "the protection range must use a checked add, not `rva + size`"
+    );
+    assert!(
+        !statement.contains("rva + size"),
+        "an unchecked sum wraps on i686 and points the protection past the image"
     );
     let bound = fragment
         .find("if end > size_of_image {")
