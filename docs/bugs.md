@@ -9,13 +9,6 @@ The lab rule still applies: anything that compiles a stub or runs an artifact is
 a live test and belongs to the dedicated lab host. The inert suite
 (`cargo test`) must stay green for every change here.
 
-## Fixed in the 2026-11-20 session
-
-- The shared import resolver refuses a descriptor with `FirstThunk == 0` as
-  `Malformed` before it resolves a single thunk. The IAT is the write target, so
-  a zero there used to place every slot at RVA 0, 4, 8 … and overwrite the
-  headers under the identity mapping `patch_imports` uses.
-
 ## Fixed in the 2026-10-24 session
 
 These were reported by the bug-bounty round and are no longer open:
@@ -84,6 +77,11 @@ These were reported by the bug-bounty round and are no longer open:
   stub-compile test pass on the lab host (2026-10-30).
 
 ## Fixed in the 2026-11-20 session
+
+- The shared import resolver refuses a descriptor with `FirstThunk == 0` as
+  `Malformed` before it resolves a single thunk. The IAT is the write target, so
+  a zero there used to place every slot at RVA 0, 4, 8 … and overwrite the
+  headers under the identity mapping `patch_imports` uses.
 
 - (bug #6) `render_launcher` fills the launcher template in a single left-to-right
   pass instead of chaining `.replace()`. The chain re-scanned the text it had
